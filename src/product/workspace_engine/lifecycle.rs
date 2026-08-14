@@ -397,6 +397,40 @@ impl WorkspaceEngine {
         Some((self.session.project_id.clone(), cwd))
     }
 
+    /// Story/Design author/revision/review prompt 注入用的路由引用上下文。
+    ///
+    /// 逻辑会话(已注入 gateway 且有 planning cwd)时经 gateway `validate` 冻结
+    /// `PlanningReadOnly` envelope 后派生 `Logical`;无 gateway/无 cwd/validate 失败
+    /// 一律回落 `Legacy`(与改造前 `_legacy()` 字节一致)。
+    ///
+    /// 只用于 prompt 路由引用分流,不改变 provider 启动路径(Task 4 范围)。
+    pub(crate) fn routing_reference_context(
+        &self,
+    ) -> crate::product::cadence_skills::routing_reference::RoutingReferenceContext {
+        use crate::product::cadence_skills::routing_reference::{
+            RoutingReferenceContext, routing_reference_context_from_policy,
+        };
+        use crate::product::logical_codebase::{PolicyTarget, ProviderRef, SessionLaunchRequest};
+
+        let Some(gateway) = self.logical_provider_gateway() else {
+            return RoutingReferenceContext::Legacy;
+        };
+        let Some((project_id, working_dir)) = self.logical_planning_launch() else {
+            return RoutingReferenceContext::Legacy;
+        };
+        let request = SessionLaunchRequest::planning(
+            project_id,
+            ProviderRef::claude_code("cap_managed_snapshot"),
+            PolicyTarget::aggregate_root(working_dir.clone()),
+            vec![working_dir],
+            "sha256:managed-config-artifact",
+        );
+        match gateway.validate(request) {
+            Ok(policy) => routing_reference_context_from_policy(&policy),
+            Err(_) => RoutingReferenceContext::Legacy,
+        }
+    }
+
     pub fn pending_author_choice_request_message(&self) -> Option<WsOutMessage> {
         let pending = self.pending_author_choice.as_ref()?;
         Some(WsOutMessage::ChoiceRequest {

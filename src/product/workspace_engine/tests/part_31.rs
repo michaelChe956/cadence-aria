@@ -289,10 +289,17 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     &["缺少 heading".to_string()],
                 ),
             ),
-            ("delta revision", engine.build_revision_delta_prompt(&review)),
+            (
+                "delta revision",
+                engine.build_revision_delta_prompt(&review, &RoutingReferenceContext::Legacy),
+            ),
             (
                 "full revision",
-                engine.build_revision_full_prompt("# 上一版 artifact", &review),
+                engine.build_revision_full_prompt(
+                    "# 上一版 artifact",
+                    &review,
+                    &RoutingReferenceContext::Legacy,
+                ),
             ),
         ] {
             assert!(
@@ -342,7 +349,11 @@ fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
     });
     let engine = WorkspaceEngine::new(store, event_tx, session);
 
-    let prompt = engine.build_revision_full_prompt("# 上一版 artifact", &review);
+    let prompt = engine.build_revision_full_prompt(
+        "# 上一版 artifact",
+        &review,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert_eq!(
         prompt.matches("[artifact_schema_contract]").count(),

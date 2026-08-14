@@ -1,6 +1,8 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 
 mod review;
 mod review_context;
@@ -41,6 +43,7 @@ pub(crate) fn normalize_generation_prompt(
 fn initial_author_runtime_contract(
     workspace_type: &WorkspaceType,
     include_direct_routing_reference: bool,
+    context: &RoutingReferenceContext,
 ) -> String {
     let (phase, required_skill) = match workspace_type {
         WorkspaceType::Story => (
@@ -62,7 +65,7 @@ fn initial_author_runtime_contract(
     };
 
     let routing_reference = if include_direct_routing_reference {
-        direct_cadence_routing_rules_reference_legacy()
+        direct_cadence_routing_rules_reference(context)
     } else {
         String::new()
     };
@@ -153,7 +156,12 @@ pub(crate) fn aggregate_author_output_contract(nonce: &str, schema: &str) -> Str
     )
 }
 
-pub(crate) fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -> String {
+pub(crate) fn reviewer_output_contract(
+    nonce: &str,
+    schema: &str,
+    intro: &str,
+    context: &RoutingReferenceContext,
+) -> String {
     format!(
         "{}\
          当前阶段：候选产物审查。\n\
@@ -163,7 +171,7 @@ pub(crate) fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
          {schema}\n\
          </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
-        direct_cadence_routing_rules_reference_legacy(),
+        direct_cadence_routing_rules_reference(context),
     )
 }
 
@@ -301,9 +309,11 @@ impl WorkspaceEngine {
     }
 
     pub(crate) fn build_prompt(&self, user_content: &str) -> String {
+        let context = self.routing_reference_context();
         let mut prompt = initial_author_runtime_contract(
             &self.session.workspace_type,
             !self.has_direct_cadence_routing_rules_system_context(),
+            &context,
         );
         if !self.has_author_artifact_schema_system_context()
             && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
@@ -341,12 +351,14 @@ impl WorkspaceEngine {
         })
     }
 
+    /// 会话 system 上下文是否已含路由引用段标记(`[cadence_project_rules]`)。
+    ///
+    /// Legacy 与 Logical 两变体都以该段标记开头,故判定对两变体同判:上下文已带
+    /// 任一变体时 prompt 不再重复注入。Legacy-only 会话行为与改造前等价(改造前
+    /// 匹配完整 legacy 文本,该文本同样以 `[cadence_project_rules]` 开头)。
     pub(crate) fn has_direct_cadence_routing_rules_system_context(&self) -> bool {
         self.session.messages.iter().any(|message| {
-            message.role == "system"
-                && message
-                    .content
-                    .contains(&direct_cadence_routing_rules_reference_legacy())
+            message.role == "system" && message.content.contains("[cadence_project_rules]")
         })
     }
 
@@ -646,5 +658,81 @@ mod aggregate_scope_prompt_tests {
         // 有效成员 ID 列出以限定 involved 取值范围。
         assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
         assert!(prompt.contains("00000000-0000-7000-8000-000000000002"));
+    }
+}
+
+#[cfg(test)]
+mod routing_reference_prompt_tests {
+    use super::*;
+    use crate::product::cadence_skills::routing_reference::{
+        LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    };
+
+    fn logical_context() -> RoutingReferenceContext {
+        RoutingReferenceContext::Logical(LogicalPolicyReference {
+            policy_id: "policy/project_0001/logical_0001/3".into(),
+            policy_revision: 3,
+            policy_digest: "sha256:abc123".into(),
+            authority_root: "/data/aria/aggregate/policy".into(),
+        })
+    }
+
+    #[test]
+    fn initial_author_runtime_contract_legacy_matches_legacy_reference() {
+        let prompt = initial_author_runtime_contract(
+            &WorkspaceType::Story,
+            true,
+            &RoutingReferenceContext::Legacy,
+        );
+        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(
+            prompt.contains(&legacy),
+            "legacy routing reference missing: {prompt}"
+        );
+        assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
+    }
+
+    #[test]
+    fn initial_author_runtime_contract_logical_declares_policy_envelope() {
+        let prompt =
+            initial_author_runtime_contract(&WorkspaceType::Story, true, &logical_context());
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("policy_id: policy/project_0001/logical_0001/3"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("policy_revision: 3"), "{prompt}");
+        assert!(prompt.contains("sha256:abc123"), "{prompt}");
+        assert!(prompt.contains("不作为政策正文"), "{prompt}");
+        assert!(prompt.contains("只报告阻塞"), "{prompt}");
+    }
+
+    #[test]
+    fn reviewer_output_contract_legacy_matches_legacy_reference() {
+        let prompt =
+            reviewer_output_contract("nonce", "{}", "intro", &RoutingReferenceContext::Legacy);
+        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(prompt.contains(&legacy), "{prompt}");
+        assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
+    }
+
+    #[test]
+    fn reviewer_output_contract_logical_declares_policy_envelope() {
+        let prompt = reviewer_output_contract("nonce", "{}", "intro", &logical_context());
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("policy_id: policy/project_0001/logical_0001/3"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("policy_revision: 3"), "{prompt}");
+        assert!(prompt.contains("sha256:abc123"), "{prompt}");
+        assert!(prompt.contains("不作为政策正文"), "{prompt}");
+        assert!(prompt.contains("只报告阻塞"), "{prompt}");
     }
 }

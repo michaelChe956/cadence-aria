@@ -1,5 +1,7 @@
 use super::*;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 use crate::product::workspace_engine::review::trusted_review_comments;
 
 impl WorkspaceEngine {
@@ -39,10 +41,11 @@ impl WorkspaceEngine {
             .latest_review_verdict
             .as_ref()
             .ok_or_else(|| "review verdict is unavailable for revision".to_string())?;
+        let context = self.routing_reference_context();
         let prompt = if resume_provider_session_id.is_some() {
-            self.build_revision_delta_prompt(review)
+            self.build_revision_delta_prompt(review, &context)
         } else {
-            self.build_revision_full_prompt(&artifact, review)
+            self.build_revision_full_prompt(&artifact, review, &context)
         };
 
         Ok(StreamingProviderInput {
@@ -62,10 +65,14 @@ impl WorkspaceEngine {
         })
     }
 
-    pub(crate) fn build_revision_delta_prompt(&self, review: &ReviewVerdict) -> String {
+    pub(crate) fn build_revision_delta_prompt(
+        &self,
+        review: &ReviewVerdict,
+        context: &RoutingReferenceContext,
+    ) -> String {
         let mut prompt = String::new();
         prompt.push_str("请作为 author 继续返修当前 Workspace 产物。\n\n");
-        prompt.push_str(&direct_cadence_routing_rules_reference_legacy());
+        prompt.push_str(&direct_cadence_routing_rules_reference(context));
         prompt.push_str(
             "当前阶段：真实 Provider resume 后的 bounded revision。\n必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
         );
@@ -94,11 +101,12 @@ impl WorkspaceEngine {
         &self,
         artifact: &str,
         review: &ReviewVerdict,
+        context: &RoutingReferenceContext,
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str("请作为 author 返修当前 Workspace 产物。\n\n");
         if !self.has_direct_cadence_routing_rules_system_context() {
-            prompt.push_str(&direct_cadence_routing_rules_reference_legacy());
+            prompt.push_str(&direct_cadence_routing_rules_reference(context));
         }
         prompt.push_str(
             "当前阶段：候选产物 bounded revision。\n必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
@@ -127,5 +135,162 @@ impl WorkspaceEngine {
         self.append_author_artifact_output_contract(&mut prompt, true);
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
         prompt
+    }
+}
+
+#[cfg(test)]
+mod revision_routing_reference_tests {
+    use super::*;
+    use crate::product::cadence_skills::routing_reference::{
+        LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    };
+    use crate::product::checkpoint_store::CheckpointStore;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn logical_context() -> RoutingReferenceContext {
+        RoutingReferenceContext::Logical(LogicalPolicyReference {
+            policy_id: "policy/project_0001/logical_0001/3".into(),
+            policy_revision: 3,
+            policy_digest: "sha256:abc123".into(),
+            authority_root: "/data/aria/aggregate/policy".into(),
+        })
+    }
+
+    fn engine_for_revision() -> WorkspaceEngine {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let store = Arc::new(CheckpointStore::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = WorkspaceSession {
+            session_id: "sess_revision_routing".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: WorkspaceStage::Revision,
+            messages: Vec::new(),
+            artifact: Some(ArtifactPayload::Markdown {
+                markdown: "# Story Spec".to_string(),
+                diff: None,
+            }),
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            provider_conversations: Vec::new(),
+            repository_path: None,
+        };
+        WorkspaceEngine::new(store, event_tx, session)
+    }
+
+    fn review_verdict() -> ReviewVerdict {
+        ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "请补全结构。".to_string(),
+            summary: "缺少 artifact schema".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        }
+    }
+
+    #[test]
+    fn revision_delta_prompt_legacy_matches_legacy_reference() {
+        let engine = engine_for_revision();
+        let prompt =
+            engine.build_revision_delta_prompt(&review_verdict(), &RoutingReferenceContext::Legacy);
+        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(
+            prompt.contains(&legacy),
+            "legacy routing reference missing: {prompt}"
+        );
+        assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
+    }
+
+    #[test]
+    fn revision_delta_prompt_logical_declares_policy_envelope() {
+        let engine = engine_for_revision();
+        let prompt = engine.build_revision_delta_prompt(&review_verdict(), &logical_context());
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("policy_id: policy/project_0001/logical_0001/3"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("policy_revision: 3"), "{prompt}");
+        assert!(prompt.contains("sha256:abc123"), "{prompt}");
+        assert!(prompt.contains("不作为政策正文"), "{prompt}");
+        assert!(prompt.contains("只报告阻塞"), "{prompt}");
+    }
+
+    #[test]
+    fn revision_full_prompt_legacy_matches_legacy_reference() {
+        let engine = engine_for_revision();
+        let prompt = engine.build_revision_full_prompt(
+            "# Existing Artifact",
+            &review_verdict(),
+            &RoutingReferenceContext::Legacy,
+        );
+        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(
+            prompt.contains(&legacy),
+            "legacy routing reference missing: {prompt}"
+        );
+        assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
+    }
+
+    #[test]
+    fn revision_full_prompt_reuses_routing_reference_present_in_generation_context() {
+        let mut engine = engine_for_revision();
+        let context = logical_context();
+        let logical_text = direct_cadence_routing_rules_reference(&context);
+        engine.session.messages.push(SessionMessage {
+            id: "msg_generation_context".to_string(),
+            role: "system".to_string(),
+            content: format!("[workflow_discipline]\n{logical_text}"),
+            checkpoint_id: None,
+            created_at: "2026-06-30T00:00:00Z".to_string(),
+        });
+
+        let prompt =
+            engine.build_revision_full_prompt("# Existing Artifact", &review_verdict(), &context);
+
+        assert_eq!(
+            prompt.matches("[cadence_project_rules]").count(),
+            1,
+            "full revision must reuse, not repeat, the logical routing reference already present: {prompt}"
+        );
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn revision_full_prompt_logical_declares_policy_envelope() {
+        let engine = engine_for_revision();
+        let prompt = engine.build_revision_full_prompt(
+            "# Existing Artifact",
+            &review_verdict(),
+            &logical_context(),
+        );
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("policy_id: policy/project_0001/logical_0001/3"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("policy_revision: 3"), "{prompt}");
+        assert!(prompt.contains("sha256:abc123"), "{prompt}");
+        assert!(prompt.contains("不作为政策正文"), "{prompt}");
+        assert!(prompt.contains("只报告阻塞"), "{prompt}");
     }
 }

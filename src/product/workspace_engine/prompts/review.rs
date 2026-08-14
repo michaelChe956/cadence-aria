@@ -72,6 +72,7 @@ impl WorkspaceEngine {
              - `pass`：产物可进入最终人工确认。\n\
              - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
+            &self.routing_reference_context(),
         ));
 
         Ok(StreamingProviderInput {
@@ -274,6 +275,7 @@ impl WorkspaceEngine {
              - `pass`：产物可进入最终人工确认。\n\
              - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding；语义为重开 Outline 并重新生成拆分。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
+            &self.routing_reference_context(),
         ));
 
         Ok(StreamingProviderInput {
@@ -393,6 +395,7 @@ impl WorkspaceEngine {
             &nonce,
             &schema,
             "\n只能在契约、依赖或 Projection 覆盖影响发布时返回 revise；需要产品判断时返回 needs_human。",
+            &self.routing_reference_context(),
         ));
         let working_dir = self
             .session
@@ -584,6 +587,7 @@ impl WorkspaceEngine {
              - 如果 finding 针对整个 Outline 方案而不是某个具体 outline，可以省略 `target_outline_id`。\n\
              - 发现不必要拆分时必须给出 severity=must_fix 的 finding；message 必须以 [outline_unnecessary_split] 开头，target_outline_id 引用其中一个现有 outline，evidence 列出全部可合并 outline ID，required_action 明确要求合并。\n\
              - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
+            &self.routing_reference_context(),
         ));
 
         Ok(StreamingProviderInput {
@@ -646,6 +650,7 @@ impl WorkspaceEngine {
             &nonce,
             r#"{"verdict":"pass|revise_batch|needs_human|plan_reopen_required","review_scope":"batch","generation_round_id":"round id","summary":"一句话摘要","affects_items":[{"target_outline_id":"outline id"}],"findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"整组 draft 或依赖上下文中的具体证据","impact":"为什么影响或不影响 final compile","required_action":"需要 batch author 执行的最小动作"}]}"#,
             "\n\n审核规则：自动模式只能整组通过、整组返修或要求重开 Outline；不得要求单项重写。最终 JSON 必须放在 nonce sentinel block 中。\n",
+            &self.routing_reference_context(),
         ));
         prompt.push_str(&format!(
             "\n[valid_outline_ids]\n{}\n",
@@ -793,6 +798,7 @@ impl WorkspaceEngine {
              - `revise`：只允许重写当前 target_outline_id 对应的 draft；如果问题只需当前 item author 修改，必须返回 `revise`。\n\
              - `plan_reopen_required`：需要修改前序 item、拆分边界或 Outline 依赖。\n\
              - `needs_human`：需要用户做范围或产品判断。\n",
+            &self.routing_reference_context(),
         ));
 
         Ok(StreamingProviderInput {

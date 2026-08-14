@@ -1,4 +1,6 @@
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::workspace_engine::{
     allowed_outputs_for, author_artifact_schema_contract_for, forbidden_outputs_for,
@@ -73,7 +75,10 @@ pub(super) fn constraint_summary_for(session: &WorkspaceSessionRecord) -> String
     }
 }
 
-pub(super) fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> String {
+pub(super) fn workflow_discipline_for(
+    session: &WorkspaceSessionRecord,
+    context: &RoutingReferenceContext,
+) -> String {
     let routing = match session.workspace_type {
         WorkspaceType::Story | WorkspaceType::Design => {
             "当前阶段：新功能、行为变化或方案讨论的候选产物 author。\n必调 Skill：using-superpowers → brainstorming。\n前置 gate：Aria 现有 author-confirmation/human-confirmation gate 承接人工确认；不得由 Provider 写入 canonical artifact。\n"
@@ -113,7 +118,7 @@ pub(super) fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> Strin
 
     format!(
         "{}\n{}",
-        direct_cadence_routing_rules_reference_legacy(),
+        direct_cadence_routing_rules_reference(context),
         routing
     ) + &workflow
 }

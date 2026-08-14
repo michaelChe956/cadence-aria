@@ -5,11 +5,15 @@ use super::prompts::{
     workspace_type_label,
 };
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::cadence_skills::routing_reference::{
+    LogicalPolicyReference, RoutingReferenceContext,
+};
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::{
-    PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode,
+    AggregatePolicyArtifactStore, LogicalCodebaseStore, PlanningContextResolver, RepositoryRouting,
+    RepositoryRoutingErrorCode,
 };
 use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
@@ -201,6 +205,7 @@ fn build_workspace_context_message(
         format!("\n\n[work_item_context]\n{work_item_context}")
     };
     let runtime_contract = runtime_contract_for(session);
+    let routing_context = routing_reference_context_for_project(app_paths, &session.project_id);
 
     let mut message = format!(
         "Workspace 生成任务已准备\n\n\
@@ -245,7 +250,7 @@ fn build_workspace_context_message(
         work_item_context_block,
         constraint_summary_for(session),
         runtime_contract,
-        workflow_discipline_for(session),
+        workflow_discipline_for(session, &routing_context),
         output_schema_for(&session.workspace_type),
         completion_or_failure_for(session),
     );
@@ -253,6 +258,33 @@ fn build_workspace_context_message(
         message.push_str(&aggregate_prompt);
     }
     Ok(message)
+}
+
+/// workspace 上下文 prompt 注入用的路由引用上下文(store-backed 受控 artifact 引用)。
+///
+/// 逻辑代码库(有 manifest + 已 bootstrap 的 `AggregatePolicyArtifact`)时派生
+/// `Logical`:`policy_id`/`policy_revision`/`policy_digest` 来自 persisted artifact,
+/// `authority_root` 取 `LogicalCodebaseManifest.provider_context_root`。两者与
+/// gateway envelope 同源,无漂移。无 manifest/artifact 或读取失败一律 `Legacy`
+/// (与改造前 `_legacy()` 字节一致)。
+pub(super) fn routing_reference_context_for_project(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+) -> RoutingReferenceContext {
+    let Ok(Some(manifest)) = LogicalCodebaseStore::new(app_paths.clone()).load_manifest(project_id)
+    else {
+        return RoutingReferenceContext::Legacy;
+    };
+    let Ok(Some(artifact)) = AggregatePolicyArtifactStore::new(app_paths.clone()).get(project_id)
+    else {
+        return RoutingReferenceContext::Legacy;
+    };
+    RoutingReferenceContext::Logical(LogicalPolicyReference {
+        policy_id: artifact.policy_id,
+        policy_revision: artifact.revision,
+        policy_digest: artifact.digest,
+        authority_root: manifest.provider_context_root.to_string_lossy().to_string(),
+    })
 }
 
 /// FailClosed 稳定错误码映射（B3）：ProductStoreError 经 product_store_api_error 的
