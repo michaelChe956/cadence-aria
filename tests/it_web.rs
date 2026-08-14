@@ -130,6 +130,8 @@ mod web_lifecycle_api;
 mod web_listening_line;
 #[path = "it_web/web_node_context.rs"]
 mod web_node_context;
+#[path = "it_web/pointer_publication.rs"]
+mod pointer_publication;
 #[path = "it_web/web_policy_runtime.rs"]
 mod web_policy_runtime;
 #[path = "it_web/web_product_api.rs"]
