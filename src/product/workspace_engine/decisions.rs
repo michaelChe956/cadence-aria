@@ -130,6 +130,7 @@ impl WorkspaceEngine {
                     .await;
                 Ok(AuthorDecisionOutcome::PrepareContext)
             }
+            _ => Err("author decision 变体尚未实现（Task 3 正式实现）".to_string()),
         }
     }
 
@@ -173,6 +174,7 @@ impl WorkspaceEngine {
                     .await?;
                 Ok(AuthorDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback })
             }
+            _ => Err("WorkItemPlan 不支持该 author decision 变体".to_string()),
         }
     }
 
