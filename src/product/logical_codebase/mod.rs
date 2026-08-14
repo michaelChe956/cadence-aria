@@ -9,6 +9,7 @@ pub mod planning_context;
 pub mod planning_context_resolver;
 pub mod planning_context_set;
 pub mod pointer_publication;
+pub mod pointer_publication_coordinator;
 pub mod policy;
 pub mod production_policy_resolvers;
 pub mod provider_capability_store;
@@ -62,6 +63,9 @@ pub use pointer_publication::{
     PointerBlockFields, PointerMergeVerdict, PointerPublication, PointerPublicationBatchKind,
     PointerPublicationEntry, PointerPublicationEntryState, PointerPublicationStatus,
     PointerPublicationStore, apply_append, classify_merge, render_pointer_block,
+};
+pub use pointer_publication_coordinator::{
+    POINTER_FILE_NAME, PointerPublishCoordinator, PointerPublishError,
 };
 pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,

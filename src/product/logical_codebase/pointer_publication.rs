@@ -162,6 +162,52 @@ impl PointerPublicationStore {
         )
     }
 
+    /// 列出某 project 的全部发布批次（按 created_at 升序）。只读顶层
+    /// `pointer-publications/{id}.json`，不触碰 `{id}/` 子目录（git-operations /
+    /// review-requests 分区）。
+    pub fn list_publications(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<PointerPublication>, ProductStoreError> {
+        let root = self.publications_root(project_id)?;
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    root.display()
+                )));
+            }
+        };
+
+        let mut publications = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("stat {}: {error}", path.display()))
+                })?
+                .is_file()
+            {
+                continue;
+            }
+            let publication: PointerPublication = read_json(&path)?;
+            ensure_publication_identity(&publication, project_id, &publication.id)?;
+            validate_record_shape(&publication)?;
+            publications.push(publication);
+        }
+        publications.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(publications)
+    }
+
     /// 单写者推进条目状态。校验 publication 归属（条目必须属于该批次）、合法状态
     /// 转换（禁止回退）以及批次仍处于 InProgress。
     pub fn advance_entry_state(
@@ -210,6 +256,50 @@ impl PointerPublicationStore {
             for entry in &mut publication.entries {
                 entry.state = PointerPublicationEntryState::Revoked;
             }
+            publication.updated_at = Utc::now().to_rfc3339();
+            Ok(())
+        })
+    }
+
+    /// 单写者记录条目结局（推进状态 + 写详情，单次原子写）。校验 publication 归属、
+    /// 批次仍 InProgress、合法状态转换（同 `advance_entry_state`）。
+    /// 由 `PointerPublishCoordinator` 每仓流水结束时调用，避免状态与详情两步写产生
+    /// 部分窗口。
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_entry_outcome(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        member_repo_id: &str,
+        target: PointerPublicationEntryState,
+        branch_name: Option<String>,
+        commit_sha: Option<String>,
+        push_error: Option<String>,
+        conflict_detail: Option<String>,
+    ) -> Result<PointerPublication, ProductStoreError> {
+        self.update(project_id, publication_id, |publication| {
+            if publication.status != PointerPublicationStatus::InProgress {
+                return Err(invalid_record(format!(
+                    "publication {publication_id} is not InProgress: {:?}",
+                    publication.status
+                )));
+            }
+            let entry = publication
+                .entries
+                .iter_mut()
+                .find(|entry| entry.member_repo_id == member_repo_id)
+                .ok_or_else(|| entry_not_found(member_repo_id))?;
+            if !valid_entry_transition(&entry.state, &target) {
+                return Err(invalid_record(format!(
+                    "invalid entry state transition for {member_repo_id}: {:?} -> {target:?}",
+                    entry.state
+                )));
+            }
+            entry.state = target;
+            entry.branch_name = branch_name;
+            entry.commit_sha = commit_sha;
+            entry.push_error = push_error;
+            entry.conflict_detail = conflict_detail;
             publication.updated_at = Utc::now().to_rfc3339();
             Ok(())
         })

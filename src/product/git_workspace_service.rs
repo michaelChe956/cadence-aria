@@ -16,8 +16,8 @@ mod test_pause;
 
 pub use test_pause::{GitCommandPause, pause_next_git_command_after_exit};
 
-const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues"];
-const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/"];
+const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues", "aria-pointer"];
+const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/", "aria-pointer/"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitWorkspaceError {
