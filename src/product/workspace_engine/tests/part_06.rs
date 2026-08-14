@@ -134,9 +134,13 @@ async fn start_generation_locks_provider_and_creates_node() {
 async fn reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node() {
     // spec-design-dialog-revision T3：旧记录（reviewer_enabled_at_start=None）+ review 未启用
     // → Accept 走 legacy 有效态判定 → HumanConfirm，且不创建 review 节点。
+    // T6 Minor-4 修订：Story/Design 已退役 HumanConfirm（无 reviewer 时直接定稿，见
+    // author_revision_loop::legacy_accept_without_reviewer_finalizes_for_story_design_not_human_confirm），
+    // 本用例改为 WorkItemPlan——该类型 HumanConfirm 仍有效，保留原“无 review 节点落入 HumanConfirm”覆盖。
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let mut session = make_session("sess_reviewer_disabled");
+    session.workspace_type = WorkspaceType::WorkItemPlan;
     session.stage = WorkspaceStage::AuthorConfirm;
     session.reviewer_provider = None;
     session.review_rounds = 0;
@@ -570,10 +574,13 @@ async fn author_decision_accept_starts_review_or_final_confirmation() {
         .await
         .unwrap();
 
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    // T6 Minor-4：Story/Design 已退役 HumanConfirm——无 review 时 Accept 直接定稿（Completed），
+    // 不再进入人工确认阶段（WorkItemPlan 的 HumanConfirm 覆盖见
+    // reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node）。
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
     assert!(engine.timeline_nodes.iter().any(|node| {
-        node.node_type == TimelineNodeType::HumanConfirm
-            && node.status == TimelineNodeStatus::Active
+        node.node_type == TimelineNodeType::Completed
+            && node.status == TimelineNodeStatus::Completed
     }));
 }
 

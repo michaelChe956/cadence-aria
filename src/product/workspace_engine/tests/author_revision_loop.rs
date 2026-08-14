@@ -1,7 +1,7 @@
 // spec-design-dialog-revision T2：provisional reviewer 快照持久化闭环
 // serde 兼容（旧 record 无新字段反序列化）+ from_record 恢复用例 + start_generation 写入路径用例（T2 fix1）
 use super::*;
-use crate::product::models::{ProviderName, WorkspaceSessionRecord};
+use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceSessionStatus};
 
 #[test]
 fn legacy_session_record_without_provisional_fields_deserializes() {
@@ -680,4 +680,184 @@ fn is_author_feedback_revision_predicate_requires_pending_without_verdict() {
         !engine.is_author_feedback_revision(),
         "review verdict 存在时不得判为 author 反馈修订（reviewer 返修路径）"
     );
+}
+
+// ============================================================================
+// spec-design-dialog-revision T6：存量会话迁移（HumanConfirm/ReviewDecision → AuthorConfirm）
+// 任务3.1：Story/Design 的 HumanConfirm/ReviewDecision 已退役，存量恢复时迁移回 AuthorConfirm。
+// 覆盖：单元（Story/Design × 两退役阶段迁移、WorkItemPlan 不迁、其他阶段不迁、产物保留）
+//       + 持久化集成路径（from_record → new_persistent fallback 链）。
+// ============================================================================
+
+fn story_session_with_stage(
+    workspace_type: WorkspaceType,
+    stage: WorkspaceStage,
+    artifact: Option<ArtifactPayload>,
+) -> WorkspaceSession {
+    let mut session = make_session("sess_retired_fallback");
+    session.workspace_type = workspace_type;
+    session.stage = stage;
+    session.artifact = artifact;
+    session
+}
+
+#[test]
+fn retired_stage_fallback_migrates_story_design_sessions() {
+    for stage in [WorkspaceStage::HumanConfirm, WorkspaceStage::ReviewDecision] {
+        for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
+            let session = story_session_with_stage(
+                workspace_type.clone(),
+                stage.clone(),
+                Some(ArtifactPayload::Markdown {
+                    markdown: "# Story".to_string(),
+                    diff: None,
+                }),
+            );
+            let migrated =
+                crate::product::workspace_engine::lifecycle::recover_story_design_retired_stage_fallback(
+                    session,
+                );
+            assert_eq!(
+                migrated.stage,
+                WorkspaceStage::AuthorConfirm,
+                "{workspace_type:?} 处于 {stage:?} 的存量会话必须迁移回 AuthorConfirm"
+            );
+            assert!(migrated.artifact.is_some(), "产物必须保留");
+        }
+    }
+    // WorkItemPlan 不受影响（HumanConfirm 对 WorkItemPlan 仍有效）
+    let plan_session = story_session_with_stage(
+        WorkspaceType::WorkItemPlan,
+        WorkspaceStage::HumanConfirm,
+        None,
+    );
+    assert_eq!(
+        crate::product::workspace_engine::lifecycle::recover_story_design_retired_stage_fallback(
+            plan_session
+        )
+        .stage,
+        WorkspaceStage::HumanConfirm
+    );
+    // 其他阶段不迁移
+    let running = story_session_with_stage(WorkspaceType::Story, WorkspaceStage::Running, None);
+    assert_eq!(
+        crate::product::workspace_engine::lifecycle::recover_story_design_retired_stage_fallback(
+            running
+        )
+        .stage,
+        WorkspaceStage::Running
+    );
+}
+
+#[tokio::test]
+async fn legacy_record_with_review_decision_restores_to_author_confirm_via_persistent_path() {
+    // 旧存量 Story 会话：record 持久化在 HumanConfirm（status=WaitingForHuman）+ 评审报告消息。
+    // 经 from_record → new_persistent 恢复后迁移回 AuthorConfirm；fallback 不动 messages，
+    // 评审报告保留在消息流（verdict 恢复语义保留在消息流）。
+    let (_tmp, checkpoint_store) = setup();
+    let app_root = tempfile::tempdir().expect("app root");
+    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(app_root.path().join(".aria")));
+    let record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    lifecycle_store
+        .append_workspace_message(
+            &record.id,
+            "assistant".to_string(),
+            "# Story Spec\n\n候选内容".to_string(),
+        )
+        .unwrap();
+    lifecycle_store
+        .append_workspace_message(
+            &record.id,
+            "reviewer".to_string(),
+            "评审报告：建议补充异常场景。".to_string(),
+        )
+        .unwrap();
+    let _ = lifecycle_store
+        .update_workspace_session_status(&record.id, WorkspaceSessionStatus::WaitingForHuman)
+        .unwrap();
+
+    let persisted = lifecycle_store.get_workspace_session(&record.id).unwrap();
+    let engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle_store,
+        mpsc::channel(64).0,
+        WorkspaceSession::from_record(persisted),
+    );
+
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+    assert!(
+        engine
+            .session()
+            .messages
+            .iter()
+            .any(|message| message.role == "reviewer"),
+        "评审报告必须保留在消息流"
+    );
+    assert!(
+        engine.session().messages.len() >= 2,
+        "消息不得被 fallback 截断或清空"
+    );
+}
+
+// Minor-4（T6）：decisions.rs Accept 兼容路由 None 分支（旧记录无 reviewer_enabled_at_start）
+// 在无 reviewer 时此前会 enter_human_confirm——Story/Design 已退役该阶段，运行中会重新落入。
+// 修复：Story/Design 走 Some(false) 同语义直接定稿；WorkItemPlan 保留 HumanConfirm（仍有效）。
+#[tokio::test]
+async fn legacy_accept_without_reviewer_finalizes_for_story_design_not_human_confirm() {
+    for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
+        let (_tmp, store) = setup();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut session = make_session("sess_legacy_no_reviewer");
+        session.workspace_type = workspace_type.clone();
+        session.stage = WorkspaceStage::AuthorConfirm;
+        session.artifact = Some(ArtifactPayload::Markdown {
+            markdown: "# Story Spec\n\n候选内容".to_string(),
+            diff: None,
+        });
+        session.reviewer_provider = None;
+        session.review_rounds = 0;
+        session.reviewer_enabled_at_start = None;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        let outcome = engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            AuthorDecisionOutcome::Finalized,
+            "{workspace_type:?} legacy None + 无 reviewer 必须直接定稿，不得落入已退役 HumanConfirm"
+        );
+        assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+    }
+
+    // WorkItemPlan 不受影响：legacy None + 无 reviewer 仍进 HumanConfirm（该阶段对 WorkItemPlan 有效）。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_legacy_no_reviewer_plan");
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.reviewer_provider = None;
+    session.review_rounds = 0;
+    session.reviewer_enabled_at_start = None;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(outcome, AuthorDecisionOutcome::HumanConfirm);
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
 }

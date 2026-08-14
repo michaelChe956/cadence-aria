@@ -110,11 +110,21 @@ impl WorkspaceEngine {
                         // 旧记录（未落盘 provisional）：保持既有有效态判定。
                         let review_enabled = self.session.review_rounds > 0
                             && self.session.reviewer_provider.is_some();
-                        self.complete_active_node(Some("已进入 Review".to_string()))
-                            .await;
                         if review_enabled {
+                            self.complete_active_node(Some("已进入 Review".to_string()))
+                                .await;
                             Ok(self.start_review_and_outcome().await)
+                        } else if matches!(
+                            self.session.workspace_type,
+                            WorkspaceType::Story | WorkspaceType::Design
+                        ) {
+                            // Minor-4（T6）：HumanConfirm 已从 Story/Design 退役，旧记录（None）
+                            // 无 reviewer 时按 Some(false) 同语义直接定稿，避免运行中重新落入退役阶段。
+                            self.finalize_current_artifact("人工确认定稿").await?;
+                            Ok(AuthorDecisionOutcome::Finalized)
                         } else {
+                            self.complete_active_node(Some("已进入 Review".to_string()))
+                                .await;
                             self.enter_human_confirm(Some(
                                 "未启用交叉审核，等待人工确认".to_string(),
                             ))
