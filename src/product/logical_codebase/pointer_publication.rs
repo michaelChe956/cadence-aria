@@ -305,6 +305,60 @@ impl PointerPublicationStore {
         })
     }
 
+    /// 崩溃恢复专用：把条目复位到 `Pending`（清空详情，供全量重跑）或推进到
+    /// `Pushed`（远端分支已存在，供补写 ReviewRequest）。与 `advance_entry_state`
+    /// 不同，本方法允许跨恢复的状态跳跃（如 `Committed→Pending`、`Failed→Pushed`），
+    /// 但要求批次仍 InProgress 且条目处于可重试的非终态集合。
+    pub fn reset_entry_for_retry(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        member_repo_id: &str,
+        target: PointerPublicationEntryState,
+    ) -> Result<PointerPublication, ProductStoreError> {
+        assert!(
+            matches!(
+                target,
+                PointerPublicationEntryState::Pending | PointerPublicationEntryState::Pushed
+            ),
+            "reset_entry_for_retry only supports Pending or Pushed"
+        );
+        self.update(project_id, publication_id, |publication| {
+            if publication.status != PointerPublicationStatus::InProgress {
+                return Err(invalid_record(format!(
+                    "publication {publication_id} is not InProgress: {:?}",
+                    publication.status
+                )));
+            }
+            let entry = publication
+                .entries
+                .iter_mut()
+                .find(|entry| entry.member_repo_id == member_repo_id)
+                .ok_or_else(|| entry_not_found(member_repo_id))?;
+            match entry.state {
+                PointerPublicationEntryState::Pending
+                | PointerPublicationEntryState::Committed
+                | PointerPublicationEntryState::Pushed
+                | PointerPublicationEntryState::Failed
+                | PointerPublicationEntryState::Conflict => {}
+                other => {
+                    return Err(invalid_record(format!(
+                        "entry {member_repo_id} is {other:?} and cannot be reset for retry"
+                    )));
+                }
+            }
+            entry.state = target;
+            if target == PointerPublicationEntryState::Pending {
+                entry.branch_name = None;
+                entry.commit_sha = None;
+                entry.push_error = None;
+                entry.conflict_detail = None;
+            }
+            publication.updated_at = Utc::now().to_rfc3339();
+            Ok(())
+        })
+    }
+
     fn publications_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
         Ok(self

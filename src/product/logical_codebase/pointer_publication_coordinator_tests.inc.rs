@@ -170,6 +170,31 @@ mod tests {
         }
     }
 
+    fn add_member(fixture: &Fixture, name: &str, with_origin: bool) -> MemberRepo {
+        let member = setup_member(fixture.tmp.path(), name, with_origin);
+        let store = LogicalCodebaseStore::new(ProductAppPaths::new(fixture.tmp.path().join(".aria")));
+        store.save_member(PROJECT_ID, &member.member_record()).unwrap();
+        store
+            .save_checkout(PROJECT_ID, &member.checkout_record())
+            .unwrap();
+        let mut manifest = store.load_manifest(PROJECT_ID).unwrap().unwrap();
+        manifest.member_ids.push(member.logical_id);
+        manifest.membership_revision += 1;
+        store.save_manifest(PROJECT_ID, &manifest).unwrap();
+        member
+    }
+
+    fn review_requests_root(fixture: &Fixture, publication_id: &str) -> PathBuf {
+        fixture
+            .tmp
+            .path()
+            .join(".aria/projects")
+            .join(PROJECT_ID)
+            .join("logical-codebase/pointer-publications")
+            .join(publication_id)
+            .join("review-requests")
+    }
+
     fn remote_has_branch(bare: &Path, branch: &str) -> bool {
         let (success, stdout) = git_allow_failure(
             bare,
@@ -456,6 +481,347 @@ mod tests {
         let member_repo_id = fixture.members[0].logical_id.0.to_string();
         assert_eq!(
             entry(&after, &member_repo_id).state,
+            PointerPublicationEntryState::ReviewCreated
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_after_incremental_does_not_republish_earlier_members() {
+        let fixture = setup(&[("api", true)]);
+        fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Full,
+            )
+            .await
+            .expect("full publish");
+
+        let worker = add_member(&fixture, "worker", true);
+        let first_incr = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Incremental,
+            )
+            .await
+            .expect("first incremental");
+        assert_eq!(first_incr.entries.len(), 1);
+        assert_eq!(
+            entry(&first_incr, &worker.logical_id.0.to_string()).state,
+            PointerPublicationEntryState::ReviewCreated
+        );
+
+        // 第二个增量批次：并集包含 api 与 worker，只发新增的 gateway。
+        let gateway = add_member(&fixture, "gateway", true);
+        let second_incr = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Incremental,
+            )
+            .await
+            .expect("second incremental");
+        assert_eq!(
+            second_incr.entries.len(),
+            1,
+            "must not republish earlier members"
+        );
+        let gateway_id = gateway.logical_id.0.to_string();
+        assert_eq!(
+            entry(&second_incr, &gateway_id).state,
+            PointerPublicationEntryState::ReviewCreated
+        );
+        assert!(remote_has_branch(
+            gateway.bare_remote.as_ref().unwrap(),
+            entry(&second_incr, &gateway_id).branch_name.as_deref().unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoke_mark_failure_returns_revoke_failed_then_retry_only_marks() {
+        let fixture = setup(&[("api", true)]);
+        let publication = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Full,
+            )
+            .await
+            .expect("publish");
+        let member_repo_id = fixture.members[0].logical_id.0.to_string();
+        let branch = entry(&publication, &member_repo_id)
+            .branch_name
+            .clone()
+            .unwrap();
+
+        let rr_root = review_requests_root(&fixture, &publication.id);
+        let requests = fixture
+            .coordinator
+            .git_ops
+            .list_pointer_review_requests(PROJECT_ID, &publication.id)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        let request_file = rr_root.join(format!("{}.json", requests[0].id));
+        let saved = std::fs::read(&request_file).unwrap();
+
+        // 标记写失败注入：review-requests 目录替换为普通文件 → list 失败。
+        std::fs::remove_dir_all(&rr_root).unwrap();
+        std::fs::write(&rr_root, b"not a directory").unwrap();
+
+        let error = fixture
+            .coordinator
+            .revoke(PROJECT_ID, &publication.id)
+            .await
+            .expect_err("mark must fail");
+        assert!(
+            matches!(error, PointerPublishError::RevokeFailed(_)),
+            "got {error:?}"
+        );
+
+        // publication 未置 Revoked（可重试态）；远端分支已被 Phase 1 删除。
+        let after = fixture
+            .coordinator
+            .publications
+            .load_publication(PROJECT_ID, &publication.id)
+            .unwrap();
+        assert_eq!(after.status, PointerPublicationStatus::CompletedAll);
+        assert!(!remote_has_branch(
+            fixture.members[0].bare_remote.as_ref().unwrap(),
+            &branch
+        ));
+
+        // 恢复后重试：删除幂等（分支已删），只补标记。
+        std::fs::remove_file(&rr_root).unwrap();
+        std::fs::create_dir_all(&rr_root).unwrap();
+        std::fs::write(&request_file, saved).unwrap();
+        let revoked = fixture
+            .coordinator
+            .revoke(PROJECT_ID, &publication.id)
+            .await
+            .expect("retry revoke");
+        assert_eq!(revoked.status, PointerPublicationStatus::Revoked);
+        let requests = fixture
+            .coordinator
+            .git_ops
+            .list_pointer_review_requests(PROJECT_ID, &publication.id)
+            .unwrap();
+        assert!(requests.iter().all(|request| request.revoked));
+    }
+
+    #[tokio::test]
+    async fn revoke_reclaims_remote_branch_for_failed_entry_with_branch() {
+        let fixture = setup(&[("api", true)]);
+        let publication = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Full,
+            )
+            .await
+            .expect("publish");
+        let member_repo_id = fixture.members[0].logical_id.0.to_string();
+        let branch = entry(&publication, &member_repo_id)
+            .branch_name
+            .clone()
+            .unwrap();
+
+        // 模拟 push 成功后写 ReviewRequest 失败的终态：Failed 但保留分支/commit。
+        let mut failed = fixture
+            .coordinator
+            .publications
+            .load_publication(PROJECT_ID, &publication.id)
+            .unwrap();
+        let failed_entry = failed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.member_repo_id == member_repo_id)
+            .unwrap();
+        failed_entry.state = PointerPublicationEntryState::Failed;
+        failed_entry.push_error = Some("review request write failed".to_string());
+        fixture
+            .coordinator
+            .publications
+            .save_publication(&failed)
+            .unwrap();
+
+        let revoked = fixture
+            .coordinator
+            .revoke(PROJECT_ID, &publication.id)
+            .await
+            .expect("revoke");
+        assert_eq!(revoked.status, PointerPublicationStatus::Revoked);
+        assert!(!remote_has_branch(
+            fixture.members[0].bare_remote.as_ref().unwrap(),
+            &branch
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_resumes_pushed_entry_to_review_created_without_repush() {
+        let fixture = setup(&[("api", true)]);
+        let publication = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Full,
+            )
+            .await
+            .expect("publish");
+        let member_repo_id = fixture.members[0].logical_id.0.to_string();
+        let branch = entry(&publication, &member_repo_id)
+            .branch_name
+            .clone()
+            .unwrap();
+        let commit_sha = entry(&publication, &member_repo_id)
+            .commit_sha
+            .clone()
+            .unwrap();
+
+        // 模拟「已 push、写 ReviewRequest 前崩溃」：条目 Pushed 且无 review request。
+        let mut pushed = fixture
+            .coordinator
+            .publications
+            .load_publication(PROJECT_ID, &publication.id)
+            .unwrap();
+        let pushed_entry = pushed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.member_repo_id == member_repo_id)
+            .unwrap();
+        pushed_entry.state = PointerPublicationEntryState::Pushed;
+        fixture
+            .coordinator
+            .publications
+            .save_publication(&pushed)
+            .unwrap();
+        std::fs::remove_dir_all(review_requests_root(&fixture, &publication.id)).unwrap();
+
+        let retried = fixture
+            .coordinator
+            .retry_member_repo(PROJECT_ID, &publication.id, &member_repo_id)
+            .await
+            .expect("retry");
+        let retried_entry = entry(&retried, &member_repo_id);
+        assert_eq!(
+            retried_entry.state,
+            PointerPublicationEntryState::ReviewCreated
+        );
+        // 未重推：分支/commit 保持不变，只补写 review request。
+        assert_eq!(retried_entry.branch_name.as_deref(), Some(branch.as_str()));
+        assert_eq!(
+            retried_entry.commit_sha.as_deref(),
+            Some(commit_sha.as_str())
+        );
+        let requests = fixture
+            .coordinator
+            .git_ops
+            .list_pointer_review_requests(PROJECT_ID, &publication.id)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_review_request_write_failure_records_failed_with_branch() {
+        let fixture = setup(&[("api", true)]);
+        let publication = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Full,
+            )
+            .await
+            .expect("publish");
+        let member_repo_id = fixture.members[0].logical_id.0.to_string();
+        let branch = entry(&publication, &member_repo_id)
+            .branch_name
+            .clone()
+            .unwrap();
+        let commit_sha = entry(&publication, &member_repo_id)
+            .commit_sha
+            .clone()
+            .unwrap();
+
+        // 模拟「已 push、写 ReviewRequest 前崩溃」+ 写失败注入。
+        let mut pushed = fixture
+            .coordinator
+            .publications
+            .load_publication(PROJECT_ID, &publication.id)
+            .unwrap();
+        let pushed_entry = pushed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.member_repo_id == member_repo_id)
+            .unwrap();
+        pushed_entry.state = PointerPublicationEntryState::Pushed;
+        fixture
+            .coordinator
+            .publications
+            .save_publication(&pushed)
+            .unwrap();
+        let rr_root = review_requests_root(&fixture, &publication.id);
+        std::fs::remove_dir_all(&rr_root).unwrap();
+        std::fs::write(&rr_root, b"not a directory").unwrap();
+
+        let retried = fixture
+            .coordinator
+            .retry_member_repo(PROJECT_ID, &publication.id, &member_repo_id)
+            .await
+            .expect("retry");
+        let retried_entry = entry(&retried, &member_repo_id);
+        assert_eq!(retried_entry.state, PointerPublicationEntryState::Failed);
+        // 修复：分支/commit 必须保留，供 revoke 回收远端孤儿分支。
+        assert_eq!(retried_entry.branch_name.as_deref(), Some(branch.as_str()));
+        assert_eq!(
+            retried_entry.commit_sha.as_deref(),
+            Some(commit_sha.as_str())
+        );
+        assert!(retried_entry.push_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn retry_pending_entry_after_interrupted_batch_recovers_to_review_created() {
+        let fixture = setup(&[("api", true)]);
+        let member_repo_id = fixture.members[0].logical_id.0.to_string();
+        // 模拟批次中途崩溃：InProgress + 条目 Pending（尚未推进任何步骤）。
+        let store =
+            PointerPublicationStore::new(ProductAppPaths::new(fixture.tmp.path().join(".aria")));
+        let now = "2026-08-14T00:00:00Z".to_string();
+        let publication = store
+            .create_publication(PointerPublication {
+                id: "pub-crash".to_string(),
+                project_id: PROJECT_ID.to_string(),
+                logical_codebase_id: fixture.logical_codebase_id.clone(),
+                batch_kind: PointerPublicationBatchKind::Full,
+                entries: vec![PointerPublicationEntry {
+                    member_repo_id: member_repo_id.clone(),
+                    state: PointerPublicationEntryState::Pending,
+                    branch_name: None,
+                    commit_sha: None,
+                    push_error: None,
+                    conflict_detail: None,
+                }],
+                status: PointerPublicationStatus::InProgress,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .expect("seed interrupted publication");
+
+        let retried = fixture
+            .coordinator
+            .retry_member_repo(PROJECT_ID, &publication.id, &member_repo_id)
+            .await
+            .expect("retry");
+        assert_eq!(retried.status, PointerPublicationStatus::CompletedAll);
+        assert_eq!(
+            entry(&retried, &member_repo_id).state,
             PointerPublicationEntryState::ReviewCreated
         );
     }

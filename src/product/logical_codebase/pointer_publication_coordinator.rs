@@ -18,13 +18,14 @@ use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CodingGitOperationPhase, CompleteReviewGitOperationInput,
+    CodingAttemptStore, CodingGitOperationJournal, CodingGitOperationPhase,
+    CompleteReviewGitOperationInput,
 };
 use crate::product::coding_models::{
     PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind,
 };
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
-use crate::product::json_store::ProductStoreError;
+use crate::product::json_store::{ProductStoreError, read_json};
 use crate::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseManifest,
     LogicalCodebaseStore, LogicalRepositoryId, PointerBlockFields, PointerMergeVerdict,
@@ -55,6 +56,8 @@ pub enum PointerPublishError {
     NotFound(String),
     #[error("pointer_conflict_unresolved: {0}")]
     ConflictUnresolved(String),
+    /// 防御性变体：coordinator 自身不直接产出 `PushFailed`（push 失败统一落
+    /// `Failed` 条目 + `push_error`），保留该变体供 web 映射层与未来调用方使用。
     #[error("pointer_push_failed: {0}")]
     PushFailed(String),
     #[error("pointer_revoke_failed: {0}")]
@@ -63,6 +66,8 @@ pub enum PointerPublishError {
     Validation(String),
     #[error("pointer_store: {0}")]
     Store(#[from] ProductStoreError),
+    /// 防御性变体：底层 git 失败统一经 `record_failed` 落条目而非向上传播，
+    /// 保留该变体供 `#[from]` 转换与 web 映射层（`pointer_push_failed`）使用。
     #[error("pointer_git: {0}")]
     Git(#[from] GitWorkspaceError),
 }
@@ -137,9 +142,11 @@ impl PointerPublishCoordinator {
         self.finalize(publication)
     }
 
-    /// 按仓重试。Conflict 未解决 → `pointer_conflict_unresolved`；Failed → 全量重跑；
-    /// 其余状态不可重试。重试前把批次放回 InProgress（重新占用发布锁）并把条目
-    /// 复位到 Pending，再删除该仓的旧 journal 强制全新流水。
+    /// 按仓重试。接受全部非终态条目状态（Pending/Committed/Pushed/Failed/Conflict），
+    /// 终态（Skipped/ReviewCreated/Revoked）不可重试。Conflict 未解决 →
+    /// `pointer_conflict_unresolved`；远端已有分支（Pushed，或 push 成功后写
+    /// ReviewRequest 失败的 Failed 带分支）→ 只补 ReviewRequest 不再 push；
+    /// 其余非终态 → 复位 Pending 并清旧 journal/本地分支/worktree 后全量重跑。
     pub async fn retry_member_repo(
         &self,
         project_id: &str,
@@ -173,12 +180,18 @@ impl PointerPublishCoordinator {
                     )));
                 }
             }
-            PointerPublicationEntryState::Failed => {}
-            other => {
+            PointerPublicationEntryState::Skipped
+            | PointerPublicationEntryState::ReviewCreated
+            | PointerPublicationEntryState::Revoked => {
                 return Err(PointerPublishError::Validation(format!(
-                    "entry {member_repo_id} is {other:?} and cannot be retried"
+                    "entry {member_repo_id} is {:?} and cannot be retried",
+                    entry.state
                 )));
             }
+            PointerPublicationEntryState::Pending
+            | PointerPublicationEntryState::Committed
+            | PointerPublicationEntryState::Pushed
+            | PointerPublicationEntryState::Failed => {}
         }
 
         self.ensure_no_other_in_progress(
@@ -187,32 +200,40 @@ impl PointerPublishCoordinator {
             publication_id,
         )?;
 
-        // 放回 InProgress 并复位条目到 Pending，再删除旧 journal 强制全新流水。
+        // 远端是否已有该分支：Pushed 条目，或 push 成功后写 ReviewRequest 失败的
+        // Failed 条目（journal 已 Completed(Pushed)）→ 只补 ReviewRequest，不再 push。
+        let already_pushed = entry.state == PointerPublicationEntryState::Pushed
+            || (entry.state == PointerPublicationEntryState::Failed
+                && self.member_pushed_to_remote(&publication, member_repo_id));
+
+        // 放回 InProgress（重新占用发布锁）。
         let mut publication = publication;
         publication.status = PointerPublicationStatus::InProgress;
         publication.updated_at = chrono::Utc::now().to_rfc3339();
         self.publications.save_publication(&publication)?;
-        let publication = self.publications.advance_entry_state(
-            project_id,
-            publication_id,
-            member_repo_id,
-            PointerPublicationEntryState::Pending,
-        )?;
 
-        let journal_path = self.git_ops.pointer_publication_git_operation_path(
-            project_id,
-            publication_id,
-            &format!("pointer-pub-{publication_id}-{member_repo_id}"),
-        );
-        if journal_path.exists() {
-            std::fs::remove_file(&journal_path).map_err(|error| {
-                ProductStoreError::Io(format!("remove {}: {error}", journal_path.display()))
-            })?;
-        }
-
-        let publication = self
-            .publish_member(&publication, &manifest, member_repo_id)
-            .await?;
+        let publication = if already_pushed {
+            let publication = self.publications.reset_entry_for_retry(
+                project_id,
+                publication_id,
+                member_repo_id,
+                PointerPublicationEntryState::Pushed,
+            )?;
+            self.finish_review_request_member(&publication, member_repo_id)
+                .await?
+        } else {
+            // 干净重跑：复位 Pending + 清旧 journal/本地分支/worktree，保证流水幂等。
+            let publication = self.publications.reset_entry_for_retry(
+                project_id,
+                publication_id,
+                member_repo_id,
+                PointerPublicationEntryState::Pending,
+            )?;
+            self.cleanup_member_artifacts(&publication, member_repo_id)
+                .await?;
+            self.publish_member(&publication, &manifest, member_repo_id)
+                .await?
+        };
         self.finalize(publication)
     }
 
@@ -232,11 +253,13 @@ impl PointerPublishCoordinator {
         }
 
         // Phase 1：逐已推条目删除远端分支（幂等）。失败 → 可重试，不标记任何内容。
+        // Failed 但已记录分支（push 成功后写 ReviewRequest 失败的孤儿分支）也一并回收。
         for entry in publication.entries.iter().filter(|entry| {
             matches!(
                 entry.state,
                 PointerPublicationEntryState::Pushed | PointerPublicationEntryState::ReviewCreated
-            )
+            ) || (entry.state == PointerPublicationEntryState::Failed
+                && entry.branch_name.is_some())
         }) {
             let branch_name = entry.branch_name.clone().ok_or_else(|| {
                 PointerPublishError::RevokeFailed(format!(
@@ -258,7 +281,16 @@ impl PointerPublishCoordinator {
                 })?;
         }
 
-        // Phase 2：标记 ReviewRequest Revoked。删除幂等，重试只补标记。
+        // Phase 2：标记 ReviewRequest Revoked。删除幂等，重试只补标记；标记写失败
+        // 统一归一为 `pointer_revoke_failed`（503），publication 保持可重试态。
+        let mut requests = self
+            .git_ops
+            .list_pointer_review_requests(project_id, publication_id)
+            .map_err(|error| {
+                PointerPublishError::RevokeFailed(format!(
+                    "list review requests for {publication_id}: {error}"
+                ))
+            })?;
         for entry in publication.entries.iter().filter(|entry| {
             matches!(
                 entry.state,
@@ -266,14 +298,25 @@ impl PointerPublishCoordinator {
             )
         }) {
             let request_id = pointer_review_request_id(publication_id, &entry.member_repo_id);
-            let mut requests = self
-                .git_ops
-                .list_pointer_review_requests(project_id, publication_id)?;
-            if let Some(request) = requests.iter_mut().find(|request| request.id == request_id) {
-                request.revoked = true;
-                request.updated_at = chrono::Utc::now().to_rfc3339();
-                self.git_ops
-                    .save_pointer_review_request(project_id, publication_id, request)?;
+            match requests.iter_mut().find(|request| request.id == request_id) {
+                Some(request) => {
+                    request.revoked = true;
+                    request.updated_at = chrono::Utc::now().to_rfc3339();
+                    self.git_ops
+                        .save_pointer_review_request(project_id, publication_id, request)
+                        .map_err(|error| {
+                            PointerPublishError::RevokeFailed(format!(
+                                "mark review request {request_id} revoked: {error}"
+                            ))
+                        })?;
+                }
+                None => {
+                    tracing::warn!(
+                        publication_id,
+                        member_repo_id = %entry.member_repo_id,
+                        "review request missing during revoke; skipping mark"
+                    );
+                }
             }
         }
 
@@ -499,7 +542,7 @@ impl PointerPublishCoordinator {
         let review_request_id = pointer_review_request_id(&publication.id, member_repo_id);
 
         if push.status == PushStatus::Pushed {
-            let completed = match self.git_ops.complete_review_pointer_publish_git_operation(
+            if let Err(error) = self.git_ops.complete_review_pointer_publish_git_operation(
                 &publication,
                 member_repo_id,
                 &journal,
@@ -510,14 +553,10 @@ impl PointerPublishCoordinator {
                     push_error: None,
                 },
             ) {
-                Ok(completed) => completed,
-                Err(error) => {
-                    self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
-                        .await;
-                    return self.record_failed(&publication, member_repo_id, error.to_string());
-                }
-            };
-            let _ = completed;
+                self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
+                    .await;
+                return self.record_failed(&publication, member_repo_id, error.to_string());
+            }
 
             // 条目 Pushed（push 成功 + journal 完成），再写 ReviewRequest。
             let publication = self
@@ -534,54 +573,13 @@ impl PointerPublishCoordinator {
                 )
                 .map_err(PointerPublishError::from)?;
 
-            let now = chrono::Utc::now().to_rfc3339();
-            let request = ReviewRequest {
-                id: review_request_id,
-                attempt_id: format!("pointer-pub-{}", publication.id),
-                kind: ReviewRequestKind::GitBranchOnly,
-                remote_kind,
-                remote: REMOTE_NAME.to_string(),
-                base_branch: "HEAD".to_string(),
-                branch_name: branch_name.clone(),
-                commit_sha: commit.commit_sha.clone(),
-                push_status: PushStatus::Pushed,
-                external_url: None,
-                manual_instructions: vec![
-                    "指针标记块已推送远端分支；请在成员仓发起人工代码审查（非自动 PR）".to_string(),
-                ],
-                push_error: None,
-                owner_kind: ReviewRequestOwnerKind::PointerPublication,
-                pointer_publication_id: Some(publication.id.clone()),
-                revoked: false,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            if let Err(error) = self.git_ops.save_pointer_review_request(
-                &publication.project_id,
-                &publication.id,
-                &request,
-            ) {
-                self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
-                    .await;
-                return self.record_failed(&publication, member_repo_id, error.to_string());
-            }
-
             self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
                 .await;
-            self.publications
-                .record_entry_outcome(
-                    &publication.project_id,
-                    &publication.id,
-                    member_repo_id,
-                    PointerPublicationEntryState::ReviewCreated,
-                    Some(branch_name),
-                    Some(commit.commit_sha),
-                    None,
-                    None,
-                )
-                .map_err(PointerPublishError::from)
+            return self
+                .finish_review_request_member(&publication, member_repo_id)
+                .await;
         } else {
-            let completed = match self.git_ops.complete_review_pointer_publish_git_operation(
+            if let Err(error) = self.git_ops.complete_review_pointer_publish_git_operation(
                 &publication,
                 member_repo_id,
                 &journal,
@@ -592,14 +590,10 @@ impl PointerPublishCoordinator {
                     push_error: push.stderr.clone(),
                 },
             ) {
-                Ok(completed) => completed,
-                Err(error) => {
-                    self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
-                        .await;
-                    return self.record_failed(&publication, member_repo_id, error.to_string());
-                }
-            };
-            let _ = completed;
+                self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
+                    .await;
+                return self.record_failed(&publication, member_repo_id, error.to_string());
+            }
 
             self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
                 .await;
@@ -616,6 +610,147 @@ impl PointerPublishCoordinator {
                 )
                 .map_err(PointerPublishError::from)
         }
+    }
+
+    /// 远端分支已存在（push 成功）：只补写 ReviewRequest 并把条目推进到
+    /// `ReviewCreated`。写失败时条目落 `Failed` 且保留 branch/commit（不再清空），
+    /// 供 revoke 回收远端孤儿分支与再次重试。
+    async fn finish_review_request_member(
+        &self,
+        publication: &PointerPublication,
+        member_repo_id: &str,
+    ) -> Result<PointerPublication, PointerPublishError> {
+        let entry = publication
+            .entries
+            .iter()
+            .find(|entry| entry.member_repo_id == member_repo_id)
+            .ok_or_else(|| {
+                PointerPublishError::NotFound(format!(
+                    "publication {} has no entry for {member_repo_id}",
+                    publication.id
+                ))
+            })?;
+        let branch_name = entry.branch_name.clone().ok_or_else(|| {
+            PointerPublishError::Validation(format!(
+                "entry {member_repo_id} has no branch to finish"
+            ))
+        })?;
+        let commit_sha = entry.commit_sha.clone().ok_or_else(|| {
+            PointerPublishError::Validation(format!(
+                "entry {member_repo_id} has no commit to finish"
+            ))
+        })?;
+        let repo_path = self.resolve_member_repo_path(&publication.project_id, member_repo_id)?;
+
+        let remote_kind = self
+            .git
+            .detect_remote_kind(&repo_path)
+            .await
+            .unwrap_or(RemoteKind::Unknown);
+        let review_request_id = pointer_review_request_id(&publication.id, member_repo_id);
+        let now = chrono::Utc::now().to_rfc3339();
+        let request = ReviewRequest {
+            id: review_request_id,
+            attempt_id: format!("pointer-pub-{}", publication.id),
+            kind: ReviewRequestKind::GitBranchOnly,
+            remote_kind,
+            remote: REMOTE_NAME.to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: branch_name.clone(),
+            commit_sha: commit_sha.clone(),
+            push_status: PushStatus::Pushed,
+            external_url: None,
+            manual_instructions: vec![
+                "指针标记块已推送远端分支；请在成员仓发起人工代码审查（非自动 PR）".to_string(),
+            ],
+            push_error: None,
+            owner_kind: ReviewRequestOwnerKind::PointerPublication,
+            pointer_publication_id: Some(publication.id.clone()),
+            revoked: false,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        if let Err(error) = self.git_ops.save_pointer_review_request(
+            &publication.project_id,
+            &publication.id,
+            &request,
+        ) {
+            // 保留分支/commit：条目 Failed 携带 branch/commit，revoke 可回收远端孤儿分支。
+            return self
+                .publications
+                .record_entry_outcome(
+                    &publication.project_id,
+                    &publication.id,
+                    member_repo_id,
+                    PointerPublicationEntryState::Failed,
+                    Some(branch_name),
+                    Some(commit_sha),
+                    Some(error.to_string()),
+                    None,
+                )
+                .map_err(PointerPublishError::from);
+        }
+        self.publications
+            .record_entry_outcome(
+                &publication.project_id,
+                &publication.id,
+                member_repo_id,
+                PointerPublicationEntryState::ReviewCreated,
+                Some(branch_name),
+                Some(commit_sha),
+                None,
+                None,
+            )
+            .map_err(PointerPublishError::from)
+    }
+
+    /// 判断远端是否已有该成员的分支：读 journal 的 `Completed(Pushed)`。
+    /// 用于区分「push 成功后写 ReviewRequest 失败」（远端有分支）与「push 失败」
+    /// （远端无分支），决定重试是补 ReviewRequest 还是全量重跑。
+    fn member_pushed_to_remote(
+        &self,
+        publication: &PointerPublication,
+        member_repo_id: &str,
+    ) -> bool {
+        let journal_id = format!("pointer-pub-{}-{}", publication.id, member_repo_id);
+        let path = self.git_ops.pointer_publication_git_operation_path(
+            &publication.project_id,
+            &publication.id,
+            &journal_id,
+        );
+        let Ok(journal) = read_json::<CodingGitOperationJournal>(&path) else {
+            return false;
+        };
+        journal.phase == CodingGitOperationPhase::Completed
+            && journal.push_status == Some(PushStatus::Pushed)
+    }
+
+    /// 删除该仓旧 journal 与本地分支/worktree，保证全量重跑时流水幂等（不残留
+    /// 上次崩溃的中间产物）。仅用于远端无分支的非终态重试；未 push 的本地分支可安全删除。
+    async fn cleanup_member_artifacts(
+        &self,
+        publication: &PointerPublication,
+        member_repo_id: &str,
+    ) -> Result<(), PointerPublishError> {
+        let journal_path = self.git_ops.pointer_publication_git_operation_path(
+            &publication.project_id,
+            &publication.id,
+            &format!("pointer-pub-{}-{}", publication.id, member_repo_id),
+        );
+        if journal_path.exists() {
+            std::fs::remove_file(&journal_path).map_err(|error| {
+                ProductStoreError::Io(format!("remove {}: {error}", journal_path.display()))
+            })?;
+        }
+        let repo_path = self.resolve_member_repo_path(&publication.project_id, member_repo_id)?;
+        let branch_name = format!("aria-pointer/{member_repo_id}/{}", publication.id);
+        let worktree_path = repo_path
+            .join(".worktrees/aria-pointer")
+            .join(member_repo_id)
+            .join(&publication.id);
+        self.cleanup_worktree(&repo_path, &worktree_path, &branch_name)
+            .await;
+        Ok(())
     }
 
     fn record_failed(
@@ -704,21 +839,18 @@ impl PointerPublishCoordinator {
                 Ok(all)
             }
             PointerPublicationBatchKind::Incremental => {
-                // 比对既有 publication 条目集合（最新批次），只发新增成员。
+                // 比对所有非 Revoked 历史批次条目并集（不是只比最新一条），只发未发布过的新成员。
                 let already: std::collections::HashSet<String> = self
                     .publications
                     .list_publications(project_id)?
                     .into_iter()
-                    .filter(|publication| publication.logical_codebase_id == logical_codebase_id)
-                    .max_by_key(|publication| publication.created_at.clone())
-                    .map(|publication| {
-                        publication
-                            .entries
-                            .into_iter()
-                            .map(|entry| entry.member_repo_id)
-                            .collect()
+                    .filter(|publication| {
+                        publication.logical_codebase_id == logical_codebase_id
+                            && publication.status != PointerPublicationStatus::Revoked
                     })
-                    .unwrap_or_default();
+                    .flat_map(|publication| publication.entries)
+                    .map(|entry| entry.member_repo_id)
+                    .collect();
                 let new_members: Vec<String> = all
                     .into_iter()
                     .filter(|member_repo_id| !already.contains(member_repo_id))
