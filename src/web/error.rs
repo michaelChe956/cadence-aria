@@ -146,6 +146,12 @@ impl IntoResponse for ApiError {
             }
             "provider_gateway_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
             "logical_provider_gateway_required" => StatusCode::INTERNAL_SERVER_ERROR,
+            // Task 10 pointer 发布稳定码：busy/conflict 409、push/revoke 失败 503、
+            // not_found 404、参数非法 422。
+            "pointer_publish_busy" | "pointer_conflict_unresolved" => StatusCode::CONFLICT,
+            "pointer_push_failed" | "pointer_revoke_failed" => StatusCode::SERVICE_UNAVAILABLE,
+            "pointer_not_found" => StatusCode::NOT_FOUND,
+            "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

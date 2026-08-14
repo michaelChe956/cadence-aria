@@ -91,6 +91,22 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::cancel_aggregate_initialization),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebase/pointer-publications",
+            get(handlers::list_pointer_publications).post(handlers::create_pointer_publication),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/pointer-publications/{publication_id}",
+            get(handlers::get_pointer_publication),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/pointer-publications/{publication_id}/retry-repo",
+            post(handlers::retry_pointer_publication_repo),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/pointer-publications/{publication_id}/revoke",
+            post(handlers::revoke_pointer_publication),
+        )
+        .route(
             "/api/projects/{project_id}/issues",
             get(handlers::list_product_issues).post(handlers::create_product_issue),
         )

@@ -78,6 +78,8 @@ mod gateway_error_mapping;
 mod health;
 pub mod image_create;
 mod lifecycle;
+mod pointer_publication;
+mod pointer_publish_error_mapping;
 mod product_resources;
 mod providers;
 mod repository_registration;
@@ -106,6 +108,10 @@ pub use aggregate_initialization::{
     create_aggregate_initialization, get_aggregate_initialization,
 };
 pub(crate) use dto::{coding_attempt_scope_text, coding_execution_unit_dto};
+pub use pointer_publication::{
+    create_pointer_publication, get_pointer_publication, list_pointer_publications,
+    retry_pointer_publication_repo, revoke_pointer_publication,
+};
 pub use repository_registration::{
     RepositoryRegistrationDependencies, RepositoryRegistrationDependenciesBuilder,
     create_repository, get_repository_initialization,
