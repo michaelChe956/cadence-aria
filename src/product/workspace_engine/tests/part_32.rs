@@ -209,3 +209,136 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
         "reviewer run node must be completed with pass summary"
     );
 }
+
+/// 测试用 target resolver：透传 request target 并记录之，用于验证
+/// `routing_reference_context` 构造 aggregate_root target 时镜像 factory 的
+/// canonicalize 语义。
+#[derive(Default)]
+struct RecordingTargetResolver {
+    seen: Arc<Mutex<Option<PolicyTarget>>>,
+}
+
+impl PolicyTargetResolver for RecordingTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        *self.seen.lock().unwrap() = Some(request.target.clone());
+        Ok(request.target.clone())
+    }
+}
+
+/// 测试用 target resolver：恒失败，用于验证 gateway validate Err → Legacy 行为不变。
+struct FailingTargetResolver;
+
+impl PolicyTargetResolver for FailingTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        _request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Err(ProviderGatewayError::Target("stub failure".to_string()))
+    }
+}
+
+/// 构造一个最小 gateway：静态 capability + 指定 target resolver + 真实 bootstrap 的
+/// aggregate policy。`routing_reference_context` 只走 validate（政策 + capability +
+/// target），不触发真实 provider run。
+fn routing_context_gateway<T: PolicyTargetResolver + 'static>(
+    root: &tempfile::TempDir,
+    resolver: T,
+) -> (Arc<LogicalCodebaseProviderGateway>, std::path::PathBuf) {
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+
+    let manifest = LogicalCodebaseManifest::new("project_0001", worktree.clone(), Vec::new());
+    let policy_store = AggregatePolicyArtifactStore::new(paths.clone());
+    policy_store
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap aggregate policy");
+
+    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+        policy_store,
+        Arc::new(ReviewStaticCapabilitySource),
+        Arc::new(resolver),
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(ReviewStubSyncAdapter),
+        review_always_available_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        worktree.clone(),
+    ));
+    (gateway, worktree)
+}
+
+#[test]
+fn routing_reference_context_returns_legacy_without_gateway() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        make_session("sess_no_gateway"),
+    );
+
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Legacy
+    ));
+}
+
+#[test]
+fn routing_reference_context_canonicalizes_aggregate_root_target() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let resolver = RecordingTargetResolver::default();
+    let seen = resolver.seen.clone();
+    let (gateway, worktree) = routing_context_gateway(&root, resolver);
+
+    // repository_path 故意带 `..`，验证 target worktree 在构造时被 canonicalize。
+    let non_canonical = worktree.join("..").join("worktree");
+    let canonical = std::fs::canonicalize(&non_canonical).expect("canonicalize non-canonical path");
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_logical");
+    session.repository_path = Some(non_canonical);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Logical(_)
+    ));
+
+    let recorded = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("resolver must record target");
+    assert_eq!(recorded.worktree, canonical);
+}
+
+#[test]
+fn routing_reference_context_returns_legacy_when_validate_fails() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let (gateway, worktree) = routing_context_gateway(&root, FailingTargetResolver);
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_validate_fails");
+    session.repository_path = Some(worktree);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    // validate Err → Legacy 行为不变。`tracing::warn!` 是日志级副作用，
+    // 无稳定可捕获的断言方式，此处不测试日志输出本身。
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Legacy
+    ));
+}

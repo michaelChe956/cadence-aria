@@ -469,9 +469,12 @@ fn workflow_discipline_legacy_matches_legacy_reference() {
 fn routing_reference_context_for_project_derives_logical_from_stores() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let aggregate_root = root.path().join("aggregate-root");
+    // 裁决①：provider_context_root 必须可达（fs::canonicalize 探测），测试需真实建目录。
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
     let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
         "project_0001",
-        root.path().join("aggregate-root"),
+        aggregate_root.clone(),
         Vec::new(),
     );
     crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
@@ -482,16 +485,20 @@ fn routing_reference_context_for_project_derives_logical_from_stores() {
             .ensure_bootstrap(&manifest)
             .expect("ensure bootstrap");
 
-    let context = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+    let context = super::builder::routing_reference_context_for_project(&app_paths, "project_0001")
+        .expect("routing reference context");
 
     match context {
         crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Logical(p) => {
             assert_eq!(p.policy_id, artifact.policy_id);
             assert_eq!(p.policy_revision, artifact.revision);
             assert_eq!(p.policy_digest, artifact.digest);
+            // M1：authority_root 与 gateway_factory/envelope 表示一致（canonicalize 后形态）。
             assert_eq!(
                 p.authority_root,
-                manifest.provider_context_root.to_string_lossy()
+                std::fs::canonicalize(&aggregate_root)
+                    .expect("canonicalize aggregate root")
+                    .to_string_lossy()
             );
         }
         crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy => {
@@ -505,10 +512,80 @@ fn routing_reference_context_for_project_defaults_to_legacy_without_manifest() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
 
-    let context = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+    let context = super::builder::routing_reference_context_for_project(&app_paths, "project_0001")
+        .expect("routing reference context");
 
     assert!(matches!(
         context,
         crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
     ));
+}
+
+#[test]
+fn routing_reference_context_for_project_propagates_corrupted_manifest_error() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let logical_root = app_paths.logical_codebase_root("project_0001");
+    std::fs::create_dir_all(&logical_root).expect("create logical root");
+    std::fs::write(logical_root.join("manifest.json"), "{ not valid json")
+        .expect("corrupt manifest");
+
+    let result = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+
+    assert!(
+        result.is_err(),
+        "corrupted manifest must fail-closed instead of silently falling back to Legacy: {result:?}"
+    );
+}
+
+#[test]
+fn routing_reference_context_for_project_propagates_corrupted_artifact_error() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let aggregate_root = root.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+    let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+        "project_0001",
+        aggregate_root,
+        Vec::new(),
+    );
+    crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .expect("save manifest");
+    crate::product::logical_codebase::AggregatePolicyArtifactStore::new(app_paths.clone())
+        .ensure_bootstrap(&manifest)
+        .expect("ensure bootstrap");
+    std::fs::write(
+        app_paths.aggregate_policy_artifact_path("project_0001"),
+        "{ not valid json",
+    )
+    .expect("corrupt artifact");
+
+    let result = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+
+    assert!(
+        result.is_err(),
+        "corrupted aggregate policy artifact must fail-closed instead of silently falling back to Legacy: {result:?}"
+    );
+}
+
+#[test]
+fn routing_reference_context_for_project_fails_closed_when_provider_context_root_unreachable() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+        "project_0001",
+        root.path().join("does-not-exist"),
+        Vec::new(),
+    );
+    crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .expect("save manifest");
+
+    let result = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+
+    assert!(
+        result.is_err(),
+        "unreachable provider_context_root must fail-closed instead of silently falling back to Legacy: {result:?}"
+    );
 }

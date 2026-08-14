@@ -205,7 +205,7 @@ fn build_workspace_context_message(
         format!("\n\n[work_item_context]\n{work_item_context}")
     };
     let runtime_contract = runtime_contract_for(session);
-    let routing_context = routing_reference_context_for_project(app_paths, &session.project_id);
+    let routing_context = routing_reference_context_for_project(app_paths, &session.project_id)?;
 
     let mut message = format!(
         "Workspace 生成任务已准备\n\n\
@@ -264,27 +264,42 @@ fn build_workspace_context_message(
 ///
 /// 逻辑代码库(有 manifest + 已 bootstrap 的 `AggregatePolicyArtifact`)时派生
 /// `Logical`:`policy_id`/`policy_revision`/`policy_digest` 来自 persisted artifact,
-/// `authority_root` 取 `LogicalCodebaseManifest.provider_context_root`。两者与
-/// gateway envelope 同源,无漂移。无 manifest/artifact 或读取失败一律 `Legacy`
-/// (与改造前 `_legacy()` 字节一致)。
+/// `authority_root` 取 `LogicalCodebaseManifest.provider_context_root` 的
+/// canonicalize 后形态(与 gateway envelope 表示一致)。
+///
+/// 裁决①(链接不可达则停下报告):
+/// - `load_manifest`/`get` 的 `Ok(None)`(store 不存在)→ `Legacy`;
+/// - `Err(e)`(文件损坏、IO 失败)→ 经 `build_workspace_context_message` 既有
+///   `Result` fail-closed 传播,不允许逻辑代码库项目静默退回 Legacy;
+/// - `provider_context_root` 不可达(`fs::canonicalize` 探测失败)同 `Err` 处理。
 pub(super) fn routing_reference_context_for_project(
     app_paths: &ProductAppPaths,
     project_id: &str,
-) -> RoutingReferenceContext {
-    let Ok(Some(manifest)) = LogicalCodebaseStore::new(app_paths.clone()).load_manifest(project_id)
+) -> Result<RoutingReferenceContext, ProductStoreError> {
+    let Some(manifest) = LogicalCodebaseStore::new(app_paths.clone()).load_manifest(project_id)?
     else {
-        return RoutingReferenceContext::Legacy;
+        return Ok(RoutingReferenceContext::Legacy);
     };
-    let Ok(Some(artifact)) = AggregatePolicyArtifactStore::new(app_paths.clone()).get(project_id)
+    // 裁决①:provider_context_root 必须可达(canonicalize 探测),不可达与 store
+    // 读取错误同等 fail-closed 传播;成功则用 canonicalize 后形态作 authority_root,
+    // 与 gateway_factory/envelope 表示一致(M1)。
+    let authority_root =
+        std::fs::canonicalize(&manifest.provider_context_root).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "provider_context_root unreachable {}: {error}",
+                manifest.provider_context_root.display()
+            ))
+        })?;
+    let Some(artifact) = AggregatePolicyArtifactStore::new(app_paths.clone()).get(project_id)?
     else {
-        return RoutingReferenceContext::Legacy;
+        return Ok(RoutingReferenceContext::Legacy);
     };
-    RoutingReferenceContext::Logical(LogicalPolicyReference {
+    Ok(RoutingReferenceContext::Logical(LogicalPolicyReference {
         policy_id: artifact.policy_id,
         policy_revision: artifact.revision,
         policy_digest: artifact.digest,
-        authority_root: manifest.provider_context_root.to_string_lossy().to_string(),
-    })
+        authority_root: authority_root.to_string_lossy().to_string(),
+    }))
 }
 
 /// FailClosed 稳定错误码映射（B3）：ProductStoreError 经 product_store_api_error 的

@@ -418,16 +418,26 @@ impl WorkspaceEngine {
         let Some((project_id, working_dir)) = self.logical_planning_launch() else {
             return RoutingReferenceContext::Legacy;
         };
+        // 镜像 factory 的 canonicalize 语义:aggregate_root target worktree 用
+        // canonicalize 后形态,失败回退原值(resolver 会再 canonicalize 复核)。
+        let target_worktree =
+            std::fs::canonicalize(&working_dir).unwrap_or_else(|_| working_dir.clone());
         let request = SessionLaunchRequest::planning(
             project_id,
             ProviderRef::claude_code("cap_managed_snapshot"),
-            PolicyTarget::aggregate_root(working_dir.clone()),
+            PolicyTarget::aggregate_root(target_worktree),
             vec![working_dir],
             "sha256:managed-config-artifact",
         );
         match gateway.validate(request) {
             Ok(policy) => routing_reference_context_from_policy(&policy),
-            Err(_) => RoutingReferenceContext::Legacy,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "workspace_engine routing_reference_context: gateway validate failed, falling back to Legacy"
+                );
+                RoutingReferenceContext::Legacy
+            }
         }
     }
 
