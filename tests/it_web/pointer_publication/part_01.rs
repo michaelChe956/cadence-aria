@@ -193,11 +193,13 @@ fn setup_member(tmp: &Path, name: &str, with_origin: bool) -> MemberRepo {
             &repo_path,
             &["remote", "add", "origin", remote_path.to_str().unwrap()],
         );
-        git(&repo_path, &["push", "-u", "origin", "master"]);
         git(&repo_path, &["branch", "-m", "main"]);
         git(&repo_path, &["push", "-u", "origin", "main"]);
         Some(remote_path)
     } else {
+        // 无 origin 成员同样统一为 main 分支（仅不配置远端）；用于场景 D 的
+        // push 失败注入，修复时可直接 `git push -u origin main`。
+        git(&repo_path, &["branch", "-m", "main"]);
         None
     };
 
