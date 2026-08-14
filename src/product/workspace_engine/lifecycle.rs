@@ -641,6 +641,18 @@ impl WorkspaceEngine {
         self.session.review_rounds = locked_snapshot.review_rounds;
         self.session.permission_modes = locked_snapshot.permission_modes.clone();
 
+        self.session.provisional_reviewer_provider = locked_snapshot.reviewer.clone();
+        self.session.reviewer_enabled_at_start = Some(reviewer_enabled);
+        if let Some(store) = &self.lifecycle_store {
+            store
+                .update_workspace_session_provisional_reviewer(
+                    &self.session.session_id,
+                    self.session.provisional_reviewer_provider.clone(),
+                    self.session.reviewer_enabled_at_start,
+                )
+                .map_err(|error| format!("persist provisional reviewer failed: {error}"))?;
+        }
+
         if let Some(store) = &self.lifecycle_store {
             let reviewer_provider = locked_snapshot
                 .reviewer

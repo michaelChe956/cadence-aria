@@ -57,6 +57,10 @@ pub struct WorkspaceSessionRecord {
     pub review_rounds: u32,
     #[serde(default)]
     pub permission_modes: WorkspaceRolePermissionModes,
+    #[serde(default)]
+    pub provisional_reviewer_provider: Option<ProviderName>,
+    #[serde(default)]
+    pub reviewer_enabled_at_start: Option<bool>,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
     #[serde(default)]

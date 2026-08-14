@@ -202,6 +202,8 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         reviewer_provider: ProviderName::ClaudeCode,
         review_rounds: 2,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
         superpowers_enabled: true,
         openspec_enabled: true,
         provider_conversations: Vec::new(),
