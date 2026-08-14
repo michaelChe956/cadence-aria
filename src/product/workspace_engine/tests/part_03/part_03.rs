@@ -1,5 +1,7 @@
+// spec-design-dialog-revision T5：Story/Design 强 revise 完成统一回 AuthorConfirm（报告进对话流），
+// WorkItem 维持既有 ReviewDecision 路由（design.md「WorkItem 不受影响」）。
 #[tokio::test]
-async fn strong_review_findings_enter_review_decision_for_all_workspace_types() {
+async fn strong_review_findings_route_author_confirm_or_review_decision_for_all_workspace_types() {
     for workspace_type in [
         WorkspaceType::Story,
         WorkspaceType::Design,
@@ -41,14 +43,33 @@ async fn strong_review_findings_enter_review_decision_for_all_workspace_types() 
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
-        assert!(
-            engine
-                .timeline_nodes
-                .iter()
-                .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
-            "{workspace_type:?} should require revision for strong findings"
-        );
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} strong revise 完成必须回 AuthorConfirm（报告进对话流）"
+                );
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::AuthorConfirm),
+                    "{workspace_type:?} should route review report back to author confirm"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
+                    "{workspace_type:?} should require revision for strong findings"
+                );
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
     }
 }
 
@@ -86,7 +107,8 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        // review_gate 语义不变（fallback 判定仍为 UserTriageRequired）；仅路由终点按类型分流：
+        // Story/Design → AuthorConfirm（报告进对话流），WorkItem → HumanConfirm（用户 triage）。
         assert_eq!(
             engine
                 .latest_review_verdict
@@ -95,13 +117,26 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
                 .review_gate,
             ReviewGate::UserTriageRequired
         );
-        assert!(
-            engine
-                .timeline_nodes
-                .iter()
-                .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
-            "{workspace_type:?} should create human_confirm node for user triage"
-        );
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} revise 无 findings 必须回 AuthorConfirm（报告进对话流）"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
+                    "{workspace_type:?} should create human_confirm node for user triage"
+                );
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
         assert!(
             !engine
                 .timeline_nodes
@@ -147,7 +182,6 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
         assert_eq!(
             engine
                 .latest_review_verdict
@@ -156,6 +190,19 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
                 .review_gate,
             ReviewGate::UserTriageRequired
         );
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} malformed findings 必须回 AuthorConfirm（报告进对话流）"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
     }
 }
 
@@ -357,7 +404,7 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
 }
 
 #[tokio::test]
-async fn drive_review_session_pass_enters_human_confirm() {
+async fn drive_review_session_pass_enters_author_confirm() {
     let (_tmp, store) = setup();
     let (tx, mut rx) = mpsc::channel(64);
     let session = make_session("sess_review_pass");
@@ -398,13 +445,18 @@ async fn drive_review_session_pass_enters_human_confirm() {
             .unwrap()
             .contains("# Story Spec")
     );
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    // spec-design-dialog-revision T5：Story review pass 完成不得自动定稿，统一回 AuthorConfirm。
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
     match engine.build_session_state() {
         WsOutMessage::SessionState { timeline_nodes, .. } => {
             assert!(timeline_nodes.iter().any(|node| {
                 node.node_type == TimelineNodeType::ReviewerRun
                     && node.status == TimelineNodeStatus::Completed
-                    && node.summary.as_deref() == Some("可以确认")
+            }));
+            // T5：回 AuthorConfirm 必须创建 AuthorConfirm 节点（报告进对话流后等待作者确认）。
+            assert!(timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::AuthorConfirm
+                    && node.status == TimelineNodeStatus::Active
             }));
         }
         _ => panic!("expected SessionState"),
@@ -431,7 +483,7 @@ async fn drive_review_session_pass_enters_human_confirm() {
 }
 
 #[tokio::test]
-async fn drive_review_session_strong_revise_pauses_for_decision() {
+async fn drive_review_session_strong_revise_returns_to_author_confirm() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let session = make_session("sess_review_revise");
@@ -472,7 +524,8 @@ async fn drive_review_session_strong_revise_pauses_for_decision() {
         )
         .await;
 
-    assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+    // spec-design-dialog-revision T5：Story 强 revise 完成不再停在 ReviewDecision，统一回 AuthorConfirm。
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
     match engine.build_session_state() {
         WsOutMessage::SessionState {
             timeline_nodes,
@@ -482,9 +535,9 @@ async fn drive_review_session_strong_revise_pauses_for_decision() {
             let active = timeline_nodes
                 .iter()
                 .find(|node| Some(&node.node_id) == active_node_id.as_ref())
-                .expect("active review decision node");
-            assert_eq!(active.node_type, TimelineNodeType::ReviewDecision);
-            assert_eq!(active.status, TimelineNodeStatus::Paused);
+                .expect("active author confirm node");
+            assert_eq!(active.node_type, TimelineNodeType::AuthorConfirm);
+            assert_eq!(active.status, TimelineNodeStatus::Active);
         }
         _ => panic!("expected SessionState"),
     }

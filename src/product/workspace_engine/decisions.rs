@@ -140,6 +140,9 @@ impl WorkspaceEngine {
                 self.complete_active_node(Some("用户提交反馈，进入修订".to_string()))
                     .await;
                 self.pending_revision_context = Some(trimmed.clone());
+                // I-1（spec-design-dialog-revision T5）：post-review 新反馈提交时清空 review verdict，
+                // 使 T4 分流谓词（pending.is_some() && verdict.is_none()）成立，否则会错走 reviewer 返修 prompt。
+                self.latest_review_verdict = None;
                 self.transition_stage(WorkspaceStage::Revision).await;
                 let _ = self
                     .create_timeline_node(TimelineNodeDraft {
@@ -165,6 +168,12 @@ impl WorkspaceEngine {
                 Ok(AuthorDecisionOutcome::Finalized)
             }
         }
+    }
+
+    /// spec-design-dialog-revision T5/M-1：author 反馈修订分流谓词（pending 存在且无 review verdict）。
+    /// prompts/revision.rs 与 provider_drive.rs 两处共用，避免重复实现漂移。
+    pub(crate) fn is_author_feedback_revision(&self) -> bool {
+        self.pending_revision_context.is_some() && self.latest_review_verdict.is_none()
     }
 
     /// AcceptWithReview 的 reviewer 就绪检查：判定依据是落盘的 reviewer_enabled_at_start，

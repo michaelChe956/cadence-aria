@@ -787,14 +787,14 @@ impl WorkspaceEngine {
             .await;
         // spec-design-dialog-revision T4：author 反馈修订完成后回 AuthorConfirm，summary 携带改动摘要
         // （brief 未覆盖提取机制，按现有 Revision 完成路径最小适配：从产物「## 改动摘要」小节提取）。
-        let confirm_summary =
-            if self.pending_revision_context.is_some() && self.latest_review_verdict.is_none() {
-                extract_changelog_summary(&artifact_markdown)
-                    .map(|changelog| format!("修订完成。\n\n## 改动摘要\n{changelog}"))
-                    .unwrap_or_else(|| "等待用户确认 author 结果".to_string())
-            } else {
-                "等待用户确认 author 结果".to_string()
-            };
+        // T5/M-1：谓词提取为共享 helper is_author_feedback_revision（decisions.rs）。
+        let confirm_summary = if self.is_author_feedback_revision() {
+            extract_changelog_summary(&artifact_markdown)
+                .map(|changelog| format!("修订完成。\n\n## 改动摘要\n{changelog}"))
+                .unwrap_or_else(|| "等待用户确认 author 结果".to_string())
+        } else {
+            "等待用户确认 author 结果".to_string()
+        };
         self.complete_active_node(Some("生成完成".to_string()))
             .await;
         self.enter_author_confirm(Some(confirm_summary)).await;
