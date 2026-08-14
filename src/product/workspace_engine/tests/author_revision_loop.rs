@@ -236,7 +236,9 @@ async fn revise_with_feedback_transitions_to_revision() {
 async fn revise_with_blank_feedback_rejected() {
     let mut engine = author_confirm_engine().await;
     let err = engine
-        .handle_author_decision(AuthorDecision::Revise { feedback: "  ".into() })
+        .handle_author_decision(AuthorDecision::Revise {
+            feedback: "  ".into(),
+        })
         .await
         .unwrap_err();
     assert!(err.contains("feedback"));
@@ -275,7 +277,10 @@ async fn accept_with_review_restores_provisional_when_disabled() {
         .await
         .unwrap();
     assert!(matches!(outcome, AuthorDecisionOutcome::StartReview));
-    assert_eq!(engine.session().reviewer_provider, Some(ProviderName::Codex));
+    assert_eq!(
+        engine.session().reviewer_provider,
+        Some(ProviderName::Codex)
+    );
     assert_eq!(engine.session().review_rounds, 1);
     assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
 }
@@ -307,4 +312,144 @@ async fn legacy_accept_routes_by_enabled_at_start() {
         .await
         .unwrap();
     assert!(matches!(outcome2, AuthorDecisionOutcome::StartReview));
+}
+
+// T3 fix round 1（reviewer Important-1）：Fake reviewer 快速路径下 outcome 与最终 stage 一致性回归。
+// start_review 的 Fake 快速路径会直接进入 HumanConfirm（Skipped 节点 + mark_reviewed + enter_human_confirm），
+// 此时 outcome 必须为 HumanConfirm，不得返回 StartReview（否则真实 handler 会向已处 HumanConfirm 的
+// 会话 spawn ReviewOnly run）。回归 5867371b decisions.rs:102 的 stage 后置校验语义。
+
+async fn fake_reviewer_author_confirm_engine_legacy() -> WorkspaceEngine {
+    // 旧记录：enabled_at_start=None + Fake reviewer（有效态判定 rounds>0 && reviewer.is_some() 成立）
+    // → Accept 经 start_review 快速路径落入 HumanConfirm，outcome 必须与 stage 一致（HumanConfirm）。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_fake_legacy");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = Some(ProviderName::Fake);
+    session.review_rounds = 1;
+    session.provisional_reviewer_provider = None;
+    session.reviewer_enabled_at_start = None;
+    WorkspaceEngine::new(store, tx, session)
+}
+
+async fn fake_reviewer_author_confirm_engine_with_review() -> WorkspaceEngine {
+    // AcceptWithReview：reviewer=Some(Fake) + rounds=1（reviewer 就绪）→ 同样走 Fake 快速路径。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_fake_with_review");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = Some(ProviderName::Fake);
+    session.review_rounds = 1;
+    session.provisional_reviewer_provider = Some(ProviderName::Fake);
+    session.reviewer_enabled_at_start = Some(true);
+    WorkspaceEngine::new(store, tx, session)
+}
+
+async fn fake_reviewer_author_confirm_engine_enabled_at_start() -> WorkspaceEngine {
+    // Accept Some(true) 分支：enabled_at_start=Some(true) + Fake reviewer → 快速路径同样落入 HumanConfirm。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_fake_enabled");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = Some(ProviderName::Fake);
+    session.review_rounds = 1;
+    session.provisional_reviewer_provider = Some(ProviderName::Fake);
+    session.reviewer_enabled_at_start = Some(true);
+    WorkspaceEngine::new(store, tx, session)
+}
+
+async fn author_confirm_engine_enabled_review() -> WorkspaceEngine {
+    // 顺手项（reviewer Minor-1）：enabled_at_start=Some(true) + 真实 reviewer（Codex）→ Accept 路由 StartReview。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_enabled_review");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = Some(ProviderName::Codex);
+    session.review_rounds = 1;
+    session.provisional_reviewer_provider = Some(ProviderName::Codex);
+    session.reviewer_enabled_at_start = Some(true);
+    WorkspaceEngine::new(store, tx, session)
+}
+
+#[tokio::test]
+async fn fake_reviewer_legacy_accept_outcome_matches_human_confirm_stage() {
+    // Fake reviewer + legacy Accept（None 记录）：有效态判定成立但 Fake 快速路径直入 HumanConfirm，
+    // outcome 必须与最终 stage 一致（HumanConfirm），不得返回 StartReview。
+    let mut engine = fake_reviewer_author_confirm_engine_legacy().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AuthorDecisionOutcome::HumanConfirm,
+        "Fake 快速路径下 outcome 必须与最终 stage 一致"
+    );
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+}
+
+#[tokio::test]
+async fn fake_reviewer_accept_with_review_outcome_matches_human_confirm_stage() {
+    // AcceptWithReview + Fake：同样必须 HumanConfirm（快速路径），与 stage 一致。
+    let mut engine = fake_reviewer_author_confirm_engine_with_review().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::AcceptWithReview)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AuthorDecisionOutcome::HumanConfirm,
+        "AcceptWithReview + Fake 快速路径下 outcome 必须与最终 stage 一致"
+    );
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+}
+
+#[tokio::test]
+async fn fake_reviewer_accept_enabled_at_start_outcome_matches_human_confirm_stage() {
+    // Accept Some(true) 分支 + Fake：快速路径同样落入 HumanConfirm，outcome 与 stage 一致。
+    let mut engine = fake_reviewer_author_confirm_engine_enabled_at_start().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AuthorDecisionOutcome::HumanConfirm,
+        "Accept Some(true) + Fake 快速路径下 outcome 必须与最终 stage 一致"
+    );
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+}
+
+#[tokio::test]
+async fn accept_enabled_review_at_start_routes_to_start_review() {
+    // 顺手项（reviewer Minor-1）：enabled_at_start=Some(true) + 真实 reviewer → Accept 路由 StartReview
+    // 且 stage=CrossReview（不走 Fake 快速路径）。
+    let mut engine = author_confirm_engine_enabled_review().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(outcome, AuthorDecisionOutcome::StartReview);
+    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
 }

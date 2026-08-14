@@ -104,8 +104,7 @@ impl WorkspaceEngine {
                         self.ensure_reviewer_available_for_review_request()?;
                         self.complete_active_node(Some("已确认，进入 Review".to_string()))
                             .await;
-                        self.start_review().await;
-                        Ok(AuthorDecisionOutcome::StartReview)
+                        Ok(self.start_review_and_outcome().await)
                     }
                     None => {
                         // 旧记录（未落盘 provisional）：保持既有有效态判定。
@@ -114,8 +113,7 @@ impl WorkspaceEngine {
                         self.complete_active_node(Some("已进入 Review".to_string()))
                             .await;
                         if review_enabled {
-                            self.start_review().await;
-                            Ok(AuthorDecisionOutcome::StartReview)
+                            Ok(self.start_review_and_outcome().await)
                         } else {
                             self.enter_human_confirm(Some(
                                 "未启用交叉审核，等待人工确认".to_string(),
@@ -160,8 +158,7 @@ impl WorkspaceEngine {
                 self.ensure_reviewer_available_for_review_request()?;
                 self.complete_active_node(Some("已确认，进入 Review".to_string()))
                     .await;
-                self.start_review().await;
-                Ok(AuthorDecisionOutcome::StartReview)
+                Ok(self.start_review_and_outcome().await)
             }
             AuthorDecision::AcceptFinalize => {
                 self.finalize_current_artifact("人工确认定稿").await?;
@@ -173,8 +170,7 @@ impl WorkspaceEngine {
     /// AcceptWithReview 的 reviewer 就绪检查：判定依据是落盘的 reviewer_enabled_at_start，
     /// 不可用 reviewer_provider.is_none()（from_record 恒 Some + fallback author，重连后失真）。
     fn ensure_reviewer_available_for_review_request(&mut self) -> Result<(), String> {
-        let review_disabled_at_start =
-            self.session.reviewer_enabled_at_start == Some(false);
+        let review_disabled_at_start = self.session.reviewer_enabled_at_start == Some(false);
         let review_active =
             self.session.review_rounds > 0 && self.session.reviewer_provider.is_some();
         if review_active {
@@ -226,6 +222,18 @@ impl WorkspaceEngine {
             self.mark_latest_artifact_reviewed(Some(ProviderName::Fake), None);
             self.enter_human_confirm(Some("等待人工确认".to_string()))
                 .await;
+        }
+    }
+
+    /// start_review 后按实际 stage 判定 outcome：Fake 快速路径会直接进入 HumanConfirm，
+    /// 此时必须返回 HumanConfirm（避免 handler 向已处 HumanConfirm 的会话 spawn ReviewOnly run）。
+    /// Accept Some(true)/Accept None 有效态/AcceptWithReview 三处共用，保持单点判定。
+    async fn start_review_and_outcome(&mut self) -> AuthorDecisionOutcome {
+        self.start_review().await;
+        if self.session.stage == WorkspaceStage::CrossReview {
+            AuthorDecisionOutcome::StartReview
+        } else {
+            AuthorDecisionOutcome::HumanConfirm
         }
     }
 
