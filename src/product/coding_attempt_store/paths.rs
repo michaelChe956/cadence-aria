@@ -111,6 +111,22 @@ impl super::CodingAttemptStore {
             .join("git-operation.json")
     }
 
+    /// PointerPublish journal 落盘分区：
+    /// `logical-codebase/pointer-publications/{publication_id}/git-operations/{journal_id}.json`。
+    pub(crate) fn pointer_publication_git_operation_path(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        journal_id: &str,
+    ) -> PathBuf {
+        self.paths
+            .logical_codebase_root(project_id)
+            .join("pointer-publications")
+            .join(publication_id)
+            .join("git-operations")
+            .join(format!("{journal_id}.json"))
+    }
+
     pub(crate) fn role_provider_config_path(
         &self,
         project_id: &str,

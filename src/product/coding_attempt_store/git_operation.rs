@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_models::{PushStatus, RemoteKind};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::logical_codebase::PointerPublication;
 
 use super::locking::{canonical_path_identity, with_exclusive_lock};
 
@@ -16,6 +17,7 @@ const CODING_GIT_OPERATION_KIND: &str = "coding_git_operation";
 pub enum CodingGitOperationKind {
     WorktreePrepare,
     ReviewRequest,
+    PointerPublish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +279,197 @@ impl super::CodingAttemptStore {
             Ok(current)
         })
     }
+
+    // 签名按 C-5 Task 8 简报逐字定义（8 参数），保留既定接口，不放宽参数上限。
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_pointer_publish_git_operation(
+        &self,
+        publication: &PointerPublication,
+        repo_path: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
+        base_branch: &str,
+        remote: &str,
+        commit_message: &str,
+    ) -> Result<CodingGitOperationJournal, ProductStoreError> {
+        validate_pointer_publication_ids(publication)?;
+        let id = pointer_journal_id(&publication.id);
+        let candidate = build_pointer_journal(
+            publication,
+            repo_path,
+            worktree_path,
+            branch_name,
+            base_branch,
+            remote,
+            commit_message,
+        )?;
+        let path = self.pointer_publication_git_operation_path(
+            &publication.project_id,
+            &publication.id,
+            &id,
+        );
+
+        with_exclusive_lock(&path, || {
+            if path.is_file() {
+                let existing: CodingGitOperationJournal = read_json(&path)?;
+                validate_pointer_journal(&existing, publication)?;
+                if same_identity(&existing, &candidate) {
+                    return Ok(existing);
+                }
+                if !existing.is_terminal() {
+                    return Err(identity_mismatch(&id));
+                }
+            }
+            write_json(&path, &candidate)?;
+            Ok(candidate)
+        })
+    }
+
+    pub fn advance_pointer_publish_git_operation(
+        &self,
+        publication: &PointerPublication,
+        expected: &CodingGitOperationJournal,
+        phase: CodingGitOperationPhase,
+        commit_sha: Option<String>,
+    ) -> Result<CodingGitOperationJournal, ProductStoreError> {
+        validate_pointer_publication_ids(publication)?;
+        let id = pointer_journal_id(&publication.id);
+        let path = self.pointer_publication_git_operation_path(
+            &publication.project_id,
+            &publication.id,
+            &id,
+        );
+
+        with_exclusive_lock(&path, || {
+            if !path.is_file() {
+                return Err(identity_mismatch(&id));
+            }
+            let mut current: CodingGitOperationJournal = read_json(&path)?;
+            validate_pointer_journal(&current, publication)?;
+            if !same_identity(&current, expected) {
+                return Err(identity_mismatch(&id));
+            }
+            if let Some(commit_sha) = commit_sha {
+                validate_non_empty("commit sha", &commit_sha, &id)?;
+                if current.kind != CodingGitOperationKind::PointerPublish
+                    || phase != CodingGitOperationPhase::CommitCreated
+                    || current
+                        .commit_sha
+                        .as_deref()
+                        .is_some_and(|existing| existing != commit_sha)
+                {
+                    return Err(identity_mismatch(&id));
+                }
+                current.commit_sha = Some(commit_sha);
+            }
+            if phase == current.phase {
+                validate_phase_state(&current)?;
+                return Ok(current);
+            }
+            if !is_allowed_transition(current.kind, current.phase, phase) {
+                return Err(identity_mismatch(&id));
+            }
+            current.phase = phase;
+            current.updated_at = Utc::now().to_rfc3339();
+            validate_phase_state(&current)?;
+            write_json(&path, &current)?;
+            Ok(current)
+        })
+    }
+
+    pub fn complete_review_pointer_publish_git_operation(
+        &self,
+        publication: &PointerPublication,
+        expected: &CodingGitOperationJournal,
+        input: CompleteReviewGitOperationInput,
+    ) -> Result<CodingGitOperationJournal, ProductStoreError> {
+        validate_relative_id(&input.review_request_id)?;
+        validate_pointer_publication_ids(publication)?;
+        let id = pointer_journal_id(&publication.id);
+        let path = self.pointer_publication_git_operation_path(
+            &publication.project_id,
+            &publication.id,
+            &id,
+        );
+
+        with_exclusive_lock(&path, || {
+            if !path.is_file() {
+                return Err(identity_mismatch(&id));
+            }
+            let mut current: CodingGitOperationJournal = read_json(&path)?;
+            validate_pointer_journal(&current, publication)?;
+            if !same_identity(&current, expected)
+                || current.kind != CodingGitOperationKind::PointerPublish
+            {
+                return Err(identity_mismatch(&id));
+            }
+            if current.phase == CodingGitOperationPhase::Completed {
+                if current.push_status.as_ref() == Some(&input.push_status)
+                    && current.remote_kind.as_ref() == Some(&input.remote_kind)
+                    && current.review_request_id.as_deref()
+                        == Some(input.review_request_id.as_str())
+                {
+                    return Ok(current);
+                }
+                return Err(identity_mismatch(&id));
+            }
+            if current.phase != CodingGitOperationPhase::PushStarted || current.commit_sha.is_none()
+            {
+                return Err(identity_mismatch(&id));
+            }
+            current.phase = CodingGitOperationPhase::Completed;
+            current.push_status = Some(input.push_status);
+            current.push_error = input.push_error;
+            current.remote_kind = Some(input.remote_kind);
+            current.review_request_id = Some(input.review_request_id);
+            current.updated_at = Utc::now().to_rfc3339();
+            validate_phase_state(&current)?;
+            write_json(&path, &current)?;
+            Ok(current)
+        })
+    }
+
+    /// 重推专用重开：仅当 journal 为 `Completed(Failed)` 时重开为 `PushStarted`
+    /// （保留 `commit_sha`，清空 push 完成态字段）。红线同 attempt 版：
+    /// `Completed(Pushed)` 与其他非 Completed 相位绝不重开。
+    pub fn reopen_failed_pointer_publish_git_operation(
+        &self,
+        publication: &PointerPublication,
+        expected: &CodingGitOperationJournal,
+    ) -> Result<CodingGitOperationJournal, ProductStoreError> {
+        validate_pointer_publication_ids(publication)?;
+        let id = pointer_journal_id(&publication.id);
+        let path = self.pointer_publication_git_operation_path(
+            &publication.project_id,
+            &publication.id,
+            &id,
+        );
+
+        with_exclusive_lock(&path, || {
+            if !path.is_file() {
+                return Err(identity_mismatch(&id));
+            }
+            let mut current: CodingGitOperationJournal = read_json(&path)?;
+            validate_pointer_journal(&current, publication)?;
+            if !same_identity(&current, expected)
+                || current.kind != CodingGitOperationKind::PointerPublish
+                || current.phase != CodingGitOperationPhase::Completed
+                || current.push_status != Some(PushStatus::Failed)
+                || current.commit_sha.is_none()
+            {
+                return Err(identity_mismatch(&id));
+            }
+            current.phase = CodingGitOperationPhase::PushStarted;
+            current.push_status = None;
+            current.push_error = None;
+            current.remote_kind = None;
+            current.review_request_id = None;
+            current.updated_at = Utc::now().to_rfc3339();
+            validate_phase_state(&current)?;
+            write_json(&path, &current)?;
+            Ok(current)
+        })
+    }
 }
 
 fn build_journal(
@@ -309,6 +502,10 @@ fn build_journal(
                 return Err(identity_mismatch(&attempt.id));
             }
         }
+        CodingGitOperationKind::PointerPublish => {
+            // PointerPublish 不绑定 attempt；attempt 方法族不得构造该 kind。
+            return Err(identity_mismatch(&attempt.id));
+        }
     }
 
     let now = Utc::now().to_rfc3339();
@@ -335,6 +532,94 @@ fn build_journal(
     };
     validate_journal(&journal, attempt)?;
     Ok(journal)
+}
+
+/// PointerPublish journal 的合成稳定标识（与 ReviewRequest.attempt_id 命名空间一致）。
+fn pointer_journal_id(publication_id: &str) -> String {
+    format!("pointer-pub-{publication_id}")
+}
+
+fn validate_pointer_publication_ids(
+    publication: &PointerPublication,
+) -> Result<(), ProductStoreError> {
+    validate_relative_id(&publication.id)?;
+    validate_relative_id(&publication.project_id)?;
+    Ok(())
+}
+
+fn build_pointer_journal(
+    publication: &PointerPublication,
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    base_branch: &str,
+    remote: &str,
+    commit_message: &str,
+) -> Result<CodingGitOperationJournal, ProductStoreError> {
+    let id = pointer_journal_id(&publication.id);
+    validate_non_empty("branch", branch_name, &id)?;
+    validate_non_empty("base branch", base_branch, &id)?;
+    validate_non_empty("remote", remote, &id)?;
+    validate_non_empty("commit message", commit_message, &id)?;
+
+    let now = Utc::now().to_rfc3339();
+    let journal = CodingGitOperationJournal {
+        project_id: publication.project_id.clone(),
+        issue_id: String::new(),
+        attempt_id: id,
+        kind: CodingGitOperationKind::PointerPublish,
+        repo_path: canonical_path_identity(repo_path)?,
+        worktree_path: canonical_path_identity(worktree_path)?,
+        branch_name: branch_name.to_string(),
+        base_branch: base_branch.to_string(),
+        before_head: String::new(),
+        remote: Some(remote.to_string()),
+        commit_message: Some(commit_message.to_string()),
+        phase: CodingGitOperationPhase::Before,
+        commit_sha: None,
+        push_status: None,
+        push_error: None,
+        remote_kind: None,
+        review_request_id: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    validate_pointer_journal(&journal, publication)?;
+    Ok(journal)
+}
+
+/// PointerPublish kind 的校验：按 publication 校验 project_id / attempt_id，
+/// 要求 branch/base_branch/remote/commit_message 非空、路径 canonical 一致；
+/// 不要求 attempt 各字段相等。
+fn validate_pointer_journal(
+    journal: &CodingGitOperationJournal,
+    publication: &PointerPublication,
+) -> Result<(), ProductStoreError> {
+    let id = pointer_journal_id(&publication.id);
+    if journal.project_id != publication.project_id
+        || journal.attempt_id != id
+        || journal.kind != CodingGitOperationKind::PointerPublish
+        || canonical_path_identity(&journal.repo_path)? != journal.repo_path
+        || canonical_path_identity(&journal.worktree_path)? != journal.worktree_path
+    {
+        return Err(identity_mismatch(&id));
+    }
+    validate_non_empty("branch", &journal.branch_name, &id)?;
+    validate_non_empty("base branch", &journal.base_branch, &id)?;
+    validate_non_empty("created at", &journal.created_at, &id)?;
+    validate_non_empty("updated at", &journal.updated_at, &id)?;
+    let Some(remote) = journal.remote.as_deref() else {
+        return Err(identity_mismatch(&id));
+    };
+    let Some(message) = journal.commit_message.as_deref() else {
+        return Err(identity_mismatch(&id));
+    };
+    validate_non_empty("remote", remote, &id)?;
+    validate_non_empty("commit message", message, &id)?;
+    if let Some(review_request_id) = journal.review_request_id.as_deref() {
+        validate_relative_id(review_request_id)?;
+    }
+    validate_phase_state(journal)
 }
 
 fn validate_journal(
@@ -386,6 +671,10 @@ fn validate_journal(
                 return Err(identity_mismatch(&attempt.id));
             }
         }
+        CodingGitOperationKind::PointerPublish => {
+            // PointerPublish 不绑定 attempt；必须走 validate_pointer_journal。
+            return Err(identity_mismatch(&attempt.id));
+        }
     }
     validate_phase_state(journal)
 }
@@ -400,32 +689,8 @@ fn validate_phase_state(journal: &CodingGitOperationJournal) -> Result<(), Produ
                 | CodingGitOperationPhase::Compensated
                 | CodingGitOperationPhase::Completed
         ),
-        CodingGitOperationKind::ReviewRequest => {
-            let phase_valid = matches!(
-                journal.phase,
-                CodingGitOperationPhase::Before
-                    | CodingGitOperationPhase::CommitStarted
-                    | CodingGitOperationPhase::CommitCreated
-                    | CodingGitOperationPhase::PushStarted
-                    | CodingGitOperationPhase::Compensated
-                    | CodingGitOperationPhase::Completed
-            );
-            let commit_valid = match journal.phase {
-                CodingGitOperationPhase::CommitCreated
-                | CodingGitOperationPhase::PushStarted
-                | CodingGitOperationPhase::Completed => journal.commit_sha.is_some(),
-                _ => true,
-            };
-            let completion_valid = if journal.phase == CodingGitOperationPhase::Completed {
-                journal.push_status.is_some()
-                    && journal.remote_kind.is_some()
-                    && journal.review_request_id.is_some()
-            } else {
-                journal.push_status.is_none()
-                    && journal.remote_kind.is_none()
-                    && journal.review_request_id.is_none()
-            };
-            phase_valid && commit_valid && completion_valid
+        CodingGitOperationKind::ReviewRequest | CodingGitOperationKind::PointerPublish => {
+            review_like_phase_state_valid(journal)
         }
     };
     if valid {
@@ -433,6 +698,34 @@ fn validate_phase_state(journal: &CodingGitOperationJournal) -> Result<(), Produ
     } else {
         Err(identity_mismatch(&journal.attempt_id))
     }
+}
+
+fn review_like_phase_state_valid(journal: &CodingGitOperationJournal) -> bool {
+    let phase_valid = matches!(
+        journal.phase,
+        CodingGitOperationPhase::Before
+            | CodingGitOperationPhase::CommitStarted
+            | CodingGitOperationPhase::CommitCreated
+            | CodingGitOperationPhase::PushStarted
+            | CodingGitOperationPhase::Compensated
+            | CodingGitOperationPhase::Completed
+    );
+    let commit_valid = match journal.phase {
+        CodingGitOperationPhase::CommitCreated
+        | CodingGitOperationPhase::PushStarted
+        | CodingGitOperationPhase::Completed => journal.commit_sha.is_some(),
+        _ => true,
+    };
+    let completion_valid = if journal.phase == CodingGitOperationPhase::Completed {
+        journal.push_status.is_some()
+            && journal.remote_kind.is_some()
+            && journal.review_request_id.is_some()
+    } else {
+        journal.push_status.is_none()
+            && journal.remote_kind.is_none()
+            && journal.review_request_id.is_none()
+    };
+    phase_valid && commit_valid && completion_valid
 }
 
 fn same_identity(left: &CodingGitOperationJournal, right: &CodingGitOperationJournal) -> bool {
@@ -474,22 +767,24 @@ fn is_allowed_transition(
                 CodingGitOperationPhase::Completed
             )
         ),
-        CodingGitOperationKind::ReviewRequest => matches!(
-            (current, next),
-            (
-                CodingGitOperationPhase::Before,
-                CodingGitOperationPhase::CommitStarted
-            ) | (
-                CodingGitOperationPhase::CommitStarted,
-                CodingGitOperationPhase::CommitCreated
-            ) | (
-                CodingGitOperationPhase::CommitCreated,
-                CodingGitOperationPhase::PushStarted
-            ) | (
-                CodingGitOperationPhase::PushStarted,
-                CodingGitOperationPhase::Completed
+        CodingGitOperationKind::ReviewRequest | CodingGitOperationKind::PointerPublish => {
+            matches!(
+                (current, next),
+                (
+                    CodingGitOperationPhase::Before,
+                    CodingGitOperationPhase::CommitStarted
+                ) | (
+                    CodingGitOperationPhase::CommitStarted,
+                    CodingGitOperationPhase::CommitCreated
+                ) | (
+                    CodingGitOperationPhase::CommitCreated,
+                    CodingGitOperationPhase::PushStarted
+                ) | (
+                    CodingGitOperationPhase::PushStarted,
+                    CodingGitOperationPhase::Completed
+                )
             )
-        ),
+        }
     }
 }
 

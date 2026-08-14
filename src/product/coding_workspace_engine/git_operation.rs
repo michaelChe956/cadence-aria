@@ -81,6 +81,15 @@ impl CodingWorkspaceEngine {
                     .into());
                 }
             },
+            // PointerPublish journal 不落 attempt_dir，attempt 终止路径不可达；
+            // 若出现即编程错误，fail-closed。
+            CodingGitOperationKind::PointerPublish => {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_git_operation",
+                    id: journal.attempt_id,
+                }
+                .into());
+            }
         }
         self.store
             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
