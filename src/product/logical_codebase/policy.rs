@@ -188,6 +188,10 @@ pub struct SessionPolicyEnvelope {
     pub config_artifact_ref: String,
     pub config_digest: String,
     pub created_at: String,
+    /// 聚合政策权威根 locator(= `LogicalCodebaseManifest.provider_context_root`,
+    /// 构造时 canonicalize)。存量记录无此键,serde 缺省为 `PathBuf::default()`。
+    #[serde(default)]
+    pub authority_root: PathBuf,
 }
 
 impl SessionPolicyEnvelope {
@@ -204,6 +208,7 @@ impl SessionPolicyEnvelope {
         provider_dialect: ProviderDialect,
         config_artifact_ref: String,
         created_at: String,
+        authority_root: PathBuf,
     ) -> Result<Self, ProductStoreError> {
         if artifact.digest.is_empty() {
             return Err(ProductStoreError::InvalidRecord {
@@ -229,6 +234,7 @@ impl SessionPolicyEnvelope {
             config_artifact_ref,
             config_digest,
             created_at,
+            authority_root,
         })
     }
 
@@ -475,6 +481,7 @@ mod tests {
             ProviderDialect::ClaudeCodeCliV1,
             "sha256:settings".into(),
             "2026-08-09T00:00:00Z".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap();
 
@@ -516,6 +523,7 @@ mod tests {
             ProviderDialect::CodexCliV1,
             "sha256:cfg".into(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap_err();
         assert!(
@@ -531,6 +539,7 @@ mod tests {
             ProviderDialect::CodexCliV1,
             "sha256:cfg".into(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap();
         assert!(ok.writable_roots.is_empty());
@@ -551,6 +560,7 @@ mod tests {
             ProviderDialect::ClaudeCodeCliV1,
             "sha256:cfg".into(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap_err();
         assert!(
@@ -567,6 +577,7 @@ mod tests {
             ProviderDialect::ClaudeCodeCliV1,
             "sha256:cfg".into(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap_err();
         assert!(
@@ -583,6 +594,7 @@ mod tests {
             ProviderDialect::ClaudeCodeCliV1,
             "sha256:cfg".into(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap();
         assert_eq!(ok.writable_roots, vec![PathBuf::from("/work/repo")]);
@@ -600,6 +612,7 @@ mod tests {
             ProviderDialect::ClaudeCodeCliV1,
             String::new(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap_err();
         assert!(
@@ -689,6 +702,35 @@ mod tests {
         assert_eq!(reloaded, revised);
     }
 
+    /// 存量 envelope JSON(无 `authority_root` 键)反序列化不失败:serde 缺省为
+    /// `PathBuf::default()`,新字段不破坏旧记录读取。
+    #[test]
+    fn legacy_envelope_json_without_authority_root_deserializes_with_default() {
+        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
+        let envelope = SessionPolicyEnvelope::new(
+            &artifact,
+            SessionPolicyAction::PlanningReadOnly,
+            PolicyTarget::aggregate_root(PathBuf::from("/aggregate")),
+            vec![PathBuf::from("/aggregate")],
+            vec![],
+            ProviderDialect::ClaudeCodeCliV1,
+            "sha256:cfg".into(),
+            "now".into(),
+            PathBuf::from("/authority-root"),
+        )
+        .unwrap();
+
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json.as_object_mut()
+            .expect("envelope serializes to an object")
+            .remove("authority_root");
+        let restored: SessionPolicyEnvelope =
+            serde_json::from_value(json).expect("legacy envelope JSON must deserialize");
+
+        assert_eq!(restored.authority_root, PathBuf::new());
+        assert_eq!(restored.policy_id, envelope.policy_id);
+    }
+
     /// `recompute_config_digest` 与 `new` 内部冻结的 config_digest 算法一致,
     /// 供 gateway spawn 前复验托管配置未被篡改。
     #[test]
@@ -703,6 +745,7 @@ mod tests {
             ProviderDialect::ClaudeCodeCliV1,
             "sha256:managed-config".into(),
             "now".into(),
+            PathBuf::from("/authority-root"),
         )
         .unwrap();
         let recomputed =

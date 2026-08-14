@@ -151,6 +151,7 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
         Arc::new(ReviewStubSyncAdapter),
         review_always_available_gate(),
         audit.clone(),
+        worktree.clone(),
     ));
 
     ReviewGatewayFixture {

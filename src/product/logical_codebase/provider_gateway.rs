@@ -613,6 +613,9 @@ pub struct LogicalCodebaseProviderGateway {
     sync_adapter: Arc<dyn crate::cross_cutting::provider_adapter::ProviderAdapter + Send + Sync>,
     availability_gate: Arc<ProviderAvailabilityGate>,
     audit: Arc<GatewayRunAudit>,
+    /// 聚合政策权威根 locator(= manifest.provider_context_root,构造时 canonicalize)。
+    /// 冻结后供 `validate` 写入 envelope.authority_root。
+    authority_root: PathBuf,
 }
 
 impl LogicalCodebaseProviderGateway {
@@ -625,6 +628,7 @@ impl LogicalCodebaseProviderGateway {
             dyn crate::cross_cutting::provider_adapter::ProviderAdapter + Send + Sync,
         >,
         availability_gate: Arc<ProviderAvailabilityGate>,
+        authority_root: PathBuf,
     ) -> Self {
         Self {
             policies,
@@ -634,11 +638,13 @@ impl LogicalCodebaseProviderGateway {
             sync_adapter,
             availability_gate,
             audit: Arc::new(GatewayRunAudit::new()),
+            authority_root,
         }
     }
 
     /// 共享同一份启动审计构造 gateway。测试 fixture 用同一 `Arc<GatewayRunAudit>`
     /// 跨多次 `gateway()` 构造累计启动记录;生产侧未来可注入跨实例审计。
+    #[allow(clippy::too_many_arguments)]
     pub fn with_audit(
         policies: AggregatePolicyArtifactStore,
         capabilities: Arc<dyn ProviderCapabilitySource>,
@@ -649,6 +655,7 @@ impl LogicalCodebaseProviderGateway {
         >,
         availability_gate: Arc<ProviderAvailabilityGate>,
         audit: Arc<GatewayRunAudit>,
+        authority_root: PathBuf,
     ) -> Self {
         Self {
             policies,
@@ -658,6 +665,7 @@ impl LogicalCodebaseProviderGateway {
             sync_adapter,
             availability_gate,
             audit,
+            authority_root,
         }
     }
 
@@ -699,6 +707,7 @@ impl LogicalCodebaseProviderGateway {
             capability.adapter_dialect,
             request.config_artifact_ref,
             now,
+            self.authority_root.clone(),
         )
         .map_err(ProviderGatewayError::policy)?;
 

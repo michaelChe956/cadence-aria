@@ -31,6 +31,23 @@ fn bootstrap_policy_is_persisted_before_gateway_can_validate_a_launch() {
     );
 }
 
+/// validated envelope 冻结 authority_root:值来自 manifest.provider_context_root
+/// (构造时 canonicalize),与构建 gateway 时注入的聚合根一致。
+#[test]
+fn validated_envelope_carries_canonical_authority_root_from_manifest() {
+    let fixture = gateway_fixture();
+    fixture.install_bootstrap_policy();
+    let manifest = fixture.manifest();
+    let expected = std::fs::canonicalize(&manifest.provider_context_root).unwrap();
+
+    let validated = fixture
+        .gateway()
+        .validate(fixture.planning_request())
+        .unwrap();
+
+    assert_eq!(validated.envelope().authority_root, expected);
+}
+
 /// validated policy 的字段对外不可直接构造:没有 public constructor,getter 是
 /// 唯一访问方式。编译期保证只能由 gateway 产出。
 #[test]
@@ -572,6 +589,9 @@ impl GatewayFixture {
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderName::ClaudeCode, self.streaming_adapter.clone());
         registry.register(ProviderName::Codex, self.streaming_adapter.clone());
+        // 权威根 = manifest.provider_context_root(temp dir),构造时 canonicalize。
+        let authority_root = std::fs::canonicalize(self.manifest().provider_context_root)
+            .expect("fixture provider context root exists");
         LogicalCodebaseProviderGateway::with_audit(
             self.policy_store(),
             self.capabilities.clone(),
@@ -580,6 +600,7 @@ impl GatewayFixture {
             self.sync_adapter.clone(),
             self.gate.clone(),
             self.audit.clone(),
+            authority_root,
         )
     }
 

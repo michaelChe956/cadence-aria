@@ -60,6 +60,11 @@ impl LogicalCodebaseGatewayFactory {
 
         ProviderCapabilityStore::new(self.paths.clone()).ensure_bootstrap(project_id)?;
 
+        // 权威根 = manifest.provider_context_root(聚合根 cwd)。若为相对路径,
+        // 构造时 canonicalize;失败回退原值(生产 manifest 应已指向存在目录)。
+        let authority_root = std::fs::canonicalize(&manifest.provider_context_root)
+            .unwrap_or_else(|_| manifest.provider_context_root.clone());
+
         Ok(LogicalCodebaseProviderGateway::with_audit(
             policies,
             Arc::new(StoreBackedProviderCapabilitySource::new(
@@ -71,6 +76,7 @@ impl LogicalCodebaseGatewayFactory {
             self.sync_adapter.clone(),
             self.availability_gate.clone(),
             self.audit.clone(),
+            authority_root,
         ))
     }
 }

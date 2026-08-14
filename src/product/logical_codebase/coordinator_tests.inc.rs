@@ -649,6 +649,7 @@ mod tests {
             Arc::new(StubSyncAdapter),
             always_available_gate(),
             audit.clone(),
+            aggregate_root.clone(),
         ));
 
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
@@ -730,6 +731,7 @@ mod tests {
             Arc::new(ProviderRegistry::new()),
             Arc::new(StubSyncAdapter),
             always_available_gate(),
+            aggregate_root.clone(),
         ));
         let driver =
             GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_managed_snapshot");

@@ -149,6 +149,7 @@ fn build_gateway_with_registry(
         Arc::new(StubSyncAdapter),
         always_available_gate(),
         audit,
+        manifest.provider_context_root.clone(),
     )
 }
 
