@@ -8,6 +8,7 @@ pub mod migration;
 pub mod planning_context;
 pub mod planning_context_resolver;
 pub mod planning_context_set;
+pub mod pointer_publication;
 pub mod policy;
 pub mod production_policy_resolvers;
 pub mod provider_capability_store;
@@ -56,6 +57,11 @@ pub use planning_context_resolver::{
 pub use planning_context_set::{
     InventoryInjection, InventoryInjectionBudget, PlanningContextSetResolver,
     RepositoryContextResolution, RepositoryContextSet, render_compact_inventory,
+};
+pub use pointer_publication::{
+    PointerBlockFields, PointerMergeVerdict, PointerPublication, PointerPublicationBatchKind,
+    PointerPublicationEntry, PointerPublicationEntryState, PointerPublicationStatus,
+    PointerPublicationStore, apply_append, classify_merge, render_pointer_block,
 };
 pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
