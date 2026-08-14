@@ -631,6 +631,10 @@ impl WorkspaceEngine {
                 locked_snapshot.permission_modes.reviewer.clone(),
             );
         }
+        // Capture the raw snapshot reviewer BEFORE the disabled-review clear below:
+        // provisional must retain the original selection even when reviewer_enabled=false
+        // (design.md §3, provisional 恢复闭环); reviewer_provider/review_rounds are still cleared.
+        let provisional_reviewer = locked_snapshot.reviewer.clone();
         if !reviewer_enabled {
             locked_snapshot.reviewer = None;
             locked_snapshot.review_rounds = 0;
@@ -641,7 +645,7 @@ impl WorkspaceEngine {
         self.session.review_rounds = locked_snapshot.review_rounds;
         self.session.permission_modes = locked_snapshot.permission_modes.clone();
 
-        self.session.provisional_reviewer_provider = locked_snapshot.reviewer.clone();
+        self.session.provisional_reviewer_provider = provisional_reviewer;
         self.session.reviewer_enabled_at_start = Some(reviewer_enabled);
         if let Some(store) = &self.lifecycle_store {
             store
