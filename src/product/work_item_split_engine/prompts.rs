@@ -1,4 +1,4 @@
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
@@ -66,7 +66,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n\n",
-        direct_cadence_routing_rules_reference(),
+        direct_cadence_routing_rules_reference_legacy(),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
@@ -86,7 +86,7 @@ fn work_item_draft_runtime_contract() -> String {
          {allowed_outputs}\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n",
-        direct_cadence_routing_rules_reference(),
+        direct_cadence_routing_rules_reference_legacy(),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )

@@ -1,4 +1,4 @@
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
 use crate::protocol::contracts::{
     NodePromptTemplateRef, PromptSection, execution_contract_for_node, workflow_discipline_for_node,
 };
@@ -55,7 +55,7 @@ fn n04_sections() -> BTreeMap<PromptSection, String> {
         "[constraint_summary]\n必须遵守 proposal_constraints：\n{{constraint_summary}}",
         &format!(
             "[workflow_discipline]\n{}\n当前阶段：候选澄清。必调 Skill：using-superpowers → brainstorming。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
-            direct_cadence_routing_rules_reference()
+            direct_cadence_routing_rules_reference_legacy()
         ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 clarification_record。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要推进节点状态。不要写文件。只输出候选结果。",
@@ -71,7 +71,7 @@ fn n05_sections() -> BTreeMap<PromptSection, String> {
         "[constraint_summary]\n必须覆盖 proposal_constraints，并声明稳定 requirement IDs：\n{{constraint_summary}}",
         &format!(
             "[workflow_discipline]\n{}\n当前阶段：Story Spec 候选方案。必调 Skill：using-superpowers → brainstorming。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
-            direct_cadence_routing_rules_reference()
+            direct_cadence_routing_rules_reference_legacy()
         ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 spec。JSON 内的 markdown 字段必须包含范围、用户故事、功能需求、成功标准、待确认项和非功能需求。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 OpenSpec。不要直接生成 projection。daemon 会做结构化落盘。",
@@ -87,7 +87,7 @@ fn n07_sections() -> BTreeMap<PromptSection, String> {
         "[constraint_summary]\n必须覆盖 requirement_constraints：\n{{constraint_summary}}",
         &format!(
             "[workflow_discipline]\n{}\n当前阶段：Design Spec 候选方案。必调 Skill：using-superpowers → brainstorming。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。风险必须显式写入“## 风险”。{{workflow_discipline_summary}}",
-            direct_cadence_routing_rules_reference()
+            direct_cadence_routing_rules_reference_legacy()
         ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 design。JSON 内的 markdown 字段必须包含架构摘要、设计决策、公共组件、数据模型、API 契约、风险和待确认项。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 plan。不要生成 dispatch_package。",
@@ -103,7 +103,7 @@ fn n11_sections() -> BTreeMap<PromptSection, String> {
         "[constraint_summary]\n必须覆盖 requirement_constraints 与 design_constraints：\n{{constraint_summary}}",
         &format!(
             "[workflow_discipline]\n{}\n当前阶段：已确认 OpenSpec 后的候选计划。必调 Skill：using-superpowers → writing-plans。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 writing-plans 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物。不得输出 superpowers 实施计划、文件写入步骤、commit 步骤、代码块或安装命令。你必须只输出 Aria PlanProjection 可消费的短 markdown。",
-            direct_cadence_routing_rules_reference()
+            direct_cadence_routing_rules_reference_legacy()
         ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 plan。JSON 内 markdown 字段必须严格包含以下 heading 与表格结构：\n# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | ... | agent_only | | REQ-001, DEC-001 | AC-001 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n\n规则：工作包 ID 必须使用 WT-001、WT-002 这类 WT 前缀；Execution Mode 只能使用 agent_only 或 human_required；Traceability 必须引用已知 REQ/DEC；Acceptance 必须引用成功标准 AC/SC。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 OpenSpec。不要生成 dispatch_package。不要生成逐文件实现步骤；daemon 会从 PlanProjection 自动写回 tasks.md。",
@@ -125,7 +125,7 @@ fn generic_sections(
         "[constraint_summary]\n{{constraint_summary}}",
         &format!(
             "[workflow_discipline]\n{}\n{}{{{{workflow_discipline_summary}}}}",
-            direct_cadence_routing_rules_reference(),
+            direct_cadence_routing_rules_reference_legacy(),
             workflow_delta,
         ),
         &format!(

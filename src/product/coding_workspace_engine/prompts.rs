@@ -1,6 +1,6 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
 use crate::product::coding_models::CodingAttemptScope;
 
 pub(crate) fn code_review_output_contract(nonce: &str) -> String {
@@ -407,7 +407,7 @@ pub(crate) fn group_final_review_material_protocol() -> String {
 
 fn with_cadence_routing_reference(protocol: &'static str) -> String {
     let mut rendered = String::from("\n");
-    rendered.push_str(direct_cadence_routing_rules_reference());
+    rendered.push_str(&direct_cadence_routing_rules_reference_legacy());
     rendered.push_str(protocol);
     rendered
 }

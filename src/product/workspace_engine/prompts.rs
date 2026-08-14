@@ -1,6 +1,6 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
 
 mod review;
 mod review_context;
@@ -62,9 +62,9 @@ fn initial_author_runtime_contract(
     };
 
     let routing_reference = if include_direct_routing_reference {
-        direct_cadence_routing_rules_reference()
+        direct_cadence_routing_rules_reference_legacy()
     } else {
-        ""
+        String::new()
     };
 
     format!(
@@ -163,7 +163,7 @@ pub(crate) fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
          {schema}\n\
          </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
-        direct_cadence_routing_rules_reference(),
+        direct_cadence_routing_rules_reference_legacy(),
     )
 }
 
@@ -346,7 +346,7 @@ impl WorkspaceEngine {
             message.role == "system"
                 && message
                     .content
-                    .contains(direct_cadence_routing_rules_reference())
+                    .contains(&direct_cadence_routing_rules_reference_legacy())
         })
     }
 

@@ -1,4 +1,4 @@
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
 use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::workspace_engine::{
     allowed_outputs_for, author_artifact_schema_contract_for, forbidden_outputs_for,
@@ -111,7 +111,11 @@ pub(super) fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> Strin
         base
     };
 
-    format!("{}\n{}", direct_cadence_routing_rules_reference(), routing) + &workflow
+    format!(
+        "{}\n{}",
+        direct_cadence_routing_rules_reference_legacy(),
+        routing
+    ) + &workflow
 }
 
 fn structured_interaction_guidance_for(provider: &ProviderName) -> &'static str {
