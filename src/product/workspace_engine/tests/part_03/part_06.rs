@@ -185,7 +185,7 @@ async fn persistent_queued_review_engine_for(
         tx,
         session,
     );
-    engine.start_review_or_skip().await;
+    engine.start_review().await;
     let review_node_id = engine
         .active_node_id
         .clone()

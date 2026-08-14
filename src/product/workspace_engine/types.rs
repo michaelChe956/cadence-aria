@@ -310,6 +310,8 @@ pub enum WorkspaceConfirmOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorDecisionOutcome {
     StartReview,
+    StartRevision { feedback: String },
+    Finalized,
     StartWorkItemPlanOutlineRevision { feedback: Option<String> },
     HumanConfirm,
     PrepareContext,

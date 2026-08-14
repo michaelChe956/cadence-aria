@@ -133,3 +133,178 @@ async fn start_generation_enabled_review_sets_provisional_and_reviewer() {
     assert_eq!(session.review_rounds, 1);
     assert_eq!(session.reviewer_enabled_at_start, Some(true));
 }
+
+// spec-design-dialog-revision T3：AuthorConfirm 对话式修订循环 + 确认双出口决策用例。
+// 引擎构造：Story/AuthorConfirm + artifact + 不同 provisional / enabled_at_start / rounds 组合。
+
+async fn author_confirm_engine() -> WorkspaceEngine {
+    // reviewer_provider=None, rounds=0, provisional=Some(Codex), enabled_at_start=Some(false)
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = None;
+    session.review_rounds = 0;
+    session.provisional_reviewer_provider = Some(ProviderName::Codex);
+    session.reviewer_enabled_at_start = Some(false);
+    WorkspaceEngine::new(store, tx, session)
+}
+
+async fn author_confirm_engine_no_provisional() -> WorkspaceEngine {
+    // 与 author_confirm_engine 相同，但 provisional=None（创建时未保留 reviewer 选择）。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_no_provisional");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = None;
+    session.review_rounds = 0;
+    session.provisional_reviewer_provider = None;
+    session.reviewer_enabled_at_start = Some(false);
+    WorkspaceEngine::new(store, tx, session)
+}
+
+async fn author_confirm_engine_provisional_restored() -> WorkspaceEngine {
+    // reviewer_enabled_at_start=Some(false) + provisional 已恢复（rounds=1）→ Accept 仍定稿。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_provisional_restored");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = Some(ProviderName::Codex);
+    session.review_rounds = 1;
+    session.provisional_reviewer_provider = Some(ProviderName::Codex);
+    session.reviewer_enabled_at_start = Some(false);
+    WorkspaceEngine::new(store, tx, session)
+}
+
+async fn author_confirm_engine_legacy_record() -> WorkspaceEngine {
+    // 旧记录：reviewer_enabled_at_start=None（未落盘）→ 按有效态判定。
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_confirm_legacy");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n\n候选内容".to_string(),
+        diff: None,
+    });
+    session.reviewer_provider = Some(ProviderName::Codex);
+    session.review_rounds = 1;
+    session.provisional_reviewer_provider = None;
+    session.reviewer_enabled_at_start = None;
+    WorkspaceEngine::new(store, tx, session)
+}
+
+#[tokio::test]
+async fn revise_with_feedback_transitions_to_revision() {
+    let mut engine = author_confirm_engine().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Revise {
+            feedback: "补充异常场景".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AuthorDecisionOutcome::StartRevision {
+            feedback: "补充异常场景".into()
+        }
+    );
+    assert_eq!(engine.session().stage, WorkspaceStage::Revision);
+    assert_eq!(
+        engine.pending_revision_context.as_deref(),
+        Some("补充异常场景")
+    );
+    assert!(engine.session().artifact.is_some(), "反馈修订不得清空产物");
+}
+
+#[tokio::test]
+async fn revise_with_blank_feedback_rejected() {
+    let mut engine = author_confirm_engine().await;
+    let err = engine
+        .handle_author_decision(AuthorDecision::Revise { feedback: "  ".into() })
+        .await
+        .unwrap_err();
+    assert!(err.contains("feedback"));
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+}
+
+#[tokio::test]
+async fn reject_returns_guidance_error_without_reset() {
+    let mut engine = author_confirm_engine().await;
+    let err = engine
+        .handle_author_decision(AuthorDecision::Reject)
+        .await
+        .unwrap_err();
+    assert!(err.contains("反馈"), "引导改用反馈修订: {err}");
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+    assert!(engine.session().artifact.is_some());
+}
+
+#[tokio::test]
+async fn accept_finalize_completes_workspace() {
+    let mut engine = author_confirm_engine().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::AcceptFinalize)
+        .await
+        .unwrap();
+    assert_eq!(outcome, AuthorDecisionOutcome::Finalized);
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+}
+
+#[tokio::test]
+async fn accept_with_review_restores_provisional_when_disabled() {
+    // reviewer_provider=None, rounds=0, provisional=Some(Codex)
+    let mut engine = author_confirm_engine().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::AcceptWithReview)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, AuthorDecisionOutcome::StartReview));
+    assert_eq!(engine.session().reviewer_provider, Some(ProviderName::Codex));
+    assert_eq!(engine.session().review_rounds, 1);
+    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
+}
+
+#[tokio::test]
+async fn accept_with_review_errors_without_provisional() {
+    let mut engine = author_confirm_engine_no_provisional().await;
+    let err = engine
+        .handle_author_decision(AuthorDecision::AcceptWithReview)
+        .await
+        .unwrap_err();
+    assert!(err.contains("reviewer"), "{err}");
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+}
+
+#[tokio::test]
+async fn legacy_accept_routes_by_enabled_at_start() {
+    // reviewer_enabled_at_start=Some(false) + provisional 已恢复(rounds=1) → Accept 仍定稿（按创建默认值）
+    let mut engine = author_confirm_engine_provisional_restored().await;
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(outcome, AuthorDecisionOutcome::Finalized);
+    // 旧记录（None）按有效态：rounds>0 && reviewer.is_some() → StartReview
+    let mut legacy = author_confirm_engine_legacy_record().await;
+    let outcome2 = legacy
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert!(matches!(outcome2, AuthorDecisionOutcome::StartReview));
+}

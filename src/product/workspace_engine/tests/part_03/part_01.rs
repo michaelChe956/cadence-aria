@@ -377,7 +377,7 @@ async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() 
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n可用版本"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(

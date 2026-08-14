@@ -31,11 +31,11 @@ impl WorkspaceEngine {
     pub async fn handle_confirm(&mut self) -> Result<WorkspaceConfirmOutcome, String> {
         match self.session.stage {
             WorkspaceStage::HumanConfirm => {
-                self.complete_active_node(Some("已确认通过".to_string()))
-                    .await;
-                self.mark_latest_artifact_confirmed(Some("human".to_string()));
                 match self.session.workspace_type {
                     WorkspaceType::WorkItemPlan => {
+                        self.complete_active_node(Some("已确认通过".to_string()))
+                            .await;
+                        self.mark_latest_artifact_confirmed(Some("human".to_string()));
                         let (plan, new_sessions) = self.confirm_work_item_plan().await?;
                         self.transition_stage(WorkspaceStage::Completed).await;
                         let _ = self
@@ -59,43 +59,9 @@ impl WorkspaceEngine {
                         });
                     }
                     _ => {
-                        if let Some(store) = &self.lifecycle_store {
-                            let _ = store.update_workspace_session_status(
-                                &self.session.session_id,
-                                WorkspaceSessionStatus::Confirmed,
-                            );
-                            let _ = match self.session.workspace_type {
-                                WorkspaceType::Story | WorkspaceType::Design => store
-                                    .update_spec_confirmation_status(
-                                        &self.session.project_id,
-                                        &self.session.issue_id,
-                                        &self.session.entity_id,
-                                        LifecycleConfirmationStatus::Confirmed,
-                                    )
-                                    .map(|_| ()),
-                                WorkspaceType::WorkItem => store
-                                    .update_work_item_plan_status(
-                                        &self.session.project_id,
-                                        &self.session.issue_id,
-                                        &self.session.entity_id,
-                                        WorkItemPlanStatus::Confirmed,
-                                    )
-                                    .map(|_| ()),
-                                WorkspaceType::WorkItemPlan => Ok(()),
-                            };
-                        }
-                        self.transition_stage(WorkspaceStage::Completed).await;
-                        let _ = self
-                            .create_timeline_node(TimelineNodeDraft {
-                                node_type: TimelineNodeType::Completed,
-                                agent: None,
-                                stage: WorkspaceStage::Completed,
-                                round: None,
-                                title: "流程完成".to_string(),
-                                summary: Some("已确认通过".to_string()),
-                                status: TimelineNodeStatus::Completed,
-                            })
-                            .await;
+                        // 与 AuthorDecision::AcceptFinalize 共用定稿实现
+                        //（mark_latest_artifact_confirmed + 状态 Confirmed + Completed 节点）。
+                        self.finalize_current_artifact("已确认通过").await?;
                     }
                 }
             }

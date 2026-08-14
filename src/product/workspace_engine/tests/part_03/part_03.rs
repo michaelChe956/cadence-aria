@@ -12,7 +12,7 @@ async fn strong_review_findings_enter_review_decision_for_all_workspace_types() 
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n缺少验收标准"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -66,7 +66,7 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n需要人工裁决的版本"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -126,7 +126,7 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n需要人工裁决的版本"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -605,7 +605,7 @@ async fn queued_review_engine_for(
     session.workspace_type = workspace_type;
     session.artifact = Some(artifact);
     let mut engine = WorkspaceEngine::new(store, tx, session);
-    engine.start_review_or_skip().await;
+    engine.start_review().await;
     let review_node_id = engine
         .active_node_id
         .clone()
