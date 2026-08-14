@@ -111,6 +111,13 @@ impl CodingWorkspaceEngine {
         let context_note_input =
             format_rework_context_notes(&context_notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
         let coding_context_notes = (!context_note_ids.is_empty()).then_some(&context_note_input);
+        let policy = self
+            .resolve_launch_policy_for_role(&attempt, CodingProviderRole::Coder, worktree_path)
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+        let routing_context = policy
+            .as_ref()
+            .map(routing_reference_context_from_policy)
+            .unwrap_or_default();
         let rendered_context = self.render_coder_unit_run_context(
             &attempt,
             &coder_provider,
@@ -127,6 +134,7 @@ impl CodingWorkspaceEngine {
                     context,
                     rework_instruction.as_ref(),
                     coding_context_notes,
+                    &routing_context,
                 )
             });
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
@@ -141,6 +149,7 @@ impl CodingWorkspaceEngine {
                 context,
                 rework_instruction.as_ref(),
                 coding_context_notes,
+                &routing_context,
             ),
         };
         if let Some(instruction) = rework_instruction.as_ref() {

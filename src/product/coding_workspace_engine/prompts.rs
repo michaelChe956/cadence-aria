@@ -1,7 +1,10 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
+use crate::product::cadence_skills::routing_reference::{
+    LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy;
 
 pub(crate) fn code_review_output_contract(nonce: &str) -> String {
     format!(
@@ -29,6 +32,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         worktree_path: &Path,
         retry_diagnostic: Option<&str>,
+        routing_context: &RoutingReferenceContext,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let diff_base = code_review_diff_base(attempt)?;
         let diff = self._git_service.git_diff(worktree_path, diff_base).await?;
@@ -71,7 +75,7 @@ impl CodingWorkspaceEngine {
             attempt.id,
             attempt.branch_name,
             attempt.base_branch,
-            code_review_material_protocol(),
+            code_review_material_protocol(routing_context),
             crate::product::plan_repair::plan_defect_structured_output_contract(),
             reviewer_test_scope_contract(),
             reviewer_process_evidence_boundary_contract(),
@@ -91,6 +95,7 @@ impl CodingWorkspaceEngine {
         review_request: &ReviewRequest,
         worktree_path: &Path,
         retry_diagnostic: Option<&str>,
+        routing_context: &RoutingReferenceContext,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let diff = self
             ._git_service
@@ -143,7 +148,7 @@ impl CodingWorkspaceEngine {
             ),
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
-            group_final_review_material_protocol(),
+            group_final_review_material_protocol(routing_context),
             crate::product::plan_repair::plan_defect_structured_output_contract(),
             reviewer_test_scope_contract(),
             reviewer_process_evidence_boundary_contract(),
@@ -158,6 +163,7 @@ pub(crate) fn build_coding_prompt(
     context: &CodingExecutionContext,
     rework_instruction: Option<&CodingReworkInstruction>,
     context_notes: Option<&ReworkContextNoteInput>,
+    routing_context: &RoutingReferenceContext,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -213,7 +219,7 @@ pub(crate) fn build_coding_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(&coding_execution_protocol());
+    prompt.push_str(&coding_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
@@ -225,6 +231,7 @@ pub(crate) fn build_coding_delta_prompt(
     context: &CodingExecutionContext,
     rework_instruction: Option<&CodingReworkInstruction>,
     context_notes: Option<&ReworkContextNoteInput>,
+    routing_context: &RoutingReferenceContext,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -282,7 +289,7 @@ pub(crate) fn build_coding_delta_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(&coding_delta_execution_protocol());
+    prompt.push_str(&coding_delta_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
@@ -312,10 +319,11 @@ pub(crate) fn reviewer_process_evidence_boundary_contract() -> &'static str {
      - 本边界不削弱可观测结果的审查：仍必须审查测试文件是否存在、测试是否覆盖需求场景、验证命令是否真实执行且非零、测试输出是否与实现自相矛盾，以及 Forbidden Write Scopes 是否被越过。\n"
 }
 
-pub(crate) fn coding_execution_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：已确认 OpenSpec 与 Plan/Work Item 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
-        "Coder 执行协议:\n\
+pub(crate) fn coding_execution_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        concat!(
+            "当前阶段：已确认 OpenSpec 与 Plan/Work Item 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+            "Coder 执行协议:\n\
      - 在修改代码前，必须先阅读“已确认 Work Item”，并从其中提取本次任务的执行清单。\n\
      - 执行清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、依赖初始化或环境诊断要求、验证命令与执行顺序、完成前自检要求、handoff 中要求交付给下游的契约。\n\
      - 如果 Work Item、Source Draft Supplement、Verification Plan 已明确给出某项要求，必须按其内容执行。\n\
@@ -325,20 +333,25 @@ pub(crate) fn coding_execution_protocol() -> String {
      - 人工事项不属于你的执行范围：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，都由人工在流程末端确认。必须在最终报告中单列“待人工处理”清单（逐项写明事项与人工执行方式），但不得因无法执行它们而报阻塞、拒绝完成或降低完成度。\n\
      - 缺少浏览器、设备、外部账号等人工环境不是运维阻塞：只有当你自己该执行的命令或代码修改无法进行时，才输出 operational_gate。\n\
      - 不得用平台默认技术栈假设替代 Work Item 内容。\n"
-    ))
+        ),
+        context,
+    )
 }
 
-pub(crate) fn coding_delta_execution_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：已确认 Plan/Work Item 范围内的 bounded rework。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
-        "Coder 增量执行协议:\n\
+pub(crate) fn coding_delta_execution_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        concat!(
+            "当前阶段：已确认 Plan/Work Item 范围内的 bounded rework。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+            "Coder 增量执行协议:\n\
      - 继续以本会话中的“已确认 Work Item”和 Verification Plan 作为任务来源。\n\
      - 在继续修改前，必须重新核对本轮修复要求、补充上下文和原 Work Item 中的执行要求。\n\
      - 若存在人工修复意见，人工修复意见优先级最高；当人工修复意见与 reviewer findings、原 Work Item 或既有上下文冲突时，优先遵循人工修复意见，并在最终报告说明冲突和取舍。\n\
      - 若没有人工修复意见，但本轮 reviewer findings 与原 Work Item 冲突，优先遵循更具体、更新的本轮 reviewer findings；同时在最终报告说明冲突和取舍。\n\
      - 不得引入平台默认技术栈假设；语言、构建系统、包管理器、测试框架相关动作必须来自 Work Item、Verification Plan、仓库文件或项目规则。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n"
-    ))
+        ),
+        context,
+    )
 }
 
 pub(crate) fn coding_completion_report_contract() -> &'static str {
@@ -354,10 +367,11 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
      - 必须单列“待人工处理”小节：逐项写明需要人工核对、人工测试或人工操作的事项及其执行方式；无此类事项时明确写“无”。该清单是交接内容，不是未完成项。\n"
 }
 
-pub(crate) fn code_review_material_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：只读代码审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
-        "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
+pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        concat!(
+            "当前阶段：只读代码审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
+            "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
      CodeReviewer 审查协议:\n\
      - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
@@ -378,13 +392,16 @@ pub(crate) fn code_review_material_protocol() -> String {
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
      - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
-    ))
+        ),
+        context,
+    )
 }
 
-pub(crate) fn group_final_review_material_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：组级 PR 最终只读审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
-        "WorkItemGroup GroupFinalReview 审查协议:\n\
+pub(crate) fn group_final_review_material_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        concat!(
+            "当前阶段：组级 PR 最终只读审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
+            "WorkItemGroup GroupFinalReview 审查协议:\n\
      - 你必须从 Completed Units、HandoffRevision、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
      - 跨 unit 交接的审查对象是 HandoffRevision 的契约与能力语义：Completed Units 段落中每个 unit 的 Provided Contracts 与 Provided Capabilities。不存在自然语言交接摘要，不得要求或期待它。\n\
      - 必须确认每个 completed unit 的 HandoffRevision 所声明的契约与能力是否体现在最终 diff 中。\n\
@@ -402,12 +419,29 @@ pub(crate) fn group_final_review_material_protocol() -> String {
      - findings 必须包含 source_stage=group_final_review。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
      - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n"
-    ))
+        ),
+        context,
+    )
 }
 
-fn with_cadence_routing_reference(protocol: &'static str) -> String {
+pub(crate) fn routing_reference_context_from_policy(
+    policy: &ValidatedSessionLaunchPolicy,
+) -> RoutingReferenceContext {
+    let envelope = policy.envelope();
+    RoutingReferenceContext::Logical(LogicalPolicyReference {
+        policy_id: envelope.policy_id.clone(),
+        policy_revision: envelope.policy_revision,
+        policy_digest: envelope.policy_digest.clone(),
+        authority_root: envelope.authority_root.to_string_lossy().to_string(),
+    })
+}
+
+fn with_cadence_routing_reference(
+    protocol: &'static str,
+    context: &RoutingReferenceContext,
+) -> String {
     let mut rendered = String::from("\n");
-    rendered.push_str(&direct_cadence_routing_rules_reference_legacy());
+    rendered.push_str(&direct_cadence_routing_rules_reference(context));
     rendered.push_str(protocol);
     rendered
 }
@@ -573,4 +607,107 @@ pub(crate) fn take_last_chars(value: &str, limit: usize) -> String {
     let chars = value.chars().collect::<Vec<_>>();
     let start = chars.len().saturating_sub(limit);
     chars[start..].iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::cadence_skills::routing_reference::{
+        LogicalPolicyReference, RoutingReferenceContext,
+    };
+
+    fn logical_context() -> RoutingReferenceContext {
+        RoutingReferenceContext::Logical(LogicalPolicyReference {
+            policy_id: "pol_1".to_string(),
+            policy_revision: 3,
+            policy_digest: "abc123".to_string(),
+            authority_root: "/data/aria/aggregate/policy".to_string(),
+        })
+    }
+
+    const LEGACY_RULE_SEGMENT: &str = "[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据";
+
+    fn assert_legacy_baseline(prompt: &str) {
+        assert!(
+            prompt.starts_with('\n'),
+            "legacy prompt must keep leading \\n"
+        );
+        assert!(
+            prompt.contains(LEGACY_RULE_SEGMENT),
+            "legacy prompt must keep the previous routing reference bytes:\n{prompt}"
+        );
+        for logical_only in [
+            "authority_root:",
+            "policy_id:",
+            "policy_digest:",
+            "不作为政策正文",
+        ] {
+            assert!(
+                !prompt.contains(logical_only),
+                "legacy prompt must not leak logical-only marker `{logical_only}`:\n{prompt}"
+            );
+        }
+    }
+
+    fn assert_logical_policy_ref(prompt: &str) {
+        assert!(prompt.contains("authority_root:"));
+        assert!(prompt.contains("/data/aria/aggregate/policy"));
+        assert!(prompt.contains("policy_id:"));
+        assert!(prompt.contains("pol_1"));
+        assert!(prompt.contains("policy_revision: 3"));
+        assert!(prompt.contains("policy_digest:"));
+        assert!(prompt.contains("abc123"));
+        assert!(prompt.contains("不作为政策正文"));
+        assert!(prompt.contains("只报告阻塞"));
+        assert!(
+            !prompt.contains(LEGACY_RULE_SEGMENT),
+            "logical prompt must not carry the legacy routing reference bytes:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn coding_execution_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&coding_execution_protocol(&RoutingReferenceContext::Legacy));
+    }
+
+    #[test]
+    fn coding_execution_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&coding_execution_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn coding_delta_execution_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&coding_delta_execution_protocol(
+            &RoutingReferenceContext::Legacy,
+        ));
+    }
+
+    #[test]
+    fn coding_delta_execution_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&coding_delta_execution_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn code_review_material_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&code_review_material_protocol(
+            &RoutingReferenceContext::Legacy,
+        ));
+    }
+
+    #[test]
+    fn code_review_material_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&code_review_material_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn group_final_review_material_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&group_final_review_material_protocol(
+            &RoutingReferenceContext::Legacy,
+        ));
+    }
+
+    #[test]
+    fn group_final_review_material_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&group_final_review_material_protocol(&logical_context()));
+    }
 }

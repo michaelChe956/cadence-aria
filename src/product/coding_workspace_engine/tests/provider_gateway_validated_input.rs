@@ -18,7 +18,12 @@ use crate::cross_cutting::provider_availability_gate::{
 };
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::product::coding_models::AttemptTargetSnapshot;
+use crate::product::coding_models::provider_config::{
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+};
 use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use crate::product::logical_codebase::{
     AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, GatewayRunAudit,
@@ -232,6 +237,25 @@ fn engine(
     }
 }
 
+/// 把 attempt 的 Coder role provider 覆盖为 ClaudeCode,避免 fixture 默认 author=Codex
+/// 触发 gateway 的 Codex danger-full-access 路由级硬门。
+fn override_coder_to_claude_code(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::ClaudeCode,
+                code_reviewer: ProviderName::ClaudeCode,
+                internal_reviewer: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
+            },
+        )
+        .expect("override coder to ClaudeCode");
+}
+
 fn streaming_input(working_dir: PathBuf, provider_type: ProviderType) -> StreamingProviderInput {
     StreamingProviderInput {
         provider_type,
@@ -306,11 +330,11 @@ fn validated_streaming_input_for_role_produces_review_read_only_for_review_roles
             logical_attempt.worktree_path.clone().expect("worktree"),
             ProviderType::ClaudeCode,
         );
-        let validated = engine
-            .validated_streaming_input_for_role(&logical_attempt, role, input)
+        let policy = engine
+            .resolve_launch_policy_for_role(&logical_attempt, role, &input.working_dir)
             .expect("helper returns Ok")
-            .expect("logical attempt + gateway must produce validated input");
-        let (_input, policy) = validated.into_parts();
+            .expect("logical attempt + gateway must produce policy");
+        let (_input, policy) = ValidatedStreamingProviderInput::new(input, policy).into_parts();
         assert_eq!(
             policy.envelope().action,
             SessionPolicyAction::ReviewReadOnly
@@ -394,12 +418,12 @@ fn validated_streaming_input_for_role_returns_none_for_legacy_attempt() {
         ProviderType::ClaudeCode,
     );
 
-    let validated = engine
-        .validated_streaming_input_for_role(&attempt, CodingProviderRole::Coder, input)
+    let policy = engine
+        .resolve_launch_policy_for_role(&attempt, CodingProviderRole::Coder, &input.working_dir)
         .expect("helper returns Ok");
 
     assert!(
-        validated.is_none(),
+        policy.is_none(),
         "legacy attempt must not produce validated input"
     );
 }
@@ -415,12 +439,16 @@ fn validated_streaming_input_for_role_returns_none_without_injected_gateway() {
         ProviderType::ClaudeCode,
     );
 
-    let validated = engine
-        .validated_streaming_input_for_role(&logical_attempt, CodingProviderRole::Coder, input)
+    let policy = engine
+        .resolve_launch_policy_for_role(
+            &logical_attempt,
+            CodingProviderRole::Coder,
+            &input.working_dir,
+        )
         .expect("helper returns Ok");
 
     assert!(
-        validated.is_none(),
+        policy.is_none(),
         "missing gateway must not produce validated input"
     );
 }
@@ -430,17 +458,22 @@ fn validated_streaming_input_for_role_produces_coding_target_write_for_coder() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let _root = root;
     let logical_attempt = with_target_snapshot(&store, &attempt);
+    override_coder_to_claude_code(&store, &logical_attempt);
     let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
     let engine = engine(&store, Some(gateway));
     let worktree = logical_attempt.worktree_path.clone().expect("worktree");
     let input = streaming_input(worktree.clone(), ProviderType::ClaudeCode);
 
-    let validated = engine
-        .validated_streaming_input_for_role(&logical_attempt, CodingProviderRole::Coder, input)
+    let policy = engine
+        .resolve_launch_policy_for_role(
+            &logical_attempt,
+            CodingProviderRole::Coder,
+            &input.working_dir,
+        )
         .expect("helper returns Ok")
-        .expect("logical attempt + gateway must produce validated input");
+        .expect("logical attempt + gateway must produce policy");
 
-    let (_input, policy) = validated.into_parts();
+    let (_input, policy) = ValidatedStreamingProviderInput::new(input, policy).into_parts();
     assert_eq!(
         policy.envelope().action,
         SessionPolicyAction::CodingTargetWrite
@@ -485,14 +518,15 @@ fn validated_streaming_input_targets_coding_worktree_not_primary_checkout() {
 
     let gateway = build_gateway(&store.paths(), &logical.project_id);
     let engine = engine(&store, Some(gateway));
+    override_coder_to_claude_code(&store, &logical);
     let input = streaming_input(nested_worktree.clone(), ProviderType::ClaudeCode);
 
-    let validated = engine
-        .validated_streaming_input_for_role(&logical, CodingProviderRole::Coder, input)
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical, CodingProviderRole::Coder, &input.working_dir)
         .expect("helper returns Ok")
-        .expect("logical attempt + gateway must produce validated input");
+        .expect("logical attempt + gateway must produce policy");
 
-    let (_input, policy) = validated.into_parts();
+    let (_input, policy) = ValidatedStreamingProviderInput::new(input, policy).into_parts();
     assert_eq!(
         policy.envelope().action,
         SessionPolicyAction::CodingTargetWrite
@@ -508,13 +542,10 @@ fn validated_streaming_input_for_role_rejects_codex_danger_full_access() {
     let logical_attempt = with_target_snapshot(&store, &attempt);
     let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
     let engine = engine(&store, Some(gateway));
-    let input = streaming_input(
-        logical_attempt.worktree_path.clone().expect("worktree"),
-        ProviderType::Codex,
-    );
+    let worktree = logical_attempt.worktree_path.clone().expect("worktree");
 
     let error = engine
-        .validated_streaming_input_for_role(&logical_attempt, CodingProviderRole::Coder, input)
+        .resolve_launch_policy_for_role(&logical_attempt, CodingProviderRole::Coder, &worktree)
         .expect_err("Codex must be rejected");
 
     assert!(
@@ -523,4 +554,35 @@ fn validated_streaming_input_for_role_rejects_codex_danger_full_access() {
             .contains("codex_danger_full_access_unsupported"),
         "expected codex_danger_full_access_unsupported, got: {error}"
     );
+}
+
+#[test]
+fn routing_reference_context_from_policy_maps_envelope_fields() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    override_coder_to_claude_code(&store, &logical_attempt);
+    let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+    let worktree = logical_attempt.worktree_path.clone().expect("worktree");
+
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical_attempt, CodingProviderRole::Coder, &worktree)
+        .expect("helper returns Ok")
+        .expect("logical attempt + gateway must produce policy");
+
+    let envelope = policy.envelope();
+    let context = routing_reference_context_from_policy(&policy);
+    match context {
+        RoutingReferenceContext::Logical(logical) => {
+            assert_eq!(logical.policy_id, envelope.policy_id);
+            assert_eq!(logical.policy_revision, envelope.policy_revision);
+            assert_eq!(logical.policy_digest, envelope.policy_digest);
+            assert_eq!(
+                logical.authority_root,
+                envelope.authority_root.to_string_lossy()
+            );
+        }
+        RoutingReferenceContext::Legacy => panic!("expected Logical routing reference context"),
+    }
 }

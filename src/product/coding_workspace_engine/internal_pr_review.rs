@@ -1,5 +1,6 @@
 use super::cross_target_check::detect_cross_target_violation_for_delivery;
 use super::*;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 
 pub(crate) fn summarize_push_error(
     remote: &str,
@@ -87,8 +88,14 @@ impl CodingWorkspaceEngine {
                 updated_at: Utc::now().to_rfc3339(),
                 push_error: None,
             });
-        self.build_group_internal_pr_review_prompt(attempt, &review_request, None, None)
-            .await
+        self.build_group_internal_pr_review_prompt(
+            attempt,
+            &review_request,
+            None,
+            None,
+            &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy,
+        )
+        .await
     }
 
     async fn build_group_internal_pr_review_prompt(
@@ -97,6 +104,7 @@ impl CodingWorkspaceEngine {
         review_request: &ReviewRequest,
         worktree_path: Option<&Path>,
         retry_diagnostic: Option<&str>,
+        routing_context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let handoffs = self.collect_completed_group_unit_handoff_revisions(attempt)?;
         let units_section = self.format_group_unit_handoff_section(&handoffs);
@@ -156,7 +164,7 @@ impl CodingWorkspaceEngine {
             units_section,
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
-            group_final_review_material_protocol(),
+            group_final_review_material_protocol(routing_context),
             reviewer_test_scope_contract(),
             reviewer_process_evidence_boundary_contract(),
             no_default_stack_assumption_contract(),
@@ -240,12 +248,26 @@ impl CodingWorkspaceEngine {
         } else {
             None
         };
+        // 裁决 A 两阶段:validate 前移,在 prompt 构建前 resolve policy 并计算
+        // routing reference context。
+        let policy = self
+            .resolve_launch_policy_for_role(
+                &attempt,
+                CodingProviderRole::InternalReviewer,
+                worktree_path.as_path(),
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+        let routing_context = policy
+            .as_ref()
+            .map(routing_reference_context_from_policy)
+            .unwrap_or_default();
         let legacy_prompt = if is_group_final_review {
             self.build_group_internal_pr_review_prompt(
                 &attempt,
                 &review_request,
                 Some(worktree_path.as_path()),
                 retry_diagnostic.as_deref(),
+                &routing_context,
             )
             .await?
         } else {
@@ -254,6 +276,7 @@ impl CodingWorkspaceEngine {
                 &review_request,
                 worktree_path,
                 retry_diagnostic.as_deref(),
+                &routing_context,
             )
             .await?
         };
@@ -297,14 +320,10 @@ impl CodingWorkspaceEngine {
             streaming_input_from_adapter(&input, worktree_path.clone(), permission_mode);
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
-        // Task 7:review 路径经统一 helper 生产 validated input;同源 clone-then-move。
-        let validated_input = self
-            .validated_streaming_input_for_role(
-                &attempt,
-                CodingProviderRole::InternalReviewer,
-                provider_input.clone(),
-            )
-            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+        // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
+        // 此处仅捆绑 validated input(同源 clone-then-move)。
+        let validated_input = policy
+            .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,

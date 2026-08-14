@@ -1,8 +1,9 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 
 #[test]
 fn code_review_prompt_requires_a_routing_receipt_before_the_final_json() {
-    let protocol = code_review_material_protocol();
+    let protocol = code_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     assert!(protocol.contains("首个用户可见消息必须是工作流路由回执"));
     assert!(protocol.contains("最终审查结论必须只输出一个 JSON 对象"));
@@ -12,8 +13,8 @@ fn code_review_prompt_requires_a_routing_receipt_before_the_final_json() {
 #[test]
 fn review_prompts_forbid_braces_outside_the_final_verdict_json() {
     for protocol in [
-        code_review_material_protocol(),
-        group_final_review_material_protocol(),
+        code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
     ] {
         assert!(protocol.contains("除最终结论 JSON 外"));
         assert!(protocol.contains("不得出现 { 或 }"));

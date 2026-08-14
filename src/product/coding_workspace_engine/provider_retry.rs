@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::protocol::provider_errors::ProviderErrorCode;
 
 const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
@@ -236,16 +237,18 @@ impl CodingWorkspaceEngine {
                     return Err(error);
                 }
             };
-            // Task 6:逻辑 target + 已注入 gateway 时生产 validated input；否则为
-            // None（Legacy 直连）。provider_input 在 move 进 run 结构前先 clone,
-            // 保证 validated 与 input 同源。
-            let validated_input = self
-                .validated_streaming_input_for_role(
+            // 裁决 A 两阶段:validate 前移,在 coding.rs/rework.rs 已完成 prompt 构建
+            // (并注入 routing reference);此处仅 resolve policy 再捆绑 validated input,
+            // provider_input 仍 clone-then-move(validated 包裹 clone,原值 move 进 run 结构)。
+            let policy = self
+                .resolve_launch_policy_for_role(
                     &invocation_attempt,
                     CodingProviderRole::Coder,
-                    provider_input.clone(),
+                    worktree_path,
                 )
                 .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            let validated_input = policy
+                .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
             let outcome = self
                 .run_provider_stream_invocation(CodingProviderStreamRun {
                     attempt: &invocation_attempt,
@@ -325,6 +328,20 @@ impl CodingWorkspaceEngine {
             let nonce = crate::product::workspace_engine::structured_output_nonce();
             let structured_output_contract = code_review_structured_output_contract(nonce.clone());
             let terminal_contract = code_review_output_contract(&nonce);
+            // 裁决 A 两阶段:validate 前移,在 prompt 构建前 resolve policy 并计算
+            // routing reference context。attempt 的 project_id/target_snapshot 稳定,
+            // 与下方 ensure 后取得的 invocation_attempt 一致。
+            let policy = self
+                .resolve_launch_policy_for_role(
+                    attempt,
+                    CodingProviderRole::CodeReviewer,
+                    worktree_path,
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            let routing_context = policy
+                .as_ref()
+                .map(routing_reference_context_from_policy)
+                .unwrap_or_default();
             let mut prompt = match self.render_reviewer_unit_run_context(attempt, reviewer)? {
                 Some(rendered) => rendered.text,
                 None => {
@@ -332,6 +349,7 @@ impl CodingWorkspaceEngine {
                         attempt,
                         worktree_path,
                         retry_diagnostic.as_deref(),
+                        &routing_context,
                     )
                     .await?
                 }
@@ -381,15 +399,10 @@ impl CodingWorkspaceEngine {
                     return Err(error);
                 }
             };
-            // Task 7:review 路径同样经统一 helper 生产 validated input;同源
-            // clone-then-move(validated 包裹 clone,原值 move 进 run 结构)。
-            let validated_input = self
-                .validated_streaming_input_for_role(
-                    &invocation_attempt,
-                    CodingProviderRole::CodeReviewer,
-                    provider_input.clone(),
-                )
-                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
+            // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
+            let validated_input = policy
+                .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
             let outcome = self
                 .run_provider_stream_invocation(CodingProviderStreamRun {
                     attempt: &invocation_attempt,

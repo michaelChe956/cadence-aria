@@ -1,9 +1,8 @@
 use super::*;
-use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::product::coding_models::CodingAttemptScope;
 use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::product::logical_codebase::provider_gateway::{
-    ProviderGatewayError, SessionLaunchRequest,
+    ProviderGatewayError, SessionLaunchRequest, ValidatedSessionLaunchPolicy,
 };
 use crate::product::work_item_split_engine::engine::provider_ref_for_name;
 use std::sync::Arc;
@@ -35,18 +34,22 @@ impl CodingWorkspaceEngine {
         self
     }
 
-    /// 逻辑 target + 已注入 gateway 时构造 validated input；否则 None（Legacy 直连）。
+    /// 逻辑 target + 已注入 gateway 时 resolve 出 validated launch policy；否则
+    /// `Ok(None)`（Legacy 直连）。
     ///
-    /// `provider` 由 `input.provider_type` 反推（与 `provider_type_for_name` 1:1），
-    /// 再经 `provider_ref_for_name` 映射为 gateway 的 `ProviderRef`。Coder 角色映射
-    /// `CodingTargetWrite`（writable_roots 为 worktree），其余角色映射
-    /// `ReviewReadOnly`（writable_roots 为空）。
-    pub(crate) fn validated_streaming_input_for_role(
+    /// 裁决 A 两阶段：`validate` 前移，使 prompt 构建先于
+    /// `ValidatedStreamingProviderInput` 捆绑。`working_dir` 由调用点从 provider
+    /// input 取出（原 `input.working_dir`）。
+    ///
+    /// Coder 角色映射 `CodingTargetWrite`（writable_roots 为 worktree），其余角色
+    /// 映射 `ReviewReadOnly`（writable_roots 为空）。provider 由角色从 attempt 的
+    /// role provider config snapshot 推导，与调用点 `provider_type_for_name` 1:1。
+    pub(crate) fn resolve_launch_policy_for_role(
         &self,
         attempt: &CodingExecutionAttempt,
         role: CodingProviderRole,
-        input: StreamingProviderInput,
-    ) -> Result<Option<ValidatedStreamingProviderInput>, ProviderGatewayError> {
+        working_dir: &Path,
+    ) -> Result<Option<ValidatedSessionLaunchPolicy>, ProviderGatewayError> {
         let Some(gateway) = self.logical_provider_gateway.as_ref() else {
             return Ok(None);
         };
@@ -61,14 +64,18 @@ impl CodingWorkspaceEngine {
             }
         };
         let writable_roots = match role {
-            CodingProviderRole::Coder => vec![input.working_dir.clone()],
+            CodingProviderRole::Coder => vec![working_dir.to_path_buf()],
             CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => Vec::new(),
         };
-        let provider_name = match input.provider_type {
-            ProviderType::ClaudeCode => ProviderName::ClaudeCode,
-            ProviderType::Codex => ProviderName::Codex,
-            ProviderType::Pi => ProviderName::Pi,
-            ProviderType::Fake => ProviderName::Fake,
+        let role_config = self.store.get_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let provider_name = match role {
+            CodingProviderRole::Coder => role_config.coder,
+            CodingProviderRole::CodeReviewer => role_config.code_reviewer,
+            CodingProviderRole::InternalReviewer => role_config.internal_reviewer,
         };
         let request = SessionLaunchRequest {
             project_id: attempt.project_id.clone(),
@@ -80,14 +87,14 @@ impl CodingWorkspaceEngine {
             target: PolicyTarget::checkout(
                 snapshot.logical_repository_id.0.to_string(),
                 snapshot.checkout_id.0.to_string(),
-                input.working_dir.clone(),
+                working_dir.to_path_buf(),
             ),
-            readable_roots: vec![input.working_dir.clone()],
+            readable_roots: vec![working_dir.to_path_buf()],
             writable_roots,
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
         };
         let validated = gateway.validate(request)?;
-        Ok(Some(ValidatedStreamingProviderInput::new(input, validated)))
+        Ok(Some(validated))
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {

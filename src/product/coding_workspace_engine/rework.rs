@@ -146,13 +146,34 @@ impl CodingWorkspaceEngine {
             &CodingProviderRole::Coder,
             &coder_provider_name,
         );
+        let policy = self
+            .resolve_launch_policy_for_role(&updated, CodingProviderRole::Coder, &worktree_path)
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+        let routing_context = policy
+            .as_ref()
+            .map(routing_reference_context_from_policy)
+            .unwrap_or_default();
         let rendered_context =
             self.render_coder_unit_run_context(&updated, &coder_provider_name, None)?;
-        let delta_prompt = build_coding_delta_prompt(&updated, context, Some(&instruction), None);
+        let delta_prompt = build_coding_delta_prompt(
+            &updated,
+            context,
+            Some(&instruction),
+            None,
+            &routing_context,
+        );
         let full_prompt = rendered_context
             .as_ref()
             .map(|rendered| format!("{}\n\n{}", rendered.text, delta_prompt))
-            .unwrap_or_else(|| build_coding_prompt(&updated, context, Some(&instruction), None));
+            .unwrap_or_else(|| {
+                build_coding_prompt(
+                    &updated,
+                    context,
+                    Some(&instruction),
+                    None,
+                    &routing_context,
+                )
+            });
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {

@@ -2,8 +2,6 @@
 pub(crate) enum RoutingReferenceContext {
     #[default]
     Legacy,
-    // 临时：T2-T5 数据通路接线后由生产代码构造；届时 expect 未满足会编译失败，强制移除。
-    #[cfg_attr(not(test), expect(dead_code))]
     Logical(LogicalPolicyReference),
 }
 

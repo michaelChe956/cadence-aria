@@ -13,6 +13,7 @@ use super::{
     CodingProviderStreamRun, CodingWorkspaceEngine, CodingWorkspaceEngineError,
     provider_type_for_name, role_permission_mode_for_attempt, streaming_input_from_adapter,
 };
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 
 use super::group_review_budget::{
     BudgetDecision, CapacityDecision, FindingsDecision, GROUP_REVIEW_QUALITY_TARGET_BYTES,
@@ -944,20 +945,23 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
             CodingProviderRole::InternalReviewer,
         )
         .map_err(map_group_review_engine_error)?;
+        // 裁决 A 两阶段:policy 在 prompt 构建前 resolve(shard/reduction prompt 不含
+        // 4 协议 routing reference,故此处仅 resolve 并捆绑 validated input)。
+        let policy = self
+            .engine
+            .resolve_launch_policy_for_role(
+                &self.attempt,
+                CodingProviderRole::InternalReviewer,
+                &worktree_path,
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
+            .map_err(map_group_review_engine_error)?;
         let mut provider_input =
             streaming_input_from_adapter(&input, worktree_path, permission_mode);
         provider_input.workspace_session_id = Some(self.attempt.id.clone());
         provider_input.resume_provider_session_id = None;
-        // Task 7:review 路径经统一 helper 生产 validated input;同源 clone-then-move。
-        let validated_input = self
-            .engine
-            .validated_streaming_input_for_role(
-                &self.attempt,
-                CodingProviderRole::InternalReviewer,
-                provider_input.clone(),
-            )
-            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
-            .map_err(map_group_review_engine_error)?;
+        let validated_input = policy
+            .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
         let (command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
         drop(command_tx);
         let full_output = self

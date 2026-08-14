@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkspaceSessionInput,
 };
@@ -113,7 +114,13 @@ fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() 
         verification_commands: vec!["./verify-local".to_string()],
     };
 
-    let prompt = build_coding_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 执行协议"));
@@ -145,7 +152,13 @@ fn coding_prompt_includes_final_compile_work_item_context_and_commands() {
         ],
     };
 
-    let prompt = build_coding_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(prompt.contains("验证命令:"));
     assert!(prompt.contains("- cargo test --locked --lib coding_execution_context"));
@@ -169,7 +182,13 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
     let attempt = test_attempt("coding_attempt_0001");
     let context = CodingExecutionContext::default();
 
-    let prompt = build_coding_delta_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_delta_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 增量执行协议"));
@@ -192,8 +211,20 @@ fn coding_prompts_require_completion_self_check_contract() {
     let attempt = test_attempt("coding_attempt_0001");
     let context = CodingExecutionContext::default();
 
-    let full_prompt = build_coding_prompt(&attempt, &context, None, None);
-    let delta_prompt = build_coding_delta_prompt(&attempt, &context, None, None);
+    let full_prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+    let delta_prompt = build_coding_delta_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     for prompt in [full_prompt, delta_prompt] {
         assert!(prompt.contains("完成报告要求"));
@@ -220,7 +251,13 @@ fn coding_prompt_preserves_stack_terms_when_they_come_from_work_item_material() 
         verification_commands: vec!["cargo fmt --check".to_string(), "mvn test".to_string()],
     };
 
-    let prompt = build_coding_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(prompt.contains("cargo fmt --check"));
     assert!(prompt.contains("mvn test"));
@@ -266,8 +303,8 @@ fn reviewer_process_evidence_boundary_contract_excludes_unobservable_unrepairabl
 fn reviewer_material_protocols_define_evidence_kinds_without_weakening_verification_findings() {
     const NON_ZERO_TEST_EXECUTION_SEMANTICS: &str = "non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。";
 
-    let code_review = code_review_material_protocol();
-    let group_final_review = group_final_review_material_protocol();
+    let code_review = code_review_material_protocol(&RoutingReferenceContext::Legacy);
+    let group_final_review = group_final_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     for protocol in [&code_review, &group_final_review] {
         assert!(protocol.contains(NON_ZERO_TEST_EXECUTION_SEMANTICS));
@@ -280,13 +317,19 @@ fn reviewer_material_protocols_define_evidence_kinds_without_weakening_verificat
     assert!(code_review.contains("测试输出显示没有实际测试被执行，不能把它当作有效覆盖"));
     assert!(group_final_review.contains("验证证据缺失"));
     assert!(group_final_review.contains("必须 request_changes 或 blocked"));
-    assert!(coding_execution_protocol().contains("写代码前调用 test-driven-development"));
-    assert!(coding_delta_execution_protocol().contains("写代码前调用 test-driven-development"));
+    assert!(
+        coding_execution_protocol(&RoutingReferenceContext::Legacy)
+            .contains("写代码前调用 test-driven-development")
+    );
+    assert!(
+        coding_delta_execution_protocol(&RoutingReferenceContext::Legacy)
+            .contains("写代码前调用 test-driven-development")
+    );
 }
 
 #[test]
 fn code_review_material_protocol_requires_material_derived_checklist() {
-    let protocol = code_review_material_protocol();
+    let protocol = code_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     assert!(
         protocol.contains("从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单")
@@ -308,8 +351,8 @@ fn code_review_material_protocol_requires_material_derived_checklist() {
 #[test]
 fn review_prompts_list_exact_finding_severity_values() {
     for protocol in [
-        code_review_material_protocol(),
-        group_final_review_material_protocol(),
+        code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
     ] {
         assert!(protocol.contains("verdict 只能使用 approve、request_changes、blocked"));
         assert!(protocol.contains("severity 只能使用 error、warning、info"));
@@ -321,10 +364,10 @@ fn review_prompts_list_exact_finding_severity_values() {
 #[test]
 fn coding_lifecycle_protocols_reuse_the_canonical_cadence_routing_reference() {
     for protocol in [
-        coding_execution_protocol(),
-        coding_delta_execution_protocol(),
-        code_review_material_protocol(),
-        group_final_review_material_protocol(),
+        coding_execution_protocol(&RoutingReferenceContext::Legacy),
+        coding_delta_execution_protocol(&RoutingReferenceContext::Legacy),
+        code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
     ] {
         assert!(
             protocol.contains("[cadence_project_rules]"),
@@ -397,7 +440,7 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
     attempt.worktree_path = Some(worktree.clone());
 
     let prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("code review prompt");
 
@@ -447,7 +490,13 @@ async fn non_group_internal_review_prompt_includes_both_reviewer_boundaries() {
     };
 
     let prompt = engine
-        .build_internal_pr_review_prompt(&attempt, &review_request, &worktree, None)
+        .build_internal_pr_review_prompt(
+            &attempt,
+            &review_request,
+            &worktree,
+            None,
+            &RoutingReferenceContext::Legacy,
+        )
         .await
         .expect("non-group internal review prompt");
 
@@ -505,7 +554,7 @@ async fn first_group_code_review_uses_base_branch_without_head_commit() {
     attempt.worktree_path = Some(worktree.clone());
 
     let prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("first group review uses base branch");
 
@@ -550,7 +599,7 @@ async fn group_code_review_uses_previous_unit_head_commit_as_diff_base() {
     attempt.worktree_path = Some(worktree.clone());
 
     let prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("code review prompt");
 
@@ -587,7 +636,7 @@ async fn later_group_code_review_rejects_missing_head_commit() {
     attempt.worktree_path = Some(worktree.clone());
 
     let error = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect_err("group review requires previous unit commit");
 
@@ -709,12 +758,13 @@ async fn group_attempt_prompts_use_current_work_item_id() {
         },
         None,
         None,
+        &RoutingReferenceContext::Legacy,
     );
     assert!(coding_prompt.contains("Work Item: work_item_0002"));
     assert!(!coding_prompt.contains("Work Item: work_item_0001"));
 
     let review_prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("code review prompt");
     assert_reviewer_browser_environment_boundary(&review_prompt);
@@ -729,7 +779,7 @@ async fn group_attempt_prompts_use_current_work_item_id() {
 
 #[test]
 fn group_final_review_material_protocol_requires_handoff_revision_checks() {
-    let protocol = group_final_review_material_protocol();
+    let protocol = group_final_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     assert!(protocol.contains("Completed Units"));
     assert!(protocol.contains("HandoffRevision"));

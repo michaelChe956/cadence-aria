@@ -1,16 +1,23 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 
 #[test]
 fn coding_plan_repair_prompt_contracts_require_canonical_schema_and_legacy_mapping() {
     let attempt = test_attempt("coding_attempt_prompt_contract");
     let context = CodingExecutionContext::default();
-    let coding_prompt = build_coding_prompt(&attempt, &context, None, None);
+    let coding_prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
     assert_plan_defect_output_contract(&coding_prompt, "plan_defect_findings");
     assert!(coding_prompt.contains("普通 implementation defect"));
 
     for prompt in [
-        code_review_material_protocol(),
-        group_final_review_material_protocol(),
+        code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
     ] {
         assert_plan_defect_output_contract(&prompt, "findings");
         assert!(prompt.contains("普通 implementation defect"));

@@ -7,13 +7,20 @@ use super::super::super::prompts::{
     coding_delta_execution_protocol, coding_execution_protocol,
     group_final_review_material_protocol,
 };
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 
 /// 1.10：两个协议都不得以交接摘要承诺为审查对象，也不得点名已移除字段。
 #[test]
 fn reviewer_protocols_do_not_review_handoff_summary_promises() {
     for (name, protocol) in [
-        ("code_review", code_review_material_protocol()),
-        ("group_final_review", group_final_review_material_protocol()),
+        (
+            "code_review",
+            code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        ),
+        (
+            "group_final_review",
+            group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
+        ),
     ] {
         assert!(
             !protocol.contains("handoff 承诺"),
@@ -37,7 +44,7 @@ fn reviewer_protocols_do_not_review_handoff_summary_promises() {
 /// 1.10：跨 unit 交接的审查对象必须是 `HandoffRevision` 的契约与能力语义。
 #[test]
 fn group_final_review_protocol_reviews_handoff_revision_contracts() {
-    let protocol = group_final_review_material_protocol();
+    let protocol = group_final_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     assert!(
         protocol.contains("HandoffRevision"),
@@ -56,8 +63,8 @@ fn group_final_review_protocol_reviews_handoff_revision_contracts() {
 /// 1.11：改写不得削弱既有否决依据与 verdict 取值口径。
 #[test]
 fn reviewer_protocols_retain_non_handoff_veto_grounds() {
-    let code_review = code_review_material_protocol();
-    let group_final_review = group_final_review_material_protocol();
+    let code_review = code_review_material_protocol(&RoutingReferenceContext::Legacy);
+    let group_final_review = group_final_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     // verdict 取值口径
     for (name, protocol) in [
@@ -95,8 +102,14 @@ fn reviewer_protocols_retain_non_handoff_veto_grounds() {
 #[test]
 fn coder_protocols_retain_tdd_requirements() {
     for (name, protocol) in [
-        ("coding_execution", coding_execution_protocol()),
-        ("coding_delta_execution", coding_delta_execution_protocol()),
+        (
+            "coding_execution",
+            coding_execution_protocol(&RoutingReferenceContext::Legacy),
+        ),
+        (
+            "coding_delta_execution",
+            coding_delta_execution_protocol(&RoutingReferenceContext::Legacy),
+        ),
     ] {
         assert!(
             protocol.contains("test-driven-development"),
@@ -104,7 +117,7 @@ fn coder_protocols_retain_tdd_requirements() {
         );
     }
     assert!(
-        coding_execution_protocol().contains("TDD/测试要求"),
+        coding_execution_protocol(&RoutingReferenceContext::Legacy).contains("TDD/测试要求"),
         "coding_execution 协议必须保留执行清单覆盖 TDD/测试要求"
     );
 }
@@ -116,7 +129,7 @@ fn coder_protocols_retain_tdd_requirements() {
 /// 阶段没有任何门禁落地，用户无按钮可点。人工核对本就不该由 Coder 执行。
 #[test]
 fn coder_protocol_excludes_manual_items_from_its_own_scope() {
-    let protocol = coding_execution_protocol();
+    let protocol = coding_execution_protocol(&RoutingReferenceContext::Legacy);
     assert!(
         protocol.contains("人工事项不属于你的执行范围"),
         "Coder 执行协议必须声明人工事项不在其执行范围内"
@@ -149,8 +162,14 @@ fn coding_completion_report_requires_pending_manual_section() {
 #[test]
 fn reviewer_protocols_do_not_reject_pending_manual_items() {
     for (name, protocol) in [
-        ("code_review", code_review_material_protocol()),
-        ("group_final_review", group_final_review_material_protocol()),
+        (
+            "code_review",
+            code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        ),
+        (
+            "group_final_review",
+            group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
+        ),
     ] {
         assert!(
             protocol.contains("待人工处理事项不是缺陷"),
@@ -162,7 +181,7 @@ fn reviewer_protocols_do_not_reject_pending_manual_items() {
         );
     }
     assert!(
-        group_final_review_material_protocol()
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy)
             .contains("必须在 summary 中汇总整组的待人工处理清单"),
         "group final review 必须把待人工清单汇总给人工接手"
     );
