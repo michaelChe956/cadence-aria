@@ -108,6 +108,8 @@ pub(crate) async fn create_repository_and_wait(
 
 #[path = "it_web/issue_delivery_summary.rs"]
 mod issue_delivery_summary;
+#[path = "it_web/pointer_publication.rs"]
+mod pointer_publication;
 #[path = "it_web/provider_gateway_envelope.rs"]
 mod provider_gateway_envelope;
 #[path = "it_web/web_api_handlers.rs"]
@@ -130,8 +132,6 @@ mod web_lifecycle_api;
 mod web_listening_line;
 #[path = "it_web/web_node_context.rs"]
 mod web_node_context;
-#[path = "it_web/pointer_publication.rs"]
-mod pointer_publication;
 #[path = "it_web/web_policy_runtime.rs"]
 mod web_policy_runtime;
 #[path = "it_web/web_product_api.rs"]
