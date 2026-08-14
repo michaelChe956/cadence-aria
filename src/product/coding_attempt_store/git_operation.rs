@@ -280,11 +280,12 @@ impl super::CodingAttemptStore {
         })
     }
 
-    // 签名按 C-5 Task 8 简报逐字定义（8 参数），保留既定接口，不放宽参数上限。
+    // 签名按 C-5 Task 8 简报逐字定义（9 参数），保留既定接口，不放宽参数上限。
     #[allow(clippy::too_many_arguments)]
     pub fn start_pointer_publish_git_operation(
         &self,
         publication: &PointerPublication,
+        member_repo_id: &str,
         repo_path: &Path,
         worktree_path: &Path,
         branch_name: &str,
@@ -292,10 +293,11 @@ impl super::CodingAttemptStore {
         remote: &str,
         commit_message: &str,
     ) -> Result<CodingGitOperationJournal, ProductStoreError> {
-        validate_pointer_publication_ids(publication)?;
-        let id = pointer_journal_id(&publication.id);
+        validate_pointer_publication_ids(publication, member_repo_id)?;
+        let id = pointer_journal_id(&publication.id, member_repo_id);
         let candidate = build_pointer_journal(
             publication,
+            member_repo_id,
             repo_path,
             worktree_path,
             branch_name,
@@ -312,7 +314,7 @@ impl super::CodingAttemptStore {
         with_exclusive_lock(&path, || {
             if path.is_file() {
                 let existing: CodingGitOperationJournal = read_json(&path)?;
-                validate_pointer_journal(&existing, publication)?;
+                validate_pointer_journal(&existing, publication, member_repo_id)?;
                 if same_identity(&existing, &candidate) {
                     return Ok(existing);
                 }
@@ -328,12 +330,13 @@ impl super::CodingAttemptStore {
     pub fn advance_pointer_publish_git_operation(
         &self,
         publication: &PointerPublication,
+        member_repo_id: &str,
         expected: &CodingGitOperationJournal,
         phase: CodingGitOperationPhase,
         commit_sha: Option<String>,
     ) -> Result<CodingGitOperationJournal, ProductStoreError> {
-        validate_pointer_publication_ids(publication)?;
-        let id = pointer_journal_id(&publication.id);
+        validate_pointer_publication_ids(publication, member_repo_id)?;
+        let id = pointer_journal_id(&publication.id, member_repo_id);
         let path = self.pointer_publication_git_operation_path(
             &publication.project_id,
             &publication.id,
@@ -345,7 +348,7 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch(&id));
             }
             let mut current: CodingGitOperationJournal = read_json(&path)?;
-            validate_pointer_journal(&current, publication)?;
+            validate_pointer_journal(&current, publication, member_repo_id)?;
             if !same_identity(&current, expected) {
                 return Err(identity_mismatch(&id));
             }
@@ -380,12 +383,13 @@ impl super::CodingAttemptStore {
     pub fn complete_review_pointer_publish_git_operation(
         &self,
         publication: &PointerPublication,
+        member_repo_id: &str,
         expected: &CodingGitOperationJournal,
         input: CompleteReviewGitOperationInput,
     ) -> Result<CodingGitOperationJournal, ProductStoreError> {
         validate_relative_id(&input.review_request_id)?;
-        validate_pointer_publication_ids(publication)?;
-        let id = pointer_journal_id(&publication.id);
+        validate_pointer_publication_ids(publication, member_repo_id)?;
+        let id = pointer_journal_id(&publication.id, member_repo_id);
         let path = self.pointer_publication_git_operation_path(
             &publication.project_id,
             &publication.id,
@@ -397,7 +401,7 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch(&id));
             }
             let mut current: CodingGitOperationJournal = read_json(&path)?;
-            validate_pointer_journal(&current, publication)?;
+            validate_pointer_journal(&current, publication, member_repo_id)?;
             if !same_identity(&current, expected)
                 || current.kind != CodingGitOperationKind::PointerPublish
             {
@@ -435,10 +439,11 @@ impl super::CodingAttemptStore {
     pub fn reopen_failed_pointer_publish_git_operation(
         &self,
         publication: &PointerPublication,
+        member_repo_id: &str,
         expected: &CodingGitOperationJournal,
     ) -> Result<CodingGitOperationJournal, ProductStoreError> {
-        validate_pointer_publication_ids(publication)?;
-        let id = pointer_journal_id(&publication.id);
+        validate_pointer_publication_ids(publication, member_repo_id)?;
+        let id = pointer_journal_id(&publication.id, member_repo_id);
         let path = self.pointer_publication_git_operation_path(
             &publication.project_id,
             &publication.id,
@@ -450,7 +455,7 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch(&id));
             }
             let mut current: CodingGitOperationJournal = read_json(&path)?;
-            validate_pointer_journal(&current, publication)?;
+            validate_pointer_journal(&current, publication, member_repo_id)?;
             if !same_identity(&current, expected)
                 || current.kind != CodingGitOperationKind::PointerPublish
                 || current.phase != CodingGitOperationPhase::Completed
@@ -534,21 +539,26 @@ fn build_journal(
     Ok(journal)
 }
 
-/// PointerPublish journal 的合成稳定标识（与 ReviewRequest.attempt_id 命名空间一致）。
-fn pointer_journal_id(publication_id: &str) -> String {
-    format!("pointer-pub-{publication_id}")
+/// PointerPublish journal 的合成稳定标识（与 ReviewRequest.attempt_id 命名空间一致），
+/// 含成员仓维度：每仓一个独立 journal，避免单文件退化为 last-repo-wins。
+fn pointer_journal_id(publication_id: &str, member_repo_id: &str) -> String {
+    format!("pointer-pub-{publication_id}-{member_repo_id}")
 }
 
 fn validate_pointer_publication_ids(
     publication: &PointerPublication,
+    member_repo_id: &str,
 ) -> Result<(), ProductStoreError> {
     validate_relative_id(&publication.id)?;
     validate_relative_id(&publication.project_id)?;
+    validate_relative_id(member_repo_id)?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_pointer_journal(
     publication: &PointerPublication,
+    member_repo_id: &str,
     repo_path: &Path,
     worktree_path: &Path,
     branch_name: &str,
@@ -556,7 +566,7 @@ fn build_pointer_journal(
     remote: &str,
     commit_message: &str,
 ) -> Result<CodingGitOperationJournal, ProductStoreError> {
-    let id = pointer_journal_id(&publication.id);
+    let id = pointer_journal_id(&publication.id, member_repo_id);
     validate_non_empty("branch", branch_name, &id)?;
     validate_non_empty("base branch", base_branch, &id)?;
     validate_non_empty("remote", remote, &id)?;
@@ -584,21 +594,31 @@ fn build_pointer_journal(
         created_at: now.clone(),
         updated_at: now,
     };
-    validate_pointer_journal(&journal, publication)?;
+    validate_pointer_journal(&journal, publication, member_repo_id)?;
     Ok(journal)
 }
 
 /// PointerPublish kind 的校验：按 publication 校验 project_id / attempt_id，
-/// 要求 branch/base_branch/remote/commit_message 非空、路径 canonical 一致；
-/// 不要求 attempt 各字段相等。
+/// 要求 issue_id 为空、分支名符合 `aria-pointer/{member_repo_id}/{publication_id}`、
+/// 该 member_repo_id 存在于 publication.entries、branch/base_branch/remote/commit_message
+/// 非空、路径 canonical 一致；不要求 attempt 各字段相等。
 fn validate_pointer_journal(
     journal: &CodingGitOperationJournal,
     publication: &PointerPublication,
+    member_repo_id: &str,
 ) -> Result<(), ProductStoreError> {
-    let id = pointer_journal_id(&publication.id);
+    let id = pointer_journal_id(&publication.id, member_repo_id);
+    let expected_branch = format!("aria-pointer/{member_repo_id}/{}", publication.id);
+    let member_belongs = publication
+        .entries
+        .iter()
+        .any(|entry| entry.member_repo_id == member_repo_id);
     if journal.project_id != publication.project_id
         || journal.attempt_id != id
         || journal.kind != CodingGitOperationKind::PointerPublish
+        || !journal.issue_id.is_empty()
+        || journal.branch_name != expected_branch
+        || !member_belongs
         || canonical_path_identity(&journal.repo_path)? != journal.repo_path
         || canonical_path_identity(&journal.worktree_path)? != journal.worktree_path
     {
