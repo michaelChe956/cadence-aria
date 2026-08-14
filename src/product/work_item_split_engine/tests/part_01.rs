@@ -770,7 +770,7 @@ fn realistic_chinese_outline_author_output() -> serde_json::Value {
 fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
     // fixture 对齐 session_0003 实测锚点：current outline JSON 实测 1,891 B（目标 ~1.7KB）、
     // 直接依赖投影实测 1,119 B（目标 ~1.1KB）。
-    // 阈值 = 实测 post-slim prompt 10,941 B + 800 余量 = 11,741（< 质量预算 12,000）；
+    // 阈值 = 实测 post-slim prompt 10,941 B + 800 余量 = 11,741（< 质量预算，现 12,600）；
     // A–E 瘦身分段实测合计节省 980 B（fixture 规模无关的模板固定开销）。
     let outline = parse_work_item_plan_outline_output(realistic_chinese_outline_author_output())
         .expect("outline output")
@@ -817,9 +817,13 @@ fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
     // 11_741 -> 11_800 spelled out `required_evidence` as an array (+45 bytes);
     // 11_800 -> 11_900 named both verification check owners (+104 bytes) after Pi
     // emitted only `verification_plan.checks` and omitted the contract copy.
-    // Runtime limits are untouched (hard backstop 65_536, quality budget 12_000).
+    // 11_900 -> 12_500 aligned the draft prompt with the current validator hard
+    // rules (+516 bytes: mandatory operational_gate blocker when the trusted
+    // catalog is empty; non-empty verbatim target_contract_refs for plan_repair
+    // routes), under the raised quality budget 12_600.
+    // Runtime limits are untouched (hard backstop 65_536, quality budget 12_600).
     assert!(
-        invocation.prompt.len() < 11_900,
+        invocation.prompt.len() < 12_500,
         "realistic Chinese serial prompt must stay within the slimmed margin target: {} bytes",
         invocation.prompt.len()
     );

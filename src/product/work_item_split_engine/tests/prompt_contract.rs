@@ -378,10 +378,57 @@ fn empty_trusted_command_catalog_placeholder_allows_required_manual_checks() {
         "empty-catalog placeholder must state that manual checks can remain required"
     );
     assert!(
-        invocation.prompt.contains(
-            "Use an operational_gate blocker only when verification cannot be grounded even by manual checks."
-        ),
-        "empty-catalog placeholder must narrow the operational_gate trigger"
+        invocation
+            .prompt
+            .contains("the draft MUST include a route=operational_gate blocker"),
+        "empty-catalog placeholder must require an operational_gate blocker"
+    );
+    assert!(
+        invocation
+            .prompt
+            .contains("manual check (command=null) cannot substitute for that blocker"),
+        "empty-catalog placeholder must forbid substituting a manual check for the operational_gate blocker"
+    );
+}
+
+/// Draft Prompt 正文必须与现行校验器硬规则逐字对齐：
+/// - 可信目录为空时 draft 必须含 route=operational_gate 的 blocker（manual check 不能替代）。
+/// - plan_repair_current / plan_repair_upstream / subgraph_replan 路由 blocker 的
+///   target_contract_refs 必须非空且每个 ref 逐字等于已登记 input/output contract_id。
+///
+/// 旧冲突句「不得因缺人工环境输出 operational_gate blocker」必须消失。
+#[test]
+fn single_item_prompt_aligns_draft_hard_rules_with_validators() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "不得把可由人工确认的事项升级为 operational_gate",
+        "可信目录为空且验证无法由 manual check 落地时，必须输出 route=operational_gate blocker",
+        "plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must state validator hard rules; missing {required}"
+        );
+    }
+    assert!(
+        !invocation
+            .prompt
+            .contains("不得因缺人工环境输出 operational_gate blocker"),
+        "draft prompt must not keep the contradictory clause that forbids operational_gate when manual environment is missing"
     );
 }
 

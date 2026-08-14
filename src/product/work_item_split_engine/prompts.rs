@@ -36,8 +36,10 @@ pub const WORK_ITEM_DRAFT_PROMPT_VERSION: &str = "work_item_draft_v2";
 /// prompt 经 stdin JSON 发送给 Provider，无 OS ARG_MAX 约束；真实物理边界是模型上下文窗口。
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
+/// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
+/// 路由 target_contract_refs 必非空且逐字）上调至 12_600。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 12_000;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 12_600;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -633,7 +635,7 @@ pub(crate) fn build_work_item_draft_prompt(
         })
         .unwrap_or_else(|_| "{}".to_string());
     let trusted_command_catalog = if current_outline.trusted_verification_commands.is_empty() {
-        "(empty: no trusted commands available; do not invent any. Manual checks with command=null may still be required=true. Use an operational_gate blocker only when verification cannot be grounded even by manual checks.)"
+        "(empty: no trusted commands available; do not invent any. Manual checks with command=null may still be required=true. When the trusted catalog is empty the draft MUST include a route=operational_gate blocker explaining that verification cannot be grounded; a manual check (command=null) cannot substitute for that blocker, otherwise the whole draft is rejected.)"
             .to_string()
     } else {
         crate::product::models::trusted_draft_verification_command_catalog_prompt_projection(
@@ -702,10 +704,10 @@ pub(crate) fn build_work_item_draft_prompt(
          [registration]\n\
          内部登记 acceptance criterion ID、traceability requirement ID、input/output contract ID 与上列可信命令；不输出该登记表。\n\n\
          [projection]\n\
-         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\
+         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致；blocker target_contract_refs 只能引用 input/output contract_id；plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\
          input_contracts 的 contract_id 与 required_capabilities 元素都是对上游的引用而非新命名：必须逐字取自 [直接依赖的可消费交接合同] 中该 provider 的 output_contracts（含标点空格），不得改写前缀（如 oc_ 换成 ic_）、意译或自行描述——两者均按字符串精确匹配，任何差异都会失配；provider_logical_work_item_id 必须是真正声明该 contract 的上游 logical_work_item_id。被消费的 output_contracts.contract_id 还须出现在其 handoff_contract.provided_contract_refs 中。\n\n\
          [self_check]\n\
-         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等。可信目录为空时所有 check 必须 command=null。需人工操作或目视确认的 verification_intent 必须表达为 acceptance_criteria 的 required_evidence=[manual_check]；verification_checks 的 required=true 仅限 Coder 可自行执行的命令或只读检查。人工事项由末端人工确认，不构成自动阶段阻塞，不得因缺人工环境输出 operational_gate blocker。\n\
+         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等。可信目录为空时所有 check 必须 command=null。需人工操作或目视确认的 verification_intent 必须表达为 acceptance_criteria 的 required_evidence=[manual_check]；verification_checks 的 required=true 仅限 Coder 可自行执行的命令或只读检查。人工事项由末端人工确认，不构成自动阶段阻塞；不得把可由人工确认的事项升级为 operational_gate；但可信目录为空且验证无法由 manual check 落地时，必须输出 route=operational_gate blocker，否则整体被拒。\n\
          输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找，找不到即为错误。\n\n\
          [canonical_field_contract]\n\
          封闭类型契约（非示例）：记号 str+=非空 string，[T]=T 数组，obj=object；每个 obj 必须且只能含所列字段，所列字段全部必填，数组可空但元素不得缺/加字段。\n\
@@ -718,7 +720,8 @@ pub(crate) fn build_work_item_draft_prompt(
          - acceptance criterion 的 statement 必须描述从最终代码状态、验证命令输出、人工检查结果或 handoff 字段可观测的结果状态；不得描述开发过程本身。\n\
          - canonical_contract.verification_checks: [obj{{check_id: str+, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}]（canonical_contract 必填字段）；draft.verification_plan: obj{{checks: 与它逐字段同序相等的独立副本}}。两处都必须输出，不得只写一处。\n\
          - handoff_contract: obj{{required_fields: 唯一 str+ 数组, provided_contract_refs: 唯一 str+ 数组（无下游消费者时为空数组）, reviewer_check_refs: 唯一 str+ 数组}}。\n\
-         - blocker_rules: [obj{{reason_code: str+, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: [string]}}]；design_traceability: [obj{{source_type: string, source_id: string, requirement_id: string}}]。\n\n\
+         - blocker_rules: [obj{{reason_code: str+, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: [string]}}]；design_traceability: [obj{{source_type: string, source_id: string, requirement_id: string}}]。\n\
+         - plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id。\n\n\
          [hard_rules]\n\
          - 当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。\n\
          - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤；canonical writeback 与正式 Plan 落盘由 human-confirmation gate 与 daemon 负责，不得声称已完成。\n\
