@@ -1,4 +1,44 @@
-use super::{push_output_is_explicit_remote_rejection, remote_delete_output_is_missing_ref};
+use std::ffi::OsStr;
+use std::path::Path;
+
+use super::{
+    git_command, push_output_is_explicit_remote_rejection, remote_delete_output_is_missing_ref,
+};
+
+#[test]
+fn localized_missing_ref_output_is_not_recognized() {
+    // 评审 I1：非 C locale 下 git 会本地化诊断短语，例如
+    //   LC_ALL=zh_CN.utf8 git push --delete ...
+    // 输出「远程引用不存在」而非英文 "remote ref does not exist"。
+    // 该匹配器只认英文（见下），故 `run_git_allow_failure` 必须固定
+    // `LC_ALL=C`（见 git_command）才能保证 delete_remote_branch 幂等判定
+    // 在任意 locale 下都成立；本测试钉死「匹配器只认英文」这一前提。
+    for stderr in [
+        "error: 无法删除 'aria/work-items/work_item_0001/attempt-1'：远程引用不存在\nerror: 无法推送一些引用到 'origin'",
+        "error: unable to delete 'aria/work-items/work_item_0001/attempt-1': 远程引用不存在",
+    ] {
+        assert!(
+            !remote_delete_output_is_missing_ref(stderr),
+            "localized stderr must not be recognized as missing-ref: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn git_command_forces_c_locale() {
+    // 不依赖 locale 的行为级证据：git 子进程命令必须显式携带 LC_ALL=C，
+    // 与上面的「匹配器只认英文」配套，构成幂等判定的完整保证（评审 I1）。
+    let command = git_command(Path::new("/unused"), &["push", "origin", "--delete", "x"]);
+    let lc_all = command
+        .as_std()
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new("LC_ALL")).then_some(value));
+    assert_eq!(
+        lc_all,
+        Some(Some(OsStr::new("C"))),
+        "run_git_allow_failure must force LC_ALL=C so git cannot localize error phrases"
+    );
+}
 
 #[test]
 fn missing_remote_ref_delete_output_is_idempotent() {

@@ -556,14 +556,7 @@ impl GitWorkspaceService {
         cwd: &Path,
         args: &[&str],
     ) -> Result<GitCommandOutput, GitWorkspaceError> {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(cwd)
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut command = git_command(cwd, args);
         let args_display = args.join(" ");
         let cwd_display = cwd.display().to_string();
         let mut child = ManagedProcessChild::spawn(&mut command).map_err(|error| {
@@ -644,6 +637,23 @@ impl Default for GitWorkspaceService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 构造 git 子进程命令。固定 `LC_ALL=C`（评审 I1）：git 的诊断短语
+/// （如 `push --delete` 的 `remote ref does not exist`）会随 locale 本地化，
+/// 而 `remote_delete_output_is_missing_ref` 仅匹配英文短语，因此必须强制英文输出，
+/// 否则非 C locale 下 `delete_remote_branch` 的幂等判定会误报真实失败。
+fn git_command(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .kill_on_drop(true)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 struct GitCommandOutput {
