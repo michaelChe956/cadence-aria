@@ -566,6 +566,7 @@ use cadence_aria::product::models::LifecycleConfirmationStatus;
 /// aggregate index + policy bootstrap，使 `RepositoryRouting::load_for_issue` 判为 Logical。
 fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalRepositoryId) {
     let aggregate_root = app_paths.root().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate-root fixture dir");
     let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![member_id]);
     LogicalCodebaseStore::new(app_paths.clone())
         .save_manifest("project_0001", &manifest)
