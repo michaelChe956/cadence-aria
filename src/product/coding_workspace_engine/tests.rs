@@ -915,6 +915,7 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
                 push_error: None,
                 owner_kind: ReviewRequestOwnerKind::Attempt,
                 pointer_publication_id: None,
+                revoked: false,
             },
         )
         .expect("review request");
@@ -1147,6 +1148,7 @@ fn seed_delivery_review_request(
         push_error,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
         created_at: "2026-08-13T00:00:00Z".to_string(),
         updated_at: "2026-08-13T00:00:00Z".to_string(),
     };

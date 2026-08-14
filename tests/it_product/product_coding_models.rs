@@ -310,6 +310,7 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
     };
     let node = CodingTimelineNode {
         id: "coding_node_0001".to_string(),

@@ -57,6 +57,10 @@ pub struct ReviewRequest {
     pub owner_kind: ReviewRequestOwnerKind,
     #[serde(default)]
     pub pointer_publication_id: Option<String>,
+    /// revoke 补偿标记：`PointerPublication` 撤回后置 true。存量记录缺省 false，
+    /// 不改变 Attempt 来源的既有语义。
+    #[serde(default)]
+    pub revoked: bool,
     pub created_at: String,
     pub updated_at: String,
 }

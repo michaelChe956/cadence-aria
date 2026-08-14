@@ -127,6 +127,30 @@ impl super::CodingAttemptStore {
             .join(format!("{journal_id}.json"))
     }
 
+    /// PointerPublication 来源 ReviewRequest 分区：
+    /// `pointer-publications/{publication_id}/review-requests`。
+    pub(crate) fn pointer_review_requests_root(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+    ) -> PathBuf {
+        self.paths
+            .logical_codebase_root(project_id)
+            .join("pointer-publications")
+            .join(publication_id)
+            .join("review-requests")
+    }
+
+    pub(crate) fn pointer_review_request_path(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        request_id: &str,
+    ) -> PathBuf {
+        self.pointer_review_requests_root(project_id, publication_id)
+            .join(format!("{request_id}.json"))
+    }
+
     pub(crate) fn role_provider_config_path(
         &self,
         project_id: &str,

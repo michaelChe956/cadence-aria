@@ -374,6 +374,7 @@ async fn logical_internal_review_launches_through_gateway() {
                 push_error: None,
                 owner_kind: ReviewRequestOwnerKind::Attempt,
                 pointer_publication_id: None,
+                revoked: false,
             },
         )
         .expect("review request");

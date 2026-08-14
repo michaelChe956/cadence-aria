@@ -24,6 +24,7 @@ mod git_operation_pointer;
 mod group_final_readiness;
 mod group_uniqueness;
 mod plan_repair;
+mod pointer_review_request;
 mod provider_stream_log_root;
 mod role_run;
 mod unit_run_execution_context;

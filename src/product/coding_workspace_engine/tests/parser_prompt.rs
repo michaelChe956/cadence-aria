@@ -489,6 +489,7 @@ async fn non_group_internal_review_prompt_includes_both_reviewer_boundaries() {
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
     };
 
     let prompt = engine

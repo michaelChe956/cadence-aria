@@ -88,6 +88,31 @@ impl super::CodingAttemptStore {
         )
     }
 
+    /// PointerPublication 来源的 ReviewRequest 独立分区落盘：
+    /// `pointer-publications/{publication_id}/review-requests/{request_id}.json`。
+    /// 不塞进 attempt_dir（attempt_dir 有 scoped 校验，强绑定 issue/attempt）。
+    /// request_id 建议 `rr-{publication_id}-{member_repo_id}`（每仓一条，可覆盖更新）。
+    pub fn save_pointer_review_request(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        request: &ReviewRequest,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&request.id)?;
+        write_json(
+            &self.pointer_review_request_path(project_id, publication_id, &request.id),
+            request,
+        )
+    }
+
+    pub fn list_pointer_review_requests(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+    ) -> Result<Vec<ReviewRequest>, ProductStoreError> {
+        super::list_json_records(&self.pointer_review_requests_root(project_id, publication_id))
+    }
+
     pub fn save_internal_pr_review(
         &self,
         attempt: &CodingExecutionAttempt,

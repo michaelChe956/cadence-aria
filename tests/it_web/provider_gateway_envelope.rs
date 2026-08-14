@@ -295,6 +295,7 @@ async fn coding_internal_review_launches_through_gateway_and_audits_stream_launc
                 push_error: None,
                 owner_kind: ReviewRequestOwnerKind::Attempt,
                 pointer_publication_id: None,
+                revoked: false,
             },
         )
         .expect("review request");

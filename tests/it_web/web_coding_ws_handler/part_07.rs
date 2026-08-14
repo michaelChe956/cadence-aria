@@ -154,6 +154,7 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
             push_error: None,
             owner_kind: ReviewRequestOwnerKind::Attempt,
             pointer_publication_id: None,
+            revoked: false,
         })
         .expect("save review request");
     let first_run = store

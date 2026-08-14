@@ -408,6 +408,7 @@ fn create_coding_role_run_fixture(
             push_error: None,
             owner_kind: ReviewRequestOwnerKind::Attempt,
             pointer_publication_id: None,
+            revoked: false,
         };
         store.save_review_request(&attempt, &review_request)?;
 

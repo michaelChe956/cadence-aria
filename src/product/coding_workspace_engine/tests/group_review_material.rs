@@ -128,6 +128,7 @@ fn request() -> ReviewRequest {
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
         created_at: "ignored".to_string(),
         updated_at: "ignored".to_string(),
     }

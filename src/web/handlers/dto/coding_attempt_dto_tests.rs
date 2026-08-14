@@ -60,6 +60,7 @@ fn failed_review_request_fixture(attempt: &CodingExecutionAttempt) -> ReviewRequ
         push_error: Some("push rejected".to_string()),
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
         created_at: "2026-06-12T00:00:00Z".to_string(),
         updated_at: "2026-06-12T00:00:00Z".to_string(),
     }

@@ -89,6 +89,7 @@ impl CodingWorkspaceEngine {
                 push_error: None,
                 owner_kind: ReviewRequestOwnerKind::Attempt,
                 pointer_publication_id: None,
+                revoked: false,
             });
         self.build_group_internal_pr_review_prompt(
             attempt,

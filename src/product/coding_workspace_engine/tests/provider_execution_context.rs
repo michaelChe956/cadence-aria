@@ -313,6 +313,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 push_error: None,
                 owner_kind: ReviewRequestOwnerKind::Attempt,
                 pointer_publication_id: None,
+                revoked: false,
             },
         )
         .unwrap();

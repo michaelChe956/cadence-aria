@@ -34,6 +34,7 @@ fn coding_plan_repair_entrypoints_internal_and_group_review_use_group_reviewer_r
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
     };
     let projection = reviewer_projection_fixture();
 
@@ -94,6 +95,7 @@ async fn coding_plan_repair_entrypoints_internal_review_execution_persists_safe_
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
     };
     store.save_review_request(&attempt, &request).unwrap();
     let (tx, _rx) = mpsc::channel(64);
@@ -552,6 +554,7 @@ pub(super) fn prepared_group_review_fixture() -> (
                 push_error: None,
                 owner_kind: ReviewRequestOwnerKind::Attempt,
                 pointer_publication_id: None,
+                revoked: false,
             },
         )
         .expect("review request");

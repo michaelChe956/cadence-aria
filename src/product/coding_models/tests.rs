@@ -174,6 +174,35 @@ fn review_request_deserializes_legacy_json_as_attempt_owner() {
     let req: ReviewRequest = serde_json::from_value(legacy).unwrap();
     assert_eq!(req.owner_kind, ReviewRequestOwnerKind::Attempt);
     assert_eq!(req.pointer_publication_id, None);
+    assert!(!req.revoked, "legacy record must default revoked to false");
+}
+
+#[test]
+fn review_request_roundtrips_revoked_flag() {
+    let req = ReviewRequest {
+        id: "rr_revoked".to_string(),
+        attempt_id: "attempt_1".to_string(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: "aria/attempt_1".to_string(),
+        commit_sha: "abc".to_string(),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: true,
+        created_at: "2026-08-14T00:00:00Z".to_string(),
+        updated_at: "2026-08-14T00:00:00Z".to_string(),
+    };
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["revoked"], true);
+
+    let decoded: ReviewRequest = serde_json::from_value(value).unwrap();
+    assert!(decoded.revoked);
 }
 
 #[test]
@@ -193,6 +222,7 @@ fn review_request_roundtrips_pointer_publication_owner() {
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::PointerPublication,
         pointer_publication_id: Some("pub_1".to_string()),
+        revoked: false,
         created_at: "2026-08-14T00:00:00Z".to_string(),
         updated_at: "2026-08-14T00:00:00Z".to_string(),
     };

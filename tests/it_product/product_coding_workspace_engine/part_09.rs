@@ -164,6 +164,7 @@ fn sample_review_request(attempt_id: &str) -> ReviewRequest {
         push_error: None,
         owner_kind: ReviewRequestOwnerKind::Attempt,
         pointer_publication_id: None,
+        revoked: false,
     }
 }
 

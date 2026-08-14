@@ -309,6 +309,7 @@ impl CodingWorkspaceEngine {
             push_error: journal.push_error.clone(),
             owner_kind: ReviewRequestOwnerKind::Attempt,
             pointer_publication_id: None,
+            revoked: false,
             manual_instructions: vec![format!(
                 "基于远端 {}/{} 发起代码审查",
                 journal.remote.as_deref().unwrap_or_default(),
