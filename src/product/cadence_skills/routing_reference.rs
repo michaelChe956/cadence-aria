@@ -1,12 +1,12 @@
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum RoutingReferenceContext {
+pub enum RoutingReferenceContext {
     #[default]
     Legacy,
     Logical(LogicalPolicyReference),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LogicalPolicyReference {
+pub struct LogicalPolicyReference {
     pub policy_id: String,
     pub policy_revision: u64,
     pub policy_digest: String,
@@ -42,12 +42,6 @@ pub(crate) fn direct_cadence_routing_rules_reference(context: &RoutingReferenceC
         RoutingReferenceContext::Legacy => LEGACY_REFERENCE.to_string(),
         RoutingReferenceContext::Logical(policy) => logical_cadence_routing_rules_reference(policy),
     }
-}
-
-/// 临时兼容旧调用点：返回与改造前字节完全一致的 Legacy 文本。
-/// T2-T5 将逐个改用带 context 的新签名并最终删除本函数。
-pub(crate) fn direct_cadence_routing_rules_reference_legacy() -> String {
-    direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy)
 }
 
 fn logical_cadence_routing_rules_reference(policy: &LogicalPolicyReference) -> String {

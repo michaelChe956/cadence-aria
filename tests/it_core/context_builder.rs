@@ -623,6 +623,7 @@ pub(super) fn builder_input(node_id: &str) -> ProviderContextBuilderInput {
             "tests/fixtures/openspec/changes/sample-change/proposal.md".to_string(),
         ],
         worktree_path: None,
+        routing_reference_context: Default::default(),
     }
 }
 
@@ -665,6 +666,7 @@ pub(super) fn p4_builder_input(node_id: &str) -> ProviderContextBuilderInput {
             ),
         ],
         worktree_path: Some("tests/fixtures/repos/sample-worktree".to_string()),
+        routing_reference_context: Default::default(),
     }
 }
 
@@ -739,6 +741,10 @@ fn full_variables(node_id: &str) -> BTreeMap<String, String> {
         (
             "workflow_discipline_summary".to_string(),
             "workflow summary for test".to_string(),
+        ),
+        (
+            "routing_reference".to_string(),
+            "[cadence_project_rules]\nlegacy fixture".to_string(),
         ),
         (
             "output_schema_summary".to_string(),

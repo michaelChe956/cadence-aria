@@ -573,6 +573,7 @@ fn runtime_unit_adapter_input_carries_no_provider_stream_log_dir() {
         constraint_summary: "constraint summary for test".to_string(),
         context_files: vec!["tests/fixtures/artifacts/spec.md".to_string()],
         worktree_path: Some(worktree.path().to_string_lossy().to_string()),
+        routing_reference_context: Default::default(),
     })
     .expect("context package");
 

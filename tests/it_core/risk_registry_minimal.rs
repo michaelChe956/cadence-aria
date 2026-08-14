@@ -211,6 +211,7 @@ fn builder_input_without_risk_registry_ref() -> ProviderContextBuilderInput {
         constraint_summary: "constraint summary".to_string(),
         context_files: vec![],
         worktree_path: None,
+        routing_reference_context: Default::default(),
     }
 }
 

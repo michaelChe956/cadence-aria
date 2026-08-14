@@ -61,7 +61,9 @@ fn initial_author_reuses_system_routing_reference_for_every_workspace_type() {
             role: "system".to_string(),
             content: format!(
                 "[workflow_discipline]\n{}\n[output_schema]\n来自正常 generation brief 的合同。",
-                crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy()
+                crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference(
+                    &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
+                )
             ),
             checkpoint_id: None,
             created_at: "2026-07-23T00:00:00Z".to_string(),
@@ -342,7 +344,9 @@ fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
         role: "system".to_string(),
         content: format!(
             "[workflow_discipline]\n{}\n[output_schema]\n[artifact_schema_contract]\n来自正常 generation brief 的合同。",
-            crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy()
+            crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference(
+                &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
+            )
         ),
         checkpoint_id: None,
         created_at: "2026-07-23T00:00:00Z".to_string(),

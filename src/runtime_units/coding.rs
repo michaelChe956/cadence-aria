@@ -14,6 +14,7 @@ use crate::cross_cutting::provider_run::{
 use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
 use crate::interactive::controller::PendingProviderStep;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
@@ -393,6 +394,7 @@ impl ExecutionChainState {
             constraint_summary: "task constraints".to_string(),
             context_files: self.input.context_files.clone(),
             worktree_path: Some(self.input.worktree_path.to_string_lossy().to_string()),
+            routing_reference_context: RoutingReferenceContext::Legacy,
         }
     }
 

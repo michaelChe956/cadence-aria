@@ -9,6 +9,7 @@ use crate::cross_cutting::provider_context_builder::{
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::provider_run_record_from_output;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::runtime_units::{
@@ -275,6 +276,7 @@ fn builder_input(input: &FinalClosureInput, node_id: &str) -> ProviderContextBui
         constraint_summary: "final closure constraints".to_string(),
         context_files: input.context_files.clone(),
         worktree_path: Some(input.worktree_path.clone()),
+        routing_reference_context: RoutingReferenceContext::Legacy,
     }
 }
 

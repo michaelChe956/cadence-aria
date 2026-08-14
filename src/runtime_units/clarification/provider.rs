@@ -11,6 +11,7 @@ use crate::cross_cutting::provider_run::{
     failed_provider_run_record_from_error, provider_run_record_from_output,
 };
 use crate::cross_cutting::runtime_event_log::append_node_event;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, ApprovalPolicy, SandboxMode};
 use crate::protocol::provider_errors::{ProviderErrorRoute, route_provider_error};
 use serde_json::{Value, json};
@@ -38,6 +39,7 @@ pub fn run_provider_node(
         constraint_summary: constraint_summary.into(),
         context_files,
         worktree_path: state.input.worktree_path.clone(),
+        routing_reference_context: RoutingReferenceContext::Legacy,
     })?;
     let adapter_input = planning_adapter_input_for_node(&build_result)?;
     let request = ProviderRunRequest {
