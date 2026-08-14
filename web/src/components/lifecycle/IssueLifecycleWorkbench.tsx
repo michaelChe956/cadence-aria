@@ -22,9 +22,16 @@ import {
   listProjects,
   listRepositories,
 } from "../../api/client";
+import {
+  createPointerPublication,
+  listPointerPublications,
+  retryPointerPublicationRepo,
+  revokePointerPublication,
+} from "../../api/pointer-publication";
 import type {
   CodingAttemptAddress,
   IssueLifecycleResponse,
+  PointerPublicationDto,
   Project,
   Repository,
   CreateRepositoryRequest,
@@ -47,6 +54,7 @@ import {
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
+import { PointerPublicationPanel } from "./PointerPublicationPanel";
 import { ProjectSidebar } from "./ProjectSidebar";
 import {
   WorkItemPlanOptionsDialog,
@@ -80,6 +88,7 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   force_frontend_backend_split: true,
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
+const POLL_INTERVAL_MS = 2_000;
 export function IssueLifecycleWorkbench({
   focusEntityKey,
   onDrawerFocusChange,
@@ -107,6 +116,10 @@ export function IssueLifecycleWorkbench({
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pointerPublications, setPointerPublications] = useState<
+    PointerPublicationDto[]
+  >([]);
+  const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
@@ -168,15 +181,18 @@ export function IssueLifecycleWorkbench({
       if (!projectId) {
         setRepositories([]);
         setLifecycles([]);
+        setPointerPublications([]);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
         return;
       }
 
-      const [repositoryResponse, issueResponse] = await Promise.all([
-        listRepositories(projectId),
-        listProductIssues(projectId),
-      ]);
+      const [repositoryResponse, issueResponse, publicationResponse] =
+        await Promise.all([
+          listRepositories(projectId),
+          listProductIssues(projectId),
+          listPointerPublications(projectId),
+        ]);
       if (!isLatestRefresh(requestId)) {
         return;
       }
@@ -195,6 +211,7 @@ export function IssueLifecycleWorkbench({
 
       setRepositories(repositoryResponse.repositories ?? []);
       setLifecycles(lifecycleResponses);
+      setPointerPublications(publicationResponse ?? []);
       setFocusedIssueId(
         focusedIssueId &&
           lifecycleResponses.some(
@@ -254,6 +271,48 @@ export function IssueLifecycleWorkbench({
     (project) => project.project_id === selectedProjectId,
   );
   const issueCount = allColumns.issue.length;
+  const latestPointerPublication = useMemo<PointerPublicationDto | null>(() => {
+    if (pointerPublications.length === 0) {
+      return null;
+    }
+    return [...pointerPublications].sort((left, right) =>
+      right.created_at.localeCompare(left.created_at),
+    )[0];
+  }, [pointerPublications]);
+
+  const latestPointerPublicationId =
+    latestPointerPublication?.status === "in_progress"
+      ? latestPointerPublication.id
+      : null;
+  useEffect(() => {
+    if (!selectedProjectId || !latestPointerPublicationId) {
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const publications = await listPointerPublications(selectedProjectId);
+        if (!disposed) {
+          setPointerPublications(publications);
+        }
+      } catch {
+        // 轮询失败保持现状，下一次间隔重试。
+      } finally {
+        inFlight = false;
+      }
+    };
+    const interval = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [latestPointerPublicationId, selectedProjectId]);
 
   async function handleSelectProject(projectId: string) {
     if (projectId === selectedProjectId) {
@@ -443,6 +502,98 @@ export function IssueLifecycleWorkbench({
   async function handleRepositoryInitializationCompleted() {
     if (selectedProjectId) {
       await refresh(selectedProjectId);
+    }
+  }
+
+  function upsertPointerPublication(publication: PointerPublicationDto) {
+    setPointerPublications((existing) => [
+      ...existing.filter((item) => item.id !== publication.id),
+      publication,
+    ]);
+  }
+
+  async function handlePublishFull() {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    setPointerPublicationBusy(true);
+    setError(null);
+    try {
+      const publication = await createPointerPublication(
+        selectedProjectId,
+        "full",
+      );
+      upsertPointerPublication(publication);
+    } catch (reason) {
+      setError(errorMessage(reason, "全量发布失败"));
+    } finally {
+      setPointerPublicationBusy(false);
+    }
+  }
+
+  async function handlePublishIncremental() {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    setPointerPublicationBusy(true);
+    setError(null);
+    try {
+      const publication = await createPointerPublication(
+        selectedProjectId,
+        "incremental",
+      );
+      upsertPointerPublication(publication);
+    } catch (reason) {
+      setError(errorMessage(reason, "增量发布失败"));
+    } finally {
+      setPointerPublicationBusy(false);
+    }
+  }
+
+  async function handleRetryRepo(memberRepoId: string) {
+    if (!selectedProjectId || !latestPointerPublication) {
+      setError("缺少 Project 或发布批次");
+      return;
+    }
+
+    setPointerPublicationBusy(true);
+    setError(null);
+    try {
+      const publication = await retryPointerPublicationRepo(
+        selectedProjectId,
+        latestPointerPublication.id,
+        memberRepoId,
+      );
+      upsertPointerPublication(publication);
+    } catch (reason) {
+      setError(errorMessage(reason, "重试失败"));
+    } finally {
+      setPointerPublicationBusy(false);
+    }
+  }
+
+  async function handleRevokePublication() {
+    if (!selectedProjectId || !latestPointerPublication) {
+      setError("缺少 Project 或发布批次");
+      return;
+    }
+
+    setPointerPublicationBusy(true);
+    setError(null);
+    try {
+      const publication = await revokePointerPublication(
+        selectedProjectId,
+        latestPointerPublication.id,
+      );
+      upsertPointerPublication(publication);
+    } catch (reason) {
+      setError(errorMessage(reason, "撤回失败"));
+    } finally {
+      setPointerPublicationBusy(false);
     }
   }
 
@@ -716,29 +867,47 @@ export function IssueLifecycleWorkbench({
             </div>
           }
           main={
-            <div className="grid min-h-[calc(100vh-6rem)] gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
-              <IssueCardList
-                cards={allColumns.issue}
-                selectedKey={selectedCardKey}
-                onSelect={handleSelectCard}
-                onGenerateStorySpec={(card) =>
-                  void handleLaunchWorkspace("story", card)
-                }
-                onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
-                deletingKey={deletingCardKey}
-              />
-              <IssueLifecycleDetail
-                issue={selectedIssueColumns.issue[0] ?? null}
-                storySpecs={selectedIssueColumns.story_spec}
-                designSpecs={selectedIssueColumns.design_spec}
-                workItems={selectedIssueColumns.work_item}
-                workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
-                selectedKey={selectedCardKey}
-                onSelect={handleSelectCard}
-                onOpenFullIssue={handleOpenFullIssue}
-                onDelete={handleDeleteLifecycleCard}
-                deletingKey={deletingCardKey}
-              />
+            <div className="space-y-3">
+              {selectedProjectId ? (
+                <div className="overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]">
+                  <PointerPublicationPanel
+                    publication={latestPointerPublication}
+                    busy={pointerPublicationBusy}
+                    onPublishFull={() => void handlePublishFull()}
+                    onPublishIncremental={() =>
+                      void handlePublishIncremental()
+                    }
+                    onRetryRepo={(memberRepoId) =>
+                      void handleRetryRepo(memberRepoId)
+                    }
+                    onRevoke={() => void handleRevokePublication()}
+                  />
+                </div>
+              ) : null}
+              <div className="grid min-h-[calc(100vh-6rem)] gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
+                <IssueCardList
+                  cards={allColumns.issue}
+                  selectedKey={selectedCardKey}
+                  onSelect={handleSelectCard}
+                  onGenerateStorySpec={(card) =>
+                    void handleLaunchWorkspace("story", card)
+                  }
+                  onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
+                  deletingKey={deletingCardKey}
+                />
+                <IssueLifecycleDetail
+                  issue={selectedIssueColumns.issue[0] ?? null}
+                  storySpecs={selectedIssueColumns.story_spec}
+                  designSpecs={selectedIssueColumns.design_spec}
+                  workItems={selectedIssueColumns.work_item}
+                  workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
+                  selectedKey={selectedCardKey}
+                  onSelect={handleSelectCard}
+                  onOpenFullIssue={handleOpenFullIssue}
+                  onDelete={handleDeleteLifecycleCard}
+                  deletingKey={deletingCardKey}
+                />
+              </div>
             </div>
           }
         />

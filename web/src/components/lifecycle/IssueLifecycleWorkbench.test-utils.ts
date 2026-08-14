@@ -787,6 +787,27 @@ export function lifecycleFetch(options?: {
         coding_attempts: data.coding_attempts,
       });
     }
+    const pointerPublicationsMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,
+    );
+    if (pointerPublicationsMatch && init?.method !== "POST") {
+      return jsonResponse([]);
+    }
+    const pointerPublicationActionMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications\/([^/]+)\/(retry-repo|revoke)$/,
+    );
+    if (pointerPublicationActionMatch && init?.method === "POST") {
+      return jsonResponse({
+        id: pointerPublicationActionMatch[2],
+        project_id: pointerPublicationActionMatch[1],
+        logical_codebase_id: "logical-0001",
+        batch_kind: "full",
+        entries: [],
+        status: "completed_all",
+        created_at: "2026-05-16T00:00:00Z",
+        updated_at: "2026-05-16T00:00:00Z",
+      });
+    }
     return jsonResponse({});
   });
 }
