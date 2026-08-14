@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 
+mod author_revision;
 mod review;
 mod review_context;
 mod review_repair;

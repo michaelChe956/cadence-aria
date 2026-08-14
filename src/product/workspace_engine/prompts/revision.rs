@@ -35,14 +35,20 @@ impl WorkspaceEngine {
         } else {
             None
         };
-        let review = self
-            .latest_review_verdict
-            .as_ref()
-            .ok_or_else(|| "review verdict is unavailable for revision".to_string())?;
-        let prompt = if resume_provider_session_id.is_some() {
-            self.build_revision_delta_prompt(review)
+        let review = self.latest_review_verdict.as_ref();
+        // spec-design-dialog-revision T4：author 反馈修订路径（pending_revision_context 存在且无 review
+        // verdict）走专用增量修订 prompt，reviewer 返修路径维持既有 delta/full 分流。
+        let prompt = if self.pending_revision_context.is_some() && review.is_none() {
+            let feedback = self.pending_revision_context.as_deref().unwrap_or_default();
+            self.build_author_revision_prompt(feedback)
         } else {
-            self.build_revision_full_prompt(&artifact, review)
+            let review =
+                review.ok_or_else(|| "review verdict is unavailable for revision".to_string())?;
+            if resume_provider_session_id.is_some() {
+                self.build_revision_delta_prompt(review)
+            } else {
+                self.build_revision_full_prompt(&artifact, review)
+            }
         };
 
         Ok(StreamingProviderInput {

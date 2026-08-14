@@ -453,3 +453,88 @@ async fn accept_enabled_review_at_start_routes_to_start_review() {
     assert_eq!(outcome, AuthorDecisionOutcome::StartReview);
     assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
 }
+
+// spec-design-dialog-revision T4：author 反馈修订 prompt 构造 + Revision run 分流 + 完成路径改动摘要。
+// prompt_engine_with_artifact 辅助构造：session.artifact = Markdown（Story/AuthorConfirm）。
+
+fn prompt_engine_with_artifact(markdown: &str) -> WorkspaceEngine {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_revision_prompt");
+    session.stage = WorkspaceStage::AuthorConfirm;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: markdown.to_string(),
+        diff: None,
+    });
+    WorkspaceEngine::new(store, tx, session)
+}
+
+#[test]
+fn author_revision_prompt_includes_feedback_and_changelog_section() {
+    let engine = prompt_engine_with_artifact("# Story Spec\n\n旧内容");
+    let prompt = engine.build_author_revision_prompt("补充异常场景与回滚策略");
+    assert!(prompt.contains("补充异常场景与回滚策略"));
+    assert!(prompt.contains("# Story Spec"));
+    assert!(
+        prompt.contains("改动摘要"),
+        "必须要求输出改动摘要小节: {prompt}"
+    );
+    assert!(prompt.contains("增量修订"), "约束不得整体重写无关章节");
+}
+
+// T4 分流：pending_revision_context 存在且无 review verdict（author 反馈路径）时，
+// build_revision_input 必须走 build_author_revision_prompt，而非 reviewer 返修 prompt。
+#[tokio::test]
+async fn author_revision_input_uses_author_prompt_when_no_review_verdict() {
+    let mut engine = prompt_engine_with_artifact("# Story Spec\n\n旧内容");
+    engine.session.stage = WorkspaceStage::Revision;
+    engine.pending_revision_context = Some("补充异常场景与回滚策略".to_string());
+    assert!(engine.latest_review_verdict.is_none());
+
+    let input = engine.build_revision_input().expect("revision input");
+
+    assert!(
+        input.prompt.contains("增量修订"),
+        "author 反馈修订必须走增量修订 prompt: {}",
+        input.prompt
+    );
+    assert!(input.prompt.contains("改动摘要"), "{}", input.prompt);
+    assert!(
+        input.prompt.contains("补充异常场景与回滚策略"),
+        "{}",
+        input.prompt
+    );
+}
+
+// T4 完成路径：author 反馈修订产物末尾的「## 改动摘要」小节被提取为 AuthorConfirm 的 summary 载荷。
+#[test]
+fn extract_changelog_summary_captures_author_revision_changelog_section() {
+    let markdown = "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 改动摘要\n- 补充异常场景 [REQ-002]\n- 调整回滚策略\n";
+    let summary =
+        crate::product::workspace_engine::provider_drive::extract_changelog_summary(markdown)
+            .expect("changelog summary");
+    assert!(summary.contains("补充异常场景"));
+    assert!(summary.contains("回滚策略"));
+    assert!(
+        !summary.contains("初版"),
+        "不得包含改动摘要之前的正文: {summary}"
+    );
+}
+
+#[test]
+fn extract_changelog_summary_none_when_section_missing_or_empty() {
+    assert_eq!(
+        crate::product::workspace_engine::provider_drive::extract_changelog_summary(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n"
+        ),
+        None
+    );
+    assert_eq!(
+        crate::product::workspace_engine::provider_drive::extract_changelog_summary(
+            "# Story Spec\n\n## 改动摘要\n\n## 待确认项\n无。\n"
+        ),
+        None,
+        "空改动摘要返回 None"
+    );
+}
