@@ -1,8 +1,8 @@
 //! T10a:聚合规划 author 启动点经 gateway 的 handler 级单测。
 //!
 //! 覆盖:
-//! - `start_work_item_plan_author(Some(launch), ...)` 经 gateway 启动并留 audit;
-//! - `start_work_item_plan_author(None, ...)` 原样走 provider.start(Legacy 零变化);
+//! - `resolve_plan_author_launch` + `start_work_item_plan_author(Logical, ...)` 经 gateway 启动并留 audit;
+//! - `resolve_plan_author_launch` 无 gateway 时返回 Legacy,`start_work_item_plan_author(Legacy, ...)` 原样走 provider.start(Legacy 零变化);
 //! - WorkspaceEngine 两个最小公开访问器。
 
 use super::*;
@@ -154,6 +154,43 @@ fn streaming_input(working_dir: std::path::PathBuf) -> StreamingProviderInput {
     }
 }
 
+fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
+    WorkspaceSession {
+        session_id: "session_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        stage: WorkspaceStage::Running,
+        messages: vec![],
+        artifact: None,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+        review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        provider_conversations: vec![],
+        repository_path: Some(repository_path),
+    }
+}
+
+fn workspace_engine(fixture: &GatewayFixture, with_gateway: bool) -> WorkspaceEngine {
+    let (event_tx, _event_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        workspace_session(fixture.aggregate_root.clone()),
+    );
+    if with_gateway {
+        engine.with_logical_provider_gateway(fixture.gateway.clone())
+    } else {
+        engine
+    }
+}
+
 #[tokio::test]
 async fn start_work_item_plan_author_routes_logical_through_gateway_and_records_audit() {
     let fixture = gateway_fixture();
@@ -163,17 +200,13 @@ async fn start_work_item_plan_author_routes_logical_through_gateway_and_records_
     let provider: Arc<dyn StreamingProviderAdapter> = Arc::new(CountingStreamingAdapter {
         starts: Arc::new(AtomicUsize::new(0)),
     });
-    let launch = LogicalPlanLaunch {
-        gateway: fixture.gateway.clone(),
-        project_id: "project_0001".to_string(),
-        working_dir: fixture.aggregate_root.clone(),
-        logical_repository_id: None,
-        checkout_id: None,
-    };
+    let engine = workspace_engine(&fixture, true);
+    let plan_launch =
+        resolve_plan_author_launch(&engine, None, None).expect("resolve logical launch");
     let input = streaming_input(fixture.aggregate_root.clone());
 
     let session =
-        start_work_item_plan_author(Some(launch), provider, input, CancellationToken::new()).await;
+        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new()).await;
 
     assert!(
         session.is_ok(),
@@ -193,10 +226,12 @@ async fn start_work_item_plan_author_none_uses_legacy_provider_start_unchanged()
     let provider: Arc<dyn StreamingProviderAdapter> = Arc::new(CountingStreamingAdapter {
         starts: starts.clone(),
     });
+    let engine = workspace_engine(&fixture, false);
+    let plan_launch = resolve_plan_author_launch(&engine, None, None).expect("legacy launch");
     let input = streaming_input(fixture.aggregate_root.clone());
 
     let session =
-        start_work_item_plan_author(None, provider, input, CancellationToken::new()).await;
+        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new()).await;
 
     assert!(
         session.is_ok(),
@@ -218,34 +253,7 @@ async fn start_work_item_plan_author_none_uses_legacy_provider_start_unchanged()
 #[test]
 fn workspace_engine_accessors_expose_logical_launch() {
     let fixture = gateway_fixture();
-    let (event_tx, _event_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
-
-    let session = WorkspaceSession {
-        session_id: "session_0001".to_string(),
-        project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: "work_item_plan_0001".to_string(),
-        workspace_type: WorkspaceType::WorkItemPlan,
-        stage: WorkspaceStage::Running,
-        messages: vec![],
-        artifact: None,
-        author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: Some(ProviderName::Codex),
-        review_rounds: 1,
-        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
-        superpowers_enabled: false,
-        openspec_enabled: false,
-        provider_conversations: vec![],
-        repository_path: Some(fixture.aggregate_root.clone()),
-    };
-    let engine = WorkspaceEngine::new(
-        Arc::new(CheckpointStore::new(
-            fixture.paths.root().join("checkpoints"),
-        )),
-        event_tx,
-        session,
-    )
-    .with_logical_provider_gateway(fixture.gateway.clone());
+    let engine = workspace_engine(&fixture, true);
 
     assert!(engine.logical_provider_gateway().is_some());
     assert_eq!(

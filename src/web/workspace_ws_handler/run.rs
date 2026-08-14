@@ -14,7 +14,7 @@ use followups::{
 };
 #[path = "run/gateway_start.rs"]
 mod gateway_start;
-pub(crate) use gateway_start::{LogicalPlanLaunch, start_work_item_plan_author};
+pub(crate) use gateway_start::{resolve_plan_author_launch, start_work_item_plan_author};
 #[path = "run/provider_run.rs"]
 mod provider_run;
 pub(crate) use provider_run::spawn_provider_run_from_handler;

@@ -394,6 +394,7 @@ fn work_item_plan_author_canonical_prompt_requests_contract_candidate_only() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -448,6 +449,7 @@ fn work_item_plan_author_canonical_prompt_is_provider_neutral_about_verification
             WorkItemGenerationMode::Serial,
             &[],
             None,
+            &RoutingReferenceContext::Legacy,
         )
         .expect("draft invocation");
 

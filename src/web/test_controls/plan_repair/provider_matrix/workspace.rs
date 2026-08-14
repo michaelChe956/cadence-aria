@@ -94,7 +94,10 @@ pub(super) async fn run_workspace_provider_roles(
         .active_timeline_node_id()
         .ok_or_else(|| fixture_error("work item author node is missing"))?;
     let author_input = engine
-        .build_current_work_item_draft_streaming_input(None)
+        .build_current_work_item_draft_streaming_input(
+            None,
+            &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy,
+        )
         .map_err(fixture_error)?;
     engine
         .emit_provider_prompt_event(

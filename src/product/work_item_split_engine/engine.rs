@@ -2,6 +2,7 @@ use serde_json::json;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::session_launch::ValidatedAdapterInput;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::policy::PolicyTarget;
 use crate::product::logical_codebase::provider_gateway::{
@@ -36,6 +37,9 @@ impl WorkItemSplitEngine {
             issue,
             repository,
             author_provider,
+            // 同步栈无 policy 来源；逻辑代码库仓库在 invoke_provider 前 fail-closed，
+            // prompt 构建始终注入 Legacy（与改造前字节一致）。
+            &RoutingReferenceContext::Legacy,
         )?;
 
         let provider_output = self
@@ -87,6 +91,9 @@ impl WorkItemSplitEngine {
             author_provider,
             retained,
             redo_specs,
+            // 同步栈无 policy 来源；逻辑代码库仓库在 invoke_provider 前 fail-closed，
+            // prompt 构建始终注入 Legacy（与改造前字节一致）。
+            &RoutingReferenceContext::Legacy,
         )?;
 
         let provider_output = self

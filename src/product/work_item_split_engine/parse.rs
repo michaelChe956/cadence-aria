@@ -141,12 +141,13 @@ pub fn parse_work_item_plan_outline_output(
     })
 }
 
-pub fn build_work_item_draft_invocation(
+pub(crate) fn build_work_item_draft_invocation(
     outline: &WorkItemPlanOutline,
     current_outline_id: &str,
     generation_mode: WorkItemGenerationMode,
     accepted_drafts: &[WorkItemDraftRecord],
     feedback: Option<&str>,
+    context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
 ) -> ApiResult<WorkItemDraftInvocation> {
     let current_outline = outline
         .work_item_outlines
@@ -196,6 +197,7 @@ pub fn build_work_item_draft_invocation(
         &other_previous,
         feedback,
         &nonce,
+        context,
     );
     if prompt.len() >= WORK_ITEM_DRAFT_PROMPT_MAX_BYTES {
         return Err(ApiError::validation_with_details(

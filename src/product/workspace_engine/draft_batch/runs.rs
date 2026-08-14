@@ -206,9 +206,10 @@ impl WorkspaceEngine {
             .unwrap_or_else(|| outline_id.to_string())
     }
 
-    pub fn build_current_work_item_draft_streaming_input(
+    pub(crate) fn build_current_work_item_draft_streaming_input(
         &mut self,
         feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<StreamingProviderInput, String> {
         let effective_feedback = match feedback {
             Some(value) => {
@@ -219,12 +220,14 @@ impl WorkspaceEngine {
         };
         self.build_current_work_item_draft_streaming_input_with_feedback(
             effective_feedback.as_deref(),
+            context,
         )
     }
 
     pub(crate) fn build_current_work_item_draft_streaming_input_with_feedback(
         &self,
         feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<StreamingProviderInput, String> {
         let store = self.work_item_plan_store()?;
         let index = store
@@ -247,6 +250,7 @@ impl WorkspaceEngine {
             WorkItemGenerationMode::Serial,
             &accepted_drafts,
             feedback,
+            context,
         )
         .map_err(|error| error.message)?;
         let working_dir = self
@@ -263,9 +267,10 @@ impl WorkspaceEngine {
         ))
     }
 
-    pub fn build_current_work_item_batch_draft_streaming_input(
+    pub(crate) fn build_current_work_item_batch_draft_streaming_input(
         &mut self,
         feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<StreamingProviderInput, String> {
         if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
             return Err("batch draft input requires active work_item_batch_run node".to_string());
@@ -300,6 +305,7 @@ impl WorkspaceEngine {
             WorkItemGenerationMode::Batch,
             &batch_drafts,
             effective_feedback.as_deref(),
+            context,
         )
         .map_err(|error| error.message)?;
         let working_dir = self

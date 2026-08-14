@@ -1,4 +1,6 @@
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference_legacy;
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
@@ -37,7 +39,7 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
 #[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 12_000;
 
-fn work_item_plan_runtime_contract(role: &str) -> String {
+fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
         "{}\
@@ -66,13 +68,13 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n\n",
-        direct_cadence_routing_rules_reference_legacy(),
+        direct_cadence_routing_rules_reference(context),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
 }
 
-fn work_item_draft_runtime_contract() -> String {
+fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
         "{}\
@@ -86,19 +88,20 @@ fn work_item_draft_runtime_contract() -> String {
          {allowed_outputs}\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n",
-        direct_cadence_routing_rules_reference_legacy(),
+        direct_cadence_routing_rules_reference(context),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
 }
 
 impl WorkItemSplitEngine {
-    pub fn build_generate_invocation(
+    pub(crate) fn build_generate_invocation(
         request: &GenerateWorkItemsRequest,
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
         repository: &RepositoryRecord,
         author_provider: ProviderName,
+        context: &RoutingReferenceContext,
     ) -> ApiResult<WorkItemSplitInvocation> {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
@@ -111,6 +114,7 @@ impl WorkItemSplitEngine {
             &story_context,
             &design_context,
             &repository_structure,
+            context,
         );
 
         Ok(WorkItemSplitInvocation {
@@ -122,13 +126,14 @@ impl WorkItemSplitEngine {
         })
     }
 
-    pub fn build_outline_invocation(
+    pub(crate) fn build_outline_invocation(
         request: &GenerateWorkItemsRequest,
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
         repository: &RepositoryRecord,
         author_provider: ProviderName,
         context_resolutions: &[OutlineContextBlockerResolution],
+        context: &RoutingReferenceContext,
     ) -> ApiResult<WorkItemSplitInvocation> {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
@@ -144,6 +149,7 @@ impl WorkItemSplitEngine {
             &repository_structure,
             &gaps,
             context_resolutions,
+            context,
         );
 
         Ok(WorkItemSplitInvocation {
@@ -160,14 +166,16 @@ impl WorkItemSplitEngine {
     /// Prompt 不再重复 issue/story/design/repository 完整上下文，而是依赖
     /// `resume_provider_session_id` 复用 provider 会话历史；仅注入需要修改的
     /// revision feedback，要求输出完整更新后的 outline JSON。
-    pub fn build_outline_revision_invocation(
+    pub(crate) fn build_outline_revision_invocation(
         request: &GenerateWorkItemsRequest,
         issue: &IssueRecord,
         repository: &RepositoryRecord,
         author_provider: ProviderName,
         feedback: &str,
+        context: &RoutingReferenceContext,
     ) -> ApiResult<WorkItemSplitInvocation> {
-        let (prompt, sentinel_nonce) = build_outline_revision_prompt(request, issue, feedback);
+        let (prompt, sentinel_nonce) =
+            build_outline_revision_prompt(request, issue, feedback, context);
 
         Ok(WorkItemSplitInvocation {
             prompt,
@@ -179,7 +187,7 @@ impl WorkItemSplitEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn build_revision_invocation(
+    pub(crate) fn build_revision_invocation(
         request: &GenerateWorkItemsRequest,
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
@@ -187,6 +195,7 @@ impl WorkItemSplitEngine {
         author_provider: ProviderName,
         retained: &[LifecycleWorkItemRecord],
         redo_specs: &[RedoSpec],
+        context: &RoutingReferenceContext,
     ) -> ApiResult<WorkItemSplitInvocation> {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
@@ -201,6 +210,7 @@ impl WorkItemSplitEngine {
             &story_context,
             &design_context,
             &repository_structure,
+            context,
         );
 
         Ok(WorkItemSplitInvocation {
@@ -225,6 +235,7 @@ pub(crate) fn build_outline_prompt(
     repository_structure: &str,
     design_context_gaps: &[String],
     context_resolutions: &[OutlineContextBlockerResolution],
+    context: &RoutingReferenceContext,
 ) -> String {
     build_outline_prompt_with_nonce(
         request,
@@ -235,6 +246,7 @@ pub(crate) fn build_outline_prompt(
         repository_structure,
         design_context_gaps,
         context_resolutions,
+        context,
     )
     .0
 }
@@ -278,9 +290,10 @@ pub(crate) fn build_outline_prompt_with_nonce(
     repository_structure: &str,
     design_context_gaps: &[String],
     context_resolutions: &[OutlineContextBlockerResolution],
+    context: &RoutingReferenceContext,
 ) -> (String, String) {
     let nonce = structured_output_nonce();
-    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner");
+    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner", context);
     let revision_feedback_section = request
         .revision_feedback
         .as_deref()
@@ -364,9 +377,10 @@ pub(crate) fn build_outline_revision_prompt(
     request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
     feedback: &str,
+    context: &RoutingReferenceContext,
 ) -> (String, String) {
     let nonce = structured_output_nonce();
-    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner");
+    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner", context);
     let prompt = format!(
         "你是 Aria 的 WorkItemPlan Outline Planner。当前请求是基于同一会话中上一版 outline 进行增量返修。\n\n\
          {runtime_contract}\
@@ -428,9 +442,10 @@ pub(crate) fn build_split_prompt(
     story_context: &[String],
     design_context: &[String],
     repository_structure: &str,
+    context: &RoutingReferenceContext,
 ) -> String {
     let nonce = structured_output_nonce();
-    let runtime_contract = work_item_plan_runtime_contract("Work Item Splitter");
+    let runtime_contract = work_item_plan_runtime_contract("Work Item Splitter", context);
     let revision_feedback_section = request
         .revision_feedback
         .as_deref()
@@ -505,6 +520,7 @@ pub(crate) fn build_revision_prompt(
     story_context: &[String],
     design_context: &[String],
     repository_structure: &str,
+    context: &RoutingReferenceContext,
 ) -> String {
     if retained.is_empty() && redo_specs.is_empty() {
         return build_split_prompt(
@@ -514,11 +530,12 @@ pub(crate) fn build_revision_prompt(
             story_context,
             design_context,
             repository_structure,
+            context,
         );
     }
 
     let nonce = structured_output_nonce();
-    let runtime_contract = work_item_plan_runtime_contract("Work Item Splitter");
+    let runtime_contract = work_item_plan_runtime_contract("Work Item Splitter", context);
     let retained_section = if retained.is_empty() {
         "(无)".to_string()
     } else {
@@ -585,6 +602,9 @@ pub(crate) fn build_revision_prompt(
     )
 }
 
+// context 参数使函数从 7 参增到 8 参；这是 T3 裁决 A 必需的签名扩展（Draft Prompt 正文与
+// MAX_BYTES/runtime contract 均未改动），对 clippy 的 too_many_arguments 阈值豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_work_item_draft_prompt(
     outline: &crate::product::models::WorkItemPlanOutline,
     current_outline: &crate::product::models::WorkItemOutline,
@@ -593,8 +613,9 @@ pub(crate) fn build_work_item_draft_prompt(
     other_previous: &[&WorkItemDraftRecord],
     feedback: Option<&str>,
     nonce: &str,
+    context: &RoutingReferenceContext,
 ) -> String {
-    let runtime_contract = work_item_draft_runtime_contract();
+    let runtime_contract = work_item_draft_runtime_contract(context);
     let confirmed_plan_trace = format!(
         "plan_id: {}\nsource_story_spec_ids: {}\nsource_design_spec_ids: {}\nstrategy_summary: {}",
         outline.id,

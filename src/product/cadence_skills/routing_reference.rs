@@ -13,6 +13,22 @@ pub(crate) struct LogicalPolicyReference {
     pub authority_root: String,
 }
 
+/// 把 gateway 校验后的 `ValidatedSessionLaunchPolicy` 映射为 `RoutingReferenceContext::Logical`。
+///
+/// 单一归属：WorkItemPlan 流式路径（T3）与 coding 路径（T2）共用本转换，不复制逻辑。
+/// envelope 是 policy 的冻结快照，`authority_root` 取 `manifest.provider_context_root`。
+pub(crate) fn routing_reference_context_from_policy(
+    policy: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+) -> RoutingReferenceContext {
+    let envelope = policy.envelope();
+    RoutingReferenceContext::Logical(LogicalPolicyReference {
+        policy_id: envelope.policy_id.clone(),
+        policy_revision: envelope.policy_revision,
+        policy_digest: envelope.policy_digest.clone(),
+        authority_root: envelope.authority_root.to_string_lossy().to_string(),
+    })
+}
+
 const LEGACY_REFERENCE: &str = concat!(
     "[cadence_project_rules]\n",
     "当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据，必须直接读取并遵守其中适用规则。\n",

@@ -65,7 +65,7 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
     assert_eq!(active_node.node_type, TimelineNodeType::WorkItemDraftRun);
 
     let input = engine
-        .build_current_work_item_draft_streaming_input(None)
+        .build_current_work_item_draft_streaming_input(None, &RoutingReferenceContext::Legacy)
         .expect("draft streaming input");
     assert!(input.prompt.contains("[review_findings]"));
     assert!(input.prompt.contains("evidence: snapshot 被 tokio::spawn 调用"));

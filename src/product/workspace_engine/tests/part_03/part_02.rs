@@ -219,7 +219,7 @@ async fn work_item_plan_item_optional_choice_can_apply_findings() {
         "optional item findings should use WorkItemDraft rewrite, not generic revision"
     );
     let input = engine
-        .build_current_work_item_draft_streaming_input(None)
+        .build_current_work_item_draft_streaming_input(None, &RoutingReferenceContext::Legacy)
         .expect("draft streaming input");
     assert!(input.prompt.contains("[review_findings]"));
     assert!(input.prompt.contains("evidence: 主路径完整"));
@@ -383,7 +383,7 @@ async fn work_item_plan_batch_optional_choice_can_apply_findings() {
         .expect("active batch run node");
     assert_eq!(active_node.node_type, TimelineNodeType::WorkItemBatchRun);
     let input = engine
-        .build_current_work_item_batch_draft_streaming_input(None)
+        .build_current_work_item_batch_draft_streaming_input(None, &RoutingReferenceContext::Legacy)
         .expect("batch streaming input");
     assert!(
         input

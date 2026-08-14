@@ -11,6 +11,7 @@ fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -44,6 +45,7 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -108,6 +110,7 @@ fn single_item_prompt_accepts_maximum_legal_trusted_command_catalog_within_budge
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("maximum legal catalog must remain invocable");
 
@@ -143,6 +146,7 @@ fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_p
         &[],
         None,
         "nonce",
+        &RoutingReferenceContext::Legacy,
     );
     assert!(
         prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
@@ -156,6 +160,7 @@ fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_p
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect_err("short catalog exceeding maxItems must fail before provider invocation");
 
@@ -188,6 +193,7 @@ fn single_item_prompt_rejects_oversized_trusted_command_catalog_before_provider_
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect_err("oversized trusted catalog must fail before provider invocation");
 
@@ -214,6 +220,7 @@ fn single_item_prompt_projects_planning_discipline_into_canonical_fields() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -245,6 +252,7 @@ fn single_item_prompt_requires_observable_acceptance_criteria_and_forbids_proces
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -274,6 +282,7 @@ fn single_item_prompt_requires_registration_projection_and_self_check() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -312,6 +321,7 @@ fn single_item_prompt_routes_manual_items_to_acceptance_criteria() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -357,6 +367,7 @@ fn empty_trusted_command_catalog_placeholder_allows_required_manual_checks() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -387,6 +398,7 @@ fn single_item_prompt_requires_reviewer_checks_to_equal_criteria() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -411,6 +423,7 @@ fn single_item_prompt_includes_closed_typed_canonical_field_contract() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -443,6 +456,7 @@ fn work_item_plan_prompts_keep_json_contract_without_markdown_schema() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -480,6 +494,7 @@ fn single_item_prompt_relaxes_handoff_provided_contract_refs_for_terminal_items(
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -527,6 +542,7 @@ fn draft_prompt_requires_input_contract_ids_to_reference_upstream_output_contrac
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -559,6 +575,7 @@ fn single_item_prompt_spells_out_required_evidence_as_array() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -587,6 +604,7 @@ fn single_item_prompt_names_both_verification_check_owners() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 

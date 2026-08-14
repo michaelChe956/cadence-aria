@@ -120,6 +120,29 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                 };
 
                 let author_provider = $engine.session().author_provider.clone();
+                let plan_launch = match resolve_plan_author_launch(
+                    &*$engine,
+                    repository
+                        .logical_repository_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                    repository
+                        .primary_checkout_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                ) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("logical plan launch failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let routing_context = plan_launch.routing_context();
                 let invocation = match WorkItemSplitEngine::build_revision_invocation(
                     &request,
                     &lifecycle_for_run,
@@ -128,6 +151,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     author_provider,
                     &retained,
                     &redo_specs,
+                    &routing_context,
                 ) {
                     Ok(invocation) => invocation,
                     Err(error) => {
@@ -155,25 +179,8 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     invocation.worktree_path.clone(),
                     invocation.author_provider.clone(),
                 );
-                let logical = $engine.logical_provider_gateway().and_then(|gateway| {
-                    $engine
-                        .logical_planning_launch()
-                        .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                            gateway,
-                            project_id,
-                            working_dir,
-                            logical_repository_id: repository
-                                .logical_repository_id
-                                .as_ref()
-                                .map(|id| id.0.to_string()),
-                            checkout_id: repository
-                                .primary_checkout_id
-                                .as_ref()
-                                .map(|id| id.0.to_string()),
-                        })
-                });
                 let provider_session = start_work_item_plan_author(
-                    logical,
+                    plan_launch,
                     $provider_for_run.clone(),
                     provider_input,
                     $run_cancel.clone(),
@@ -304,6 +311,29 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
 
                             // 整组 AutoRevision 时丢弃局部 retained/redo，使用完整 generate_revision。
                             let author_provider = $engine.session().author_provider.clone();
+                            let plan_launch = match resolve_plan_author_launch(
+                                &*$engine,
+                                repository
+                                    .logical_repository_id
+                                    .as_ref()
+                                    .map(|id| id.0.to_string()),
+                                repository
+                                    .primary_checkout_id
+                                    .as_ref()
+                                    .map(|id| id.0.to_string()),
+                            ) {
+                                Ok(launch) => launch,
+                                Err(error) => {
+                                    $engine.mark_active_run_finished(&$run_label);
+                                    drop($engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!("logical plan launch failed: {error}"),
+                                    };
+                                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            let routing_context = plan_launch.routing_context();
                             let invocation = match WorkItemSplitEngine::build_revision_invocation(
                                 &request,
                                 &lifecycle_for_run,
@@ -312,6 +342,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 author_provider,
                                 &[],
                                 &[],
+                                &routing_context,
                             ) {
                                 Ok(invocation) => invocation,
                                 Err(error) => {
@@ -336,27 +367,8 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
                             );
-                            let logical = $engine
-                                .logical_provider_gateway()
-                                .and_then(|gateway| {
-                                    $engine.logical_planning_launch().map(
-                                        |(project_id, working_dir)| LogicalPlanLaunch {
-                                            gateway,
-                                            project_id,
-                                            working_dir,
-                                            logical_repository_id: repository
-                                                .logical_repository_id
-                                                .as_ref()
-                                                .map(|id| id.0.to_string()),
-                                            checkout_id: repository
-                                                .primary_checkout_id
-                                                .as_ref()
-                                                .map(|id| id.0.to_string()),
-                                        },
-                                    )
-                                });
                             let provider_session = start_work_item_plan_author(
-                                logical,
+                                plan_launch,
                                 $provider_for_run.clone(),
                                 provider_input,
                                 $run_cancel.clone(),
@@ -613,8 +625,31 @@ macro_rules! workspace_ws_provider_run_followups {
                 .await;
                 return;
             };
+            let plan_launch = match resolve_plan_author_launch(&*$engine, None, None) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    $engine.mark_active_run_finished(&$run_label);
+                    drop($engine);
+                    let err = WsOutMessage::Error {
+                        message: format!("logical plan launch failed: {error}"),
+                    };
+                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    clear_active_run_if_token(
+                        &$current_run_for_task,
+                        &$workspace_runs_for_task,
+                        &$session_id_for_task,
+                        $run_token,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let routing_context = plan_launch.routing_context();
             let provider_input = match $engine
-                .build_current_work_item_draft_streaming_input(feedback.as_deref())
+                .build_current_work_item_draft_streaming_input(
+                    feedback.as_deref(),
+                    &routing_context,
+                )
             {
                 Ok(input) => input,
                 Err(message) => {
@@ -646,19 +681,8 @@ macro_rules! workspace_ws_provider_run_followups {
                     Some(author_name.clone()),
                 )
                 .await;
-            let logical = $engine.logical_provider_gateway().and_then(|gateway| {
-                $engine
-                    .logical_planning_launch()
-                    .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                        gateway,
-                        project_id,
-                        working_dir,
-                        logical_repository_id: None,
-                        checkout_id: None,
-                    })
-            });
             let provider_session = start_work_item_plan_author(
-                logical,
+                plan_launch,
                 provider_for_draft.clone(),
                 provider_input,
                 $run_cancel.clone(),
@@ -766,6 +790,19 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
     let mut revision_iterations = 0;
     loop {
         let author_provider = engine.session().author_provider.clone();
+        let plan_launch = resolve_plan_author_launch(
+            engine,
+            repository
+                .logical_repository_id
+                .as_ref()
+                .map(|id| id.0.to_string()),
+            repository
+                .primary_checkout_id
+                .as_ref()
+                .map(|id| id.0.to_string()),
+        )
+        .map_err(|error| format!("logical plan launch failed: {error}"))?;
+        let routing_context = plan_launch.routing_context();
         let context_resolutions = load_work_item_plan_outline_context_resolutions(
             app_paths,
             session_record,
@@ -780,6 +817,7 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             &repository,
             author_provider,
             &context_resolutions,
+            &routing_context,
         )
         .map_err(|error| format!("split generate failed: {}", error.message))?;
         let node_id = engine
@@ -791,25 +829,8 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             invocation.worktree_path.clone(),
             invocation.author_provider.clone(),
         );
-        let logical = engine.logical_provider_gateway().and_then(|gateway| {
-            engine
-                .logical_planning_launch()
-                .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                    gateway,
-                    project_id,
-                    working_dir,
-                    logical_repository_id: repository
-                        .logical_repository_id
-                        .as_ref()
-                        .map(|id| id.0.to_string()),
-                    checkout_id: repository
-                        .primary_checkout_id
-                        .as_ref()
-                        .map(|id| id.0.to_string()),
-                })
-        });
         let provider_session = start_work_item_plan_author(
-            logical,
+            plan_launch,
             provider.clone(),
             provider_input,
             run_cancel.clone(),

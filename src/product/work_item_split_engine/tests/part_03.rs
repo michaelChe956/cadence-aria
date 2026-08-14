@@ -5,7 +5,7 @@ fn build_split_prompt_inlines_schema_and_kind_guidance() {
     // `kind` 是必填字段,按习惯输出 `type` 触发 `missing field kind`。
     // 修复后 prompt 必须内联 schema 正文并给出 kind 合法取值。
     let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(
         !prompt.contains("work_item_split_output_schema.json"),
@@ -40,7 +40,7 @@ fn build_split_prompt_inlines_schema_and_kind_guidance() {
 #[test]
 fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
     let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
     assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
@@ -53,7 +53,7 @@ fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
 #[test]
 fn split_prompt_requests_progress_before_long_operations() {
     let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
     assert!(prompt.contains("先输出一行简短可读状态"));
@@ -76,6 +76,7 @@ fn build_revision_prompt_inlines_schema_and_kind_guidance() {
         &[],
         &[],
         "(empty)",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(
@@ -122,6 +123,7 @@ fn build_revision_prompt_allows_readable_stream_before_final_sentinel() {
         &[],
         &[],
         "(empty)",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
@@ -148,6 +150,7 @@ fn revision_prompt_requests_progress_before_long_operations() {
         &[],
         &[],
         "(empty)",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));

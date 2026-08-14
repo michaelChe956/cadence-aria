@@ -109,7 +109,7 @@ fn build_split_prompt_includes_revision_feedback() {
         identity_schema_version: 0,
     };
 
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(
         prompt.contains("[revision_feedback]"),
@@ -134,6 +134,7 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
         "src/product\nweb/src",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("[openspec_contract]"));
@@ -178,7 +179,7 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
     let (request, issue, _repository) = split_prompt_fixture();
 
     let (prompt, _nonce) =
-        build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes");
+        build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
@@ -247,6 +248,7 @@ fn build_outline_revision_prompt_is_delta_only() {
         &request,
         &issue,
         "add dependency edge between backend and frontend",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(
@@ -349,6 +351,7 @@ fn outline_author_prompt_forbids_full_work_items_and_repository_profile() {
         "(empty)",
         &["missing_test_strategy".to_string()],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("只能输出 WorkItemPlan Outline"));
@@ -390,8 +393,9 @@ fn outline_author_prompts_make_context_blockers_outline_alternative() {
         "(empty)",
         &["missing_test_strategy".to_string()],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
-    let (revision_prompt, _) = build_outline_revision_prompt(&request, &issue, "补充前后端依赖边");
+    let (revision_prompt, _) = build_outline_revision_prompt(&request, &issue, "补充前后端依赖边", &RoutingReferenceContext::Legacy);
 
     for prompt in [prompt, revision_prompt] {
         assert!(
@@ -421,9 +425,10 @@ fn outline_author_prompts_require_dependency_write_scope_partitioning() {
         "(empty)",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
     let (revision_prompt, _) =
-        build_outline_revision_prompt(&request, &issue, "修复 exclusive_write_scopes 重叠");
+        build_outline_revision_prompt(&request, &issue, "修复 exclusive_write_scopes 重叠", &RoutingReferenceContext::Legacy);
 
     for prompt in [prompt, revision_prompt] {
         assert!(
@@ -461,9 +466,10 @@ fn work_item_plan_prompts_require_current_scope_verification_closure() {
         "(empty)",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
     let (revision_outline_prompt, _) =
-        build_outline_revision_prompt(&request, &issue, "修复验证可达性");
+        build_outline_revision_prompt(&request, &issue, "修复验证可达性", &RoutingReferenceContext::Legacy);
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
         .outline
@@ -474,6 +480,7 @@ fn work_item_plan_prompts_require_current_scope_verification_closure() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation")
     .prompt;
@@ -645,6 +652,7 @@ fn single_item_prompt_projects_direct_dependency_within_provider_budget() {
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some("补充错误态"),
+        &RoutingReferenceContext::Legacy,
     )
     .expect("direct dependency context must stay within the provider budget");
 
@@ -802,6 +810,7 @@ fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
         WorkItemGenerationMode::Serial,
         &[accepted_module_draft],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("realistic serial prompt must stay invocable");
     // Slimmed margin target, raised twice for canonical field contract clarity:
@@ -875,6 +884,7 @@ fn serial_prompt_above_legacy_11000_limit_remains_invocable_below_hard_backstop(
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some(&feedback),
+        &RoutingReferenceContext::Legacy,
     )
     .expect("prompt above the legacy 11000-byte limit must remain invocable below the 64KB hard backstop");
     assert!(
@@ -927,6 +937,7 @@ fn serial_prompt_above_hard_backstop_is_rejected() {
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some(&feedback),
+        &RoutingReferenceContext::Legacy,
     )
     .expect_err("prompt above the 64KB hard backstop must fail closed");
     assert_eq!(error.code, "work_item_draft_prompt_too_large");
@@ -951,6 +962,7 @@ fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -978,6 +990,7 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -1013,6 +1026,7 @@ fn single_item_prompt_requires_verification_checks_as_exact_execution_view() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 

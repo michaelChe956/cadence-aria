@@ -25,10 +25,8 @@ pub use context::{
     design_context_capabilities_for_request, design_context_gaps,
     extract_design_context_capabilities,
 };
-pub use parse::{
-    build_work_item_draft_invocation, parse_work_item_draft_output,
-    parse_work_item_plan_outline_output,
-};
+pub(crate) use parse::build_work_item_draft_invocation;
+pub use parse::{parse_work_item_draft_output, parse_work_item_plan_outline_output};
 pub use prompts::WORK_ITEM_DRAFT_PROMPT_VERSION;
 pub use schema::WORK_ITEM_DRAFT_OUTPUT_SCHEMA;
 pub use types::{

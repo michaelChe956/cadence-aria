@@ -179,6 +179,29 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 };
 
                 let author_provider = engine.session().author_provider.clone();
+                let plan_launch = match resolve_plan_author_launch(
+                    &engine,
+                    repository
+                        .logical_repository_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                    repository
+                        .primary_checkout_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                ) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("logical plan launch failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let routing_context = plan_launch.routing_context();
 
                 // 首次生成：使用完整 prompt + context_resolutions；
                 // review/AutoRevision：使用同一会话增量返修 prompt，不重复完整上下文。
@@ -192,6 +215,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         &repository,
                         author_provider,
                         feedback,
+                        &routing_context,
                     ) {
                         Ok(invocation) => invocation,
                         Err(error) => {
@@ -230,6 +254,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         &repository,
                         author_provider,
                         &context_resolutions,
+                        &routing_context,
                     ) {
                         Ok(invocation) => invocation,
                         Err(error) => {
@@ -310,25 +335,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         invocation.author_provider.clone(),
                     )
                 };
-                let logical = engine.logical_provider_gateway().and_then(|gateway| {
-                    engine
-                        .logical_planning_launch()
-                        .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                            gateway,
-                            project_id,
-                            working_dir,
-                            logical_repository_id: repository
-                                .logical_repository_id
-                                .as_ref()
-                                .map(|id| id.0.to_string()),
-                            checkout_id: repository
-                                .primary_checkout_id
-                                .as_ref()
-                                .map(|id| id.0.to_string()),
-                        })
-                });
                 let provider_session = start_work_item_plan_author(
-                    logical,
+                    plan_launch,
                     provider_for_run.clone(),
                     provider_input,
                     run_cancel.clone(),
@@ -429,6 +437,29 @@ pub(crate) async fn spawn_provider_run_from_handler(
                                 .unwrap_or_else(|| "timeline_node_unknown".to_string());
                             let retry_error = work_item_plan_retry_error(&findings);
                             let author_provider = engine.session().author_provider.clone();
+                            let plan_launch = match resolve_plan_author_launch(
+                                &engine,
+                                repository
+                                    .logical_repository_id
+                                    .as_ref()
+                                    .map(|id| id.0.to_string()),
+                                repository
+                                    .primary_checkout_id
+                                    .as_ref()
+                                    .map(|id| id.0.to_string()),
+                            ) {
+                                Ok(launch) => launch,
+                                Err(error) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!("logical plan launch failed: {error}"),
+                                    };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            let routing_context = plan_launch.routing_context();
                             invocation =
                                 match WorkItemSplitEngine::build_outline_revision_invocation(
                                     &request,
@@ -436,6 +467,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                                     &repository,
                                     author_provider,
                                     &feedback,
+                                    &routing_context,
                                 ) {
                                     Ok(invocation) => invocation,
                                     Err(error) => {
@@ -474,25 +506,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
                             );
-                            let logical = engine.logical_provider_gateway().and_then(|gateway| {
-                                engine
-                                    .logical_planning_launch()
-                                    .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                                        gateway,
-                                        project_id,
-                                        working_dir,
-                                        logical_repository_id: repository
-                                            .logical_repository_id
-                                            .as_ref()
-                                            .map(|id| id.0.to_string()),
-                                        checkout_id: repository
-                                            .primary_checkout_id
-                                            .as_ref()
-                                            .map(|id| id.0.to_string()),
-                                    })
-                            });
                             let provider_session = start_work_item_plan_author(
-                                logical,
+                                plan_launch,
                                 provider_for_run.clone(),
                                 provider_input,
                                 run_cancel.clone(),
@@ -549,9 +564,23 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                         return;
                     };
-                    let provider_input = match engine
-                        .build_current_work_item_draft_streaming_input(feedback.as_deref())
-                    {
+                    let plan_launch = match resolve_plan_author_launch(&engine, None, None) {
+                        Ok(launch) => launch,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error {
+                                message: format!("logical plan launch failed: {error}"),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    let routing_context = plan_launch.routing_context();
+                    let provider_input = match engine.build_current_work_item_draft_streaming_input(
+                        feedback.as_deref(),
+                        &routing_context,
+                    ) {
                         Ok(input) => input,
                         Err(message) => {
                             engine
@@ -576,19 +605,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             Some(author_provider.clone()),
                         )
                         .await;
-                    let logical = engine.logical_provider_gateway().and_then(|gateway| {
-                        engine
-                            .logical_planning_launch()
-                            .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                                gateway,
-                                project_id,
-                                working_dir,
-                                logical_repository_id: None,
-                                checkout_id: None,
-                            })
-                    });
                     let provider_session = start_work_item_plan_author(
-                        logical,
+                        plan_launch,
                         provider_for_run.clone(),
                         provider_input,
                         run_cancel.clone(),
@@ -668,9 +686,24 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                         return;
                     };
+                    let plan_launch = match resolve_plan_author_launch(&engine, None, None) {
+                        Ok(launch) => launch,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error {
+                                message: format!("logical plan launch failed: {error}"),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    let routing_context = plan_launch.routing_context();
                     let provider_input = match engine
-                        .build_current_work_item_batch_draft_streaming_input(feedback.as_deref())
-                    {
+                        .build_current_work_item_batch_draft_streaming_input(
+                            feedback.as_deref(),
+                            &routing_context,
+                        ) {
                         Ok(input) => input,
                         Err(message) => {
                             engine
@@ -695,19 +728,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             Some(author_provider.clone()),
                         )
                         .await;
-                    let logical = engine.logical_provider_gateway().and_then(|gateway| {
-                        engine
-                            .logical_planning_launch()
-                            .map(|(project_id, working_dir)| LogicalPlanLaunch {
-                                gateway,
-                                project_id,
-                                working_dir,
-                                logical_repository_id: None,
-                                checkout_id: None,
-                            })
-                    });
                     let provider_session = start_work_item_plan_author(
-                        logical,
+                        plan_launch,
                         provider_for_run.clone(),
                         provider_input,
                         run_cancel.clone(),

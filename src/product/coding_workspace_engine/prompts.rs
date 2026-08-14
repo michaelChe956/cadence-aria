@@ -1,10 +1,14 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::cadence_skills::routing_reference::{
-    LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
 };
 use crate::product::coding_models::CodingAttemptScope;
-use crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy;
+
+// `routing_reference_context_from_policy` 已迁至 `cadence_skills/routing_reference.rs`
+// 作为单一归属（WorkItemPlan T3 与 coding T2 共用）。此处 re-export 保持既有
+// `use super::*` 调用点（coding/rework/internal_pr_review/provider_retry）不变。
+pub(crate) use crate::product::cadence_skills::routing_reference::routing_reference_context_from_policy;
 
 pub(crate) fn code_review_output_contract(nonce: &str) -> String {
     format!(
@@ -422,18 +426,6 @@ pub(crate) fn group_final_review_material_protocol(context: &RoutingReferenceCon
         ),
         context,
     )
-}
-
-pub(crate) fn routing_reference_context_from_policy(
-    policy: &ValidatedSessionLaunchPolicy,
-) -> RoutingReferenceContext {
-    let envelope = policy.envelope();
-    RoutingReferenceContext::Logical(LogicalPolicyReference {
-        policy_id: envelope.policy_id.clone(),
-        policy_revision: envelope.policy_revision,
-        policy_digest: envelope.policy_digest.clone(),
-        authority_root: envelope.authority_root.to_string_lossy().to_string(),
-    })
 }
 
 fn with_cadence_routing_reference(
