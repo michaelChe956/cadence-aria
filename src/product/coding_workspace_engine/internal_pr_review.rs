@@ -87,6 +87,8 @@ impl CodingWorkspaceEngine {
                 created_at: Utc::now().to_rfc3339(),
                 updated_at: Utc::now().to_rfc3339(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
             });
         self.build_group_internal_pr_review_prompt(
             attempt,

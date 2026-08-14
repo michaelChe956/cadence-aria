@@ -12,7 +12,7 @@ use crate::product::coding_models::{
     CodingExecutionStage as FixtureStage, CodingGateAction, CodingGateActionType,
     CodingProviderRole, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
     CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind,
+    ReviewRequestKind, ReviewRequestOwnerKind,
 };
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::json_store::write_json;
@@ -406,6 +406,8 @@ fn create_coding_role_run_fixture(
             created_at: now.clone(),
             updated_at: now.clone(),
             push_error: None,
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
         };
         store.save_review_request(&attempt, &review_request)?;
 

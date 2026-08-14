@@ -162,7 +162,7 @@ mod tests {
     use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
     use crate::product::coding_models::{
         CodingAttemptStatus, CodingExecutionAttempt, PushStatus, RemoteKind, ReviewRequest,
-        ReviewRequestKind,
+        ReviewRequestKind, ReviewRequestOwnerKind,
     };
     use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::json_store::{read_json, write_json};
@@ -271,6 +271,8 @@ mod tests {
             external_url: None,
             manual_instructions: Vec::new(),
             push_error,
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
             created_at: "2026-08-13T00:00:00Z".to_string(),
             updated_at: "2026-08-13T00:00:00Z".to_string(),
         };

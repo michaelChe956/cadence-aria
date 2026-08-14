@@ -10,7 +10,8 @@ use cadence_aria::product::coding_models::{
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
+    WorkItemExecutionPlan,
 };
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::{

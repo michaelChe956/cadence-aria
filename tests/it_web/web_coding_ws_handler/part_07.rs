@@ -152,6 +152,8 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
             created_at: "2026-06-13T00:00:00Z".to_string(),
             updated_at: "2026-06-13T00:00:00Z".to_string(),
             push_error: None,
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
         })
         .expect("save review request");
     let first_run = store

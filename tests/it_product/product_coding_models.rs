@@ -5,7 +5,7 @@ use cadence_aria::product::coding_models::{
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
     CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
     InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict,
+    ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -308,6 +308,8 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         created_at: "2026-05-23T00:05:00Z".to_string(),
         updated_at: "2026-05-23T00:05:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
     };
     let node = CodingTimelineNode {
         id: "coding_node_0001".to_string(),

@@ -1,4 +1,4 @@
-use crate::product::coding_models::{RemoteKind, ReviewRequest, ReviewRequestKind};
+use crate::product::coding_models::{RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind};
 
 fn manual_recovery_attempt_fixture() -> CodingExecutionAttempt {
     CodingExecutionAttempt {
@@ -58,6 +58,8 @@ fn failed_review_request_fixture(attempt: &CodingExecutionAttempt) -> ReviewRequ
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: Some("push rejected".to_string()),
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "2026-06-12T00:00:00Z".to_string(),
         updated_at: "2026-06-12T00:00:00Z".to_string(),
     }

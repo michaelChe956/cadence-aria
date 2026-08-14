@@ -1,7 +1,8 @@
 use crate::product::coding_models::{
     CodeReviewReport, CodingAttemptStatus, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole, FindingSeverity,
-    InternalPrReview, ReviewFinding, ReviewVerdict,
+    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
+    ReviewRequestOwnerKind, ReviewVerdict,
 };
 
 #[test]
@@ -158,4 +159,52 @@ fn legacy_coding_qa_records_deserialize_with_defaults() {
     assert_eq!(gate.reason_code, None);
     assert!(gate.evidence_refs.is_empty());
     assert_eq!(gate.raw_provider_output_ref, None);
+}
+
+#[test]
+fn review_request_deserializes_legacy_json_as_attempt_owner() {
+    let legacy = serde_json::json!({
+        "id": "rr_1", "attempt_id": "attempt_1", "kind": "git_branch_only",
+        "remote_kind": "generic_git", "remote": "origin",
+        "base_branch": "main", "branch_name": "aria/attempt_1",
+        "commit_sha": "abc", "push_status": "pushed",
+        "external_url": null, "manual_instructions": [],
+        "created_at": "2026-08-14T00:00:00Z", "updated_at": "2026-08-14T00:00:00Z"
+    });
+    let req: ReviewRequest = serde_json::from_value(legacy).unwrap();
+    assert_eq!(req.owner_kind, ReviewRequestOwnerKind::Attempt);
+    assert_eq!(req.pointer_publication_id, None);
+}
+
+#[test]
+fn review_request_roundtrips_pointer_publication_owner() {
+    let req = ReviewRequest {
+        id: "rr_2".to_string(),
+        attempt_id: "pointer-pub-pub_1".to_string(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: "aria/pointer_pub_1".to_string(),
+        commit_sha: "abc".to_string(),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error: None,
+        owner_kind: ReviewRequestOwnerKind::PointerPublication,
+        pointer_publication_id: Some("pub_1".to_string()),
+        created_at: "2026-08-14T00:00:00Z".to_string(),
+        updated_at: "2026-08-14T00:00:00Z".to_string(),
+    };
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["owner_kind"], "pointer_publication");
+    assert_eq!(value["pointer_publication_id"], "pub_1");
+
+    let decoded: ReviewRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        decoded.owner_kind,
+        ReviewRequestOwnerKind::PointerPublication
+    );
+    assert_eq!(decoded.pointer_publication_id, Some("pub_1".to_string()));
+    assert_eq!(decoded.attempt_id, "pointer-pub-pub_1");
 }

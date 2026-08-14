@@ -24,7 +24,7 @@ use cadence_aria::product::coding_models::{
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict,
+    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine,

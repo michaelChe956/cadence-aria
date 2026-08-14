@@ -9,7 +9,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use crate::product::coding_models::{
     CodingUnitRun, CodingUnitRunStatus, CompactFindingDigest, PushStatus, RemoteKind,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, UnitReviewConclusionSnapshot,
+    ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
+    UnitReviewConclusionSnapshot,
 };
 use crate::product::coding_workspace_engine::group_review_budget::{
     GROUP_REVIEW_HARD_CAP_BYTES, GROUP_REVIEW_QUALITY_TARGET_BYTES,
@@ -222,6 +223,8 @@ fn e2e_review_request() -> ReviewRequest {
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "ignored".to_string(),
         updated_at: "ignored".to_string(),
     }

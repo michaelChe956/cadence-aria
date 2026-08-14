@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::coding_models::{
     CodingUnitRun, CodingUnitRunStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
+    ReviewRequestOwnerKind,
 };
 use crate::product::coding_workspace_engine::plan_defect_routing::{
     AuthoritativeGroupReviewerBinding, GroupReviewerProjectionBinding,
@@ -75,6 +76,8 @@ fn facts_request(attempt: &CodingExecutionAttempt, final_commit: String) -> Revi
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "2026-08-04T00:00:00Z".to_string(),
         updated_at: "2026-08-04T00:00:00Z".to_string(),
     }

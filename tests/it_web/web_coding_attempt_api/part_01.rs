@@ -33,7 +33,7 @@ use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,

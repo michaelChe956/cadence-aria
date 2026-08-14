@@ -913,6 +913,8 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
                 created_at: "2026-07-07T00:00:00Z".to_string(),
                 updated_at: "2026-07-07T00:00:00Z".to_string(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
             },
         )
         .expect("review request");
@@ -1143,6 +1145,8 @@ fn seed_delivery_review_request(
         external_url: None,
         manual_instructions: Vec::new(),
         push_error,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "2026-08-13T00:00:00Z".to_string(),
         updated_at: "2026-08-13T00:00:00Z".to_string(),
     };

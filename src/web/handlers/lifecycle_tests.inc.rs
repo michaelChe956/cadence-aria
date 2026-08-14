@@ -2,7 +2,7 @@
 // 经 lifecycle.rs 的 `include!` 引入（large_file_guard 1200 行红线）。共享 `mod tests`
 // 作用域内 `use super::*` 的导入。
 
-    use crate::product::coding_models::{RemoteKind, ReviewRequest, ReviewRequestKind};
+    use crate::product::coding_models::{RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind};
     use crate::product::issue_store::CreateProductIssueInput;
     use crate::product::lifecycle_store::CreateWorkItemInput;
     use crate::product::logical_codebase::{
@@ -219,6 +219,8 @@
             external_url: None,
             manual_instructions: Vec::new(),
             push_error,
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
             created_at: "2026-08-13T00:00:00Z".to_string(),
             updated_at: "2026-08-13T00:00:00Z".to_string(),
         };

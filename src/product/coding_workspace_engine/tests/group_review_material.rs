@@ -1,6 +1,7 @@
 use crate::product::coding_models::{
     CodingUnitRun, CodingUnitRunStatus, CompactFindingDigest, PushStatus, RemoteKind,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, UnitReviewConclusionSnapshot,
+    ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
+    UnitReviewConclusionSnapshot,
 };
 use crate::product::coding_workspace_engine::group_review_material::{
     GroupReviewMaterialSnapshotDraft, ShardPromptMeasurer, compile_group_review_material,
@@ -125,6 +126,8 @@ fn request() -> ReviewRequest {
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "ignored".to_string(),
         updated_at: "ignored".to_string(),
     }

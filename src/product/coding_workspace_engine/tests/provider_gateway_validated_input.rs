@@ -372,6 +372,8 @@ async fn logical_internal_review_launches_through_gateway() {
                 created_at: "2026-08-09T00:00:00Z".to_string(),
                 updated_at: "2026-08-09T00:00:00Z".to_string(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
             },
         )
         .expect("review request");

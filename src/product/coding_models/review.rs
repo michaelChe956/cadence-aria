@@ -13,6 +13,14 @@ pub enum ReviewRequestKind {
     ManualExternalRequest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRequestOwnerKind {
+    #[default]
+    Attempt,
+    PointerPublication,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteKind {
@@ -45,6 +53,10 @@ pub struct ReviewRequest {
     pub manual_instructions: Vec<String>,
     #[serde(default)]
     pub push_error: Option<String>,
+    #[serde(default)]
+    pub owner_kind: ReviewRequestOwnerKind,
+    #[serde(default)]
+    pub pointer_publication_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

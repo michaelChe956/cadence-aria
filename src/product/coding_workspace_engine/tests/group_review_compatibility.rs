@@ -12,7 +12,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
 use crate::product::coding_models::{
     CodingExecutionAttempt, CodingUnitRun, CodingUnitRunStatus, CompactFindingDigest, PushStatus,
-    RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, UnitReviewConclusionSnapshot,
+    RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
+    UnitReviewConclusionSnapshot,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_engine::GitWorkspaceService;
@@ -235,6 +236,8 @@ async fn legacy_hash_fixture(
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "2026-08-04T00:00:00Z".to_string(),
         updated_at: "2026-08-04T00:00:00Z".to_string(),
     };

@@ -311,6 +311,8 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 created_at: "2026-07-19T00:00:00Z".to_string(),
                 updated_at: "2026-07-19T00:00:00Z".to_string(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
             },
         )
         .unwrap();

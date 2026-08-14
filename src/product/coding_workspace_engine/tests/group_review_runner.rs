@@ -325,6 +325,8 @@ async fn group_review_runner_fixture(
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
         created_at: "2026-08-04T00:00:00Z".to_string(),
         updated_at: "2026-08-04T00:00:00Z".to_string(),
     };

@@ -43,7 +43,7 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
     AttemptTargetSnapshot, CodingExecutionAttempt, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict,
+    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine,
@@ -293,6 +293,8 @@ async fn coding_internal_review_launches_through_gateway_and_audits_stream_launc
                 created_at: "2026-08-13T00:00:00Z".to_string(),
                 updated_at: "2026-08-13T00:00:00Z".to_string(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
             },
         )
         .expect("review request");

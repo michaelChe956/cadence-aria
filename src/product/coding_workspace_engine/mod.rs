@@ -34,7 +34,7 @@ use crate::product::coding_models::{
     CodingProviderRole, CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
     FindingSeverity, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict,
+    ReviewRequestOwnerKind, ReviewVerdict,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};

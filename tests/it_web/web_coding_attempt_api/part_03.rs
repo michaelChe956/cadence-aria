@@ -32,6 +32,8 @@ fn sample_review_request(attempt_id: &str) -> ReviewRequest {
         created_at: "2026-05-23T00:02:00Z".to_string(),
         updated_at: "2026-05-23T00:02:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
     }
 }
 
