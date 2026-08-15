@@ -24,6 +24,7 @@ use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
 pub enum RecoverableInterruptedOperation {
     Review,
     WorkItemDraftGeneration,
+    Revision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

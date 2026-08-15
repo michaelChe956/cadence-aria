@@ -4,6 +4,7 @@ use super::*;
 pub enum InterruptedRunRecoveryOutcome {
     Review,
     WorkItemDraftGeneration,
+    Revision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -119,6 +120,25 @@ impl WorkspaceEngine {
                 .await;
                 Ok(InterruptedRunRecoveryOutcome::WorkItemDraftGeneration)
             }
+            // spec-design-dialog-revision T7：Revision 恢复臂。置 stage=Running，复用失败修订节点
+            // 的类型（TimelineNodeType::Revision）启动修订 run，跟随 Review 臂的既有写法。
+            RecoverableInterruptedOperation::Revision => {
+                self.transition_stage(WorkspaceStage::Running).await;
+                self.create_timeline_node_with_retry(
+                    TimelineNodeDraft {
+                        node_type: source_node.node_type,
+                        agent: Some(self.session.author_provider.clone()),
+                        stage: WorkspaceStage::Running,
+                        round: source_node.round,
+                        title: source_node.title,
+                        summary: Some("重试断线中止的修订".to_string()),
+                        status: TimelineNodeStatus::Active,
+                    },
+                    Some(retry),
+                )
+                .await;
+                Ok(InterruptedRunRecoveryOutcome::Revision)
+            }
         }
     }
 
@@ -188,7 +208,37 @@ impl WorkspaceEngine {
 
     fn recoverable_shared_review(&self) -> Option<RecoverableInterruptedRun> {
         self.session.artifact.as_ref()?;
+        // spec-design-dialog-revision T7：修订 run 断线 → Revision 恢复臂。
+        // 与 ReviewerRun 检测互斥：断线只作用于最后一个 active run，同一时刻至多一个失败节点。
+        if let Some(recovery) = self.recoverable_failed_revision() {
+            return Some(recovery);
+        }
         self.recoverable_failed_review(TimelineNodeType::ReviewerRun)
+    }
+
+    /// spec-design-dialog-revision T7：检测失败修订节点。Revise/Review-revise 臂实际创建
+    /// TimelineNodeType::Revision 节点（decisions.rs:159/466/618），修订 run 期间即 active node；
+    /// 断线时 append_aborted_by_disconnect 将其标记 Failed（连接断开）并追加 AbortedByDisconnect。
+    fn recoverable_failed_revision(&self) -> Option<RecoverableInterruptedRun> {
+        let failed_revision_index =
+            self.failed_disconnect_node_index(TimelineNodeType::Revision)?;
+        let source_index = self.current_artifact_source_index()?;
+        if source_index > failed_revision_index
+            || self.timeline_nodes[failed_revision_index + 1..]
+                .iter()
+                .any(|node| {
+                    node.node_type == TimelineNodeType::Revision
+                        && node.status == TimelineNodeStatus::Completed
+                })
+        {
+            return None;
+        }
+
+        Some(RecoverableInterruptedRun {
+            failed_node_id: self.timeline_nodes[failed_revision_index].node_id.clone(),
+            operation: RecoverableInterruptedOperation::Revision,
+            label: "重试中断修订".to_string(),
+        })
     }
 
     fn recoverable_failed_review(

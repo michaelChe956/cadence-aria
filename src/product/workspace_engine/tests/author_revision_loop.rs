@@ -861,3 +861,170 @@ async fn legacy_accept_without_reviewer_finalizes_for_story_design_not_human_con
     assert_eq!(outcome, AuthorDecisionOutcome::HumanConfirm);
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
 }
+
+// ============================================================================
+// spec-design-dialog-revision T7：修订断线恢复扩展（Revision 恢复臂）
+// 任务3.3：InterruptedRunRecoveryOutcome::Revision + 检测失败修订节点 + retry 臂 + inbound 映射。
+// 节点类型决策：失败修订节点采用 Revise/Review-revise 臂【实际创建】的 TimelineNodeType::Revision
+// （decisions.rs:159/466/618），而非 AuthorRun——修订 run 期间 active node 即 Revision 节点
+// （drive_revision_session 完成后 complete_active_node 结束的是同一节点），断线时
+// append_aborted_by_disconnect 将其标记 Failed（"连接断开，运行已中止"）。
+// 覆盖 spec 两红线：①修订 run 未完成时重连（保留修订前产物 + 提供重试 + 无部分写入）；
+// ②修订 run 完成后重连（provider_drive 完成路径已处理，验证修订版回 AuthorConfirm 且不再提供恢复）。
+// ============================================================================
+
+fn interrupted_revision_run_engine() -> (TempDir, WorkspaceEngine) {
+    let (_tmp, checkpoint_store) = setup();
+    let (tx, _rx) = mpsc::channel(8);
+    let mut session = make_session("sess_interrupted_revision_run");
+    session.stage = WorkspaceStage::PrepareContext;
+    let payload = artifact_payload("# Story Spec\n\n修订前产物");
+    session.artifact = Some(payload.clone());
+    let mut engine = WorkspaceEngine::new(checkpoint_store, tx, session);
+    engine.artifact_versions = vec![ArtifactVersion {
+        version: 1,
+        payload,
+        generated_by: ProviderName::ClaudeCode,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: true,
+        created_at: "2026-07-11T17:00:00Z".to_string(),
+        source_node_id: "timeline_node_002".to_string(),
+    }];
+    engine.timeline_nodes = vec![
+        interrupted_recovery_timeline_node(
+            "timeline_node_002",
+            TimelineNodeType::AuthorRun,
+            TimelineNodeStatus::Completed,
+            WsWorkspaceStage::Running,
+            Some("修订前产物生成".to_string()),
+        ),
+        interrupted_recovery_timeline_node(
+            "timeline_node_003",
+            TimelineNodeType::Revision,
+            TimelineNodeStatus::Failed,
+            WsWorkspaceStage::Revision,
+            Some("连接断开，运行已中止".to_string()),
+        ),
+        interrupted_recovery_timeline_node(
+            "timeline_node_004",
+            TimelineNodeType::AbortedByDisconnect,
+            TimelineNodeStatus::Failed,
+            WsWorkspaceStage::PrepareContext,
+            Some("last_active_run_id: run-11".to_string()),
+        ),
+    ];
+    (_tmp, engine)
+}
+
+// 红线①「修订 run 未完成时重连」：保留修订前产物 + 提供重试（Revision 恢复臂）+ 无部分写入。
+#[tokio::test]
+async fn interrupted_revision_run_is_recoverable_and_retryable() {
+    let (_tmp, mut engine) = interrupted_revision_run_engine();
+
+    let recoverable = engine
+        .recoverable_interrupted_run()
+        .expect("修订 run 应可恢复");
+    assert_eq!(
+        recoverable.operation,
+        RecoverableInterruptedOperation::Revision
+    );
+    assert_eq!(recoverable.label, "重试中断修订");
+
+    let outcome = engine
+        .retry_interrupted_run(&recoverable.failed_node_id)
+        .await
+        .expect("retry interrupted revision run");
+    assert_eq!(outcome, InterruptedRunRecoveryOutcome::Revision);
+    assert_eq!(engine.session().stage, WorkspaceStage::Running);
+
+    let retry_node = engine.timeline_nodes.last().expect("retry node");
+    assert_eq!(retry_node.node_type, TimelineNodeType::Revision);
+    assert_eq!(retry_node.status, TimelineNodeStatus::Active);
+    let retry = retry_node.retry.as_ref().expect("retry metadata");
+    assert_eq!(retry.retry_of_node_id, recoverable.failed_node_id);
+    assert_eq!(retry.retry_attempt, 1);
+    assert_eq!(retry.retry_reason, "aborted_by_disconnect");
+
+    // 修订前产物保留（无部分写入）：断线时不得清空或半写产物。
+    assert!(
+        engine
+            .session()
+            .artifact
+            .as_ref()
+            .expect("修订前产物必须保留")
+            .markdown_or_empty()
+            .contains("修订前产物"),
+        "修订 run 断线必须保留修订前产物，不得有部分写入"
+    );
+}
+
+// 红线②「修订 run 完成后重连」：provider_drive 完成路径已处理——修订版应用到产物并回 AuthorConfirm，
+// 且会话无失败修订节点（recoverable_interrupted_run 为 None），不提供多余恢复入口。
+#[tokio::test]
+async fn completed_revision_run_reconnects_to_author_confirm_with_revised_artifact() {
+    let (_tmp, store) = setup();
+    // drive_revision_session 会发射超过 8 个 engine 事件（prompt/StreamChunk/ExecutionEvent/
+    // stage 与 node 变更）：receiver 存活却不消费时，event_tx 容量占满后 send().await 永久阻塞。
+    // 按 part_04.rs 驱动类测试惯例直接丢弃 receiver——engine 侧全部 `let _ = send().await`，
+    // 对已关闭 channel 立即返回 Err 并被丢弃，不会阻塞也不会影响断言。
+    let (tx, _) = mpsc::channel(8);
+    let mut session = make_session("sess_completed_revision_run");
+    session.stage = WorkspaceStage::Revision;
+    session.artifact = Some(artifact_payload("# Story Spec\n\n修订前产物"));
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    engine.pending_revision_context = Some("补充异常场景".to_string());
+    engine
+        .create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::Revision,
+            agent: Some(ProviderName::ClaudeCode),
+            stage: WorkspaceStage::Revision,
+            round: None,
+            title: "反馈修订".to_string(),
+            summary: Some("补充异常场景".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await;
+
+    engine
+        .drive_revision_session(
+            Arc::new(ReviewVerdictStreamingProvider {
+                // 输出必须是完整 Story 产物（必需小节 + source id + [REQ-*]/[AC-*]），否则
+                // Completed 分支的 artifact gate（content_has_complete_workspace_artifact）
+                // 判失败并 finish_failed_run 回 PrepareContext，而非回 AuthorConfirm。
+                output: "# Story Spec\n\n\
+                    ## 范围\n来源 source id: Issue issue_0001；修订后产物：补充异常场景。\n\n\
+                    ## 用户故事\n作为用户，我希望异常场景有明确处理。\n\n\
+                    ## 功能需求\n- [REQ-001] 登录成功路径。\n- [REQ-002] 补充异常场景。\n\n\
+                    ## 成功标准\n- [AC-001] 覆盖异常场景。\n\n\
+                    ## 待确认项\n无。\n\n\
+                    ## 非功能需求\n无。\n\n\
+                    ## 改动摘要\n- 补充异常场景 [REQ-002]\n",
+                provider_type: Arc::new(Mutex::new(None)),
+                prompt: Arc::new(Mutex::new(None)),
+            }),
+            empty_provider_commands(),
+        )
+        .await;
+
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::AuthorConfirm,
+        "修订 run 完成后重连必须回 AuthorConfirm"
+    );
+    assert!(
+        engine
+            .session()
+            .artifact
+            .as_ref()
+            .expect("修订产物")
+            .markdown_or_empty()
+            .contains("修订后产物"),
+        "修订版必须应用到产物"
+    );
+    assert!(
+        engine.recoverable_interrupted_run().is_none(),
+        "修订完成后无失败节点，不得提供恢复入口"
+    );
+}
