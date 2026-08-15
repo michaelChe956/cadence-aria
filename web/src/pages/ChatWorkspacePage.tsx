@@ -13,6 +13,7 @@ import {
   fetchWorkspacePrompt,
 } from "../api/workspace-content";
 import type {
+  AuthorDecisionChoice,
   RevisionPath,
 } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
@@ -400,7 +401,13 @@ export function ChatWorkspacePage({
     sendHumanConfirm(decision, payload);
   }
 
-  function handleAuthorDecision(decision: "accept" | "reject") {
+  function handleAuthorDecision(decision: AuthorDecisionChoice, feedback?: string) {
+    // spec-design-dialog-revision T8："revise" 携带反馈，由 useWorkspaceWs 构造
+    // `{revise: {feedback}}` 线格式；其余变体（含 WorkItemPlan outline 的兼容 "accept"）原样透传。
+    if (decision === "revise") {
+      sendAuthorDecision("revise", feedback);
+      return;
+    }
     sendAuthorDecision(decision);
   }
 
@@ -686,6 +693,7 @@ export function ChatWorkspacePage({
                 activeNodeType={activeNode?.node_type ?? null}
                 workItemPlanArtifact={workItemPlanArtifact}
                 disabled={inputDisabled}
+                reviewerEnabled={reviewerEnabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}

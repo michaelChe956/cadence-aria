@@ -232,6 +232,9 @@ describe("useWorkspaceWs outgoing actions", () => {
       harness.ws.sent.length = 0;
       harness.api.sendAuthorDecision("accept");
       harness.api.sendAuthorDecision("reject");
+      harness.api.sendAuthorDecision("revise", "补充回滚策略");
+      harness.api.sendAuthorDecision("accept_with_review");
+      harness.api.sendAuthorDecision("accept_finalize");
     });
 
     expect(harness.ws.sent).toEqual([
@@ -242,6 +245,18 @@ describe("useWorkspaceWs outgoing actions", () => {
       JSON.stringify({
         type: "author_decision",
         decision: "reject",
+      }),
+      JSON.stringify({
+        type: "author_decision",
+        decision: { revise: { feedback: "补充回滚策略" } },
+      }),
+      JSON.stringify({
+        type: "author_decision",
+        decision: "accept_with_review",
+      }),
+      JSON.stringify({
+        type: "author_decision",
+        decision: "accept_finalize",
       }),
     ]);
   });

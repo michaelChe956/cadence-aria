@@ -17,6 +17,17 @@ describe("providerConfigFor", () => {
     });
   });
 
+  it("未启用 review 时仍携带已选 reviewer 且 rounds 为 0（provisional 快照）", () => {
+    const snapshot = providerConfigFor(
+      { author: "claude_code", reviewer: "codex" },
+      false,
+      3,
+    );
+
+    expect(snapshot.reviewer).toBe("codex");
+    expect(snapshot.review_rounds).toBe(0);
+  });
+
   it("保留 pi 选择不回退并序列化权限模式", () => {
     const snapshot = providerConfigFor(
       { author: "pi", reviewer: "codex" },

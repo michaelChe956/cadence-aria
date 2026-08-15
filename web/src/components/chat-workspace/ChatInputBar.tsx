@@ -1,6 +1,7 @@
 import { Check, GitBranch, Layers, Play, RefreshCcw, Send, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import type {
+  AuthorDecisionChoice,
   WorkItemBatchDecision,
   WorkItemDraftDecision,
   WorkItemGenerationMode,
@@ -17,7 +18,7 @@ interface ChatInputBarProps {
   onSendContextNote: (content: string) => void;
   onStartGeneration: () => void;
   onSendHumanDecision: (payload: { description: string; source: "human" }) => void;
-  onAuthorDecision?: (decision: "accept" | "reject") => void;
+  onAuthorDecision?: (decision: AuthorDecisionChoice, feedback?: string) => void;
   onSelectWorkItemGenerationMode?: (mode: WorkItemGenerationMode) => void;
   onRequestOutlineRevision?: () => void;
   onWorkItemDraftDecision?: (outlineId: string, decision: WorkItemDraftDecision) => void;
@@ -29,6 +30,8 @@ interface ChatInputBarProps {
   onAbort: () => void;
   disabled?: boolean;
   hideStartGeneration?: boolean;
+  /** author_confirm 阶段三动作的默认高亮：启用 review 时高亮「确认并送审」，否则「确认定稿」。 */
+  reviewerEnabled?: boolean;
 }
 
 const BUSY_STAGES = new Set(["running", "cross_review", "revision"]);
@@ -48,6 +51,7 @@ export function ChatInputBar({
   onAbort,
   disabled = false,
   hideStartGeneration = false,
+  reviewerEnabled = true,
 }: ChatInputBarProps) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -59,7 +63,9 @@ export function ChatInputBar({
   const isWorkItemBatchConfirm = activeNodeType === "work_item_batch_confirm";
   const isHumanConfirm = stage === "human_confirm";
   const isBusy = BUSY_STAGES.has(stage);
-  const inputDisabled = disabled || isBusy || isAuthorConfirm || stage === "completed";
+  // spec-design-dialog-revision T8：author_confirm 反馈输入开放（原为禁用）；
+  // 发送仍走「发送反馈」按钮而非表单提交。
+  const inputDisabled = disabled || isBusy || stage === "completed";
   const canSend = !inputDisabled && (isPrepareContext || isHumanConfirm) && trimmedInput.length > 0;
   const showSend = isPrepareContext || isHumanConfirm;
   const draftPayload =
@@ -91,6 +97,14 @@ export function ChatInputBar({
     }
     appendOptimisticEntry("start_generation", "开始生成");
     onStartGeneration();
+  }
+
+  function handleSendAuthorFeedback() {
+    if (disabled || trimmedInput.length === 0) {
+      return;
+    }
+    onAuthorDecision("revise", trimmedInput);
+    setInput("");
   }
 
   return (
@@ -279,21 +293,38 @@ export function ChatInputBar({
             <>
               <button
                 type="button"
-                onClick={() => onAuthorDecision("reject")}
-                disabled={disabled}
+                onClick={handleSendAuthorFeedback}
+                disabled={disabled || trimmedInput.length === 0}
                 className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
               >
-                <RefreshCcw className="h-4 w-4" />
-                重新编写
+                <Send className="h-4 w-4" />
+                发送反馈
               </button>
               <button
                 type="button"
-                onClick={() => onAuthorDecision("accept")}
+                onClick={() => onAuthorDecision("accept_with_review")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className={
+                  reviewerEnabled
+                    ? "inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                    : "inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                }
+              >
+                <GitBranch className="h-4 w-4" />
+                确认并送审
+              </button>
+              <button
+                type="button"
+                onClick={() => onAuthorDecision("accept_finalize")}
+                disabled={disabled}
+                className={
+                  reviewerEnabled
+                    ? "inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                    : "inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                }
               >
                 <Check className="h-4 w-4" />
-                进入 Review
+                确认定稿
               </button>
             </>
           ) : null}
@@ -332,7 +363,8 @@ function placeholderForStage(stage: string, activeNodeType?: string | null) {
     return "输入修改意见...";
   }
   if (stage === "author_confirm") {
-    return "等待确认 Author 结果";
+    // spec-design-dialog-revision T8：推倒重来出口移除，反馈修订成为主路径。
+    return "输入修改意见，或直接确认";
   }
   if (BUSY_STAGES.has(stage)) {
     return "Provider 运行中，暂不可输入";

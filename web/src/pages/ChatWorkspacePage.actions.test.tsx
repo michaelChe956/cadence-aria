@@ -193,11 +193,31 @@ describe("ChatWorkspacePage chat actions", () => {
       <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "进入 Review" }));
-    await userEvent.click(screen.getByRole("button", { name: "重新编写" }));
+    expect(
+      screen.queryByRole("button", { name: "重新编写" }),
+    ).not.toBeInTheDocument();
 
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(1, "accept");
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(2, "reject");
+    await userEvent.type(
+      screen.getByPlaceholderText(/输入修改意见/),
+      "补充回滚策略",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认并送审" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认定稿" }));
+
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
+      1,
+      "revise",
+      "补充回滚策略",
+    );
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
+      2,
+      "accept_with_review",
+    );
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
+      3,
+      "accept_finalize",
+    );
   });
 
   it.each(["story", "design", "work_item"])(

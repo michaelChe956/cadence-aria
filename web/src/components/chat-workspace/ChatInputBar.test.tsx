@@ -69,12 +69,13 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "开始生成" })).not.toBeInTheDocument();
   });
 
-  it("shows author confirmation actions", () => {
+  it("shows three author confirm actions with a usable feedback input", () => {
     const onAuthorDecision = vi.fn();
 
     render(
       <ChatInputBar
         stage="author_confirm"
+        reviewerEnabled={true}
         onSendContextNote={vi.fn()}
         onStartGeneration={vi.fn()}
         onSendHumanDecision={vi.fn()}
@@ -83,13 +84,49 @@ describe("ChatInputBar", () => {
       />,
     );
 
-    expect(screen.getByRole("textbox")).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "进入 Review" }));
-    fireEvent.click(screen.getByRole("button", { name: "重新编写" }));
+    const feedbackInput = screen.getByPlaceholderText(/输入修改意见/);
+    expect(feedbackInput).toBeEnabled();
+    expect(screen.getByRole("button", { name: "发送反馈" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: /重新编写/ }),
+    ).not.toBeInTheDocument();
 
-    expect(onAuthorDecision).toHaveBeenNthCalledWith(1, "accept");
-    expect(onAuthorDecision).toHaveBeenNthCalledWith(2, "reject");
+    fireEvent.change(feedbackInput, { target: { value: "补充回滚策略" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+
+    expect(onAuthorDecision).toHaveBeenCalledWith("revise", "补充回滚策略");
+    expect(
+      (screen.getByPlaceholderText(/输入修改意见/) as HTMLTextAreaElement).value,
+    ).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "确认并送审" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认定稿" }));
+
+    expect(onAuthorDecision).toHaveBeenNthCalledWith(2, "accept_with_review");
+    expect(onAuthorDecision).toHaveBeenNthCalledWith(3, "accept_finalize");
+  });
+
+  it("highlights finalize by default when review is disabled", () => {
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        reviewerEnabled={false}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "确认并送审" }).className,
+    ).not.toContain("aria-primary");
+    expect(
+      screen.getByRole("button", { name: "确认并送审" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "确认定稿" }).className,
+    ).toContain("aria-primary");
   });
 
   it("submits human confirm feedback with optimistic insertion", () => {
