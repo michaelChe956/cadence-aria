@@ -1028,3 +1028,176 @@ async fn completed_revision_run_reconnects_to_author_confirm_with_revised_artifa
         "修订完成后无失败节点，不得提供恢复入口"
     );
 }
+
+// ============================================================================
+// T7 fix1（Finding-A，Important）：真实断线重连后，重试【用户反馈修订】run 必须能启动并完成。
+// 修复前链路：socket 每连接重建 engine → new_persistent 将 pending_revision_context 置 None
+// （该字段不在 WorkspaceSessionRecord，不随会话记录恢复）→ retry 后 drive_revision_session →
+// build_revision_input 中 is_author_feedback_revision()=false（pending=None）且
+// latest_review_verdict=None → Err("review verdict is unavailable for revision") →
+// finish_failed_run 回 PrepareContext。本测试走真实持久化路径：第一阶段用真实 Revise 臂
+// 启动修订 run，第二阶段 new_persistent 从磁盘重建 engine 后 retry 并驱动 retried run 完成。
+// ============================================================================
+
+#[tokio::test]
+async fn retried_author_feedback_revision_completes_after_real_reconnect() {
+    let (_tmp, checkpoint_store) = setup();
+    let app_root = tempfile::tempdir().expect("app root");
+    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(app_root.path().join(".aria")));
+    // review_rounds=0：未启用 review 的用户反馈修订（最主流路径），重连后 verdict 恒 None，
+    // 正是 Finding-A 中 Err("review verdict is unavailable for revision") 的触发条件。
+    let record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 0,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+
+    // 第一次连接：AuthorConfirm + 产物 v1（current 版本 source=AuthorRun 节点），
+    // 用户提交反馈进入修订 run（真实 Revise 臂：创建 Revision 节点并置 pending 上下文）。
+    let (tx, _) = mpsc::channel(64);
+    let mut first = WorkspaceEngine::new_persistent(
+        checkpoint_store.clone(),
+        lifecycle_store.clone(),
+        tx,
+        WorkspaceSession::from_record(lifecycle_store.get_workspace_session(&record.id).unwrap()),
+    );
+    let payload = artifact_payload("# Story Spec\n\n修订前产物");
+    first.session.artifact = Some(payload.clone());
+    first.artifact_versions = vec![ArtifactVersion {
+        version: 1,
+        payload,
+        generated_by: ProviderName::ClaudeCode,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: true,
+        created_at: "2026-08-14T17:00:00Z".to_string(),
+        source_node_id: "timeline_node_002".to_string(),
+    }];
+    first.timeline_nodes = vec![
+        interrupted_recovery_timeline_node(
+            "timeline_node_001",
+            TimelineNodeType::PrepareContext,
+            TimelineNodeStatus::Completed,
+            WsWorkspaceStage::PrepareContext,
+            Some("上下文已就绪".to_string()),
+        ),
+        interrupted_recovery_timeline_node(
+            "timeline_node_002",
+            TimelineNodeType::AuthorRun,
+            TimelineNodeStatus::Completed,
+            WsWorkspaceStage::Running,
+            Some("修订前产物生成".to_string()),
+        ),
+    ];
+    first.active_node_id = Some("timeline_node_002".to_string());
+    first.persist_timeline_nodes();
+    first.persist_artifact_versions();
+    first.session.stage = WorkspaceStage::AuthorConfirm;
+
+    let outcome = first
+        .handle_author_decision(AuthorDecision::Revise {
+            feedback: "补充异常场景".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AuthorDecisionOutcome::StartRevision { .. }
+    ));
+    assert_eq!(first.session().stage, WorkspaceStage::Revision);
+    // 修订 run 进行程中断线：socket 层丢弃 engine，内存态（pending_revision_context）随之消失。
+
+    // 真实重连：new_persistent 从磁盘重建 engine（socket.rs 每连接重建的同一路径）。
+    let (tx2, _) = mpsc::channel(8);
+    let mut reconnected = WorkspaceEngine::new_persistent(
+        checkpoint_store.clone(),
+        lifecycle_store.clone(),
+        tx2,
+        WorkspaceSession::from_record(lifecycle_store.get_workspace_session(&record.id).unwrap()),
+    );
+    assert_eq!(reconnected.session().stage, WorkspaceStage::Revision);
+    // Finding-A 根因前置：pending_revision_context 不在会话记录中，重连后必然丢失。
+    assert!(
+        reconnected.pending_revision_context.is_none(),
+        "前置：重连后 pending_revision_context 丢失（Finding-A 根因）"
+    );
+    // 重连既有前置：Revision 阶段的 stale run 归位 PrepareContext（lifecycle.rs 既有路径）。
+    reconnected
+        .recover_stale_active_run_after_disconnect()
+        .await;
+    assert_eq!(reconnected.session().stage, WorkspaceStage::PrepareContext);
+
+    let recoverable = reconnected
+        .recoverable_interrupted_run()
+        .expect("用户反馈修订 run 断线后应可恢复");
+    assert_eq!(
+        recoverable.operation,
+        RecoverableInterruptedOperation::Revision
+    );
+
+    // retry：必须重建用户反馈上下文，否则 retried run 无法走 author 反馈 prompt 分支。
+    reconnected
+        .retry_interrupted_run(&recoverable.failed_node_id)
+        .await
+        .unwrap();
+    assert!(
+        reconnected.is_author_feedback_revision(),
+        "重连后 retry 必须恢复用户反馈修订上下文（Finding-A：否则 build_revision_input 报 \
+         review verdict is unavailable for revision）"
+    );
+
+    // 端到端：驱动 retried run 完成。prompt 捕获自 fixture provider，断言走 author 反馈
+    // prompt 分支且携带断线前的用户反馈全文；产物 gate 需要完整 Story 产物小节。
+    let prompt = Arc::new(Mutex::new(None));
+    reconnected
+        .drive_revision_session(
+            Arc::new(ReviewVerdictStreamingProvider {
+                output: "# Story Spec\n\n\
+                    ## 范围\n来源 source id: Issue issue_0001；修订后产物：补充异常场景。\n\n\
+                    ## 用户故事\n作为用户，我希望异常场景有明确处理。\n\n\
+                    ## 功能需求\n- [REQ-001] 登录成功路径。\n- [REQ-002] 补充异常场景。\n\n\
+                    ## 成功标准\n- [AC-001] 覆盖异常场景。\n\n\
+                    ## 待确认项\n无。\n\n\
+                    ## 非功能需求\n无。\n\n\
+                    ## 改动摘要\n- 补充异常场景 [REQ-002]\n",
+                provider_type: Arc::new(Mutex::new(None)),
+                prompt: prompt.clone(),
+            }),
+            empty_provider_commands(),
+        )
+        .await;
+
+    let captured_prompt = prompt.lock().unwrap().clone().expect("retried run prompt");
+    assert!(
+        captured_prompt.contains("## 用户反馈"),
+        "retried run 必须走 author 反馈 prompt 分支（而非 reviewer 返修 prompt）"
+    );
+    assert!(
+        captured_prompt.contains("补充异常场景"),
+        "retried run prompt 必须携带断线前的用户反馈全文"
+    );
+    assert_eq!(
+        reconnected.session().stage,
+        WorkspaceStage::AuthorConfirm,
+        "retried 修订 run 必须完成并回 AuthorConfirm，而非 Err 后 finish_failed_run 回 PrepareContext"
+    );
+    assert!(
+        reconnected
+            .session()
+            .artifact
+            .as_ref()
+            .expect("修订产物")
+            .markdown_or_empty()
+            .contains("修订后产物"),
+        "修订版必须应用到产物"
+    );
+}

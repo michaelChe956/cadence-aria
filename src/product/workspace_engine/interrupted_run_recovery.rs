@@ -124,19 +124,39 @@ impl WorkspaceEngine {
             // 的类型（TimelineNodeType::Revision）启动修订 run，跟随 Review 臂的既有写法。
             RecoverableInterruptedOperation::Revision => {
                 self.transition_stage(WorkspaceStage::Running).await;
-                self.create_timeline_node_with_retry(
-                    TimelineNodeDraft {
-                        node_type: source_node.node_type,
-                        agent: Some(self.session.author_provider.clone()),
-                        stage: WorkspaceStage::Running,
-                        round: source_node.round,
-                        title: source_node.title,
-                        summary: Some("重试断线中止的修订".to_string()),
-                        status: TimelineNodeStatus::Active,
-                    },
-                    Some(retry),
-                )
-                .await;
+                // T7 fix1（Finding-A）：重连重建的 engine 丢失 pending_revision_context
+                // （new_persistent 恒置 None，该字段不在 WorkspaceSessionRecord）。从失败
+                // 修订节点的 detail.revision_feedback（Revise/人工反馈返修臂置位时落盘）
+                // 重建，retried run 的 build_revision_input 才能走 author 反馈 prompt 分支。
+                let revision_feedback = self
+                    .pending_revision_context
+                    .clone()
+                    .or_else(|| self.revision_feedback_from_node_detail(&source_node.node_id));
+                if let Some(feedback) = revision_feedback.clone() {
+                    self.pending_revision_context = Some(feedback);
+                }
+                let retry_node_id = self
+                    .create_timeline_node_with_retry(
+                        TimelineNodeDraft {
+                            node_type: source_node.node_type,
+                            agent: Some(self.session.author_provider.clone()),
+                            stage: WorkspaceStage::Running,
+                            round: source_node.round,
+                            title: source_node.title,
+                            summary: Some("重试断线中止的修订".to_string()),
+                            status: TimelineNodeStatus::Active,
+                        },
+                        Some(retry),
+                    )
+                    .await;
+                // 反馈同步落盘到 retry 节点：retried run 再次断线后仍可从该节点重建。
+                if let Some(feedback) = revision_feedback {
+                    let _ = self
+                        .update_node_detail(&retry_node_id, |detail| {
+                            detail.revision_feedback = Some(feedback);
+                        })
+                        .await;
+                }
                 Ok(InterruptedRunRecoveryOutcome::Revision)
             }
         }
@@ -263,6 +283,25 @@ impl WorkspaceEngine {
             operation: RecoverableInterruptedOperation::Review,
             label: "重试中断审核".to_string(),
         })
+    }
+
+    /// T7 fix1（Finding-A）：读取修订节点 detail 的 revision_feedback（Revise/人工反馈返修
+    /// 臂置位时落盘），供 retry 臂重建重连后丢失的 pending_revision_context。
+    /// detail 缺失（无 lifecycle store 的内存 engine / 存量旧会话）或反馈为空时返回 None，
+    /// 维持修复前行为（不影响 review decision 路径——其 verdict 经节点 detail 持久化可恢复）。
+    fn revision_feedback_from_node_detail(&self, node_id: &str) -> Option<String> {
+        let store = self.lifecycle_store.as_ref()?;
+        let detail = store
+            .load_node_detail_for_issue_session(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.session_id,
+                node_id,
+            )
+            .ok()?;
+        detail
+            .revision_feedback
+            .filter(|feedback| !feedback.trim().is_empty())
     }
 
     fn failed_disconnect_node_index(&self, node_type: TimelineNodeType) -> Option<usize> {

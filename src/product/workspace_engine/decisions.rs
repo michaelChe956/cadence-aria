@@ -154,7 +154,7 @@ impl WorkspaceEngine {
                 // 使 T4 分流谓词（pending.is_some() && verdict.is_none()）成立，否则会错走 reviewer 返修 prompt。
                 self.latest_review_verdict = None;
                 self.transition_stage(WorkspaceStage::Revision).await;
-                let _ = self
+                let revision_node_id = self
                     .create_timeline_node(TimelineNodeDraft {
                         node_type: TimelineNodeType::Revision,
                         agent: Some(self.session.author_provider.clone()),
@@ -163,6 +163,17 @@ impl WorkspaceEngine {
                         title: "反馈修订".to_string(),
                         summary: Some(trimmed.clone()),
                         status: TimelineNodeStatus::Active,
+                    })
+                    .await;
+                // T7 fix1（Finding-A）：反馈全文落盘到 Revision 节点 detail（既有
+                // NodeDetail.revision_feedback 字段）。重连后 new_persistent 重建 engine 会
+                // 丢失内存态 pending_revision_context（该字段不在 WorkspaceSessionRecord），
+                // retry 臂从该字段重建，retried run 才能走 author 反馈 prompt 分支。
+                // （节点 summary 不可用：断线时 append_aborted_by_disconnect 会覆写为
+                // "连接断开，运行已中止"。）
+                let _ = self
+                    .update_node_detail(&revision_node_id, |detail| {
+                        detail.revision_feedback = Some(trimmed.clone());
                     })
                     .await;
                 Ok(AuthorDecisionOutcome::StartRevision { feedback: trimmed })
@@ -603,7 +614,7 @@ impl WorkspaceEngine {
                         structured_output_diagnostic: None,
                     });
                 }
-                self.pending_revision_context = context;
+                self.pending_revision_context = context.clone();
                 self.complete_active_node(Some("已请求修改".to_string()))
                     .await;
                 self.transition_stage(WorkspaceStage::Revision).await;
@@ -613,7 +624,7 @@ impl WorkspaceEngine {
                     .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
                     .count() as u32)
                     .max(1);
-                let _ = self
+                let revision_node_id = self
                     .create_timeline_node(TimelineNodeDraft {
                         node_type: TimelineNodeType::Revision,
                         agent: Some(self.session.author_provider.clone()),
@@ -624,6 +635,17 @@ impl WorkspaceEngine {
                         status: TimelineNodeStatus::Active,
                     })
                     .await;
+                // T7 fix1（Finding-A）：人工反馈返修同样把反馈全文落盘到节点 detail——
+                // 该路径的 verdict 可能是内存合成值（不落盘、重连后丢失），重连 retry 时
+                // 若不重建 pending_revision_context，build_revision_input 同样会因
+                // verdict 缺失而失败。
+                if let Some(feedback) = context {
+                    let _ = self
+                        .update_node_detail(&revision_node_id, |detail| {
+                            detail.revision_feedback = Some(feedback);
+                        })
+                        .await;
+                }
                 Ok(ReviewDecisionOutcome::StartRevision)
             }
             HumanConfirmDecision::Terminate => {
