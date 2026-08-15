@@ -326,6 +326,25 @@ async fn build_session_state_returns_correct_structure() {
 }
 
 #[tokio::test]
+async fn build_session_state_projects_reviewer_enabled_at_start() {
+    let (_tmp, store) = setup();
+    let (tx, _) = mpsc::channel(64);
+    let mut session = make_session("sess_reas_001");
+    session.reviewer_enabled_at_start = Some(false);
+    let engine = WorkspaceEngine::new(store, tx, session);
+
+    match engine.build_session_state() {
+        WsOutMessage::SessionState {
+            reviewer_enabled_at_start,
+            ..
+        } => {
+            assert_eq!(reviewer_enabled_at_start, Some(false));
+        }
+        _ => panic!("expected SessionState"),
+    }
+}
+
+#[tokio::test]
 async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_active_run_id() {
     let (tmp, checkpoint_store) = setup();
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));

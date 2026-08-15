@@ -228,6 +228,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
         human_presentation_revisions: Vec::new(),
+        reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
     })
@@ -794,6 +795,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
         human_presentation_revisions: Vec::new(),
+        reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
     };

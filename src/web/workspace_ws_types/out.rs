@@ -136,6 +136,8 @@ pub enum WsOutMessage {
         active_run_id: Option<String>,
         human_presentation_revisions: Vec<HumanPresentationRevision>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewer_enabled_at_start: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_repair: Option<Box<PlanRepairSessionSnapshotDto>>,

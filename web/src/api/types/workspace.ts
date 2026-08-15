@@ -556,6 +556,7 @@ export type WsOutMessage =
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
       human_presentation_revisions: HumanPresentationRevision[];
+      reviewer_enabled_at_start?: boolean | null;
       recoverable_interrupted_run?: RecoverableInterruptedRun | null;
       plan_repair?: PlanRepairSessionSnapshot | null;
     }
