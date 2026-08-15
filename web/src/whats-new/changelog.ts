@@ -5,9 +5,20 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.0.7";
+export const CURRENT_VERSION = "0.0.8";
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.0.8",
+    date: "2026-08-15",
+    title: "v0.0.8 更新",
+    highlights: [
+      "Story/Design 工作台支持对话式修订：确认页直接输入修改意见，作者增量修订并附改动摘要",
+      "确认双出口：「确认并送审」进入交叉审核，「确认定稿」直接完成；审核结论不再自动定稿",
+      "审核报告进入对话流：pass 或返修统一回到确认页，可基于报告继续反馈修订",
+      "临时送审与断线恢复增强：未启用 review 的会话可一键送审，修订中断重连后可继续",
+    ],
+  },
   {
     version: "0.0.7",
     date: "2026-08-13",
