@@ -32,6 +32,19 @@ export const selectChatPanelState = (state: WorkspaceWsState) => ({
   selectedNodeId: state.selectedNodeId,
 });
 
+/**
+ * adopt-review-findings T1：取最后一条 review 报告消息的文本。
+ * 与对话流 ReviewVerdictEntry 渲染同源（entry.content 为后端推送的 summary，
+ * live/rebuild 两路径一致）；不在前端从结构化 verdict 重新格式化。
+ */
+export function selectLatestReviewReport(state: WorkspaceWsState): string | undefined {
+  const entry = state.chatEntries
+    .filter((candidate) => candidate.type === "review_verdict")
+    .at(-1);
+  const content = typeof entry?.content === "string" ? entry.content.trim() : "";
+  return content.length > 0 ? content : undefined;
+}
+
 export function selectPrepareContextNotes(state: WorkspaceWsState) {
   return state.timelineNodes
     .filter((node) => node.node_type === "context_note")

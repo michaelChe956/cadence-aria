@@ -129,6 +129,80 @@ describe("ChatInputBar", () => {
     ).toContain("aria-primary");
   });
 
+  it("adopts the latest review report into the feedback input", () => {
+    const report = "发现 3 个问题：第二节缺少回滚策略；示例代码未覆盖错误分支；结论与数据不一致。";
+    const onAuthorDecision = vi.fn();
+
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        latestReviewReport={report}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAuthorDecision={onAuthorDecision}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "采纳 Review 意见" }));
+
+    expect(
+      (screen.getByPlaceholderText(/输入修改意见/) as HTMLTextAreaElement).value,
+    ).toBe(`按以下 review 意见修订：\n\n${report}`);
+    // 带入仅预填，不自动发送。
+    expect(onAuthorDecision).not.toHaveBeenCalled();
+  });
+
+  it("hides the adopt review button without a latest report", () => {
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAuthorDecision={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "采纳 Review 意见" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送反馈" })).toBeDisabled();
+    expect(
+      (screen.getByPlaceholderText(/输入修改意见/) as HTMLTextAreaElement).value,
+    ).toBe("");
+  });
+
+  it("re-adopts the same report after the input is cleared", () => {
+    const report = "仅可选建议：建议补充一段迁移说明。";
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        latestReviewReport={report}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAuthorDecision={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    const feedbackInput = screen.getByPlaceholderText(/输入修改意见/) as HTMLTextAreaElement;
+    const adoptButton = screen.getByRole("button", { name: "采纳 Review 意见" });
+    const expected = `按以下 review 意见修订：\n\n${report}`;
+
+    fireEvent.click(adoptButton);
+    expect(feedbackInput.value).toBe(expected);
+
+    fireEvent.change(feedbackInput, { target: { value: "" } });
+    expect(feedbackInput.value).toBe("");
+
+    fireEvent.click(adoptButton);
+    expect(feedbackInput.value).toBe(expected);
+  });
+
   it("submits human confirm feedback with optimistic insertion", () => {
     const onSendHumanDecision = vi.fn();
     useWorkspaceStore.getState().appendChatEntry({

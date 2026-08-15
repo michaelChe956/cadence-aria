@@ -1,4 +1,13 @@
-import { Check, GitBranch, Layers, Play, RefreshCcw, Send, X } from "lucide-react";
+import {
+  Check,
+  ClipboardCopy,
+  GitBranch,
+  Layers,
+  Play,
+  RefreshCcw,
+  Send,
+  X,
+} from "lucide-react";
 import { useState, type FormEvent } from "react";
 import type {
   AuthorDecisionChoice,
@@ -32,6 +41,8 @@ interface ChatInputBarProps {
   hideStartGeneration?: boolean;
   /** author_confirm 阶段三动作的默认高亮：启用 review 时高亮「确认并送审」，否则「确认定稿」。 */
   reviewerEnabled?: boolean;
+  /** adopt-review-findings T1：最新 review 报告文本（与对话流渲染同源）；非空时展示「采纳 Review 意见」。 */
+  latestReviewReport?: string;
 }
 
 const BUSY_STAGES = new Set(["running", "cross_review", "revision"]);
@@ -52,6 +63,7 @@ export function ChatInputBar({
   disabled = false,
   hideStartGeneration = false,
   reviewerEnabled = true,
+  latestReviewReport,
 }: ChatInputBarProps) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -105,6 +117,15 @@ export function ChatInputBar({
     }
     onAuthorDecision("revise", trimmedInput);
     setInput("");
+  }
+
+  // adopt-review-findings T1：覆盖式预填引导语 + 最新 review 报告；仅预填，不自动发送，
+  // 重复点击天然不拼接（spec Scenario 3）。
+  function handleAdoptReviewReport() {
+    if (disabled || !latestReviewReport) {
+      return;
+    }
+    setInput(`按以下 review 意见修订：\n\n${latestReviewReport}`);
   }
 
   return (
@@ -291,6 +312,17 @@ export function ChatInputBar({
             </>
           ) : isAuthorConfirm ? (
             <>
+              {latestReviewReport ? (
+                <button
+                  type="button"
+                  onClick={handleAdoptReviewReport}
+                  disabled={disabled}
+                  className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                >
+                  <ClipboardCopy className="h-4 w-4" />
+                  采纳 Review 意见
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={handleSendAuthorFeedback}

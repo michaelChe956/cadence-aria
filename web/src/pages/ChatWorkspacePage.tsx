@@ -42,6 +42,7 @@ import type {
 import {
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
+import { selectLatestReviewReport } from "../state/workspace-ws-selectors";
 import { workItemPlanProjectionArtifactsFromVersions } from "../state/workspace-ws-store-helpers";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import {
@@ -146,6 +147,7 @@ export function ChatWorkspacePage({
     (state) => state.recoverableInterruptedRun,
   );
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
+  const latestReviewReport = useWorkspaceStore(selectLatestReviewReport);
   const stageConfig = useStageUI(stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
@@ -694,6 +696,7 @@ export function ChatWorkspacePage({
                 workItemPlanArtifact={workItemPlanArtifact}
                 disabled={inputDisabled}
                 reviewerEnabled={reviewerEnabled}
+                latestReviewReport={latestReviewReport}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
