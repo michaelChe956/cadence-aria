@@ -12,9 +12,9 @@
     "Segoe UI",
     sans-serif;
   color-scheme: light;
-  background: #f6f8fa;
+  background: #f5f3ee;
   color: #17202a;
-  --aria-bg: #f6f8fa;
+  --aria-bg: #f5f3ee;
   --aria-panel: #ffffff;
   --aria-panel-muted: #fbfcfe;
   --aria-panel-subtle: #f1f5f9;
@@ -22,8 +22,11 @@
   --aria-ink-muted: #52616f;
   --aria-line: #dde5ec;
   --aria-line-strong: #c8d3dc;
-  --aria-primary: #0891b2;
-  --aria-primary-soft: #e0f7fb;
+  --aria-border-strong: #3f3f46;
+  --aria-primary: #4F46E5;
+  --aria-primary-soft: #e0e7ff;
+  --aria-cta: #F97316;
+  --aria-cta-soft: #ffedd5;
   --aria-success: #059669;
   --aria-success-soft: #dcfce7;
   --aria-warning: #d97706;
