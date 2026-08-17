@@ -34,7 +34,9 @@ const ARIA_EXCLUDE_LINE: &str = ".aria/";
 /// 令牌文件相对 worktree 根的路径：`.aria/evidence-token`。
 const EVIDENCE_TOKEN_FILE: &str = "evidence-token";
 /// attempt 分区令牌哈希记录文件名。
-const EVIDENCE_TOKEN_RECORD_FILE: &str = "evidence-token.json";
+///
+/// `pub(crate)`：T6 `resolve_attempt_by_token` 需按此名扫描各 attempt 分区。
+pub(crate) const EVIDENCE_TOKEN_RECORD_FILE: &str = "evidence-token.json";
 /// 令牌原始字节数（32 字节 → 64 位 hex）。
 const TOKEN_BYTES: usize = 32;
 

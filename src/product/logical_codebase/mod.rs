@@ -5,6 +5,7 @@ pub mod aggregate_initialization_store;
 pub mod evidence_audit;
 pub mod evidence_budget;
 pub mod evidence_index;
+pub mod evidence_mediator;
 pub mod evidence_token;
 pub mod feature;
 pub mod issue_selection;
@@ -43,6 +44,10 @@ pub use aggregate_initialization_coordinator::{
     resolve_aggregate_profile,
 };
 pub use aggregate_initialization_store::AggregateInitializationOperationStore;
+pub use evidence_mediator::{
+    EvidenceIndexPinRecord, EvidenceQueryInput, EvidenceQueryResponse, EvidenceRole,
+    handle_evidence_query, resolve_attempt_by_token,
+};
 pub use feature::LogicalCodebaseFeature;
 pub use issue_selection::{
     EffectiveMemberResolution, InvalidationRecord, IssueCodebaseSelection,
