@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { PointerPublicationDto } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   defaultLaunchTitle,
@@ -24,8 +25,102 @@ vi.mock("../shared/MonacoViewer", () => ({
   ),
 }));
 
+function pointerPublication(
+  overrides: Partial<PointerPublicationDto> = {},
+): PointerPublicationDto {
+  return {
+    id: "publication_0001",
+    project_id: "project_0001",
+    logical_codebase_id: "logical_0001",
+    batch_kind: "full",
+    entries: [],
+    status: "completed_all",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("IssueLifecycleWorkbench base workflow", () => {
   installIssueLifecycleWorkbenchTestHooks();
+
+  it("wires pointer publication actions to APIs and upserts each returned publication", async () => {
+    const initialPublication = pointerPublication({
+      id: "publication_0000",
+      status: "completed_partial",
+      entries: [
+        {
+          member_repo_id: "repository_0001",
+          state: "failed",
+          branch_name: null,
+          commit_sha: null,
+          push_error: "remote rejected",
+          conflict_detail: null,
+        },
+      ],
+    });
+    const fetchMock = lifecycleFetch({
+      pointerPublications: [initialPublication],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByRole("button", { name: "全量发布" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebase/pointer-publications",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ batch_kind: "full" }),
+        }),
+      ),
+    );
+    expect(screen.getByTestId("pointer-publication-badge")).toHaveAttribute(
+      "data-status",
+      "completed_partial",
+    );
+    expect(
+      screen.getByText("aria-pointer/repository_0001/full"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "增量发布" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebase/pointer-publications",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ batch_kind: "incremental" }),
+        }),
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebase/pointer-publications/publication_0000/retry-repo",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ member_repo_id: "repository_0001" }),
+        }),
+      ),
+    );
+    expect(screen.getByText("aria-pointer/repository_0001/retried")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "撤回" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebase/pointer-publications/publication_0000/revoke",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      ),
+    );
+    expect(screen.getAllByText("已撤回").length).toBeGreaterThan(0);
+  });
 
   it("renders issues as the primary workbench and shows selected issue lifecycle content", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());

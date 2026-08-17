@@ -1,5 +1,9 @@
 import { beforeEach, vi } from "vitest";
-import type { CodingAttempt, IssueWorkItemPlanDetailDto } from "../../api/types";
+import type {
+  CodingAttempt,
+  IssueWorkItemPlanDetailDto,
+  PointerPublicationDto,
+} from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   codingAttemptRecord,
@@ -44,6 +48,7 @@ export function lifecycleFetch(options?: {
   workItemPlans?: unknown[];
   skippedIntegrationRisk?: boolean;
   codingAttempts?: CodingAttempt[];
+  pointerPublications?: PointerPublicationDto[];
   // REQ-TGT-05：后端 work_item_repository_groups 的 mock 值；缺省空数组（单仓扁平兼容）。
   workItemRepositoryGroups?: Array<Record<string, unknown>>;
 }) {
@@ -63,6 +68,7 @@ export function lifecycleFetch(options?: {
   const issueCallsByProject = new Map<string, number>();
   const latestIssueTitlesByProject = new Map<string, string>();
   const lifecycleByIssue = new Map<string, MockLifecycleData>();
+  let pointerPublications = [...(options?.pointerPublications ?? [])];
 
   function issueRecord(issueId: string, title: string) {
     return {
@@ -790,23 +796,75 @@ export function lifecycleFetch(options?: {
     const pointerPublicationsMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,
     );
-    if (pointerPublicationsMatch && init?.method !== "POST") {
-      return jsonResponse([]);
+    if (pointerPublicationsMatch) {
+      if (init?.method !== "POST") {
+        return jsonResponse(pointerPublications);
+      }
+      const payload = JSON.parse(String(init.body)) as {
+        batch_kind: "full" | "incremental";
+      };
+      const current = pointerPublications[0];
+      const publication: PointerPublicationDto = {
+        id: current?.id ?? "publication_0001",
+        project_id: pointerPublicationsMatch[1],
+        logical_codebase_id: "logical-0001",
+        batch_kind: payload.batch_kind,
+        entries: [
+          {
+            member_repo_id: "repository_0001",
+            state: "failed",
+            branch_name: `aria-pointer/repository_0001/${payload.batch_kind}`,
+            commit_sha: null,
+            push_error: "remote rejected",
+            conflict_detail: null,
+          },
+        ],
+        status: "completed_partial",
+        created_at: "2026-08-14T00:00:00Z",
+        updated_at: "2026-08-14T00:00:00Z",
+      };
+      pointerPublications = [publication];
+      return jsonResponse(publication);
     }
     const pointerPublicationActionMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications\/([^/]+)\/(retry-repo|revoke)$/,
     );
     if (pointerPublicationActionMatch && init?.method === "POST") {
-      return jsonResponse({
-        id: pointerPublicationActionMatch[2],
-        project_id: pointerPublicationActionMatch[1],
-        logical_codebase_id: "logical-0001",
-        batch_kind: "full",
-        entries: [],
-        status: "completed_all",
-        created_at: "2026-05-16T00:00:00Z",
-        updated_at: "2026-05-16T00:00:00Z",
-      });
+      const [projectId, publicationId, action] = [
+        pointerPublicationActionMatch[1],
+        pointerPublicationActionMatch[2],
+        pointerPublicationActionMatch[3],
+      ];
+      const current = pointerPublications.find(
+        (publication) => publication.id === publicationId,
+      );
+      const publication: PointerPublicationDto = {
+        id: publicationId,
+        project_id: projectId,
+        logical_codebase_id: current?.logical_codebase_id ?? "logical-0001",
+        batch_kind: current?.batch_kind ?? "full",
+        entries:
+          action === "revoke"
+            ? (current?.entries ?? []).map((entry) => ({
+                ...entry,
+                state: "revoked",
+              }))
+            : [
+                {
+                  member_repo_id: "repository_0001",
+                  state: "review_created",
+                  branch_name: "aria-pointer/repository_0001/retried",
+                  commit_sha: "abc123def456",
+                  push_error: null,
+                  conflict_detail: null,
+                },
+              ],
+        status: action === "revoke" ? "revoked" : "completed_all",
+        created_at: current?.created_at ?? "2026-08-14T00:00:00Z",
+        updated_at: "2026-08-14T00:00:01Z",
+      };
+      pointerPublications = [publication];
+      return jsonResponse(publication);
     }
     return jsonResponse({});
   });
