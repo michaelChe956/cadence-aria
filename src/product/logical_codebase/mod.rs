@@ -5,6 +5,7 @@ pub mod aggregate_initialization_store;
 pub mod evidence_audit;
 pub mod evidence_budget;
 pub mod evidence_index;
+pub mod evidence_injection;
 pub mod evidence_mediator;
 pub mod evidence_token;
 pub mod feature;

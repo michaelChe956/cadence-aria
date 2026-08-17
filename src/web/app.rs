@@ -2,6 +2,7 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use tokio::net::TcpListener;
 
 use crate::product::app_paths::ProductAppPaths;
@@ -14,6 +15,10 @@ use crate::web::test_controls;
 use crate::web::workspace_ws_handler;
 
 pub fn build_web_router(state: WebAppState) -> Router {
+    build_web_router_with_evidence(state, true)
+}
+
+pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool) -> Router {
     let router = Router::new()
         .route("/api/health", get(handlers::health))
         .route("/api/providers/status", get(handlers::providers_status))
@@ -293,6 +298,13 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(coding_ws_handler::scoped_coding_ws),
         );
 
+    // C-4 T7：证据查询路由仅在回环监听（evidence_enabled）时挂载。
+    let router = if evidence_enabled {
+        router.route("/api/evidence-query", post(handlers::evidence_query))
+    } else {
+        router
+    };
+
     let router = if test_controls::test_controls_enabled() {
         router
             .route(
@@ -343,6 +355,30 @@ pub fn listening_line(addr: &SocketAddr) -> String {
     format!("{LISTENING_LINE_PREFIX}{addr}")
 }
 
+/// 证据端点发现文件的相对路径（写于 workspace 根，T7）。
+pub const WEB_ENDPOINT_FILE: &str = ".aria/web-endpoint";
+
+/// 回环 host 白名单（设计 §3.3）：证据路由仅在这些 host 上挂载。
+pub fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// 把绑定成功的端口原子写入 `.aria/web-endpoint`（内容为纯端口号）。
+pub fn write_web_endpoint_file(workspace_root: &Path, port: u16) -> std::io::Result<()> {
+    let path = web_endpoint_path(workspace_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temp_path, port.to_string())?;
+    std::fs::rename(&temp_path, &path)?;
+    Ok(())
+}
+
+fn web_endpoint_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WEB_ENDPOINT_FILE)
+}
+
 pub async fn serve_web(
     workspace_root: std::path::PathBuf,
     host: String,
@@ -356,18 +392,29 @@ pub async fn serve_web(
     let events = EventHub::new();
     let state = WebAppState::with_events(
         workspace_root.clone(),
-        crate::web::runtime::WebRuntime::new_real_with_events(workspace_root, events.clone())
-            .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
+        crate::web::runtime::WebRuntime::new_real_with_events(
+            workspace_root.clone(),
+            events.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
         events,
     );
     refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
-    let app = build_web_router(state).fallback(move |req: axum::extract::Request| {
-        let static_service = static_service.clone();
-        async move { crate::web::static_assets::serve_static(static_service, req).await }
-    });
+    let app = build_web_router_with_evidence(state, is_loopback_host(&host)).fallback(
+        move |req: axum::extract::Request| {
+            let static_service = static_service.clone();
+            async move { crate::web::static_assets::serve_static(static_service, req).await }
+        },
+    );
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
+    if let Err(error) = write_web_endpoint_file(&workspace_root, bound_addr.port()) {
+        eprintln!(
+            "warning: write {}: {error}",
+            web_endpoint_path(&workspace_root).display()
+        );
+    }
     eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
     Ok(())
@@ -395,7 +442,10 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
 
-    use super::{build_web_router, refresh_provider_health_for_startup};
+    use super::{
+        WEB_ENDPOINT_FILE, build_web_router, build_web_router_with_evidence, is_loopback_host,
+        refresh_provider_health_for_startup, write_web_endpoint_file,
+    };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
         BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
@@ -504,5 +554,72 @@ mod tests {
         refresh_provider_health_for_startup(&state).await;
 
         assert_eq!(state.provider_health.latest_diagnostic().generation, 0);
+    }
+
+    #[test]
+    fn web_evidence_endpoint_file_writes_plain_port_number() {
+        let root = tempdir().expect("root");
+        write_web_endpoint_file(root.path(), 43_210).expect("write endpoint file");
+
+        let content = std::fs::read_to_string(root.path().join(WEB_ENDPOINT_FILE))
+            .expect("read endpoint file");
+        assert_eq!(
+            content, "43210",
+            "endpoint file must hold the plain port number"
+        );
+    }
+
+    #[test]
+    fn is_loopback_host_accepts_only_loopback_bindings() {
+        for host in ["127.0.0.1", "localhost", "::1"] {
+            assert!(is_loopback_host(host), "{host} must be loopback");
+        }
+        for host in ["0.0.0.0", "::", "192.168.1.10", "example.com"] {
+            assert!(!is_loopback_host(host), "{host} must not be loopback");
+        }
+    }
+
+    #[tokio::test]
+    async fn web_evidence_route_absent_when_loopback_disabled() {
+        let root = tempdir().expect("root");
+        let app = build_web_router_with_evidence(state(root.path()), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/evidence-query")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "evidence route must not be mounted when host is not loopback"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_evidence_route_present_when_loopback_enabled() {
+        let root = tempdir().expect("root");
+        let app = build_web_router_with_evidence(state(root.path()), true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/evidence-query")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "evidence route must be mounted when host is loopback"
+        );
     }
 }

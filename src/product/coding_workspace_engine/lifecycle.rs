@@ -326,6 +326,13 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 journal.worktree_path.clone(),
             )?;
+            // C-4 T7：worktree 创建完成后幂等注入证据查询脚本（T0 审计点 2 首挂点）。
+            crate::product::logical_codebase::evidence_injection::write_evidence_query_script(
+                &journal.worktree_path,
+            )
+            .map_err(|error| {
+                CodingWorkspaceEngineError::EvidenceScriptInjection(error.to_string())
+            })?;
             self.store.advance_coding_git_operation(
                 &updated,
                 &journal,

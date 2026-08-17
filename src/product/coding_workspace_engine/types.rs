@@ -65,6 +65,9 @@ pub enum CodingWorkspaceEngineError {
     /// `StableCode::as_str()` 转字符串填充。
     #[error("cross_target_delivery_blocked: {0}")]
     CrossTargetDeliveryBlocked(String),
+    /// C-4 证据查询脚本注入失败（worktree `.aria/bin/aria-evidence-query` 写入失败）。
+    #[error("coding_evidence_script_injection_failed: {0}")]
+    EvidenceScriptInjection(String),
 }
 
 #[derive(Debug, Clone)]
