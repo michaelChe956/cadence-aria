@@ -22,6 +22,7 @@ import {
   listProjects,
   listRepositories,
 } from "../../api/client";
+import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import {
   createPointerPublication,
   listPointerPublications,
@@ -31,6 +32,7 @@ import {
 import type {
   CodingAttemptAddress,
   IssueLifecycleResponse,
+  LogicalCodebaseMemberDto,
   PointerPublicationDto,
   Project,
   Repository,
@@ -119,6 +121,9 @@ export function IssueLifecycleWorkbench({
   const [pointerPublications, setPointerPublications] = useState<
     PointerPublicationDto[]
   >([]);
+  const [logicalCodebaseMembers, setLogicalCodebaseMembers] = useState<
+    LogicalCodebaseMemberDto[]
+  >([]);
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
@@ -182,17 +187,23 @@ export function IssueLifecycleWorkbench({
         setRepositories([]);
         setLifecycles([]);
         setPointerPublications([]);
+        setLogicalCodebaseMembers([]);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
         return;
       }
 
-      const [repositoryResponse, issueResponse, publicationResponse] =
-        await Promise.all([
-          listRepositories(projectId),
-          listProductIssues(projectId),
-          listPointerPublications(projectId),
-        ]);
+      const [
+        repositoryResponse,
+        issueResponse,
+        publicationResponse,
+        membersResponse,
+      ] = await Promise.all([
+        listRepositories(projectId),
+        listProductIssues(projectId),
+        listPointerPublications(projectId),
+        listLogicalCodebaseMembers(projectId),
+      ]);
       if (!isLatestRefresh(requestId)) {
         return;
       }
@@ -212,6 +223,7 @@ export function IssueLifecycleWorkbench({
       setRepositories(repositoryResponse.repositories ?? []);
       setLifecycles(lifecycleResponses);
       setPointerPublications(publicationResponse ?? []);
+      setLogicalCodebaseMembers(membersResponse.members ?? []);
       setFocusedIssueId(
         focusedIssueId &&
           lifecycleResponses.some(
@@ -284,6 +296,20 @@ export function IssueLifecycleWorkbench({
     latestPointerPublication?.status === "in_progress"
       ? latestPointerPublication.id
       : null;
+  const latestCompletedPointerPublication = useMemo<PointerPublicationDto | null>(() => {
+    const completed = pointerPublications.filter(
+      (publication) => publication.status !== "in_progress",
+    );
+    if (completed.length === 0) {
+      return null;
+    }
+    return [...completed].sort((left, right) =>
+      right.created_at.localeCompare(left.created_at),
+    )[0];
+  }, [pointerPublications]);
+  const showIncrementalHint =
+    latestCompletedPointerPublication !== null &&
+    logicalCodebaseMembers.length > latestCompletedPointerPublication.entries.length;
   useEffect(() => {
     if (!selectedProjectId || !latestPointerPublicationId) {
       return;
@@ -873,6 +899,7 @@ export function IssueLifecycleWorkbench({
                   <PointerPublicationPanel
                     publication={latestPointerPublication}
                     busy={pointerPublicationBusy}
+                    showIncrementalHint={showIncrementalHint}
                     onPublishFull={() => void handlePublishFull()}
                     onPublishIncremental={() =>
                       void handlePublishIncremental()

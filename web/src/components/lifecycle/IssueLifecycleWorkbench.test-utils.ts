@@ -49,6 +49,11 @@ export function lifecycleFetch(options?: {
   skippedIntegrationRisk?: boolean;
   codingAttempts?: CodingAttempt[];
   pointerPublications?: PointerPublicationDto[];
+  logicalCodebaseMembers?: Array<{
+    logical_repository_id: string;
+    alias: string;
+    status: "active" | "removed" | "tombstoned";
+  }>;
   // REQ-TGT-05：后端 work_item_repository_groups 的 mock 值；缺省空数组（单仓扁平兼容）。
   workItemRepositoryGroups?: Array<Record<string, unknown>>;
 }) {
@@ -796,6 +801,20 @@ export function lifecycleFetch(options?: {
     const pointerPublicationsMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,
     );
+    const logicalCodebaseMembersMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/members$/,
+    );
+    if (logicalCodebaseMembersMatch) {
+      return jsonResponse({
+        members: options?.logicalCodebaseMembers ?? [
+          {
+            logical_repository_id: "repository_0001",
+            alias: "api",
+            status: "active",
+          },
+        ],
+      });
+    }
     if (pointerPublicationsMatch) {
       if (init?.method !== "POST") {
         return jsonResponse(pointerPublications);

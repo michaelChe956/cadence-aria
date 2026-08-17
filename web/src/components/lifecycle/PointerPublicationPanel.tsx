@@ -40,6 +40,7 @@ export type PointerPublicationPanelProps = {
   busy?: boolean;
   onPublishFull: () => void;
   onPublishIncremental: () => void;
+  showIncrementalHint?: boolean;
   onRetryRepo: (memberRepoId: string) => void;
   onRevoke: () => void;
 };
@@ -49,6 +50,7 @@ export function PointerPublicationPanel({
   busy = false,
   onPublishFull,
   onPublishIncremental,
+  showIncrementalHint = false,
   onRetryRepo,
   onRevoke,
 }: PointerPublicationPanelProps) {
@@ -105,6 +107,23 @@ export function PointerPublicationPanel({
           </div>
         ) : null}
       </div>
+
+      {showIncrementalHint ? (
+        <div
+          data-testid="pointer-publication-new-members-hint"
+          className="mb-2 flex items-center justify-between gap-2 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-xs text-[var(--aria-primary)]"
+        >
+          <span>检测到新增成员，建议增量发布</span>
+          <button
+            type="button"
+            disabled={inProgress || busy}
+            onClick={onPublishIncremental}
+            className="inline-flex h-7 items-center rounded-md border border-[var(--aria-primary)] px-2.5 font-semibold disabled:border-[var(--aria-line)] disabled:text-[var(--aria-ink-muted)]"
+          >
+            增量发布
+          </button>
+        </div>
+      ) : null}
 
       {!publication ? (
         <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-4">

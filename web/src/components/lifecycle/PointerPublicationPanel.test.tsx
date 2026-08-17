@@ -43,6 +43,7 @@ function renderPanel(
     publication: PointerPublicationDto | null;
     onPublishFull: () => void;
     onPublishIncremental: () => void;
+    showIncrementalHint?: boolean;
     onRetryRepo: (memberRepoId: string) => void;
     onRevoke: () => void;
   }> = {},
@@ -51,6 +52,7 @@ function renderPanel(
     publication: null as PointerPublicationDto | null,
     onPublishFull: () => {},
     onPublishIncremental: () => {},
+    showIncrementalHint: false,
     onRetryRepo: (_memberRepoId: string) => {},
     onRevoke: () => {},
     ...overrides,
@@ -219,14 +221,32 @@ describe("PointerPublicationPanel", () => {
     expect(onPublishFull).toHaveBeenCalledTimes(1);
   });
 
-  it("triggers incremental publish when incremental button clicked", () => {
+  it("renders the new-members hint and triggers incremental publish", () => {
     const onPublishIncremental = vi.fn();
     renderPanel({
-      publication: publication("completed_all", []),
+      publication: publication("completed_all", [entry("repo-a", "pushed")]),
+      showIncrementalHint: true,
       onPublishIncremental,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "增量发布" }));
+    expect(screen.getByTestId("pointer-publication-new-members-hint")).toHaveTextContent(
+      "检测到新增成员，建议增量发布",
+    );
+    fireEvent.click(
+      screen
+        .getByTestId("pointer-publication-new-members-hint")
+        .querySelector("button")!,
+    );
     expect(onPublishIncremental).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render the new-members hint when disabled", () => {
+    renderPanel({
+      publication: publication("completed_all", [entry("repo-a", "pushed")]),
+    });
+
+    expect(
+      screen.queryByTestId("pointer-publication-new-members-hint"),
+    ).not.toBeInTheDocument();
   });
 });

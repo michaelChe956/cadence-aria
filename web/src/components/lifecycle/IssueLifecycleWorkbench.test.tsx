@@ -122,6 +122,91 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     expect(screen.getAllByText("已撤回").length).toBeGreaterThan(0);
   });
 
+  it("shows the new-members hint and publishes incrementally when member count increased", async () => {
+    const initialPublication = pointerPublication({
+      entries: [
+        {
+          member_repo_id: "repository_0001",
+          state: "pushed",
+          branch_name: null,
+          commit_sha: null,
+          push_error: null,
+          conflict_detail: null,
+        },
+      ],
+    });
+    const fetchMock = lifecycleFetch({
+      pointerPublications: [initialPublication],
+      logicalCodebaseMembers: [
+        {
+          logical_repository_id: "repository_0001",
+          alias: "api",
+          status: "active",
+        },
+        {
+          logical_repository_id: "repository_0002",
+          alias: "web",
+          status: "active",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    const hint = await screen.findByTestId(
+      "pointer-publication-new-members-hint",
+    );
+    expect(hint).toHaveTextContent("检测到新增成员，建议增量发布");
+    await user.click(within(hint).getByRole("button", { name: "增量发布" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebase/pointer-publications",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ batch_kind: "incremental" }),
+        }),
+      ),
+    );
+  });
+
+  it("does not show the new-members hint when member count does not exceed entries", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        pointerPublications: [
+          pointerPublication({
+            entries: [
+              {
+                member_repo_id: "repository_0001",
+                state: "pushed",
+                branch_name: null,
+                commit_sha: null,
+                push_error: null,
+                conflict_detail: null,
+              },
+            ],
+          }),
+        ],
+        logicalCodebaseMembers: [
+          {
+            logical_repository_id: "repository_0001",
+            alias: "api",
+            status: "active",
+          },
+        ],
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("pointer-publication-panel");
+    expect(
+      screen.queryByTestId("pointer-publication-new-members-hint"),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders issues as the primary workbench and shows selected issue lifecycle content", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
     const user = userEvent.setup();
