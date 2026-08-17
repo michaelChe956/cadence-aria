@@ -37,12 +37,61 @@ export const selectChatPanelState = (state: WorkspaceWsState) => ({
  * 与对话流 ReviewVerdictEntry 渲染同源（entry.content 为后端推送的 summary，
  * live/rebuild 两路径一致）；不在前端从结构化 verdict 重新格式化。
  */
+type ReviewFindingLike = {
+  severity?: unknown;
+  message?: unknown;
+  evidence?: unknown;
+  impact?: unknown;
+  required_action?: unknown;
+};
+
+function asTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function formatReviewFindings(findings: ReviewFindingLike[]): string {
+  return findings
+    .map((finding, index) => {
+      const severity = asTrimmedString(finding.severity) || String(finding.severity ?? "");
+      return [
+        `${index + 1}. severity: ${severity}`,
+        `   message: ${asTrimmedString(finding.message)}`,
+        `   evidence: ${asTrimmedString(finding.evidence)}`,
+        `   impact: ${asTrimmedString(finding.impact)}`,
+        `   required_action: ${asTrimmedString(finding.required_action)}`,
+      ].join("\n");
+    })
+    .join("\n");
+}
+
 export function selectLatestReviewReport(state: WorkspaceWsState): string | undefined {
   const entry = state.chatEntries
     .filter((candidate) => candidate.type === "review_verdict")
     .at(-1);
   const content = typeof entry?.content === "string" ? entry.content.trim() : "";
-  return content.length > 0 ? content : undefined;
+  if (!entry) {
+    return undefined;
+  }
+  const metadata = entry.metadata;
+  const summary = asTrimmedString(metadata?.summary) || content;
+  const comments = asTrimmedString(metadata?.comments);
+  const findings = Array.isArray(metadata?.findings)
+    ? (metadata?.findings as ReviewFindingLike[]).filter(
+        (finding) => asTrimmedString(finding.message).length > 0,
+      )
+    : [];
+  if (findings.length === 0) {
+    return content.length > 0 ? content : undefined;
+  }
+  const parts: string[] = [];
+  if (summary.length > 0) {
+    parts.push(`[review_summary]\n${summary}`);
+  }
+  if (comments.length > 0) {
+    parts.push(`[review_comments]\n${comments}`);
+  }
+  parts.push(`[review_findings]\n${formatReviewFindings(findings)}`);
+  return parts.join("\n\n");
 }
 
 export function selectPrepareContextNotes(state: WorkspaceWsState) {
