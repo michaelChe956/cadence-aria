@@ -23,6 +23,7 @@
   --aria-line: #dde5ec;
   --aria-line-strong: #c8d3dc;
   --aria-border-strong: #3f3f46;
+  --aria-border-muted: #71717a;
   --aria-primary: #4F46E5;
   --aria-primary-soft: #e0e7ff;
   --aria-cta: #F97316;
@@ -102,22 +103,27 @@ select:disabled {
 }
 
 @layer components {
+  /* 边框强度与元素面积匹配：大卡片可“实”（粗边框），小控件要“轻”（细边/无边框） */
   .aria-card-clay {
-    @apply rounded-xl border-3 bg-white shadow-sm;
-    border-color: var(--aria-border-strong);
+    @apply rounded-xl border-2 bg-white shadow-sm;
+    border-color: var(--aria-border-muted);
   }
   .aria-chip {
-    @apply inline-flex items-center gap-1 rounded-full border-2 px-3 py-1 text-xs font-bold;
-    border-color: var(--aria-border-strong);
+    @apply inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-bold;
+    border-color: var(--aria-line-strong);
   }
   .btn-primary {
-    @apply inline-flex items-center gap-2 rounded-xl border-2 px-4 py-2 text-sm font-semibold text-white transition-colors duration-200;
+    @apply inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition-colors duration-200;
     background: var(--aria-primary);
-    border-color: var(--aria-border-strong);
+    border: 1px solid color-mix(in srgb, var(--aria-primary) 80%, black);
   }
   .btn-secondary {
-    @apply inline-flex items-center gap-2 rounded-xl border-2 bg-white px-4 py-2 text-sm font-semibold transition-colors duration-200;
+    @apply inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-colors duration-200;
+    background: var(--aria-primary-soft);
     color: var(--aria-primary);
-    border-color: var(--aria-border-strong);
+    border: 1px solid transparent;
+  }
+  .btn-secondary:hover {
+    border-color: var(--aria-line-strong);
   }
 }
