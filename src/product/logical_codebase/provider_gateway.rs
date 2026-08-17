@@ -681,6 +681,22 @@ impl LogicalCodebaseProviderGateway {
         &self,
         request: SessionLaunchRequest,
     ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
+        let project_id = request.project_id.clone();
+        let result = self.validate_inner(request);
+        if let Err(error) = &result {
+            tracing::warn!(
+                project_id,
+                error = %error,
+                "provider gateway denied session validation"
+            );
+        }
+        result
+    }
+
+    fn validate_inner(
+        &self,
+        request: SessionLaunchRequest,
+    ) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
         let artifact = self
             .policies
             .get(&request.project_id)
@@ -810,7 +826,15 @@ impl LogicalCodebaseProviderGateway {
     ) -> Result<ProviderSession, ProviderGatewayError> {
         let (input, validated) = launch.into_parts();
         let is_resume = input.resume_provider_session_id.is_some();
-        self.revalidate_before_spawn(&validated, &input.working_dir, is_resume)?;
+        if let Err(error) = self.revalidate_before_spawn(&validated, &input.working_dir, is_resume)
+        {
+            tracing::warn!(
+                project_id = %validated.project_id,
+                error = %error,
+                "provider gateway blocked streaming spawn during revalidation"
+            );
+            return Err(error);
+        }
         let adapter = self.lookup_real_streaming_adapter(&validated)?;
         let policy_digest = validated.envelope().policy_digest.clone();
         let session = adapter
@@ -854,7 +878,14 @@ impl LogicalCodebaseProviderGateway {
             .map(Path::new)
             .ok_or(ProviderGatewayError::MissingCwd)?;
         // 同步 adapter input 不携带 resume session id;同步路径默认非 resume。
-        self.revalidate_before_spawn(&validated, cwd, false)?;
+        if let Err(error) = self.revalidate_before_spawn(&validated, cwd, false) {
+            tracing::warn!(
+                project_id = %validated.project_id,
+                error = %error,
+                "provider gateway blocked sync spawn during revalidation"
+            );
+            return Err(error);
+        }
         let policy_digest = validated.envelope().policy_digest.clone();
         let output = self
             .sync_adapter

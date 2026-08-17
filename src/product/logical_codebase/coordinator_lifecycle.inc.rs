@@ -123,15 +123,37 @@ impl AggregateInitializationCoordinator {
         let manifest = self.load_manifest(project_id, &operation)?;
 
         // machine_skills: deterministic, never a provider turn.
-        self.run_machine_skills(project_id, operation_id, &cancellation)
-            .await?;
+        if let Err(error) = self
+            .run_machine_skills(project_id, operation_id, &cancellation)
+            .await
+        {
+            tracing::warn!(
+                project_id,
+                operation_id,
+                error = %error,
+                "aggregate initialization failed during machine skills preparation"
+            );
+            return Err(error);
+        }
         if cancellation.is_cancelled() {
             return self.fail_interrupted(project_id, operation_id);
         }
 
         // aggregate_preflight: deterministic, never a provider turn.
-        let preflight =
-            self.run_aggregate_preflight(project_id, operation_id, &manifest, &cancellation)?;
+        let preflight = match self
+            .run_aggregate_preflight(project_id, operation_id, &manifest, &cancellation)
+        {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                tracing::warn!(
+                    project_id,
+                    operation_id,
+                    error = %error,
+                    "aggregate initialization failed during aggregate preflight"
+                );
+                return Err(error);
+            }
+        };
         if cancellation.is_cancelled() {
             return self.fail_interrupted(project_id, operation_id);
         }

@@ -743,9 +743,14 @@ fn touch(journal: &mut LegacySharedWorktreeMigrationJournal) {
 }
 
 fn inconsistent(reason: impl Into<String>) -> ProductStoreError {
+    let reason = reason.into();
+    tracing::warn!(
+        reason = %reason,
+        "legacy shared worktree migration rejected inconsistent record"
+    );
     ProductStoreError::InvalidRecord {
         kind: "legacy_shared_worktree_migration",
-        reason: format!("legacy_shared_worktree_inconsistent: {}", reason.into()),
+        reason: format!("legacy_shared_worktree_inconsistent: {reason}"),
     }
 }
 

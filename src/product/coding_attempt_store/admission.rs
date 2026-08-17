@@ -270,25 +270,58 @@ impl CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
-        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        let attempt = match self.get_attempt(project_id, issue_id, attempt_id) {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                tracing::warn!(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    error = %error,
+                    "coding admission rejected before ticket issuance"
+                );
+                return Err(error);
+            }
+        };
         let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
         // 直接调用 locked 版本以保留原始 ProductStoreError（稳定码不经过 StableCode 往返）；
         // 两段锁顺序获取、不嵌套，无重入死锁风险。
-        let ticket = with_exclusive_lock(&path, || {
+        let ticket = match with_exclusive_lock(&path, || {
             self.admit_attempt_for_execution_locked(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
             )
-        })?;
-        with_exclusive_lock(&path, || {
+        }) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                tracing::warn!(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    error = %error,
+                    "coding admission rejected during target and policy validation"
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = with_exclusive_lock(&path, || {
             self.transition_to_executable_locked(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 &ticket,
             )
-        })?;
+        }) {
+            tracing::warn!(
+                project_id,
+                issue_id,
+                attempt_id,
+                error = %error,
+                "coding admission rejected while consuming ticket"
+            );
+            return Err(error);
+        }
         self.get_attempt(project_id, issue_id, attempt_id)
     }
 
