@@ -2,6 +2,7 @@ pub mod aggregate_index;
 pub mod aggregate_initialization;
 pub mod aggregate_initialization_coordinator;
 pub mod aggregate_initialization_store;
+pub mod evidence_budget;
 pub mod evidence_index;
 pub mod evidence_token;
 pub mod feature;
