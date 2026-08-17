@@ -416,7 +416,7 @@ fn single_item_prompt_aligns_draft_hard_rules_with_validators() {
 
     for required in [
         "不得把可由人工确认的事项升级为 operational_gate",
-        "可信目录为空且验证无法由 manual check 落地时，必须输出 route=operational_gate blocker",
+        "可信目录为空时，必须输出 route=operational_gate blocker；manual check 不能替代该 blocker",
         "plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id",
     ] {
         assert!(
