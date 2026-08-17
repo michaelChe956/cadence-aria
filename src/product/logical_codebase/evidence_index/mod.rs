@@ -47,6 +47,10 @@ pub enum EvidenceError {
     Unauthorized,
     #[error("evidence_forbidden")]
     Forbidden,
+    #[error("evidence_not_available")]
+    NotAvailable,
+    #[error("evidence_budget_exhausted")]
+    BudgetExhausted,
     #[error("evidence_io:{message}")]
     Io { message: String },
 }

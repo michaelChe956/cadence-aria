@@ -13,26 +13,50 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRunner, TokioBoundedCommandRunner,
+};
 use crate::cross_cutting::document_ops::compute_sha256;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::CodingExecutionAttempt;
+use crate::product::coding_models::{AttemptTargetSnapshot, CodingExecutionAttempt};
 use crate::product::json_store::{read_json, write_json};
 use crate::product::logical_codebase::aggregate_index::{
-    AggregateIndexRecord, AggregateIndexStore,
+    AggregateIndexRecord, AggregateIndexStore, CodeGraphCli,
 };
-use crate::product::logical_codebase::evidence_index::EvidenceError;
+use crate::product::logical_codebase::evidence_audit::{
+    EvidenceAuditRecord, append_evidence_audit,
+};
+use crate::product::logical_codebase::evidence_budget::{
+    BudgetOutcome, EVIDENCE_QUERY_RESULT_CHAR_LIMIT, EvidenceBudgetLedger,
+};
+use crate::product::logical_codebase::evidence_index::{
+    EvidenceError, EvidenceHit, EvidenceIndexQuery,
+};
 use crate::product::logical_codebase::evidence_token::{
-    EvidenceTokenRecord, EVIDENCE_TOKEN_RECORD_FILE,
+    EVIDENCE_TOKEN_RECORD_FILE, EvidenceTokenRecord, validate_evidence_token,
 };
 use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
+use crate::product::logical_codebase::{
+    CheckoutAvailability, CheckoutKind, MemberStatus, RepositoryCheckoutRecord,
+};
 
 /// attempt 分区快照钉住记录文件名（设计 §4.3 命名）。
 const EVIDENCE_INDEX_PIN_FILE: &str = "evidence-index-pin.json";
+
+/// 单次结果被截断时附加的尾部标记。
+const TRUNCATION_MARKER: &str = "（结果已截断，请缩小查询范围）";
+
+/// 单行渲染文本的防御性字符上限（超出截断单行；非设计常量，仅防病理性符号串）。
+const EVIDENCE_HIT_LINE_CHAR_LIMIT: usize = 4096;
+
+/// 审计 `role` 字段的自报标记后缀（设计 §5.2）。
+const ROLE_SELF_REPORTED_MARK: &str = "role_self_reported";
 
 /// 证据查询可用角色（Coder/Reviewer 共用，审计区分角色；serde snake_case）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,12 +95,98 @@ pub struct EvidenceQueryResponse {
 }
 
 /// 六步编排入口（T7 使用）：以真实 `TokioBoundedCommandRunner` 构造 CodeGraphCli。
-#[allow(unused_variables)]
 pub fn handle_evidence_query(
     paths: &ProductAppPaths,
     input: &EvidenceQueryInput,
 ) -> Result<EvidenceQueryResponse, EvidenceError> {
-    todo!()
+    handle_evidence_query_with_runner(paths, input, Arc::new(TokioBoundedCommandRunner))
+}
+
+/// 可注入 runner 的编排实现（测试经 fake runner 注入 CodeGraphCli）。
+fn handle_evidence_query_with_runner(
+    paths: &ProductAppPaths,
+    input: &EvidenceQueryInput,
+    runner: Arc<dyn BoundedCommandRunner>,
+) -> Result<EvidenceQueryResponse, EvidenceError> {
+    // ① 令牌校验：反查 attempt 归属（Unauthorized/401）+ Running 校验（Forbidden/403）。
+    let attempt = resolve_attempt_by_token(paths, &input.token)?;
+    validate_evidence_token(paths, &attempt, &input.token)?;
+
+    // ② target_snapshot 锚定：None → evidence_not_available（404）；推导目标成员目录名。
+    let snapshot = attempt
+        .target_snapshot
+        .as_ref()
+        .ok_or(EvidenceError::NotAvailable)?;
+    let logical = LogicalCodebaseStore::new(paths.clone());
+    let target_member_dir = resolve_target_member_dir(&logical, &attempt, snapshot)?;
+
+    // ③ ACL：manifest 成员集合 + 成员目录名（排除本仓/非成员）。
+    let manifest = logical
+        .load_manifest(&attempt.project_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| EvidenceError::QueryFailed {
+            code: "evidence_acl_manifest_missing",
+            message: format!(
+                "project {} has no logical-codebase manifest",
+                attempt.project_id
+            ),
+        })?;
+    let member_dir_names = member_dir_names(&logical, &manifest)?;
+    if !manifest
+        .member_ids
+        .contains(&snapshot.logical_repository_id)
+    {
+        return Err(EvidenceError::QueryFailed {
+            code: "evidence_acl_target_not_member",
+            message: format!(
+                "target member {} is not in the manifest member set",
+                snapshot.logical_repository_id.0
+            ),
+        });
+    }
+    let index_query = EvidenceIndexQuery::new(
+        CodeGraphCli::new(runner, "codegraph".to_string()),
+        manifest.provider_context_root.clone(),
+        member_dir_names,
+        target_member_dir,
+    );
+
+    // ④ 快照钉住：首查写 pin，后续读钉住 record；stale 两方向判定。
+    let pinned = load_or_pin_index(paths, &attempt, &manifest)?;
+    let index_stale = is_index_stale(snapshot, &pinned);
+
+    // ⑤ 查询 + 渲染 + 单次 12k 截断 + 累计配额（Exhausted→evidence_budget_exhausted/429）。
+    let hits = index_query.query(&input.query)?;
+    let (text, truncated) = render_and_truncate(&hits);
+    let result_chars = text.chars().count();
+    let ledger = EvidenceBudgetLedger::new(paths.clone());
+    let budget_remaining = match ledger.consume(&attempt, &input.query, result_chars)? {
+        BudgetOutcome::Accepted { remaining } => remaining,
+        BudgetOutcome::Exhausted => return Err(EvidenceError::BudgetExhausted),
+    };
+
+    // ⑥ 审计 append（role 拼 role_self_reported 标记）。
+    append_evidence_audit(
+        paths,
+        &attempt,
+        &EvidenceAuditRecord {
+            attempt_id: attempt.id.clone(),
+            role: format!("{}({})", input.role.as_str(), ROLE_SELF_REPORTED_MARK),
+            query: input.query.clone(),
+            hit_count: hits.len(),
+            result_chars,
+            snapshot_refs: hits.iter().map(|hit| hit.file_path.clone()).collect(),
+            budget_remaining,
+            timestamp: Utc::now().to_rfc3339(),
+        },
+    )?;
+
+    Ok(EvidenceQueryResponse {
+        text,
+        truncated,
+        index_stale,
+        budget_remaining,
+    })
 }
 
 /// attempt 分区快照钉住记录（`pinned_aggregate_index_id`/`pinned_at`）。
@@ -123,7 +233,8 @@ pub fn resolve_attempt_by_token(
                 if record.token_hash != target_hash {
                     continue;
                 }
-                let Some(attempt_id) = attempt_dir.file_name().and_then(|name| name.to_str()) else {
+                let Some(attempt_id) = attempt_dir.file_name().and_then(|name| name.to_str())
+                else {
                     return Err(EvidenceError::Io {
                         message: format!(
                             "attempt dir name is not UTF-8: {}",
@@ -195,15 +306,17 @@ fn load_or_pin_index(
         return load_pinned_index(paths, attempt, &pin.pinned_aggregate_index_id);
     }
 
-    let pinned_id = manifest.active_aggregate_index_id.clone().ok_or_else(|| {
-        EvidenceError::QueryFailed {
-            code: "evidence_index_unavailable",
-            message: format!(
-                "project {} has no active aggregate index to pin",
-                attempt.project_id
-            ),
-        }
-    })?;
+    let pinned_id =
+        manifest
+            .active_aggregate_index_id
+            .clone()
+            .ok_or_else(|| EvidenceError::QueryFailed {
+                code: "evidence_index_unavailable",
+                message: format!(
+                    "project {} has no active aggregate index to pin",
+                    attempt.project_id
+                ),
+            })?;
     let record = load_pinned_index(paths, attempt, &pinned_id)?;
     let pin = EvidenceIndexPinRecord {
         pinned_aggregate_index_id: pinned_id,
@@ -257,13 +370,162 @@ fn map_store_error(error: crate::product::json_store::ProductStoreError) -> Evid
     }
 }
 
-// 占位：BTreeMap/LogicalCodebaseStore 供后续编排与 ACL 使用，phase 1 仅用 map_store_error。
-#[allow(dead_code)]
-fn _unused_placeholder(
-    _logical: &LogicalCodebaseStore,
-    _map: &BTreeMap<String, String>,
-    _store: &CodingAttemptStore,
-) {
+/// 目标成员目录名推导：读 target_snapshot 字段 + LogicalCodebaseStore member/checkout
+/// 记录，本仓目录名取目标成员 checkout canonical_path 最后一段。
+fn resolve_target_member_dir(
+    logical: &LogicalCodebaseStore,
+    attempt: &CodingExecutionAttempt,
+    snapshot: &AttemptTargetSnapshot,
+) -> Result<String, EvidenceError> {
+    let member = logical
+        .load_member(&attempt.project_id, snapshot.logical_repository_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| EvidenceError::QueryFailed {
+            code: "evidence_acl_target_member_missing",
+            message: format!(
+                "target member {} has no authority record",
+                snapshot.logical_repository_id.0
+            ),
+        })?;
+    if member.status != MemberStatus::Active {
+        return Err(EvidenceError::QueryFailed {
+            code: "evidence_acl_target_member_inactive",
+            message: format!(
+                "target member {} is not active",
+                snapshot.logical_repository_id.0
+            ),
+        });
+    }
+    let checkout = logical
+        .load_checkout(&attempt.project_id, snapshot.checkout_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| EvidenceError::QueryFailed {
+            code: "evidence_acl_target_checkout_missing",
+            message: format!("target checkout {} has no record", snapshot.checkout_id.0),
+        })?;
+    if checkout.logical_repository_id != snapshot.logical_repository_id {
+        return Err(EvidenceError::QueryFailed {
+            code: "evidence_acl_target_checkout_mismatch",
+            message: format!(
+                "target checkout {} belongs to member {} rather than {}",
+                snapshot.checkout_id.0,
+                checkout.logical_repository_id.0,
+                snapshot.logical_repository_id.0
+            ),
+        });
+    }
+    checkout_dir_name(&checkout)
+}
+
+/// 成员目录名：按 manifest.member_ids 顺序，对每个成员取其唯一 Main 且 Available 的
+/// checkout canonical_path 最后一段（与 aggregate_index::operation 的
+/// `included_main_checkouts` 判定一致，但按任务简报取 canonical_path 最后一段）。
+fn member_dir_names(
+    logical: &LogicalCodebaseStore,
+    manifest: &LogicalCodebaseManifest,
+) -> Result<Vec<String>, EvidenceError> {
+    let members = logical
+        .list_members(&manifest.project_id)
+        .map_err(map_store_error)?;
+    let checkouts = logical
+        .list_checkouts(&manifest.project_id)
+        .map_err(map_store_error)?;
+    let members_by_id: BTreeMap<_, _> = members
+        .iter()
+        .map(|member| (member.logical_repository_id, member))
+        .collect();
+
+    let mut names = Vec::with_capacity(manifest.member_ids.len());
+    for member_id in &manifest.member_ids {
+        let member = members_by_id.get(member_id).copied().ok_or_else(|| {
+            acl_error(format!(
+                "manifest member {} has no authority record",
+                member_id.0
+            ))
+        })?;
+        if member.status != MemberStatus::Active {
+            return Err(acl_error(format!(
+                "manifest member {} is not active",
+                member_id.0
+            )));
+        }
+        let main_checkouts: Vec<_> = checkouts
+            .iter()
+            .filter(|checkout| {
+                checkout.logical_repository_id == *member_id && checkout.kind == CheckoutKind::Main
+            })
+            .collect();
+        let [checkout] = main_checkouts.as_slice() else {
+            return Err(acl_error(format!(
+                "manifest member {} must have exactly one main checkout, found {}",
+                member_id.0,
+                main_checkouts.len()
+            )));
+        };
+        if !member.checkout_ids.contains(&checkout.checkout_id)
+            || checkout.availability != CheckoutAvailability::Available
+        {
+            return Err(acl_error(format!(
+                "main checkout {} is not an available checkout of member {}",
+                checkout.checkout_id.0, member_id.0
+            )));
+        }
+        names.push(checkout_dir_name(checkout)?);
+    }
+    Ok(names)
+}
+
+/// checkout canonical_path 最后一段作为成员目录名。
+fn checkout_dir_name(checkout: &RepositoryCheckoutRecord) -> Result<String, EvidenceError> {
+    checkout
+        .canonical_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| EvidenceError::QueryFailed {
+            code: "evidence_acl_checkout_dir",
+            message: format!(
+                "checkout {} canonical path has no usable directory name: {}",
+                checkout.checkout_id.0,
+                checkout.canonical_path.display()
+            ),
+        })
+}
+
+fn acl_error(reason: String) -> EvidenceError {
+    EvidenceError::QueryFailed {
+        code: "evidence_acl_member_invalid",
+        message: reason,
+    }
+}
+
+/// EvidenceHit → 文本行 `file:line symbol`（每行用 symbol 内容，行超单行上限截断单行）。
+fn render_hits(hits: &[EvidenceHit]) -> String {
+    let mut out = String::new();
+    for hit in hits {
+        let line = format!("{}:{} {}", hit.file_path, hit.start_line, hit.symbol);
+        let line = truncate_chars(&line, EVIDENCE_HIT_LINE_CHAR_LIMIT);
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// 渲染后按 `EVIDENCE_QUERY_RESULT_CHAR_LIMIT` 截断，`truncated` 并附尾部标记。
+fn render_and_truncate(hits: &[EvidenceHit]) -> (String, bool) {
+    let rendered = render_hits(hits);
+    if rendered.chars().count() <= EVIDENCE_QUERY_RESULT_CHAR_LIMIT {
+        return (rendered, false);
+    }
+    let mut truncated = truncate_chars(&rendered, EVIDENCE_QUERY_RESULT_CHAR_LIMIT);
+    truncated.push_str(TRUNCATION_MARKER);
+    (truncated, true)
+}
+
+/// 按字符数截断（char 边界安全）。
+fn truncate_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
 }
 
 #[cfg(test)]
@@ -274,11 +536,18 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    };
     use crate::product::coding_models::{
         AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
     };
     use crate::product::logical_codebase::aggregate_index::{
         AggregateIndexMemberSnapshot, AggregateIndexStatus,
+    };
+    use crate::product::logical_codebase::evidence_audit::EvidenceAuditRecord;
+    use crate::product::logical_codebase::evidence_budget::{
+        BudgetOutcome, EVIDENCE_ATTEMPT_CHAR_QUOTA, EvidenceBudgetLedger,
     };
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId,
@@ -332,7 +601,9 @@ mod tests {
             created_at: "2026-08-14T00:00:00Z".to_string(),
             updated_at: "2026-08-14T00:00:00Z".to_string(),
         };
-        logical.save_manifest(PROJECT_ID, &manifest).expect("save manifest");
+        logical
+            .save_manifest(PROJECT_ID, &manifest)
+            .expect("save manifest");
 
         logical
             .save_member(
@@ -380,13 +651,10 @@ mod tests {
         let attempt = attempt_fixture(CodingAttemptStatus::Running, Some(snapshot));
         write_json(&attempt_record_path(&paths), &attempt).expect("write attempt record");
 
-        let token =
-            crate::product::logical_codebase::evidence_token::issue_evidence_token(
-                &paths,
-                &repo,
-                &attempt,
-            )
-            .expect("issue evidence token");
+        let token = crate::product::logical_codebase::evidence_token::issue_evidence_token(
+            &paths, &repo, &attempt,
+        )
+        .expect("issue evidence token");
 
         Fixture {
             _tmp: tmp,
@@ -517,6 +785,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn index_record(
         id: &str,
         api_id: LogicalRepositoryId,
@@ -597,8 +866,8 @@ mod tests {
         let mut fx = setup();
 
         // 首次：按 manifest.active_aggregate_index_id 写 pin 并返回该 record。
-        let first = load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest)
-            .expect("first pin load");
+        let first =
+            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest).expect("first pin load");
         assert_eq!(first.aggregate_index_id, fx.aggregate_index_id);
 
         let pin: EvidenceIndexPinRecord =
@@ -630,8 +899,8 @@ mod tests {
             .expect("save manifest with new active id");
 
         // 二次查询读钉住值（第一代 record），不重写 pin。
-        let second = load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest)
-            .expect("second pin load");
+        let second =
+            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest).expect("second pin load");
         assert_eq!(second.aggregate_index_id, fx.aggregate_index_id);
 
         let pin: EvidenceIndexPinRecord =
@@ -642,8 +911,13 @@ mod tests {
     #[test]
     fn stale_detects_membership_revision_and_revision_mismatch() {
         let fx = setup();
-        let snapshot =
-            target_snapshot(fx.api_id, fx.api_checkout_id, &fx.repo.join("api"), "rev-api", 1);
+        let snapshot = target_snapshot(
+            fx.api_id,
+            fx.api_checkout_id,
+            &fx.repo.join("api"),
+            "rev-api",
+            1,
+        );
 
         let matching = index_record(
             &fx.aggregate_index_id,
@@ -666,5 +940,289 @@ mod tests {
         let mut revision_drifted = matching.clone();
         revision_drifted.member_snapshots[0].revision = "rev-api-other".to_string();
         assert!(is_index_stale(&snapshot, &revision_drifted));
+    }
+
+    struct FakeCodeGraphRunner {
+        results: std::sync::Mutex<
+            std::collections::VecDeque<Result<BoundedCommandResult, BoundedCommandError>>,
+        >,
+        requests: std::sync::Mutex<Vec<BoundedCommandRequest>>,
+    }
+
+    impl FakeCodeGraphRunner {
+        fn with_stdout(stdout: &str) -> Self {
+            Self {
+                results: std::sync::Mutex::new(std::collections::VecDeque::from([Ok(
+                    BoundedCommandResult {
+                        exit_code: Some(0),
+                        stdout: stdout.to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        cancelled: false,
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                        duration_ms: 1,
+                    },
+                )])),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for FakeCodeGraphRunner {
+        async fn run(
+            &self,
+            request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            self.requests
+                .lock()
+                .expect("fake runner requests")
+                .push(request);
+            self.results
+                .lock()
+                .expect("fake runner results")
+                .pop_front()
+                .expect("scripted result")
+        }
+    }
+
+    fn audit_file_path(paths: &ProductAppPaths) -> PathBuf {
+        paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(ATTEMPT_ID)
+            .join("evidence-audit.jsonl")
+    }
+
+    fn read_first_audit(paths: &ProductAppPaths) -> EvidenceAuditRecord {
+        let content = std::fs::read_to_string(audit_file_path(paths)).expect("read audit file");
+        let first = content.lines().next().expect("first audit line");
+        serde_json::from_str(first).expect("parse audit record")
+    }
+
+    fn index_record_path(paths: &ProductAppPaths, id: &str) -> PathBuf {
+        paths
+            .aggregate_indexes_root(PROJECT_ID)
+            .join(format!("{id}.json"))
+    }
+
+    fn query_input(token: &str, role: EvidenceRole, query: &str) -> EvidenceQueryInput {
+        EvidenceQueryInput {
+            token: token.to_string(),
+            role,
+            query: query.to_string(),
+        }
+    }
+
+    #[test]
+    fn full_chain_coder_cross_member_hit_returns_text_budget_and_audit() {
+        let fx = setup();
+        // 目标仓命中（api/）与非成员命中（other/）均应被过滤，仅 web/ 跨仓命中保留。
+        let hits_json = serde_json::json!([
+            {"node": {"name": "usedByWeb", "filePath": "web/src/app.ts", "startLine": 10}},
+            {"node": {"name": "targetSelf", "filePath": "api/src/lib.rs", "startLine": 3}},
+            {"node": {"name": "nonMember", "filePath": "other/foo.ts", "startLine": 5}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "usedByWeb");
+
+        let response = handle_evidence_query_with_runner(&fx.paths, &input, runner.clone())
+            .expect("full chain succeeds");
+
+        assert_eq!(response.text, "web/src/app.ts:10 usedByWeb\n");
+        assert!(!response.truncated);
+        assert!(!response.index_stale);
+        assert_eq!(
+            response.budget_remaining,
+            EVIDENCE_ATTEMPT_CHAR_QUOTA - response.text.chars().count()
+        );
+
+        // 审计落盘：role 含 role_self_reported，hit_count/snapshot_refs/result_chars/budget_remaining 对齐。
+        let audit = read_first_audit(&fx.paths);
+        assert_eq!(audit.attempt_id, ATTEMPT_ID);
+        assert_eq!(audit.role, "coder(role_self_reported)");
+        assert_eq!(audit.query, "usedByWeb");
+        assert_eq!(audit.hit_count, 1);
+        assert_eq!(audit.result_chars, response.text.chars().count());
+        assert_eq!(audit.snapshot_refs, vec!["web/src/app.ts".to_string()]);
+        assert_eq!(audit.budget_remaining, response.budget_remaining);
+    }
+
+    #[test]
+    fn unauthorized_for_empty_and_wrong_token() {
+        let fx = setup();
+        let runner = || Arc::new(FakeCodeGraphRunner::with_stdout("[]"));
+
+        let empty = handle_evidence_query_with_runner(
+            &fx.paths,
+            &query_input("", EvidenceRole::Coder, "x"),
+            runner(),
+        )
+        .expect_err("empty token");
+        assert_eq!(empty, EvidenceError::Unauthorized);
+
+        let wrong = handle_evidence_query_with_runner(
+            &fx.paths,
+            &query_input("deadbeef", EvidenceRole::Coder, "x"),
+            runner(),
+        )
+        .expect_err("wrong token");
+        assert_eq!(wrong, EvidenceError::Unauthorized);
+    }
+
+    #[test]
+    fn forbidden_when_attempt_not_running() {
+        let fx = setup();
+        let mut completed = fx.attempt.clone();
+        completed.status = CodingAttemptStatus::Completed;
+        write_json(&attempt_record_path(&fx.paths), &completed).expect("write completed attempt");
+
+        let input = query_input(&fx.token, EvidenceRole::Coder, "x");
+        let err = handle_evidence_query_with_runner(
+            &fx.paths,
+            &input,
+            Arc::new(FakeCodeGraphRunner::with_stdout("[]")),
+        )
+        .expect_err("non-running attempt");
+        assert_eq!(err, EvidenceError::Forbidden);
+    }
+
+    #[test]
+    fn not_available_when_target_snapshot_none() {
+        let fx = setup();
+        let mut no_snapshot = fx.attempt.clone();
+        no_snapshot.target_snapshot = None;
+        write_json(&attempt_record_path(&fx.paths), &no_snapshot)
+            .expect("write attempt without snapshot");
+
+        let input = query_input(&fx.token, EvidenceRole::Reviewer, "x");
+        let err = handle_evidence_query_with_runner(
+            &fx.paths,
+            &input,
+            Arc::new(FakeCodeGraphRunner::with_stdout("[]")),
+        )
+        .expect_err("legacy attempt");
+        assert_eq!(err, EvidenceError::NotAvailable);
+    }
+
+    #[test]
+    fn non_member_and_target_hits_are_filtered_to_empty() {
+        let fx = setup();
+        let hits_json = serde_json::json!([
+            {"node": {"name": "self", "filePath": "api/src/lib.rs", "startLine": 1}},
+            {"node": {"name": "other", "filePath": "other/x.ts", "startLine": 2}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "x");
+
+        let response = handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect("filtered-empty query succeeds");
+        assert_eq!(response.text, "");
+        assert_eq!(response.budget_remaining, EVIDENCE_ATTEMPT_CHAR_QUOTA);
+        assert_eq!(read_first_audit(&fx.paths).hit_count, 0);
+    }
+
+    #[test]
+    fn budget_exhausted_returns_error() {
+        let fx = setup();
+        let ledger = EvidenceBudgetLedger::new(fx.paths.clone());
+        assert_eq!(
+            ledger.consume(&fx.attempt, "warmup", 119_999).unwrap(),
+            BudgetOutcome::Accepted { remaining: 1 }
+        );
+
+        let hits_json = serde_json::json!([
+            {"node": {"name": "hit", "filePath": "web/x.ts", "startLine": 1}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "hit");
+
+        let err = handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect_err("quota exceeded");
+        assert_eq!(err, EvidenceError::BudgetExhausted);
+    }
+
+    #[test]
+    fn stale_marks_response_when_index_drifted() {
+        let fx = setup();
+        // 覆盖钉住索引为目标成员 revision 漂移版本。
+        let drifted = index_record(
+            &fx.aggregate_index_id,
+            fx.api_id,
+            fx.web_id,
+            fx.api_checkout_id,
+            fx.web_checkout_id,
+            "rev-api-drifted",
+            "rev-web",
+            &fx.repo,
+        );
+        write_json(
+            &index_record_path(&fx.paths, &fx.aggregate_index_id),
+            &drifted,
+        )
+        .expect("overwrite index record");
+
+        let hits_json = serde_json::json!([
+            {"node": {"name": "hit", "filePath": "web/x.ts", "startLine": 1}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "hit");
+
+        let response = handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect("stale query succeeds");
+        assert!(response.index_stale);
+        assert_eq!(response.text, "web/x.ts:1 hit\n");
+    }
+
+    #[test]
+    fn truncation_marks_response_and_appends_marker() {
+        let fx = setup();
+        // 200 条命中（MAX_EVIDENCE_HITS 上限）且每行 > 100 字符，总长 > 12k → 截断。
+        let entries: Vec<serde_json::Value> = (0..200)
+            .map(|index| {
+                serde_json::json!({
+                    "node": {
+                        "name": format!("symbol_{}", "x".repeat(80)),
+                        "filePath": format!("web/src/file{index}.ts"),
+                        "startLine": index,
+                    }
+                })
+            })
+            .collect();
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(
+            &serde_json::json!(entries).to_string(),
+        ));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "symbol");
+
+        let response = handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect("truncated query succeeds");
+        assert!(response.truncated);
+        assert!(response.text.ends_with(TRUNCATION_MARKER));
+        assert_eq!(
+            response.text.chars().count(),
+            EVIDENCE_QUERY_RESULT_CHAR_LIMIT + TRUNCATION_MARKER.chars().count()
+        );
+        assert_eq!(
+            response.budget_remaining,
+            EVIDENCE_ATTEMPT_CHAR_QUOTA - response.text.chars().count()
+        );
+    }
+
+    #[test]
+    fn reviewer_role_is_distinguished_in_audit() {
+        let fx = setup();
+        let hits_json = serde_json::json!([
+            {"node": {"name": "hit", "filePath": "web/x.ts", "startLine": 1}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Reviewer, "hit");
+
+        handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect("reviewer query succeeds");
+        assert_eq!(
+            read_first_audit(&fx.paths).role,
+            "reviewer(role_self_reported)"
+        );
     }
 }
