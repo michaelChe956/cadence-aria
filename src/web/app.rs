@@ -360,6 +360,12 @@ pub const WEB_ENDPOINT_FILE: &str = ".aria/web-endpoint";
 
 /// 回环 host 白名单（设计 §3.3）：证据路由仅在这些 host 上挂载。
 pub fn is_loopback_host(host: &str) -> bool {
+    // M4（fix round 1）：去括号 + trim 后再匹配，识别 `[::1]` 等括号形式。
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
@@ -377,6 +383,20 @@ pub fn write_web_endpoint_file(workspace_root: &Path, port: u16) -> std::io::Res
 
 fn web_endpoint_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WEB_ENDPOINT_FILE)
+}
+
+/// M3（fix round 1）：证据路由未挂载（非回环 host）时跳过端口文件写入，
+/// 避免端口文件留在 workspace 根却无可用的证据路由。
+fn maybe_write_web_endpoint_file(evidence_enabled: bool, workspace_root: &Path, port: u16) {
+    if !evidence_enabled {
+        return;
+    }
+    if let Err(error) = write_web_endpoint_file(workspace_root, port) {
+        eprintln!(
+            "warning: write {}: {error}",
+            web_endpoint_path(workspace_root).display()
+        );
+    }
 }
 
 pub async fn serve_web(
@@ -401,7 +421,8 @@ pub async fn serve_web(
     );
     refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
-    let app = build_web_router_with_evidence(state, is_loopback_host(&host)).fallback(
+    let evidence_enabled = is_loopback_host(&host);
+    let app = build_web_router_with_evidence(state, evidence_enabled).fallback(
         move |req: axum::extract::Request| {
             let static_service = static_service.clone();
             async move { crate::web::static_assets::serve_static(static_service, req).await }
@@ -409,12 +430,7 @@ pub async fn serve_web(
     );
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
-    if let Err(error) = write_web_endpoint_file(&workspace_root, bound_addr.port()) {
-        eprintln!(
-            "warning: write {}: {error}",
-            web_endpoint_path(&workspace_root).display()
-        );
-    }
+    maybe_write_web_endpoint_file(evidence_enabled, &workspace_root, bound_addr.port());
     eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
     Ok(())
@@ -444,7 +460,8 @@ mod tests {
 
     use super::{
         WEB_ENDPOINT_FILE, build_web_router, build_web_router_with_evidence, is_loopback_host,
-        refresh_provider_health_for_startup, write_web_endpoint_file,
+        maybe_write_web_endpoint_file, refresh_provider_health_for_startup,
+        write_web_endpoint_file,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -571,12 +588,33 @@ mod tests {
 
     #[test]
     fn is_loopback_host_accepts_only_loopback_bindings() {
-        for host in ["127.0.0.1", "localhost", "::1"] {
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]", " [::1] "] {
             assert!(is_loopback_host(host), "{host} must be loopback");
         }
         for host in ["0.0.0.0", "::", "192.168.1.10", "example.com"] {
             assert!(!is_loopback_host(host), "{host} must not be loopback");
         }
+    }
+
+    #[test]
+    fn web_endpoint_file_skipped_when_evidence_disabled() {
+        let root = tempdir().expect("root");
+        maybe_write_web_endpoint_file(false, root.path(), 43_210);
+        assert!(
+            !root.path().join(WEB_ENDPOINT_FILE).exists(),
+            "non-loopback (evidence disabled) must not write endpoint file"
+        );
+    }
+
+    #[test]
+    fn web_endpoint_file_written_when_evidence_enabled() {
+        let root = tempdir().expect("root");
+        maybe_write_web_endpoint_file(true, root.path(), 43_210);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(WEB_ENDPOINT_FILE))
+                .expect("read endpoint file"),
+            "43210"
+        );
     }
 
     #[tokio::test]

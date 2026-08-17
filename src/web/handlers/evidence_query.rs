@@ -18,6 +18,7 @@ use crate::product::logical_codebase::evidence_audit::{
     EvidenceAuditRecord, append_evidence_audit,
 };
 use crate::product::logical_codebase::evidence_budget::EvidenceBudgetLedger;
+use crate::product::logical_codebase::evidence_index::EvidenceError;
 use crate::product::logical_codebase::evidence_mediator::evidence_role_label;
 use crate::product::logical_codebase::{
     EvidenceQueryInput, EvidenceQueryResponse, handle_evidence_query, resolve_attempt_by_token,
@@ -36,10 +37,21 @@ pub async fn evidence_query(
         Err(error) => {
             // 控制器裁决 1（T6 Minor-1）：被拒查询也补审计（query 留痕；
             // result_chars=0、budget_remaining 取当前 ledger 或 0）。
-            record_rejected_evidence_query(&paths, &input);
+            // M1（fix round 1）：`EvidenceError::Io` 可能来自 T6 成功路径自身
+            // 审计 append 失败（结果已服务），此时再补零结果「被拒」审计会失真，
+            // 故 Io 不补记（见 should_record_rejected_audit）。
+            if should_record_rejected_audit(&error) {
+                record_rejected_evidence_query(&paths, &input);
+            }
             Err(evidence_api_error(&error))
         }
     }
+}
+
+/// M1（fix round 1）：`EvidenceError::Io` 可能来自 T6 成功路径自身审计 append 失败
+/// （结果已服务但审计落盘失败），此时再补一条零结果「被拒」审计会失真，故 Io 不补记。
+fn should_record_rejected_audit(error: &EvidenceError) -> bool {
+    !matches!(error, EvidenceError::Io { .. })
 }
 
 /// 被拒查询审计补记：令牌可反查 attempt 时追加一条零结果审计条目；
@@ -81,6 +93,7 @@ mod tests {
     use crate::product::json_store::write_json;
     use crate::product::logical_codebase::evidence_audit::EvidenceAuditRecord;
     use crate::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA;
+    use crate::product::logical_codebase::evidence_index::EvidenceError;
     use crate::product::logical_codebase::evidence_token::issue_evidence_token;
     use crate::product::logical_codebase::{EvidenceQueryInput, EvidenceRole};
     use crate::product::models::ProviderName;
@@ -162,6 +175,26 @@ mod tests {
             role: EvidenceRole::Coder,
             query: "RejectedSymbol".to_string(),
         }
+    }
+
+    #[test]
+    fn web_evidence_io_error_skips_rejected_audit_but_other_errors_do_not() {
+        assert!(
+            !should_record_rejected_audit(&EvidenceError::Io {
+                message: "audit append failed".to_string()
+            }),
+            "Io must not trigger a rejected-audit record"
+        );
+        assert!(
+            should_record_rejected_audit(&EvidenceError::InvalidQuery {
+                reason: "empty".to_string()
+            }),
+            "InvalidQuery must still trigger a rejected-audit record"
+        );
+        assert!(
+            should_record_rejected_audit(&EvidenceError::BudgetExhausted),
+            "BudgetExhausted must still trigger a rejected-audit record"
+        );
     }
 
     #[test]
