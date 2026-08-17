@@ -200,11 +200,14 @@ impl PointerPublishCoordinator {
             publication_id,
         )?;
 
-        // 远端是否已有该分支：Pushed 条目，或 push 成功后写 ReviewRequest 失败的
-        // Failed 条目（journal 已 Completed(Pushed)）→ 只补 ReviewRequest，不再 push。
+        // 远端是否已有该分支：Pushed 条目，或 journal 已 Completed(Pushed) 的
+        // Committed/Failed 条目 → 只补 ReviewRequest，不再 push。Committed 覆盖
+        // journal 完成与 publication 条目落盘之间的崩溃窗口。
         let already_pushed = entry.state == PointerPublicationEntryState::Pushed
-            || (entry.state == PointerPublicationEntryState::Failed
-                && self.member_pushed_to_remote(&publication, member_repo_id));
+            || (matches!(
+                entry.state,
+                PointerPublicationEntryState::Committed | PointerPublicationEntryState::Failed
+            ) && self.member_pushed_to_remote(&publication, member_repo_id));
 
         // 放回 InProgress（重新占用发布锁）。
         let mut publication = publication;

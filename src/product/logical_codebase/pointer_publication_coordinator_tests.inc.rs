@@ -728,6 +728,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_resumes_committed_entry_with_pushed_journal_without_repush() {
+        let fixture = setup(&[("api", true)]);
+        let publication = fixture
+            .coordinator
+            .publish_all(
+                PROJECT_ID,
+                &fixture.logical_codebase_id,
+                PointerPublicationBatchKind::Full,
+            )
+            .await
+            .expect("publish");
+        let member_repo_id = fixture.members[0].logical_id.0.to_string();
+        let branch = entry(&publication, &member_repo_id)
+            .branch_name
+            .clone()
+            .unwrap();
+        let commit_sha = entry(&publication, &member_repo_id)
+            .commit_sha
+            .clone()
+            .unwrap();
+
+        // 模拟 journal 已 Completed(Pushed) 但条目仅提交完成、ReviewRequest 尚未写入。
+        let mut committed = fixture
+            .coordinator
+            .publications
+            .load_publication(PROJECT_ID, &publication.id)
+            .unwrap();
+        let committed_entry = committed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.member_repo_id == member_repo_id)
+            .unwrap();
+        committed_entry.state = PointerPublicationEntryState::Committed;
+        fixture
+            .coordinator
+            .publications
+            .save_publication(&committed)
+            .unwrap();
+        let journal_path = fixture.coordinator.git_ops.pointer_publication_git_operation_path(
+            PROJECT_ID,
+            &publication.id,
+            &format!("pointer-pub-{}-{}", publication.id, member_repo_id),
+        );
+        let before_retry_journal: CodingGitOperationJournal =
+            crate::product::json_store::read_json(&journal_path).unwrap();
+        std::fs::remove_dir_all(review_requests_root(&fixture, &publication.id)).unwrap();
+
+        let retried = fixture
+            .coordinator
+            .retry_member_repo(PROJECT_ID, &publication.id, &member_repo_id)
+            .await
+            .expect("retry");
+        let after_retry_journal: CodingGitOperationJournal =
+            crate::product::json_store::read_json(&journal_path).unwrap();
+        assert_eq!(
+            after_retry_journal.created_at,
+            before_retry_journal.created_at,
+            "Committed+Pushed retry must not recreate the completed journal"
+        );
+        let retried_entry = entry(&retried, &member_repo_id);
+        assert_eq!(
+            retried_entry.state,
+            PointerPublicationEntryState::ReviewCreated
+        );
+        assert_eq!(retried_entry.branch_name.as_deref(), Some(branch.as_str()));
+        assert_eq!(
+            retried_entry.commit_sha.as_deref(),
+            Some(commit_sha.as_str())
+        );
+        assert_eq!(
+            fixture
+                .coordinator
+                .git_ops
+                .list_pointer_review_requests(PROJECT_ID, &publication.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn retry_review_request_write_failure_records_failed_with_branch() {
         let fixture = setup(&[("api", true)]);
         let publication = fixture
