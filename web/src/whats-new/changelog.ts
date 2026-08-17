@@ -5,9 +5,20 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.0.8";
+export const CURRENT_VERSION = "0.0.9";
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.0.9",
+    date: "2026-08-17",
+    title: "v0.0.9 更新",
+    highlights: [
+      "Story/Design 确认页新增 Canvas 产物审核面板：确认阶段自动展开，可对照产物与改动摘要做决策",
+      "确认操作分三档沉入面板：采纳 Review 意见预填输入、「确认并送审」进入交叉审核、「确认定稿」直接完成",
+      "面板收起后对话流恢复全宽，输入区上方一键重新展开；断线重连回到确认页时面板自动滑出",
+      "基础组件视觉升级：蓝紫主色 token、Claymorphism 克制形态，过渡 150-300ms，无装饰性动效",
+    ],
+  },
   {
     version: "0.0.8",
     date: "2026-08-15",
