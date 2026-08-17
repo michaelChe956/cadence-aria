@@ -25,7 +25,18 @@ use crate::web::state::WebAppState;
 
 #[derive(Debug, Deserialize)]
 pub struct CreatePointerPublicationRequest {
-    pub batch_kind: PointerPublicationBatchKind,
+    pub batch_kind: serde_json::Value,
+}
+
+impl CreatePointerPublicationRequest {
+    fn batch_kind(&self) -> ApiResult<PointerPublicationBatchKind> {
+        serde_json::from_value(self.batch_kind.clone()).map_err(|_| {
+            ApiError::validation(
+                "invalid_pointer_request",
+                "batch_kind must be one of: full, incremental",
+            )
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +50,7 @@ pub async fn create_pointer_publication(
     Json(request): Json<CreatePointerPublicationRequest>,
 ) -> ApiResult<Response> {
     validate_project_id(&project_id)?;
+    let batch_kind = request.batch_kind()?;
     let paths = product_app_paths(&state);
     let manifest = load_manifest(&paths, &project_id)?;
     let coordinator = PointerPublishCoordinator::new(paths);
@@ -46,7 +58,7 @@ pub async fn create_pointer_publication(
         .publish_all(
             &project_id,
             &manifest.logical_codebase_id.to_string(),
-            request.batch_kind,
+            batch_kind,
         )
         .await
         .map_err(pointer_publish_api_error)?;
@@ -147,9 +159,10 @@ mod tests {
     use super::*;
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId,
-        MemberStatus, PointerPublication, PointerPublicationBatchKind, PointerPublicationEntry,
-        PointerPublicationEntryState, PointerPublicationStatus, RepositoryCheckoutId,
-        RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+        MemberStatus, PointerBlockFields, PointerPublication, PointerPublicationBatchKind,
+        PointerPublicationEntry, PointerPublicationEntryState, PointerPublicationStatus,
+        RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+        render_pointer_block,
     };
     use crate::web::app::build_web_router;
     use crate::web::runtime::WebRuntime;
@@ -327,6 +340,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_pointer_publication_rejects_invalid_batch_kind_with_explicit_422() {
+        let fixture = setup();
+        let app = test_app(fixture.root.path());
+        let response = post_json(
+            &app,
+            "/api/projects/project_0001/logical-codebase/pointer-publications",
+            serde_json::json!({"batch_kind": "unsupported"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "invalid_pointer_request");
+        assert_eq!(
+            body["message"],
+            "batch_kind must be one of: full, incremental"
+        );
+    }
+
+    #[tokio::test]
     async fn create_pointer_publication_rejects_second_in_progress_batch_with_busy() {
         let fixture = setup();
         // 预置一个 InProgress 批次：发布锁必须拒绝新批次。
@@ -367,6 +399,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = body_json(response).await;
         assert_eq!(body["code"], "pointer_publish_busy");
+    }
+
+    #[tokio::test]
+    async fn retry_pointer_publication_repo_returns_http_409_for_unresolved_conflict() {
+        let fixture = setup();
+        let paths = ProductAppPaths::new(fixture.root.path().join(".aria"));
+        let manifest = crate::product::logical_codebase::LogicalCodebaseStore::new(paths)
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap();
+        std::fs::write(
+            fixture.root.path().join("api/.aria-pointer.md"),
+            render_pointer_block(&PointerBlockFields {
+                logical_codebase_id: manifest.logical_codebase_id.to_string(),
+                repo_id: "00000000-0000-0000-0000-00000000dead".to_string(),
+                canonical_policy_locator: fixture
+                    .root
+                    .path()
+                    .join("aggregate-root")
+                    .to_string_lossy()
+                    .into_owned(),
+                pointer_version: 1,
+            }),
+        )
+        .unwrap();
+
+        let app = test_app(fixture.root.path());
+        let created = body_json(
+            post_json(
+                &app,
+                "/api/projects/project_0001/logical-codebase/pointer-publications",
+                serde_json::json!({"batch_kind": "full"}),
+            )
+            .await,
+        )
+        .await;
+        let publication_id = created["id"].as_str().unwrap();
+        let response = post_json(
+            &app,
+            &format!(
+                "/api/projects/project_0001/logical-codebase/pointer-publications/{publication_id}/retry-repo"
+            ),
+            serde_json::json!({"member_repo_id": fixture.member_repo_id}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(response).await["code"],
+            "pointer_conflict_unresolved"
+        );
     }
 
     #[tokio::test]
