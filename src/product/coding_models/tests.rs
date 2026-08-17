@@ -178,6 +178,21 @@ fn review_request_deserializes_legacy_json_as_attempt_owner() {
 }
 
 #[test]
+fn review_request_rejects_json_without_attempt_id() {
+    let missing_attempt_id = serde_json::json!({
+        "id": "rr_1", "kind": "git_branch_only", "remote_kind": "generic_git",
+        "remote": "origin", "base_branch": "main", "branch_name": "aria/attempt_1",
+        "commit_sha": "abc", "push_status": "pushed", "external_url": null,
+        "manual_instructions": [], "created_at": "2026-08-14T00:00:00Z",
+        "updated_at": "2026-08-14T00:00:00Z"
+    });
+
+    let error = serde_json::from_value::<ReviewRequest>(missing_attempt_id)
+        .expect_err("ReviewRequest must require attempt_id");
+    assert!(error.to_string().contains("attempt_id"));
+}
+
+#[test]
 fn review_request_roundtrips_revoked_flag() {
     let req = ReviewRequest {
         id: "rr_revoked".to_string(),
