@@ -18,20 +18,21 @@
 ```
 
 **切换逻辑（全部由 stage 驱动，无手动开关状态）**：
-- 进入 author_confirm（产出/修订/review 报告回来）→ 面板滑出展示当前版本
+- 进入 author_confirm（产出/修订/review 报告回来，含刷新/断线重连恢复到该阶段）→ 面板滑出展示当前版本
 - 用户聚焦对话输入区开始输入 / 点「返回对话反馈」→ 面板收起，对话全宽
-- 新一轮运行开始（Revision/CrossReview 进入 Running）→ 面板保持收起
-- 送审/定稿后 → 面板随阶段离开 author_confirm 收起
+- 「采纳 Review 意见」点击 → 预填输入框的同时面板自动收起（避免预填写入被面板遮挡的交互死点）
+- 送审（进入 CrossReview）/ 新一轮运行开始（Running）→ 面板收起，对话全宽展示执行过程；结束回 author_confirm 再次滑出
+- 定稿后 → 面板随阶段离开 author_confirm 收起
 
-**面板组成**：顶部工具条（标题 + 版本切换 + 收起钮）→ 本轮改动摘要折叠条（默认展开）→ artifact 渲染区（复用并放大现有 ArtifactPane 的 markdown 渲染）→ 吸顶操作条（采纳 Review 意见 + 送审/定稿）。
+**面板组成**：顶部工具条（标题 + 版本切换 + 收起钮）→ 本轮改动摘要折叠条（默认展开；取最近一个 completed revision 节点的 summary，无摘要时整条隐藏）→ artifact 渲染区（复用并放大现有 ArtifactPane 的 markdown 渲染）→ 吸顶操作条（采纳 Review 意见 + 确认送审/确认定稿）。
 
-**三栏宽度策略**：节点栏固定 ~200px；面板默认占剩余 ~60%；对话流收窄保底 ~320px；1440px 以下面板可覆盖对话区（overlay 模式），ui-ux 规范中定断点。
+**三栏宽度策略与断点**：节点栏固定 ~200px；>=1440px 时三栏并存（面板占剩余 ~60%，对话流收窄保底 ~320px）；<1440px 时面板以 overlay 模式覆盖对话区（节点栏仍保留）。现状 `activePanel: "chat" | "artifact"` 互斥 Tab（ChatWorkspacePage.tsx:154,590）需改造：author_confirm 时 chat 与面板并存，Tab 语义调整为仅在非 author_confirm 阶段生效。
 
 ## 2. 三动作分层映射
 
 | 动作 | 位置 | 样式 |
 |---|---|---|
-| 送审 / 定稿 | 面板吸顶操作条 | 成对；默认推荐项 btn-primary（蓝紫实心），另一项 btn-secondary（白底粗边框） |
+| 确认送审 / 确认定稿 | 面板吸顶操作条 | 成对；默认推荐项 btn-primary（蓝紫实心），另一项 btn-secondary（白底粗边框）；文案保留现状不改动 |
 | 采纳 Review 意见 | 面板吸顶操作条左侧 | btn-secondary；仅对话流有 review 报告时显示 |
 | 发送反馈 | 对话输入区（输入框右侧） | 中性次级；不与终局确认并排 |
 | 返回对话反馈 | 面板工具条 | 文本钮，收起面板 |
@@ -52,9 +53,11 @@
 
 实施方式：`styles.css` 的 --aria-* 变量值更新（保留变量名，改值 + 新增 --aria-cta），组件类向规范收敛；MASTER.md 由 ui-ux-pro-max 生成并按上表定制。
 
-## 4. 行为兼容
+## 4. 行为兼容与全站连带
 
 spec-design-dialog-revision 的全部行为契约不变：stage 机、决策语义、provisional、review 回对话流、采纳按钮预填逻辑——本 change 仅改呈现层。既有前端测试断言类名/结构的需随样式迁移更新，行为断言不变。
+
+**token 改值的全站连带（有意为之）**：`--aria-*` 为全站共享变量（47 个文件引用），styles.css 改值后 coding/image-create 等其他工作台色系随之联动——这是"规范全站"的自然结果且可接受（仅色系变化，组件形态不变）；组件形态收敛（粗边框卡片/胶囊 chip/按钮体系）仅落 spec 工作台。回归范围相应包含其他工作台关键页冒烟测试（渲染不炸、对比度不劣化）。
 
 ## 5. 决策记录
 

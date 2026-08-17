@@ -26,6 +26,22 @@ Story/Design workspace 进入 AuthorConfirm 阶段时，必须在右侧自动滑
 - **WHEN** 修订完成进入 AuthorConfirm 且本轮有改动摘要
 - **THEN** 面板顶部展示可折叠的「本轮改动」摘要条，默认展开
 
+#### Scenario: 无改动摘要时折叠条隐藏
+- **WHEN** 进入 AuthorConfirm 时当前版本非修订产生（如初稿）或无可用摘要
+- **THEN** 面板不渲染「本轮改动」折叠条
+
+#### Scenario: 重连恢复后面板状态
+- **WHEN** 会话处于 AuthorConfirm 阶段时页面刷新或断线重连
+- **THEN** 状态恢复后面板自动滑出展示当前版本产物（阶段驱动，与首次进入一致）
+
+#### Scenario: 送审与运行期间面板收起
+- **WHEN** 用户在面板点「确认送审」（进入 CrossReview）或新一轮修订运行开始
+- **THEN** 面板收起，reviewer/author 运行期间对话流全宽展示执行过程；运行结束回到 AuthorConfirm 时面板再次滑出
+
+#### Scenario: 采纳 Review 意见预填时自动收起面板
+- **WHEN** 面板展示中用户点击「采纳 Review 意见」
+- **THEN** 报告文本预填入对话输入框的同时面板自动收起（对话流全宽），用户可直接查看/编辑预填内容
+
 ### Requirement: 三动作视觉分层
 
 终局确认动作与迭代操作必须在位置与样式上明确分层；「发送反馈」不得与终局确认按钮并排呈现。
@@ -43,8 +59,8 @@ Story/Design workspace 进入 AuthorConfirm 阶段时，必须在右侧自动滑
 Spec 工作台视觉迁移到 Claymorphism 蓝紫橙规范；设计规范以 design-system/MASTER.md 持久化为全站唯一事实源。
 
 #### Scenario: token 映射落地
-- **WHEN** 实施完成后检查 spec 工作台页面
-- **THEN** 卡片/面板呈现 2-3px 深色边框与 rounded-xl/2xl 圆角，页面底色为微暖奶油色，主色为 #4F46E5、CTA 强调为 #F97316，标签为胶囊 chip 形态
+- **WHEN** 实施完成后检查页面
+- **THEN** token 层全站生效（主色 #4F46E5、CTA #F97316、奶油底色）；spec 工作台组件形态收敛：卡片/面板 2-3px 深色边框与 rounded-xl/2xl 圆角、标签为胶囊 chip 形态；其他工作台仅色系联动、组件形态不变
 
 #### Scenario: 克制玩具元素
 - **WHEN** 检查 spec 工作台页面
@@ -52,4 +68,4 @@ Spec 工作台视觉迁移到 Claymorphism 蓝紫橙规范；设计规范以 des
 
 #### Scenario: 规范持久化
 - **WHEN** 查看仓库 design-system/MASTER.md
-- **THEN** 文件存在且包含配色/字体/边框/圆角/阴影/按钮/chip 的完整规范与反模式清单，作为后续全站推广的唯一事实源
+- **THEN** 文件存在且至少包含：配色（主色/CTA/底色/文本/边框）、字体、边框与圆角、阴影、按钮体系（primary/secondary）、chip 组件、反模式清单七个章节，作为后续全站推广的唯一事实源
