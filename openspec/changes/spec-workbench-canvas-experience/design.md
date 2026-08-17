@@ -42,7 +42,7 @@
 | 维度 | 现状 | 目标 |
 |---|---|---|
 | 主色 | #0891b2 青 | #4F46E5 蓝紫（primary） |
-| CTA 强调 | 无独立 CTA 色 | #F97316 橙（主按钮/激活态；selection 已有先例） |
+| CTA 强调 | 无独立 CTA 色 | #F97316 橙（激活态/警示点缀；selection 已有先例；主按钮为蓝紫 btn-primary） |
 | 页面底色 | #f6f8fa 冷灰 | #f5f3ee 微暖奶油（面板保持白色卡片） |
 | 边框 | 1px #dde5ec | 2-3px var(--text) 深色边框（卡片/面板/chip） |
 | 圆角 | rounded-md | rounded-xl（16px）/ 2xl（24px） |
