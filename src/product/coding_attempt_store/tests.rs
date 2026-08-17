@@ -6,7 +6,8 @@ use crate::product::coding_models::{
     AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
     CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType, CodingProviderRole,
     FindingSeverity, GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind,
-    GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding,
+    GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind,
     ReviewVerdict,
 };
 use crate::product::json_store::write_json;
@@ -61,6 +62,45 @@ fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
         })
         .unwrap();
     (tmp, store, attempt)
+}
+
+#[test]
+fn list_review_requests_orders_by_created_at_then_id() {
+    let (_tmp, store, attempt) = setup();
+    let request = |id: &str, created_at: &str| ReviewRequest {
+        id: id.to_string(),
+        attempt_id: attempt.id.clone(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: format!("aria/{id}"),
+        commit_sha: format!("commit-{id}"),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
+        created_at: created_at.to_string(),
+        updated_at: created_at.to_string(),
+    };
+    let older = request("zz-request", "2026-08-14T00:00:00Z");
+    let newer = request("aa-request", "2026-08-14T00:00:01Z");
+    store.save_review_request(&attempt, &newer).unwrap();
+    store.save_review_request(&attempt, &older).unwrap();
+
+    let listed = store
+        .list_review_requests(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["zz-request", "aa-request"]
+    );
 }
 
 fn provider_snapshot() -> ProviderConfigSnapshot {

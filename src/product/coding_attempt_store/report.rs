@@ -81,11 +81,17 @@ impl super::CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<Vec<ReviewRequest>, ProductStoreError> {
-        super::list_json_records(
+        let mut requests: Vec<ReviewRequest> = super::list_json_records(
             &self
                 .attempt_dir(project_id, issue_id, attempt_id)
                 .join("review-requests"),
-        )
+        )?;
+        requests.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(requests)
     }
 
     /// PointerPublication 来源的 ReviewRequest 独立分区落盘：
