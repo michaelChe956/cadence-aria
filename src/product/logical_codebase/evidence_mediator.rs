@@ -75,6 +75,14 @@ impl EvidenceRole {
     }
 }
 
+/// 审计 `role` 字段标签：`coder(role_self_reported)` / `reviewer(role_self_reported)`。
+///
+/// T7 被拒查询审计补记（T6 Minor-1）与 T6 成功路径共用同一标签来源，避免
+/// `role_self_reported` 标记在调用点各自拼接导致漂移。
+pub fn evidence_role_label(role: EvidenceRole) -> String {
+    format!("{}({})", role.as_str(), ROLE_SELF_REPORTED_MARK)
+}
+
 /// 受控证据查询输入（HTTP body `{token, role, query}`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -171,7 +179,7 @@ fn handle_evidence_query_with_runner(
         &attempt,
         &EvidenceAuditRecord {
             attempt_id: attempt.id.clone(),
-            role: format!("{}({})", input.role.as_str(), ROLE_SELF_REPORTED_MARK),
+            role: evidence_role_label(input.role),
             query: input.query.clone(),
             hit_count: hits.len(),
             result_chars,

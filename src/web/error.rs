@@ -152,6 +152,14 @@ impl IntoResponse for ApiError {
             "pointer_push_failed" | "pointer_revoke_failed" => StatusCode::SERVICE_UNAVAILABLE,
             "pointer_not_found" => StatusCode::NOT_FOUND,
             "invalid_pointer_request" => StatusCode::UNPROCESSABLE_ENTITY,
+            // Task 7 证据查询稳定码：6 码 + evidence_io（设计 §5.2）。
+            "evidence_unauthorized" => StatusCode::UNAUTHORIZED,
+            "evidence_forbidden" => StatusCode::FORBIDDEN,
+            "evidence_not_available" => StatusCode::NOT_FOUND,
+            "evidence_invalid_query" => StatusCode::UNPROCESSABLE_ENTITY,
+            "evidence_budget_exhausted" => StatusCode::TOO_MANY_REQUESTS,
+            "evidence_query_failed" => StatusCode::SERVICE_UNAVAILABLE,
+            "evidence_io" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -512,6 +520,25 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn evidence_stable_codes_map_to_design_http_status() {
+        // 设计 §5.2：evidence_* 稳定码 → HTTP 状态集中登记。
+        let cases = [
+            ("evidence_unauthorized", StatusCode::UNAUTHORIZED),
+            ("evidence_forbidden", StatusCode::FORBIDDEN),
+            ("evidence_not_available", StatusCode::NOT_FOUND),
+            ("evidence_invalid_query", StatusCode::UNPROCESSABLE_ENTITY),
+            ("evidence_budget_exhausted", StatusCode::TOO_MANY_REQUESTS),
+            ("evidence_query_failed", StatusCode::SERVICE_UNAVAILABLE),
+            ("evidence_io", StatusCode::INTERNAL_SERVER_ERROR),
+        ];
+
+        for (code, expected) in cases {
+            let response = ApiError::validation(code, "evidence contract").into_response();
+            assert_eq!(response.status(), expected, "{code} status mapping");
+        }
     }
 
     #[tokio::test]

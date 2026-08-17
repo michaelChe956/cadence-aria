@@ -72,6 +72,14 @@ impl EvidenceBudgetLedger {
         Self { paths }
     }
 
+    /// 读取当前剩余配额（只读，不消费）。缺文件时按 `cumulative_chars = 0` →
+    /// 返回全配额。T7 被拒查询审计补记取「当前 ledger 值或 0」用。
+    pub fn remaining(&self, attempt: &CodingExecutionAttempt) -> Result<usize, EvidenceError> {
+        let path = self.budget_path(attempt);
+        let record = self.load_or_init(attempt, &path)?;
+        Ok(EVIDENCE_ATTEMPT_CHAR_QUOTA.saturating_sub(record.cumulative_chars))
+    }
+
     /// 消费 `result_chars` 个结果字符。返回 `Accepted`（含剩余配额）或 `Exhausted`
     /// （累计超配额，ledger 保持原值不写入本次消费）。
     pub fn consume(
