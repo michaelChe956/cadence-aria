@@ -383,7 +383,7 @@ describe("ChatWorkspacePage chat actions", () => {
         <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
       );
 
-      // 输入聚焦 → 收起。
+      // 输入聚焦（<1440px，jsdom 默认 innerWidth=1024）→ overlay 遮挡输入框，收起。
       act(() => {
         screen.getByPlaceholderText(/输入修改意见/).focus();
       });
@@ -401,6 +401,41 @@ describe("ChatWorkspacePage chat actions", () => {
       expect(
         screen.getByTestId("artifact-review-panel"),
       ).toBeInTheDocument();
+    });
+
+    it("≥1440px 聚焦输入框不收起面板（对照 artifact 撰写反馈）", () => {
+      mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType: "story",
+        stage: "author_confirm",
+        reviewerEnabled: true,
+        providers: { author: "claude_code", reviewer: "codex" },
+        artifact: "# Spec",
+      });
+
+      const originalWidth = window.innerWidth;
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: 1920,
+      });
+      try {
+        render(
+          <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        );
+        expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
+        act(() => {
+          screen.getByPlaceholderText(/输入修改意见/).focus();
+        });
+        expect(
+          screen.getByTestId("artifact-review-panel"),
+        ).toBeInTheDocument();
+      } finally {
+        Object.defineProperty(window, "innerWidth", {
+          configurable: true,
+          value: originalWidth,
+        });
+      }
     });
 
     it("点击采纳 Review 意见预填输入并收起面板", async () => {

@@ -654,7 +654,14 @@ export function ChatWorkspacePage({
                   activeNodeType={activeNode?.node_type ?? null}
                   workItemPlanArtifact={workItemPlanArtifact}
                   disabled={inputDisabled}
-                  onInputFocus={() => setReviewPanelDismissed(true)}
+                  onInputFocus={() => {
+                    // spec-workbench-canvas-experience 测试反馈：≥1440px 三栏并存时
+                    // 聚焦不收起面板（用户对照 artifact 内容提修改意见）；
+                    // <1440px overlay 面板遮挡输入框，聚焦时临时收起。
+                    if (window.innerWidth < 1440) {
+                      setReviewPanelDismissed(true);
+                    }
+                  }}
                   onSendContextNote={sendContextNote}
                   onStartGeneration={handleStartGeneration}
                   hideStartGeneration={Boolean(recoverableInterruptedRun)}
