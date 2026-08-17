@@ -55,6 +55,23 @@ const partialSummary: IssueDeliverySummaryDto = {
   ],
 };
 
+const notPushedSummary: IssueDeliverySummaryDto = {
+  project_id: "project_0001",
+  issue_id: "issue_0001",
+  overall: "partial",
+  entries: [
+    {
+      repository_name: "cadence-aria",
+      work_item_id: "work_item_0003",
+      attempt_status: "completed",
+      branch_name: "feat/delivery-local",
+      commit_sha: "abc123def456",
+      push_status: "not_pushed",
+      push_error: null,
+    },
+  ],
+};
+
 const noneSummary: IssueDeliverySummaryDto = {
   project_id: "project_0001",
   issue_id: "issue_0001",
@@ -98,6 +115,17 @@ describe("DeliveryStatusPanel", () => {
     expect(failedRows).toHaveLength(1);
     expect(failedRows[0]).toHaveTextContent("cadence-web");
     expect(failedRows[0]).toHaveTextContent("remote rejected: non-fast-forward");
+  });
+
+  it("renders not_pushed as an explicit pending delivery branch", () => {
+    render(<DeliveryStatusPanel summary={notPushedSummary} />);
+
+    const row = screen.getByTestId("delivery-entry-row");
+    expect(row).toHaveAttribute("data-status", "pending");
+    expect(row).toHaveTextContent("cadence-aria");
+    expect(row).toHaveTextContent("未推送");
+    expect(row).not.toHaveTextContent("推送失败");
+    expect(screen.queryByTestId("delivery-entry-error")).not.toBeInTheDocument();
   });
 
   it("renders none with unavailable hint", () => {
