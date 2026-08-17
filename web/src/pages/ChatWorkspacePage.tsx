@@ -17,6 +17,7 @@ import type {
   RevisionPath,
 } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
+import { ArtifactReviewPanel } from "../components/chat-workspace/ArtifactReviewPanel";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
@@ -158,6 +159,21 @@ export function ChatWorkspacePage({
   ] = useState<number | null>(null);
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
+  // spec-workbench-canvas-experience T3：author_confirm 且 story/design 时
+  // 对话与产物审核面板并存（互斥 Tab 仅保留给其余场景）。
+  const reviewPanelEnabled =
+    stage === "author_confirm" &&
+    (workspaceType === "story" || workspaceType === "design");
+  const [reviewPanelOpen, setReviewPanelOpen] = useState(true);
+  const changelogSummary = useMemo(() => {
+    const lastCompletedRevision = timelineNodes
+      .filter(
+        (node) => node.node_type === "revision" && node.status === "completed",
+      )
+      .at(-1);
+    const summary = lastCompletedRevision?.summary?.trim();
+    return summary ? summary : undefined;
+  }, [timelineNodes]);
   const reviewDecisionOptions = useMemo(
     () =>
       pendingDecision?.options ??
@@ -581,13 +597,103 @@ export function ChatWorkspacePage({
           onSelectNode={handleSelectNode}
           className="border-b border-[var(--aria-line)] md:border-b-0 md:border-r"
         />
-        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
-          <WorkspacePanelTabs
-            activePanel={activePanel}
-            onSelectPanel={setActivePanel}
-            artifactCount={artifactVersions.length}
-          />
-          {activePanel === "artifact" ? (
+        <section
+          className={`grid min-h-0 bg-[var(--aria-panel)] ${
+            reviewPanelEnabled
+              ? "grid-rows-[minmax(0,1fr)]"
+              : "grid-rows-[auto_minmax(0,1fr)]"
+          }`}
+        >
+          {reviewPanelEnabled ? (
+            <div className="relative grid min-h-0 min-[1440px]:grid-cols-[minmax(320px,1fr)_minmax(0,1.4fr)]">
+              <div className="grid min-h-0 min-w-[320px] grid-rows-[minmax(0,1fr)_auto] border-r border-[var(--aria-line)]">
+                <ChatEntryList
+                  ref={chatListRef}
+                  entries={chatEntries}
+                  onPermissionResponse={handlePermissionResponse}
+                  onChoiceResponse={handleChoiceResponse}
+                  onHumanConfirm={handleHumanConfirm}
+                  sessionId={sessionReady ? sessionId : null}
+                  contentCache={contentCacheValues}
+                  loadContent={handleLoadContent}
+                  onCacheContent={handleCacheContent}
+                />
+                <ChatInputBar
+                  stage={stage}
+                  activeNodeType={activeNode?.node_type ?? null}
+                  workItemPlanArtifact={workItemPlanArtifact}
+                  disabled={inputDisabled}
+                  reviewerEnabled={reviewerEnabled}
+                  latestReviewReport={latestReviewReport}
+                  onSendContextNote={sendContextNote}
+                  onStartGeneration={handleStartGeneration}
+                  hideStartGeneration={Boolean(recoverableInterruptedRun)}
+                  onSendHumanDecision={(payload) =>
+                    sendHumanConfirm("request-change", payload)
+                  }
+                  onAuthorDecision={handleAuthorDecision}
+                  onSelectWorkItemGenerationMode={
+                    sendSelectWorkItemGenerationMode
+                  }
+                  onRequestOutlineRevision={() => sendRequestOutlineRevision()}
+                  onWorkItemDraftDecision={sendWorkItemDraftDecision}
+                  onWorkItemBatchDecision={sendWorkItemBatchDecision}
+                  onAbort={abort}
+                />
+              </div>
+              {reviewPanelOpen ? (
+                <div className="absolute inset-y-0 right-0 w-[65%] min-h-0 max-w-full border-l border-[var(--aria-line)] bg-[var(--aria-panel)] p-2 min-[1440px]:static min-[1440px]:w-auto min-[1440px]:border-l-0">
+                  <ArtifactReviewPanel
+                    artifactVersions={artifactVersions}
+                    artifact={artifact}
+                    sessionId={sessionReady ? sessionId : null}
+                    artifactContentCache={artifactContentCacheValues}
+                    loadArtifactVersion={handleLoadArtifactVersion}
+                    onCacheArtifactContent={handleCacheArtifactContent}
+                    changelogSummary={changelogSummary}
+                    onClose={() => setReviewPanelOpen(false)}
+                    actions={
+                      // TODO(spec-workbench-canvas-experience T4)：三动作正式迁移至面板。
+                      <>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => sendRequestRevision()}
+                        >
+                          请求修订
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => sendAuthorDecision("accept")}
+                        >
+                          定稿采纳
+                        </button>
+                      </>
+                    }
+                    className="h-full min-h-0"
+                  />
+                </div>
+              ) : (
+                <div className="absolute bottom-4 right-4 z-20 min-[1440px]:static min-[1440px]:flex min-[1440px]:items-end min-[1440px]:justify-end min-[1440px]:p-3">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setReviewPanelOpen(true)}
+                  >
+                    展开 Artifact 审核
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <WorkspacePanelTabs
+                activePanel={activePanel}
+                onSelectPanel={setActivePanel}
+                artifactCount={artifactVersions.length}
+              />
+              {activePanel === "artifact" ? (
             workspaceType === "work_item_plan" ? (
               displayedWorkItemPlanArtifact ? (
                 <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
@@ -713,6 +819,8 @@ export function ChatWorkspacePage({
                 onAbort={abort}
               />
             </div>
+            )}
+            </>
           )}
         </section>
       </main>

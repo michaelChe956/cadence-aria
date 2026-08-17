@@ -16,7 +16,7 @@
 |------|-----|----------|------|
 | Primary 主色 | `#4F46E5` | `--aria-primary` | 品牌蓝紫：链接、激活态、主交互色 |
 | Primary 浅底 | `#E0E7FF` | `--aria-primary-soft` | 主色浅底（选中行、高亮块） |
-| CTA 强调 | `#F97316` | `--aria-cta` | 橙：主按钮（送审/定稿/采纳）、激活强调（selection 已有先例） |
+| CTA 强调 | `#F97316` | `--aria-cta` | 橙：激活强调（激活 chip、版本标识、review 警示、selection）、警示点缀；不作主按钮色 |
 | CTA 浅底 | `#FFEDD5` | `--aria-cta-soft` | CTA 浅底 |
 | 页面底色 | `#f5f3ee` | `--aria-bg` | 微暖奶油底；面板保持白色卡片 |
 | 面板 | `#ffffff` | `--aria-panel` | 白色卡片/面板 |
@@ -47,7 +47,7 @@
 
 ## 5. 按钮（Buttons）
 
-- **主按钮（CTA）：** 背景 `var(--aria-cta)`（#F97316）+ 白字 + 2px 深边框 + `rounded-xl`，600 字重。
+- **主按钮（送审/定稿/采纳等 CTA）：** 背景 `var(--aria-primary)`（#4F46E5 蓝紫）+ 白字 + 2px 深边框 + `rounded-xl`，600 字重。橙 `var(--aria-cta)` 仅用于激活强调/警示点缀，不作主按钮色。
 - **次按钮：** 白底 + 2px `var(--aria-border-strong)` 边框 + `rounded-xl`。
 - **危险按钮：** `var(--aria-danger)` 系。
 - hover 仅做颜色/阴影变化，transition 150-300ms；**禁 hover scale/位移**。
