@@ -3,19 +3,12 @@
 ## Purpose
 TBD - created by archiving change harden-coding-attempt-deletion. Update Purpose after archive.
 ## Requirements
-### Requirement: 删除 coding attempt 必须按条件清理 shared-worktree
+### Requirement: 删除 coding attempt 必须按条件清理 shared-worktree（REQ-DEL-01）
+系统 SHALL 使逻辑代码库场景下删除 coding attempt 时按 `(project, issue, repository)` 判定 shared-worktree 是否仍被同仓库其他 attempt 使用；仅当同仓无其他使用者时才清理，不得因异仓 attempt 存在而误删或误留。
 
-删除一个 coding attempt 后，系统 MUST 检查该 issue 是否还有其他 attempt 记录。无其他 attempt 时 MUST 删除 `issue-shared-worktree.json` 及其 `.lock`；有其他 attempt 时 MUST 保留（它们仍在使用 shared-worktree）。
-
-#### Scenario: 无其他 attempt 时清理 shared-worktree
-
-- **WHEN** 删除一个 attempt 后，该 issue 不存在其他 attempt 记录
-- **THEN** 系统 MUST 删除 `issue-shared-worktree.json` 与 `.issue-shared-worktree.json.lock`，且删除视为成功（NotFound=OK）
-
-#### Scenario: 有其他 attempt 时保留 shared-worktree
-
-- **WHEN** 删除一个 attempt 后，该 issue 仍存在其他 attempt 记录
-- **THEN** 系统 MUST NOT 删除 `issue-shared-worktree.json`，其他 attempt 对 shared-worktree 的使用 MUST 不受影响
+#### Scenario: 按仓库范围判定 shared-worktree 清理
+- **WHEN** 逻辑代码库场景下删除 coding attempt
+- **THEN** 系统 SHALL 按 `(project, issue, repository)` 判定 shared-worktree 是否仍被同仓库其他 attempt 使用，仅同仓无使用者时清理
 
 ### Requirement: 删除 coding attempt 必须清理该 attempt 的残留 lock
 
@@ -40,12 +33,10 @@ TBD - created by archiving change harden-coding-attempt-deletion. Update Purpose
 - **WHEN** 删除一个 attempt，其 worktree 目录已被手动删除
 - **THEN** 删除 MUST 成功完成，MUST NOT 因 worktree 缺失报错
 
-### Requirement: 删除 coding attempt 不得误伤同 issue 其他数据
+### Requirement: 删除 coding attempt 不得误伤同 issue 其他数据（REQ-DEL-02）
+系统 SHALL 使删除同一 Issue 下某一仓库的 attempt 时保留其他仓库的 shared-worktree、锁与数据，删除范围限定于该 target repository。
 
-删除 attempt MUST 只影响该 attempt 自身及其产物，MUST NOT 删除同 issue 其他 attempt 的数据、plan、revisions 或其他 attempt 的 worktree/分支。
-
-#### Scenario: 删除一个 attempt 不影响其他 attempt
-
-- **WHEN** 同 issue 有多个 attempt，删除其中一个
-- **THEN** 其他 attempt 的记录、shared-worktree（因仍有 attempt）、各自的 worktree/分支 MUST 不受影响
+#### Scenario: 异仓 attempt 互不影响
+- **WHEN** 删除同一 Issue 下某一仓库的 attempt
+- **THEN** 系统 SHALL 保留其他仓库的 shared-worktree、锁与数据，删除范围限定于该 target repository
 

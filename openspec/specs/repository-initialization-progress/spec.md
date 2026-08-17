@@ -4,28 +4,12 @@
 
 为代码库初始化提供可轮询的异步操作状态：固定五步真实进度、失败诊断与最终结果，服务端是步骤状态的唯一事实来源。
 ## Requirements
-### Requirement: 可轮询的代码库初始化操作
-系统 SHALL 在接受添加代码库请求后创建一个具有唯一 `operation_id` 的持久化代码库初始化操作，并立即返回 operation 快照，而不等待 Cadence-skills 与 Claude Code 初始化完成。系统 SHALL 提供只读接口，以便客户端通过 `operation_id` 获取当前快照和最终结果。
+### Requirement: 可轮询的代码库初始化操作（REQ-INIT-01）
+系统 SHALL 在逻辑代码库场景提供可轮询、可恢复的聚合初始化操作（manifest revision、成员状态机、幂等 key、取消语义），并暴露与单仓 operation 一致的状态查询；不得复用固定六步单仓 operation 伪装为聚合。
 
-#### Scenario: 成功接受初始化请求
-- **WHEN** 用户为已有 Project 提交有效的未注册 Git 代码库
-- **THEN** 系统 SHALL 创建状态为 `created` 或 `running` 的 operation、返回其 `operation_id` 和初始快照，并在后台开始初始化
-
-#### Scenario: 查询非终态操作
-- **WHEN** 客户端查询一个仍在执行的有效 `operation_id`
-- **THEN** 系统 SHALL 返回服务端已持久化的 operation 状态、五个步骤的真实状态和当前可用诊断信息
-
-#### Scenario: 查询完成操作
-- **WHEN** 客户端查询状态为 `completed` 的有效 `operation_id`
-- **THEN** 系统 SHALL 返回五个 `completed` 步骤以及与现有代码库创建成功响应等价的 `repository` 和 `initialization` 最终结果
-
-#### Scenario: 查询失败操作
-- **WHEN** 客户端查询状态为 `failed` 的有效 `operation_id`
-- **THEN** 系统 SHALL 返回失败步骤、未执行步骤、结构化错误详情以及可用的 changed paths
-
-#### Scenario: 查询不存在操作
-- **WHEN** 客户端查询未知的 `operation_id`
-- **THEN** 系统 SHALL 返回稳定的“初始化操作不存在”错误，且不得返回其他 Project 或代码库的操作信息
+#### Scenario: 聚合初始化操作可轮询
+- **WHEN** 逻辑代码库场景下用户触发聚合初始化
+- **THEN** 系统 SHALL 提供独立的聚合初始化 operation 并暴露可轮询状态
 
 ### Requirement: 固定五步真实状态机
 每个代码库初始化 operation SHALL 按以下顺序创建且仅创建六个步骤：`cadence_skills`、`pre_check`、`rule_config`、`mcp_configuration`、`project_rules_examples`、`git_finalize`。每一步 SHALL 具有 `pending`、`running`、`completed` 或 `failed` 状态；服务端 SHALL 是这些状态的唯一事实来源。
@@ -142,3 +126,16 @@
 - **WHEN** `git_finalize` 执行任意 git 命令
 - **THEN** 子进程环境 SHALL NOT 包含除 `LC_ALL`、`HOME`、`SSH_AUTH_SOCK` 之外的继承变量
 
+
+### Requirement: 聚合初始化真实状态机（REQ-REG-05）
+系统 SHALL 使聚合初始化步骤状态机表达聚合级步骤（CadenceSkills/全局工具一次、聚合规则/MCP/OpenSpec/示例生成、成员预检），而非逐成员重复固定步骤;聚合模式步骤数由 design.md §7.2 spike 定值的 5 个稳定 step ID 表达。
+
+#### Scenario: 逻辑代码库聚合步骤
+- **WHEN** 逻辑代码库场景下执行聚合初始化
+- **THEN** 步骤状态机 SHALL 表达聚合级步骤，而非逐成员重复五步
+### Requirement: 聚合初始化不向成员仓提交推送（REQ-REG-06）
+系统 SHALL NOT 在逻辑代码库聚合初始化完成时对任何成员仓执行 `git add -A`/commit/push；逐仓提交推送的 GitFinalize 仅保留给传统单仓登记路径。
+
+#### Scenario: 聚合初始化不向成员仓提交推送
+- **WHEN** 逻辑代码库场景下聚合初始化完成
+- **THEN** 系统 SHALL NOT 对任何成员仓执行 git 提交推送；成员仓内不得残留聚合初始化的本地化资产
