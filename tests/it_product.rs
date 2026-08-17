@@ -13,6 +13,8 @@ mod product_git_workspace_service;
 mod product_index;
 #[path = "it_product/product_lifecycle_store.rs"]
 mod product_lifecycle_store;
+#[path = "it_product/product_logical_codebase_migration.rs"]
+mod product_logical_codebase_migration;
 #[path = "it_product/product_runtime_compat.rs"]
 mod product_runtime_compat;
 #[path = "it_product/product_test_executor.rs"]
