@@ -434,8 +434,25 @@ fn with_cadence_routing_reference(
 ) -> String {
     let mut rendered = String::from("\n");
     rendered.push_str(&direct_cadence_routing_rules_reference(context));
+    if matches!(context, RoutingReferenceContext::Logical(_)) {
+        rendered.push_str(&cross_repo_evidence_section());
+    }
     rendered.push_str(protocol);
     rendered
+}
+
+/// C-4 跨仓只读证据中介的 Logical 分支 prompt 段：告知 Coder/Reviewer 可用的
+/// 证据查询辅助工具及其边界。Legacy 分支不注入本段（既有 legacy 字节基线不变）。
+///
+/// 仅 Logical（逻辑代码库多仓流程）注入：证据中介链路（令牌/端口/查询脚本）只
+/// 在逻辑代码库 attempt 的 worktree 内注入，传统单仓流程不存在该工具。
+pub(crate) fn cross_repo_evidence_section() -> String {
+    "\n[cross_repo_evidence]\n\
+     - 本 worktree 已注入跨仓只读证据查询工具：`.aria/bin/aria-evidence-query`。\n\
+     - 用法: .aria/bin/aria-evidence-query --role <coder|reviewer> --query <symbol>\n\
+     - 预算规则: 收到 429 即停止查询（attempt 累计配额已耗尽）。\n\
+     - 只允许通过上述脚本读取 `.aria/evidence-token` 令牌并查询证据；不得触碰 `.aria/evidence-token` 以外的机制（不得改写令牌文件、端口文件或 Aria 内部分区）。\n"
+        .to_string()
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -665,6 +682,40 @@ mod tests {
     #[test]
     fn coding_execution_protocol_logical_carries_policy_ref() {
         assert_logical_policy_ref(&coding_execution_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn coding_execution_protocol_logical_carries_cross_repo_evidence_section() {
+        let prompt = coding_execution_protocol(&logical_context());
+        assert!(
+            prompt.contains("[cross_repo_evidence]"),
+            "logical prompt must carry the cross-repo evidence section:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(".aria/bin/aria-evidence-query"),
+            "logical prompt must carry the evidence tool path:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("429"),
+            "logical prompt must carry the 429 budget rule:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(".aria/evidence-token"),
+            "logical prompt must carry the token-file constraint:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn coding_execution_protocol_legacy_omits_cross_repo_evidence_section() {
+        let prompt = coding_execution_protocol(&RoutingReferenceContext::Legacy);
+        assert!(
+            !prompt.contains("[cross_repo_evidence]"),
+            "legacy prompt must not carry the cross-repo evidence section:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains(".aria/bin/aria-evidence-query"),
+            "legacy prompt must not carry the evidence tool path:\n{prompt}"
+        );
     }
 
     #[test]

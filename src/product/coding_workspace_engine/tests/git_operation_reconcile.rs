@@ -52,6 +52,85 @@ async fn worktree_prepare_persists_completed_git_operation_journal() {
 }
 
 #[tokio::test]
+async fn worktree_prepare_issues_evidence_token_and_rewrites_per_attempt() {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    init_test_git_repo(&repo);
+    let base_branch = git_stdout(&repo, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let create_attempt = |branch_name: &str| {
+        store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: base_branch.clone(),
+                branch_name: branch_name.to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+            })
+            .expect("create attempt")
+    };
+
+    let attempt = create_attempt("aria/work-items/work_item_0001/attempt-1");
+    let updated = engine
+        .execute_worktree_prepare(&attempt, &repo)
+        .await
+        .expect("first worktree prepare");
+    let first_worktree = updated.worktree_path.clone().expect("first worktree path");
+    let first_token = fs::read_to_string(first_worktree.join(".aria/evidence-token"))
+        .expect("first evidence token");
+    assert!(!first_token.trim().is_empty(), "token must be non-empty");
+
+    // 关闭首个 attempt（Created → Aborted），腾出同 work item 的 active 槽位，
+    // 以便创建 attempt_no=2 的新 attempt，验证令牌按 attempt 重写。
+    store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .expect("abort first attempt");
+
+    let second = create_attempt("aria/work-items/work_item_0001/attempt-2");
+    let second_updated = engine
+        .execute_worktree_prepare(&second, &repo)
+        .await
+        .expect("second worktree prepare");
+    let second_token = fs::read_to_string(
+        second_updated
+            .worktree_path
+            .as_ref()
+            .expect("second worktree path")
+            .join(".aria/evidence-token"),
+    )
+    .expect("second evidence token");
+    assert!(
+        !second_token.trim().is_empty(),
+        "second token must be non-empty"
+    );
+    assert_ne!(
+        first_token, second_token,
+        "token must be rewritten per attempt"
+    );
+}
+
+#[tokio::test]
 async fn cancellation_after_branch_exit_compensates_before_returning_aborted() {
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");

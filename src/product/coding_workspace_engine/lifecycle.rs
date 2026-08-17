@@ -326,6 +326,47 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 journal.worktree_path.clone(),
             )?;
+            // C-4 T8：worktree 创建完成后幂等签发/重写 attempt 级证据令牌
+            // （issue_evidence_token），并随注入物复制端口文件（inject_web_endpoint）。
+            // 两者均为证据检索辅助能力，失败仅 warn 降级、不阻断 attempt 启动。
+            // admission 置 Running 早于 worktree 创建，若把挂点前置会 create_dir_all
+            // 提前建目录破坏 `git worktree add`，故挂在此处。
+            let evidence_paths = self.store.paths();
+            if let Err(error) =
+                crate::product::logical_codebase::evidence_token::issue_evidence_token(
+                    &evidence_paths,
+                    repo_path,
+                    &updated,
+                )
+            {
+                tracing::warn!(
+                    %error,
+                    attempt_id = %updated.id,
+                    "issue evidence token failed; degrading without blocking worktree prepare"
+                );
+            }
+            match evidence_paths.root().parent() {
+                Some(workspace_root) => {
+                    if let Err(error) =
+                        crate::product::logical_codebase::evidence_injection::inject_web_endpoint(
+                            workspace_root,
+                            &journal.worktree_path,
+                        )
+                    {
+                        tracing::warn!(
+                            %error,
+                            attempt_id = %updated.id,
+                            "inject web endpoint failed; degrading without blocking worktree prepare"
+                        );
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        attempt_id = %updated.id,
+                        "evidence paths root has no parent; skipping web endpoint injection"
+                    );
+                }
+            }
             // C-4 T7：worktree 创建完成后幂等注入证据查询脚本（T0 审计点 2 首挂点）。
             crate::product::logical_codebase::evidence_injection::write_evidence_query_script(
                 &journal.worktree_path,
