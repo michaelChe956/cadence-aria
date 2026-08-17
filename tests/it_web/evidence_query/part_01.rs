@@ -301,6 +301,7 @@ pub(crate) fn read_first_audit(paths: &ProductAppPaths) -> Value {
     serde_json::from_str(first).expect("audit JSON")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn index_record(
     id: &str,
     api_id: LogicalRepositoryId,
