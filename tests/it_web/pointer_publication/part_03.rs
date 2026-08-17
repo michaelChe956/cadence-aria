@@ -83,6 +83,14 @@ async fn pointer_publication_scenario_d_partial_push_failure_then_retry_all_push
         broken_entry["push_error"].is_string(),
         "failed entry must carry push_error: {publication}"
     );
+    let local_pointer_branches = git_out(
+        &broken_member.repo_path,
+        &["branch", "--list", "aria-pointer/*"],
+    );
+    assert!(
+        local_pointer_branches.is_empty(),
+        "failed member must clean up local aria-pointer branches before retry: {local_pointer_branches}"
+    );
 
     // 修复 broken 成员远端（补 bare origin）后重试 → 只补推该成员 → completed_all。
     let remote_path = fixture.root.path().join("broken-origin.git");
