@@ -200,7 +200,7 @@ export function ArtifactPane({
   return (
     <aside
       data-testid="artifact-pane"
-      className={`flex min-h-0 flex-col border-l border-[var(--aria-line)] bg-[var(--aria-panel)] ${className}`}
+      className={`aria-card-clay flex min-h-0 flex-col ${className}`}
     >
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--aria-line)] px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
@@ -208,7 +208,7 @@ export function ArtifactPane({
           <h2 className="truncate text-sm font-semibold text-[var(--aria-ink)]">Artifact</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <label className="inline-flex items-center gap-2 text-xs text-[var(--aria-ink-muted)]">
+          <label className="aria-chip text-[var(--aria-ink-muted)]">
             版本
             <select
               aria-label="Artifact 版本"

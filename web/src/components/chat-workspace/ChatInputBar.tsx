@@ -161,7 +161,7 @@ export function ChatInputBar({
               data-testid={isHumanConfirm ? "send-human-decision" : "send-context-note"}
               type="submit"
               disabled={!canSend}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+              className="btn-secondary h-9 disabled:opacity-50"
             >
               <Send className="h-4 w-4" />
               {isHumanConfirm ? "发送修改意见" : "发送"}
@@ -173,7 +173,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onRequestOutlineRevision()}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <RefreshCcw className="h-4 w-4" />
                 重写 Outline
@@ -182,7 +182,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onAuthorDecision("accept")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className="btn-primary h-9 disabled:opacity-50"
               >
                 <Check className="h-4 w-4" />
                 接受 Outline
@@ -194,7 +194,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onSelectWorkItemGenerationMode("serial")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <GitBranch className="h-4 w-4" />
                 逐个生成
@@ -203,7 +203,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onSelectWorkItemGenerationMode("batch")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className="btn-primary h-9 disabled:opacity-50"
               >
                 <Layers className="h-4 w-4" />
                 自动生成
@@ -212,7 +212,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={onRequestOutlineRevision}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <RefreshCcw className="h-4 w-4" />
                 返回 Outline 返修
@@ -230,7 +230,7 @@ export function ChatInputBar({
                     onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "accept")
                   }
                   disabled={disabled}
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                  className="btn-primary h-9 disabled:opacity-50"
                 >
                   <Check className="h-4 w-4" />
                   接受
@@ -244,7 +244,7 @@ export function ChatInputBar({
                       onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "rewrite")
                     }
                     disabled={disabled}
-                    className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                    className="btn-secondary h-9 disabled:opacity-50"
                   >
                     <RefreshCcw className="h-4 w-4" />
                     {draftPayload.can_accept ? "重写" : "根据校验错误重写"}
@@ -255,7 +255,7 @@ export function ChatInputBar({
                       onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "pause")
                     }
                     disabled={disabled}
-                    className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                    className="btn-secondary h-9 disabled:opacity-50"
                   >
                     <X className="h-4 w-4" />
                     暂停
@@ -269,7 +269,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onWorkItemBatchDecision("accept_all")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className="btn-primary h-9 disabled:opacity-50"
               >
                 <Check className="h-4 w-4" />
                 接受全部
@@ -278,7 +278,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onWorkItemBatchDecision("rewrite_batch")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <RefreshCcw className="h-4 w-4" />
                 整组重写
@@ -287,7 +287,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onWorkItemBatchDecision("pause")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <X className="h-4 w-4" />
                 暂停
@@ -303,7 +303,7 @@ export function ChatInputBar({
                     )
                   }
                   disabled={disabled}
-                  className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                  className="btn-secondary h-9 disabled:opacity-50"
                 >
                   <GitBranch className="h-4 w-4" />
                   降级串行
@@ -317,7 +317,7 @@ export function ChatInputBar({
                   type="button"
                   onClick={handleAdoptReviewReport}
                   disabled={disabled}
-                  className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                  className="btn-secondary h-9 disabled:opacity-50"
                 >
                   <ClipboardCopy className="h-4 w-4" />
                   采纳 Review 意见
@@ -327,7 +327,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={handleSendAuthorFeedback}
                 disabled={disabled || trimmedInput.length === 0}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <Send className="h-4 w-4" />
                 发送反馈
@@ -338,8 +338,8 @@ export function ChatInputBar({
                 disabled={disabled}
                 className={
                   reviewerEnabled
-                    ? "inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
-                    : "inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                    ? "btn-primary h-9 disabled:opacity-50"
+                    : "btn-secondary h-9 disabled:opacity-50"
                 }
               >
                 <GitBranch className="h-4 w-4" />
@@ -351,8 +351,8 @@ export function ChatInputBar({
                 disabled={disabled}
                 className={
                   reviewerEnabled
-                    ? "inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
-                    : "inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                    ? "btn-secondary h-9 disabled:opacity-50"
+                    : "btn-primary h-9 disabled:opacity-50"
                 }
               >
                 <Check className="h-4 w-4" />
@@ -366,7 +366,7 @@ export function ChatInputBar({
               type="button"
               onClick={handleStartGeneration}
               disabled={disabled}
-              className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+              className="btn-primary h-9 disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
               开始生成

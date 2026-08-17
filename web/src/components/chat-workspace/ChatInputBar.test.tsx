@@ -120,13 +120,13 @@ describe("ChatInputBar", () => {
 
     expect(
       screen.getByRole("button", { name: "确认并送审" }).className,
-    ).not.toContain("aria-primary");
+    ).not.toContain("btn-primary");
     expect(
       screen.getByRole("button", { name: "确认并送审" }),
     ).toBeEnabled();
     expect(
       screen.getByRole("button", { name: "确认定稿" }).className,
-    ).toContain("aria-primary");
+    ).toContain("btn-primary");
   });
 
   it("adopts the latest review report into the feedback input", () => {

@@ -100,3 +100,24 @@ select:disabled {
     transform: none;
   }
 }
+
+@layer components {
+  .aria-card-clay {
+    @apply rounded-xl border-3 bg-white shadow-sm;
+    border-color: var(--aria-border-strong);
+  }
+  .aria-chip {
+    @apply inline-flex items-center gap-1 rounded-full border-2 px-3 py-1 text-xs font-bold;
+    border-color: var(--aria-border-strong);
+  }
+  .btn-primary {
+    @apply inline-flex items-center gap-2 rounded-xl border-2 px-4 py-2 text-sm font-semibold text-white transition-colors duration-200;
+    background: var(--aria-primary);
+    border-color: var(--aria-border-strong);
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 rounded-xl border-2 bg-white px-4 py-2 text-sm font-semibold transition-colors duration-200;
+    color: var(--aria-primary);
+    border-color: var(--aria-border-strong);
+  }
+}
