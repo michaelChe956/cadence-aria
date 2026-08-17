@@ -182,6 +182,93 @@ describe("ChatWorkspacePage chat actions", () => {
 
   // spec-workbench-canvas-experience T4：确认并送审/确认定稿迁移至面板
   // actions 插槽；反馈仍从输入发送。决策 payload 不变。
+  // spec-workbench-canvas-experience T5：dismissed 时双列 grid 降为单列，
+  // 对话流在 ≥1440px 恢复全宽，展开入口沉入输入区上方工具行。
+  it("collapses to a single column when the review panel is dismissed", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact: "# Story Spec",
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    const grid = screen.getByTestId("review-split-grid");
+    expect(grid.className).toContain("min-[1440px]:grid-cols-[");
+
+    // 输入聚焦 → 收起 → 单列全宽 + 工具行展开入口。
+    await userEvent.click(
+      screen.getByPlaceholderText(/输入修改意见/),
+    );
+    expect(screen.queryByTestId("artifact-review-panel")).not.toBeInTheDocument();
+    expect(grid.className).not.toContain("min-[1440px]:grid-cols-[");
+    expect(screen.getByTestId("review-panel-restore-slot")).toBeInTheDocument();
+
+    // 从工具行重新展开。
+    await userEvent.click(
+      screen.getByRole("button", { name: "展开 Artifact 审核" }),
+    );
+    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
+    expect(grid.className).toContain("min-[1440px]:grid-cols-[");
+    expect(
+      screen.queryByTestId("review-panel-restore-slot"),
+    ).not.toBeInTheDocument();
+  });
+
+  // spec-workbench-canvas-experience T5：work_item_plan 在 author_confirm 不走
+  // Canvas 审核面板，WorkItemPlanCandidatePanel 自有终局按钮兜底，无死路。
+  it("keeps final actions reachable for work_item_plan author_confirm", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      workItemPlanCandidate: workItemPlanCandidate(),
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(
+      screen.queryByTestId("artifact-review-panel"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+    expect(
+      screen.getByTestId("work-item-plan-candidate-panel"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("accept-plan-button")).toBeEnabled();
+    expect(screen.getByTestId("request-revision-button")).toBeInTheDocument();
+  });
+
+  // spec-workbench-canvas-experience T5：空 workspaceType（store 默认）在
+  // author_confirm 不渲染审核面板，输入区可用、不崩溃。
+  it("keeps the chat input usable for the default empty workspaceType", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(
+      screen.queryByTestId("artifact-review-panel"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(/输入修改意见/),
+    ).toBeEnabled();
+  });
+
   it("sends author confirmation decisions from the review panel", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({

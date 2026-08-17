@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ClipboardCopy, GitBranch, TriangleAlert, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, Check, ClipboardCopy, GitBranch, PanelRightOpen, TriangleAlert, Wifi, WifiOff } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -618,8 +618,25 @@ export function ChatWorkspacePage({
           }`}
         >
           {reviewPanelEnabled ? (
-            <div className="relative grid min-h-0 min-[1440px]:grid-cols-[minmax(320px,1fr)_minmax(0,1.4fr)]">
-              <div className="grid min-h-0 min-w-[320px] grid-rows-[minmax(0,1fr)_auto] border-r border-[var(--aria-line)]">
+            <div
+              data-testid="review-split-grid"
+              className={
+                // spec-workbench-canvas-experience T5：dismissed 时降为单列，
+                // 对话流在 ≥1440px 恢复全宽（不保留空右列）。
+                reviewPanelVisible
+                  ? "relative grid min-h-0 min-[1440px]:grid-cols-[minmax(320px,1fr)_minmax(0,1.4fr)]"
+                  : "relative grid min-h-0 grid-cols-1"
+              }
+            >
+              <div
+                className={
+                  // spec-workbench-canvas-experience T5：dismissed 时对话列占满全宽，
+                  // 「展开 Artifact 审核」以工具行形式沉入输入区上方。
+                  reviewPanelVisible
+                    ? "grid min-h-0 min-w-[320px] grid-rows-[minmax(0,1fr)_auto] border-r border-[var(--aria-line)]"
+                    : "grid min-h-0 min-w-[320px] grid-rows-[minmax(0,1fr)_auto_auto]"
+                }
+              >
                 <ChatEntryList
                   ref={chatListRef}
                   entries={chatEntries}
@@ -653,6 +670,21 @@ export function ChatWorkspacePage({
                   onWorkItemBatchDecision={sendWorkItemBatchDecision}
                   onAbort={abort}
                 />
+                {reviewPanelVisible ? null : (
+                  <div
+                    data-testid="review-panel-restore-slot"
+                    className="flex items-center justify-end border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2"
+                  >
+                    <button
+                      type="button"
+                      className="btn-secondary h-9"
+                      onClick={() => setReviewPanelDismissed(false)}
+                    >
+                      <PanelRightOpen className="h-4 w-4" />
+                      展开 Artifact 审核
+                    </button>
+                  </div>
+                )}
               </div>
               {reviewPanelVisible ? (
                 <div className="absolute inset-y-0 right-0 w-[65%] min-h-0 max-w-full border-l border-[var(--aria-line)] bg-[var(--aria-panel)] p-2 min-[1440px]:static min-[1440px]:w-auto min-[1440px]:border-l-0">
@@ -714,17 +746,7 @@ export function ChatWorkspacePage({
                     className="h-full min-h-0"
                   />
                 </div>
-              ) : (
-                <div className="absolute bottom-4 right-4 z-20 min-[1440px]:static min-[1440px]:flex min-[1440px]:items-end min-[1440px]:justify-end min-[1440px]:p-3">
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => setReviewPanelDismissed(false)}
-                  >
-                    展开 Artifact 审核
-                  </button>
-                </div>
-              )}
+              ) : null}
             </div>
           ) : (
             <>
