@@ -1,6 +1,5 @@
 import {
   Check,
-  ClipboardCopy,
   GitBranch,
   Layers,
   Play,
@@ -8,7 +7,12 @@ import {
   Send,
   X,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type FormEvent,
+} from "react";
 import type {
   AuthorDecisionChoice,
   WorkItemBatchDecision,
@@ -39,15 +43,22 @@ interface ChatInputBarProps {
   onAbort: () => void;
   disabled?: boolean;
   hideStartGeneration?: boolean;
-  /** author_confirm 阶段三动作的默认高亮：启用 review 时高亮「确认并送审」，否则「确认定稿」。 */
-  reviewerEnabled?: boolean;
-  /** adopt-review-findings T1：最新 review 报告文本（与对话流渲染同源）；非空时展示「采纳 Review 意见」。 */
-  latestReviewReport?: string;
+  /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
+  onInputFocus?: () => void;
+}
+
+/**
+ * spec-workbench-canvas-experience T4：暴露预填能力给宿主页面——
+ * 「采纳 Review 意见」按钮已迁移至 ArtifactReviewPanel，预填仍复用本组件输入框状态。
+ */
+export interface ChatInputBarHandle {
+  prefill: (text: string) => void;
 }
 
 const BUSY_STAGES = new Set(["running", "cross_review", "revision"]);
 
-export function ChatInputBar({
+export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
+  function ChatInputBar({
   stage,
   activeNodeType = null,
   workItemPlanArtifact = null,
@@ -62,9 +73,8 @@ export function ChatInputBar({
   onAbort,
   disabled = false,
   hideStartGeneration = false,
-  reviewerEnabled = true,
-  latestReviewReport,
-}: ChatInputBarProps) {
+  onInputFocus,
+}, ref) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
   const isPrepareContext = stage === "prepare_context";
@@ -85,6 +95,15 @@ export function ChatInputBar({
   const batchPayload =
     workItemPlanArtifact?.type === "batch_state" ? workItemPlanArtifact.payload : null;
   const firstBatchFailureOutlineId = batchPayload?.failure_summary[0]?.outline_id;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      // adopt-review-findings：覆盖式预填（重复调用天然不拼接）。
+      prefill: (text: string) => setInput(text),
+    }),
+    [],
+  );
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -119,15 +138,6 @@ export function ChatInputBar({
     setInput("");
   }
 
-  // adopt-review-findings T1：覆盖式预填引导语 + 最新 review 报告；仅预填，不自动发送，
-  // 重复点击天然不拼接（spec Scenario 3）。
-  function handleAdoptReviewReport() {
-    if (disabled || !latestReviewReport) {
-      return;
-    }
-    setInput(`按以下 review 意见修订：\n\n${latestReviewReport}`);
-  }
-
   return (
     <form
       data-testid="chat-input-bar"
@@ -139,6 +149,7 @@ export function ChatInputBar({
           data-testid="context-note-input"
           value={input}
           onChange={(event) => setInput(event.target.value)}
+          onFocus={onInputFocus}
           disabled={inputDisabled}
           rows={3}
           placeholder={placeholderForStage(stage, activeNodeType)}
@@ -311,54 +322,15 @@ export function ChatInputBar({
               ) : null}
             </>
           ) : isAuthorConfirm ? (
-            <>
-              {latestReviewReport ? (
-                <button
-                  type="button"
-                  onClick={handleAdoptReviewReport}
-                  disabled={disabled}
-                  className="btn-secondary h-9 disabled:opacity-50"
-                >
-                  <ClipboardCopy className="h-4 w-4" />
-                  采纳 Review 意见
-                </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={handleSendAuthorFeedback}
-                disabled={disabled || trimmedInput.length === 0}
-                className="btn-secondary h-9 disabled:opacity-50"
-              >
-                <Send className="h-4 w-4" />
-                发送反馈
-              </button>
-              <button
-                type="button"
-                onClick={() => onAuthorDecision("accept_with_review")}
-                disabled={disabled}
-                className={
-                  reviewerEnabled
-                    ? "btn-primary h-9 disabled:opacity-50"
-                    : "btn-secondary h-9 disabled:opacity-50"
-                }
-              >
-                <GitBranch className="h-4 w-4" />
-                确认并送审
-              </button>
-              <button
-                type="button"
-                onClick={() => onAuthorDecision("accept_finalize")}
-                disabled={disabled}
-                className={
-                  reviewerEnabled
-                    ? "btn-secondary h-9 disabled:opacity-50"
-                    : "btn-primary h-9 disabled:opacity-50"
-                }
-              >
-                <Check className="h-4 w-4" />
-                确认定稿
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={handleSendAuthorFeedback}
+              disabled={disabled || trimmedInput.length === 0}
+              className="btn-secondary h-9 disabled:opacity-50"
+            >
+              <Send className="h-4 w-4" />
+              发送反馈
+            </button>
           ) : null}
           {isPrepareContext && !hideStartGeneration ? (
             <button
@@ -376,7 +348,7 @@ export function ChatInputBar({
       </div>
     </form>
   );
-}
+});
 
 function placeholderForStage(stage: string, activeNodeType?: string | null) {
   if (activeNodeType === "work_item_plan_outline_confirm") {
@@ -417,3 +389,4 @@ function appendOptimisticEntry(type: ChatEntryType, content: string) {
   };
   useWorkspaceStore.getState().appendChatEntry(entry);
 }
+

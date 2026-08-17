@@ -1,4 +1,4 @@
-import { ArrowLeft, TriangleAlert, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, Check, ClipboardCopy, GitBranch, TriangleAlert, Wifi, WifiOff } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -22,7 +22,10 @@ import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
-import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
+import {
+  ChatInputBar,
+  type ChatInputBarHandle,
+} from "../components/chat-workspace/ChatInputBar";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import {
   DisconnectBanner,
@@ -159,12 +162,22 @@ export function ChatWorkspacePage({
   ] = useState<number | null>(null);
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
-  // spec-workbench-canvas-experience T3：author_confirm 且 story/design 时
-  // 对话与产物审核面板并存（互斥 Tab 仅保留给其余场景）。
+  // spec-workbench-canvas-experience T4：面板可见性完全由 stage 驱动——
+  // stage === "author_confirm" 且 story/design 时自动展开；userDismissed 仅为
+  // 组件本地状态（输入聚焦 / 收起钮 / 采纳预填置 true），stage 重新进入
+  // author_confirm 时重置为 false（重连恢复也会自动滑出）。
   const reviewPanelEnabled =
     stage === "author_confirm" &&
     (workspaceType === "story" || workspaceType === "design");
-  const [reviewPanelOpen, setReviewPanelOpen] = useState(true);
+  const [reviewPanelDismissed, setReviewPanelDismissed] = useState(false);
+  const reviewPanelVisible = reviewPanelEnabled && !reviewPanelDismissed;
+  const chatInputRef = useRef<ChatInputBarHandle | null>(null);
+
+  useEffect(() => {
+    if (stage === "author_confirm") {
+      setReviewPanelDismissed(false);
+    }
+  }, [stage]);
   const changelogSummary = useMemo(() => {
     const lastCompletedRevision = timelineNodes
       .filter(
@@ -619,12 +632,12 @@ export function ChatWorkspacePage({
                   onCacheContent={handleCacheContent}
                 />
                 <ChatInputBar
+                  ref={chatInputRef}
                   stage={stage}
                   activeNodeType={activeNode?.node_type ?? null}
                   workItemPlanArtifact={workItemPlanArtifact}
                   disabled={inputDisabled}
-                  reviewerEnabled={reviewerEnabled}
-                  latestReviewReport={latestReviewReport}
+                  onInputFocus={() => setReviewPanelDismissed(true)}
                   onSendContextNote={sendContextNote}
                   onStartGeneration={handleStartGeneration}
                   hideStartGeneration={Boolean(recoverableInterruptedRun)}
@@ -641,7 +654,7 @@ export function ChatWorkspacePage({
                   onAbort={abort}
                 />
               </div>
-              {reviewPanelOpen ? (
+              {reviewPanelVisible ? (
                 <div className="absolute inset-y-0 right-0 w-[65%] min-h-0 max-w-full border-l border-[var(--aria-line)] bg-[var(--aria-panel)] p-2 min-[1440px]:static min-[1440px]:w-auto min-[1440px]:border-l-0">
                   <ArtifactReviewPanel
                     artifactVersions={artifactVersions}
@@ -651,23 +664,50 @@ export function ChatWorkspacePage({
                     loadArtifactVersion={handleLoadArtifactVersion}
                     onCacheArtifactContent={handleCacheArtifactContent}
                     changelogSummary={changelogSummary}
-                    onClose={() => setReviewPanelOpen(false)}
+                    onClose={() => setReviewPanelDismissed(true)}
                     actions={
-                      // TODO(spec-workbench-canvas-experience T4)：三动作正式迁移至面板。
+                      // spec-workbench-canvas-experience T4：三动作自 ChatInputBar
+                      // 迁移至面板 actions 插槽（决策 payload 不变）。
                       <>
+                        {latestReviewReport ? (
+                          <button
+                            type="button"
+                            className="btn-secondary h-9"
+                            onClick={() => {
+                              // 复用 ChatInputBar 预填逻辑（覆盖式，不自动发送）+ 收起面板。
+                              chatInputRef.current?.prefill(
+                                `按以下 review 意见修订：\n\n${latestReviewReport}`,
+                              );
+                              setReviewPanelDismissed(true);
+                            }}
+                          >
+                            <ClipboardCopy className="h-4 w-4" />
+                            采纳 Review 意见
+                          </button>
+                        ) : null}
                         <button
                           type="button"
-                          className="btn-secondary"
-                          onClick={() => sendRequestRevision()}
+                          className={
+                            reviewerEnabled
+                              ? "btn-primary h-9"
+                              : "btn-secondary h-9"
+                          }
+                          onClick={() => sendAuthorDecision("accept_with_review")}
                         >
-                          请求修订
+                          <GitBranch className="h-4 w-4" />
+                          确认并送审
                         </button>
                         <button
                           type="button"
-                          className="btn-primary"
-                          onClick={() => sendAuthorDecision("accept")}
+                          className={
+                            reviewerEnabled
+                              ? "btn-secondary h-9"
+                              : "btn-primary h-9"
+                          }
+                          onClick={() => sendAuthorDecision("accept_finalize")}
                         >
-                          定稿采纳
+                          <Check className="h-4 w-4" />
+                          确认定稿
                         </button>
                       </>
                     }
@@ -679,7 +719,7 @@ export function ChatWorkspacePage({
                   <button
                     type="button"
                     className="btn-secondary"
-                    onClick={() => setReviewPanelOpen(true)}
+                    onClick={() => setReviewPanelDismissed(false)}
                   >
                     展开 Artifact 审核
                   </button>
@@ -801,8 +841,6 @@ export function ChatWorkspacePage({
                 activeNodeType={activeNode?.node_type ?? null}
                 workItemPlanArtifact={workItemPlanArtifact}
                 disabled={inputDisabled}
-                reviewerEnabled={reviewerEnabled}
-                latestReviewReport={latestReviewReport}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
