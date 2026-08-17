@@ -17,9 +17,16 @@ use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthS
 use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderSession, StreamingProviderInput,
 };
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+use crate::product::lifecycle_store::{
+    CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
+    CreateWorkspaceSessionInput,
+};
 use crate::product::logical_codebase::{
     LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
 };
+use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceType};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::protocol::contracts::{AdapterOutput, AdapterRole, ProviderType, TimeoutStatus};
 use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 
@@ -260,4 +267,156 @@ fn workspace_engine_accessors_expose_logical_launch() {
         engine.logical_planning_launch(),
         Some(("project_0001".to_string(), fixture.aggregate_root.clone()))
     );
+}
+
+#[tokio::test]
+async fn logical_plan_validate_failure_is_reported_by_handler() {
+    let fixture = gateway_fixture();
+    let repo_path = fixture._temp.path().join("member");
+    std::fs::create_dir_all(&repo_path).expect("member checkout");
+    let repository = RepositoryStore::new(fixture.paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "member".to_string(),
+            path: repo_path.clone(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+            idempotency_key: "logical-plan-validate-failure".to_string(),
+        })
+        .expect("repository");
+    let issue = IssueStore::new(fixture.paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id.clone()),
+            title: "Logical plan validation".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let lifecycle = LifecycleStore::new(fixture.paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: issue.project_id.clone(),
+            issue_id: issue.id.clone(),
+            repository_id: repository.id.clone(),
+            title: "Story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story");
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: issue.project_id.clone(),
+            issue_id: issue.id.clone(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "Design".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("design");
+    let plan = lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0001".to_string()),
+            project_id: issue.project_id.clone(),
+            issue_id: issue.id.clone(),
+            source_story_spec_ids: vec![story.id],
+            source_design_spec_ids: vec![design.id],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids: vec![],
+            repository_profile_ref: None,
+            verification_plan_ids: vec![],
+            dependency_graph: vec![],
+            created_from_provider_run: None,
+            validator_findings: vec![],
+        })
+        .expect("plan");
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: issue.project_id.clone(),
+            issue_id: issue.id.clone(),
+            entity_id: plan.id,
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("workspace session");
+
+    // Keep the already-built gateway in memory, then remove its policy artifact.  This
+    // deterministically exercises the validate-failure early return without a real provider.
+    let gateway = fixture.gateway.clone();
+    std::fs::remove_file(fixture.paths.aggregate_policy_artifact_path("project_0001"))
+        .expect("remove policy artifact");
+    std::fs::remove_file(
+        fixture
+            .paths
+            .logical_codebase_root("project_0001")
+            .join("manifest.json"),
+    )
+    .expect("remove manifest to keep repository routing legacy");
+
+    let (engine_tx, _engine_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
+    let mut session = WorkspaceSession::from_record(session_record.clone());
+    session.stage = WorkspaceStage::PrepareContext;
+    session.repository_path = Some(repo_path);
+    let engine = Arc::new(Mutex::new(
+        WorkspaceEngine::new_persistent(
+            Arc::new(CheckpointStore::new(
+                fixture.paths.root().join("checkpoints"),
+            )),
+            lifecycle,
+            engine_tx,
+            session,
+        )
+        .with_logical_provider_gateway(gateway),
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(CountingStreamingAdapter {
+            starts: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext {
+        provider_registry: Arc::new(registry),
+        engine,
+        current_run: current_run.clone(),
+        workspace_runs,
+        session_id: session_record.id.clone(),
+        next_run_id: Arc::new(Mutex::new(0)),
+        app_paths: fixture.paths.clone(),
+        session_record,
+    };
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(8);
+
+    spawn_provider_run_from_handler(
+        run_context,
+        ProviderRunKind::WorkItemPlanAuthor,
+        outbound_tx,
+    )
+    .await
+    .expect("validation failure is reported from the async handler task");
+
+    let OutboundControl::Text(json) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), outbound_rx.recv())
+            .await
+            .expect("handler error outbound")
+            .expect("handler error message")
+    else {
+        panic!("expected text error outbound");
+    };
+    let message: WsOutMessage = serde_json::from_str(&json).expect("ws error message");
+    assert!(matches!(
+        message,
+        WsOutMessage::Error { ref message }
+            if message.starts_with("logical plan launch failed:")
+    ));
 }
