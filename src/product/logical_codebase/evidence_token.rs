@@ -106,11 +106,24 @@ pub fn validate_evidence_token(
             ),
         })?;
 
-    if record.token_hash == compute_sha256(token.as_bytes()) {
+    let token_hash = compute_sha256(token.as_bytes());
+    if constant_time_hash_eq(&record.token_hash, &token_hash) {
         Ok(())
     } else {
         Err(EvidenceError::Unauthorized)
     }
+}
+
+/// Compare digest strings without an early exit so a matching prefix does not
+/// reveal how many leading characters were correct. Hashes are expected to be
+/// fixed-width SHA-256 hex, but length is folded into the result defensively.
+fn constant_time_hash_eq(left: &str, right: &str) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= (left.as_bytes().get(index).copied().unwrap_or(0)
+            ^ right.as_bytes().get(index).copied().unwrap_or(0)) as usize;
+    }
+    difference == 0
 }
 
 /// 生成 32 字节随机令牌并编码为 64 位小写 hex（两个 v4 UUID 拼接）。
@@ -395,6 +408,14 @@ mod tests {
             compute_sha256(first.as_bytes()),
             "record must be updated to the latest token hash"
         );
+    }
+
+    #[test]
+    fn constant_time_hash_comparison_matches_only_equal_hashes() {
+        assert!(constant_time_hash_eq("same-hash", "same-hash"));
+        assert!(!constant_time_hash_eq("same-hash", "different"));
+        assert!(!constant_time_hash_eq("same-hash", "same-has"));
+        assert!(!constant_time_hash_eq(&"\0".repeat(256), ""));
     }
 
     #[test]
