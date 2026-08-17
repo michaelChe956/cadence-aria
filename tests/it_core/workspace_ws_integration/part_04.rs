@@ -459,8 +459,11 @@ async fn workspace_ws_codex_current_protocol_completes_from_repository_path() {
     server.abort();
 }
 
+// spec-design-dialog-revision T9：旧「重连时处在 ReviewDecision 阶段」场景迁移——ReviewDecision 已从
+// Story/Design 退役，等价场景为：review 完成回 AuthorConfirm 后断线，重连提交反馈修订仍可运行，
+// 并可再次送审完成第二轮 review。
 #[tokio::test]
-async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() {
+async fn workspace_ws_reconnect_after_review_can_still_run_revision() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture_with_providers(&root, "fake", "codex", 2).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
@@ -519,9 +522,10 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
         },
     )
     .await;
+    let mut saw_review_revise = false;
     for _ in 0..600 {
         match recv_json(&mut ws).await {
-            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && !saw_review_revise => {
                 send_json(
                     &mut ws,
                     &WsInMessage::AuthorDecision {
@@ -530,26 +534,37 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
                 )
                 .await;
             }
-            WsOutMessage::ReviewDecisionRequired { .. } => break,
+            WsOutMessage::ReviewComplete {
+                verdict: ReviewVerdictType::Revise,
+                ..
+            } => {
+                saw_review_revise = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && saw_review_revise => {
+                // review 完成回到 AuthorConfirm：在此处断线（等价旧 ReviewDecision 暂停点）。
+                break;
+            }
             WsOutMessage::Error { message } => panic!("ws error: {message}"),
             _ => {}
         }
     }
+    assert!(saw_review_revise, "review should report revise verdict");
     drop(ws);
 
     let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
     let _state = recv_json(&mut reconnected).await;
     send_json(
         &mut reconnected,
-        &WsInMessage::ReviewDecisionResponse {
-            decision: "continue_with_context".to_string(),
-            extra_context: Some("重连后补充".to_string()),
+        &WsInMessage::AuthorDecision {
+            decision: AuthorDecision::Revise {
+                feedback: "重连后补充".to_string(),
+            },
         },
     )
     .await;
 
     let mut saw_revision = false;
-    let mut saw_human_confirm = false;
+    let mut saw_post_revision_confirm = false;
     for _ in 0..600 {
         match recv_json(&mut reconnected).await {
             WsOutMessage::StreamChunk { content, .. }
@@ -557,7 +572,8 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
             {
                 saw_revision = true;
             }
-            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && saw_revision => {
+                saw_post_revision_confirm = true;
                 send_json(
                     &mut reconnected,
                     &WsInMessage::AuthorDecision {
@@ -565,19 +581,40 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
                     },
                 )
                 .await;
-            }
-            WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
-                saw_human_confirm = true;
                 break;
             }
             WsOutMessage::Error { message } => panic!("ws error: {message}"),
             _ => {}
         }
     }
-    assert!(saw_revision);
-    assert!(saw_human_confirm);
+    assert!(
+        saw_post_revision_confirm,
+        "revision after reconnect should complete back to author_confirm"
+    );
+
+    let mut saw_second_review_pass = false;
+    let mut saw_final_author_confirm = false;
+    for _ in 0..600 {
+        match recv_json(&mut reconnected).await {
+            WsOutMessage::ReviewComplete { summary, .. } if summary == "可以确认" => {
+                saw_second_review_pass = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && saw_second_review_pass => {
+                saw_final_author_confirm = true;
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    assert!(saw_second_review_pass, "second review after reconnect should pass");
+    assert!(
+        saw_final_author_confirm,
+        "second review pass should return to author_confirm (T5)"
+    );
     let prompts = author_prompts.lock().unwrap();
-    assert!(prompts[1].contains("需要补充失败路径"));
+    // T4：反馈修订走 build_author_revision_prompt（产物全文 + 用户反馈）。
+    assert!(prompts[1].contains("## 用户反馈"));
     assert!(prompts[1].contains("重连后补充"));
 
     drop(reconnected);

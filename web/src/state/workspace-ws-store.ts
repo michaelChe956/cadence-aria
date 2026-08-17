@@ -212,6 +212,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         protocolError: null,
         activeRunId: state.active_run_id ?? null,
         recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
+        reviewerEnabled: state.reviewer_enabled_at_start ?? prev.reviewerEnabled,
       };
       return {
         ...nextState,

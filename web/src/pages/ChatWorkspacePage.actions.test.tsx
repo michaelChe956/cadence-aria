@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -180,11 +180,102 @@ describe("ChatWorkspacePage chat actions", () => {
     });
   });
 
-  it("sends author confirmation decisions from the chat input", async () => {
-    const api = mockWorkspaceWs();
+  // spec-workbench-canvas-experience T4：确认并送审/确认定稿迁移至面板
+  // actions 插槽；反馈仍从输入发送。决策 payload 不变。
+  // spec-workbench-canvas-experience T5：dismissed 时双列 grid 降为单列，
+  // 对话流在 ≥1440px 恢复全宽，展开入口沉入输入区上方工具行。
+  it("collapses to a single column when the review panel is dismissed", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact: "# Story Spec",
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    const grid = screen.getByTestId("review-split-grid");
+    expect(grid.className).toContain("min-[1440px]:grid-cols-[");
+
+    // 输入聚焦 → 收起 → 单列全宽 + 工具行展开入口。
+    await userEvent.click(
+      screen.getByPlaceholderText(/输入修改意见/),
+    );
+    expect(screen.queryByTestId("artifact-review-panel")).not.toBeInTheDocument();
+    expect(grid.className).not.toContain("min-[1440px]:grid-cols-[");
+    expect(screen.getByTestId("review-panel-restore-slot")).toBeInTheDocument();
+
+    // 从工具行重新展开。
+    await userEvent.click(
+      screen.getByRole("button", { name: "展开 Artifact 审核" }),
+    );
+    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
+    expect(grid.className).toContain("min-[1440px]:grid-cols-[");
+    expect(
+      screen.queryByTestId("review-panel-restore-slot"),
+    ).not.toBeInTheDocument();
+  });
+
+  // spec-workbench-canvas-experience T5：work_item_plan 在 author_confirm 不走
+  // Canvas 审核面板，WorkItemPlanCandidatePanel 自有终局按钮兜底，无死路。
+  it("keeps final actions reachable for work_item_plan author_confirm", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      workItemPlanCandidate: workItemPlanCandidate(),
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(
+      screen.queryByTestId("artifact-review-panel"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+    expect(
+      screen.getByTestId("work-item-plan-candidate-panel"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("accept-plan-button")).toBeEnabled();
+    expect(screen.getByTestId("request-revision-button")).toBeInTheDocument();
+  });
+
+  // spec-workbench-canvas-experience T5：空 workspaceType（store 默认）在
+  // author_confirm 不渲染审核面板，输入区可用、不崩溃。
+  it("keeps the chat input usable for the default empty workspaceType", () => {
+    mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(
+      screen.queryByTestId("artifact-review-panel"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(/输入修改意见/),
+    ).toBeEnabled();
+  });
+
+  it("sends author confirmation decisions from the review panel", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "author_confirm",
+      reviewerEnabled: true,
       providers: { author: "fake", reviewer: "codex" },
       artifact: "# Story Spec",
     });
@@ -193,11 +284,228 @@ describe("ChatWorkspacePage chat actions", () => {
       <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "进入 Review" }));
-    await userEvent.click(screen.getByRole("button", { name: "重新编写" }));
+    expect(
+      screen.queryByRole("button", { name: "重新编写" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
 
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(1, "accept");
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(2, "reject");
+    await userEvent.type(
+      screen.getByPlaceholderText(/输入修改意见/),
+      "补充回滚策略",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+
+    // 输入聚焦会收起面板，重新展开后再点终局确认对。
+    await userEvent.click(
+      screen.getByRole("button", { name: "展开 Artifact 审核" }),
+    );
+    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "确认并送审" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认定稿" }));
+
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
+      1,
+      "revise",
+      "补充回滚策略",
+    );
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
+      2,
+      "accept_with_review",
+    );
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
+      3,
+      "accept_finalize",
+    );
+  });
+
+  describe("author_confirm 产物审核面板开合状态机（spec-workbench-canvas-experience T4）", () => {
+    it.each(["story", "design"])(
+      "author_confirm 阶段 %s 工作区自动展示产物面板",
+      (workspaceType) => {
+        mockWorkspaceWs();
+        useWorkspaceStore.setState({
+          sessionId: "workspace_session_0001",
+          workspaceType,
+          stage: "author_confirm",
+          providers: { author: "claude_code", reviewer: "codex" },
+          artifact: "# Spec",
+        });
+
+        render(
+          <ChatWorkspacePage
+            sessionId="workspace_session_0001"
+            onBack={vi.fn()}
+          />,
+        );
+
+        expect(
+          screen.getByTestId("artifact-review-panel"),
+        ).toBeInTheDocument();
+        expect(
+          screen.queryByRole("button", { name: "展开 Artifact 审核" }),
+        ).not.toBeInTheDocument();
+      },
+    );
+
+    it("stage 离开 author_confirm 时面板收起且无展开残留", () => {
+      mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType: "story",
+        stage: "running",
+        providers: { author: "claude_code", reviewer: "codex" },
+        artifact: "# Spec",
+      });
+
+      render(
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      );
+
+      expect(
+        screen.queryByTestId("artifact-review-panel"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "展开 Artifact 审核" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("stage 重新进入 author_confirm 时重置用户收起（重连恢复自动滑出）", () => {
+      mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType: "story",
+        stage: "author_confirm",
+        providers: { author: "claude_code", reviewer: "codex" },
+        artifact: "# Spec",
+      });
+
+      render(
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      );
+
+      // 输入聚焦（<1440px，jsdom 默认 innerWidth=1024）→ overlay 遮挡输入框，收起。
+      act(() => {
+        screen.getByPlaceholderText(/输入修改意见/).focus();
+      });
+      expect(
+        screen.queryByTestId("artifact-review-panel"),
+      ).not.toBeInTheDocument();
+
+      // 离开再回来 → 自动重开。
+      act(() => {
+        useWorkspaceStore.setState({ stage: "running" });
+      });
+      act(() => {
+        useWorkspaceStore.setState({ stage: "author_confirm" });
+      });
+      expect(
+        screen.getByTestId("artifact-review-panel"),
+      ).toBeInTheDocument();
+    });
+
+    it("≥1440px 聚焦输入框不收起面板（对照 artifact 撰写反馈）", () => {
+      mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType: "story",
+        stage: "author_confirm",
+        reviewerEnabled: true,
+        providers: { author: "claude_code", reviewer: "codex" },
+        artifact: "# Spec",
+      });
+
+      const originalWidth = window.innerWidth;
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: 1920,
+      });
+      try {
+        render(
+          <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        );
+        expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
+        act(() => {
+          screen.getByPlaceholderText(/输入修改意见/).focus();
+        });
+        expect(
+          screen.getByTestId("artifact-review-panel"),
+        ).toBeInTheDocument();
+      } finally {
+        Object.defineProperty(window, "innerWidth", {
+          configurable: true,
+          value: originalWidth,
+        });
+      }
+    });
+
+    it("点击采纳 Review 意见预填输入并收起面板", async () => {
+      mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType: "story",
+        stage: "author_confirm",
+        reviewerEnabled: true,
+        providers: { author: "claude_code", reviewer: "codex" },
+        artifact: "# Spec",
+        chatEntries: [
+          chatEntry({
+            type: "review_verdict",
+            role: "reviewer",
+            content: "发现 3 个问题：第二节缺少回滚策略。",
+          }),
+        ],
+      });
+
+      render(
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      );
+
+      const adoptButton = screen.getByRole("button", { name: "采纳 Review 意见" });
+      expect(adoptButton).toBeInTheDocument();
+      await userEvent.click(adoptButton);
+
+      const feedbackInput = screen.getByPlaceholderText(
+        /输入修改意见/,
+      ) as HTMLTextAreaElement;
+      expect(feedbackInput.value).toBe(
+        "按以下 review 意见修订：\n\n发现 3 个问题：第二节缺少回滚策略。",
+      );
+      expect(
+        screen.queryByTestId("artifact-review-panel"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "展开 Artifact 审核" }),
+      ).toBeInTheDocument();
+    });
+
+    it("无 review 报告时不渲染采纳按钮，主次样式随 reviewerEnabled", async () => {
+      const api = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType: "design",
+        stage: "author_confirm",
+        reviewerEnabled: false,
+        providers: { author: "claude_code", reviewer: "codex" },
+        artifact: "# Design",
+      });
+
+      render(
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      );
+
+      expect(
+        screen.queryByRole("button", { name: "采纳 Review 意见" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "确认并送审" }).className,
+      ).not.toContain("btn-primary");
+      expect(
+        screen.getByRole("button", { name: "确认定稿" }).className,
+      ).toContain("btn-primary");
+
+      await userEvent.click(screen.getByRole("button", { name: "确认并送审" }));
+      expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept_with_review");
+    });
   });
 
   it.each(["story", "design", "work_item"])(

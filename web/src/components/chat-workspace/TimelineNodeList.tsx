@@ -75,10 +75,10 @@ function TimelineNodeButton({
       aria-current={active ? "step" : undefined}
       onClick={onSelect}
       className={[
-        "block w-full rounded-md border bg-white px-3 py-2 text-left transition-colors",
+        "block w-full rounded-md border-2 bg-white px-3 py-2 text-left transition-colors",
         selected || active
           ? "border-[var(--aria-primary)] ring-1 ring-[var(--aria-primary)]"
-          : "border-[var(--aria-line)] hover:border-[var(--aria-primary)]",
+          : "border-[var(--aria-line-strong)] hover:border-[var(--aria-primary)]",
       ].join(" ")}
     >
       <div className="flex min-w-0 items-start gap-2">
@@ -88,7 +88,7 @@ function TimelineNodeButton({
             <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
               {title}
             </span>
-            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
+            <span className="aria-chip shrink-0 text-[11px] text-[var(--aria-ink-muted)]">
               {completed ? <Check className="h-3 w-3" aria-hidden="true" /> : null}
               {completed ? "✓" : node.status}
             </span>

@@ -243,7 +243,24 @@ export type StructuredFeedback = {
 
 export type RevisionPath = "revise" | "revise-with-context" | "skip-to-human";
 export type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
-export type AuthorDecision = "accept" | "reject";
+
+/**
+ * author_decision 可发送的决策形式（spec-design-dialog-revision T1/T8）。
+ * - "accept"/"reject"：兼容保留（reject 仅 WorkItemPlan outline 等存量分支使用）；
+ * - "revise"：携带反馈的对话式修订，发送时构造 `{revise: {feedback}}`；
+ * - "accept_with_review"/"accept_finalize"：确认分流（送审/直接定稿）。
+ */
+export type AuthorDecisionChoice =
+  | "accept"
+  | "reject"
+  | "revise"
+  | "accept_with_review"
+  | "accept_finalize";
+
+/** WS 线格式：字符串变体或 `{revise: {feedback}}`（serde externally tagged）。 */
+export type AuthorDecision =
+  | AuthorDecisionChoice
+  | { revise: { feedback: string } };
 
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
 export type WorkspaceReviewFindingSeverity =

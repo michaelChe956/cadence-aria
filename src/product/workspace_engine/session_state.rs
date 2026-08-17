@@ -451,6 +451,7 @@ impl WorkspaceEngine {
             timeline_node_summaries,
             active_run_id: self.active_run_id.clone(),
             human_presentation_revisions: self.latest_human_presentation_revisions(),
+            reviewer_enabled_at_start: self.session.reviewer_enabled_at_start,
             recoverable_interrupted_run: self.recoverable_interrupted_run(),
             plan_repair: self.plan_repair_snapshot.clone().map(|mut snapshot| {
                 snapshot.timeline_nodes = self.timeline_nodes.clone();

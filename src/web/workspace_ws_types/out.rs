@@ -24,6 +24,7 @@ use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
 pub enum RecoverableInterruptedOperation {
     Review,
     WorkItemDraftGeneration,
+    Revision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +135,8 @@ pub enum WsOutMessage {
         timeline_node_summaries: HashMap<String, NodeDetailSummary>,
         active_run_id: Option<String>,
         human_presentation_revisions: Vec<HumanPresentationRevision>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewer_enabled_at_start: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

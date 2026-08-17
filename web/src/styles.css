@@ -12,9 +12,9 @@
     "Segoe UI",
     sans-serif;
   color-scheme: light;
-  background: #f6f8fa;
+  background: #f5f3ee;
   color: #17202a;
-  --aria-bg: #f6f8fa;
+  --aria-bg: #f5f3ee;
   --aria-panel: #ffffff;
   --aria-panel-muted: #fbfcfe;
   --aria-panel-subtle: #f1f5f9;
@@ -22,8 +22,12 @@
   --aria-ink-muted: #52616f;
   --aria-line: #dde5ec;
   --aria-line-strong: #c8d3dc;
-  --aria-primary: #0891b2;
-  --aria-primary-soft: #e0f7fb;
+  --aria-border-strong: #3f3f46;
+  --aria-border-muted: #71717a;
+  --aria-primary: #4F46E5;
+  --aria-primary-soft: #e0e7ff;
+  --aria-cta: #F97316;
+  --aria-cta-soft: #ffedd5;
   --aria-success: #059669;
   --aria-success-soft: #dcfce7;
   --aria-warning: #d97706;
@@ -95,5 +99,31 @@ select:disabled {
   .aria-lifecycle-card--deleting {
     opacity: 0.55;
     transform: none;
+  }
+}
+
+@layer components {
+  /* 边框强度与元素面积匹配：大卡片可“实”（粗边框），小控件要“轻”（细边/无边框） */
+  .aria-card-clay {
+    @apply rounded-xl border-2 bg-white shadow-sm;
+    border-color: var(--aria-border-muted);
+  }
+  .aria-chip {
+    @apply inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-bold;
+    border-color: var(--aria-line-strong);
+  }
+  .btn-primary {
+    @apply inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition-colors duration-200;
+    background: var(--aria-primary);
+    border: 1px solid color-mix(in srgb, var(--aria-primary) 80%, black);
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-colors duration-200;
+    background: var(--aria-primary-soft);
+    color: var(--aria-primary);
+    border: 1px solid transparent;
+  }
+  .btn-secondary:hover {
+    border-color: var(--aria-line-strong);
   }
 }

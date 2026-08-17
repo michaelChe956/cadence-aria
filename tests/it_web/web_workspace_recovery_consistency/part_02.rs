@@ -126,6 +126,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         timeline_node_summaries: HashMap::new(),
         active_run_id: None,
         human_presentation_revisions: vec![],
+        reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
     };

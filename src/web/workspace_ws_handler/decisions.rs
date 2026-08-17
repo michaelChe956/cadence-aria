@@ -215,6 +215,19 @@ pub(crate) async fn handle_author_decision_from_handler(
             };
             let _ = send_json_outbound(&outbound_tx, &state_msg).await;
         }
+        Ok(AuthorDecisionOutcome::StartRevision { feedback: _ }) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::Revision,
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Ok(AuthorDecisionOutcome::Finalized) => {}
         Err(message) => {
             let err = WsOutMessage::ProtocolError {
                 code: "INVALID_AUTHOR_DECISION".to_string(),

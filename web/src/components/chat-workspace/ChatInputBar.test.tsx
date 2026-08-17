@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
-import { ChatInputBar } from "./ChatInputBar";
+import { ChatInputBar, type ChatInputBarHandle } from "./ChatInputBar";
 
 describe("ChatInputBar", () => {
   beforeEach(() => {
@@ -69,7 +70,9 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "开始生成" })).not.toBeInTheDocument();
   });
 
-  it("shows author confirmation actions", () => {
+  // spec-workbench-canvas-experience T4：确认并送审/确认定稿/采纳 Review 意见
+  // 已迁移至 ArtifactReviewPanel，此处仅保留反馈发送。
+  it("keeps only the feedback send action at author confirm", () => {
     const onAuthorDecision = vi.fn();
 
     render(
@@ -83,13 +86,64 @@ describe("ChatInputBar", () => {
       />,
     );
 
-    expect(screen.getByRole("textbox")).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "进入 Review" }));
-    fireEvent.click(screen.getByRole("button", { name: "重新编写" }));
+    const feedbackInput = screen.getByPlaceholderText(/输入修改意见/);
+    expect(feedbackInput).toBeEnabled();
+    expect(screen.getByRole("button", { name: "发送反馈" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "确认并送审" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认定稿" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "采纳 Review 意见" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /重新编写/ }),
+    ).not.toBeInTheDocument();
 
-    expect(onAuthorDecision).toHaveBeenNthCalledWith(1, "accept");
-    expect(onAuthorDecision).toHaveBeenNthCalledWith(2, "reject");
+    fireEvent.change(feedbackInput, { target: { value: "补充回滚策略" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+
+    expect(onAuthorDecision).toHaveBeenCalledWith("revise", "补充回滚策略");
+    expect(
+      (screen.getByPlaceholderText(/输入修改意见/) as HTMLTextAreaElement).value,
+    ).toBe("");
+  });
+
+  // spec-workbench-canvas-experience T4：预填能力改为 ref 暴露（供面板采纳按钮调用），
+  // 覆盖式写入，重复调用不拼接。
+  it("exposes a covering prefill handle and input focus callback", () => {
+    const onInputFocus = vi.fn();
+    const ref = createRef<ChatInputBarHandle>();
+
+    render(
+      <ChatInputBar
+        ref={ref}
+        stage="author_confirm"
+        onInputFocus={onInputFocus}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    act(() => {
+      ref.current?.prefill("按以下 review 意见修订：\n\n发现 3 个问题");
+    });
+    const feedbackInput = screen.getByPlaceholderText(
+      /输入修改意见/,
+    ) as HTMLTextAreaElement;
+    expect(feedbackInput.value).toBe("按以下 review 意见修订：\n\n发现 3 个问题");
+
+    act(() => {
+      ref.current?.prefill("第二次预填");
+    });
+    expect(feedbackInput.value).toBe("第二次预填");
+
+    fireEvent.focus(feedbackInput);
+    expect(onInputFocus).toHaveBeenCalledTimes(1);
   });
 
   it("submits human confirm feedback with optimistic insertion", () => {

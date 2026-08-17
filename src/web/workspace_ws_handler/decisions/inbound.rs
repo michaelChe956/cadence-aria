@@ -19,6 +19,8 @@ pub(crate) fn provider_run_kind_for_interrupted_recovery(
         InterruptedRunRecoveryOutcome::WorkItemDraftGeneration => {
             ProviderRunKind::WorkItemPlanDraft { feedback: None }
         }
+        // spec-design-dialog-revision T7：Revision 恢复臂 → 修订 run。
+        InterruptedRunRecoveryOutcome::Revision => ProviderRunKind::Revision,
     }
 }
 

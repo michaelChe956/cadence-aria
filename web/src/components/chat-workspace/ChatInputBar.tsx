@@ -1,6 +1,20 @@
-import { Check, GitBranch, Layers, Play, RefreshCcw, Send, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import {
+  Check,
+  GitBranch,
+  Layers,
+  Play,
+  RefreshCcw,
+  Send,
+  X,
+} from "lucide-react";
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type FormEvent,
+} from "react";
 import type {
+  AuthorDecisionChoice,
   WorkItemBatchDecision,
   WorkItemDraftDecision,
   WorkItemGenerationMode,
@@ -17,7 +31,7 @@ interface ChatInputBarProps {
   onSendContextNote: (content: string) => void;
   onStartGeneration: () => void;
   onSendHumanDecision: (payload: { description: string; source: "human" }) => void;
-  onAuthorDecision?: (decision: "accept" | "reject") => void;
+  onAuthorDecision?: (decision: AuthorDecisionChoice, feedback?: string) => void;
   onSelectWorkItemGenerationMode?: (mode: WorkItemGenerationMode) => void;
   onRequestOutlineRevision?: () => void;
   onWorkItemDraftDecision?: (outlineId: string, decision: WorkItemDraftDecision) => void;
@@ -29,11 +43,22 @@ interface ChatInputBarProps {
   onAbort: () => void;
   disabled?: boolean;
   hideStartGeneration?: boolean;
+  /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
+  onInputFocus?: () => void;
+}
+
+/**
+ * spec-workbench-canvas-experience T4：暴露预填能力给宿主页面——
+ * 「采纳 Review 意见」按钮已迁移至 ArtifactReviewPanel，预填仍复用本组件输入框状态。
+ */
+export interface ChatInputBarHandle {
+  prefill: (text: string) => void;
 }
 
 const BUSY_STAGES = new Set(["running", "cross_review", "revision"]);
 
-export function ChatInputBar({
+export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
+  function ChatInputBar({
   stage,
   activeNodeType = null,
   workItemPlanArtifact = null,
@@ -48,7 +73,8 @@ export function ChatInputBar({
   onAbort,
   disabled = false,
   hideStartGeneration = false,
-}: ChatInputBarProps) {
+  onInputFocus,
+}, ref) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
   const isPrepareContext = stage === "prepare_context";
@@ -59,7 +85,9 @@ export function ChatInputBar({
   const isWorkItemBatchConfirm = activeNodeType === "work_item_batch_confirm";
   const isHumanConfirm = stage === "human_confirm";
   const isBusy = BUSY_STAGES.has(stage);
-  const inputDisabled = disabled || isBusy || isAuthorConfirm || stage === "completed";
+  // spec-design-dialog-revision T8：author_confirm 反馈输入开放（原为禁用）；
+  // 发送仍走「发送反馈」按钮而非表单提交。
+  const inputDisabled = disabled || isBusy || stage === "completed";
   const canSend = !inputDisabled && (isPrepareContext || isHumanConfirm) && trimmedInput.length > 0;
   const showSend = isPrepareContext || isHumanConfirm;
   const draftPayload =
@@ -67,6 +95,15 @@ export function ChatInputBar({
   const batchPayload =
     workItemPlanArtifact?.type === "batch_state" ? workItemPlanArtifact.payload : null;
   const firstBatchFailureOutlineId = batchPayload?.failure_summary[0]?.outline_id;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      // adopt-review-findings：覆盖式预填（重复调用天然不拼接）。
+      prefill: (text: string) => setInput(text),
+    }),
+    [],
+  );
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -93,6 +130,14 @@ export function ChatInputBar({
     onStartGeneration();
   }
 
+  function handleSendAuthorFeedback() {
+    if (disabled || trimmedInput.length === 0) {
+      return;
+    }
+    onAuthorDecision("revise", trimmedInput);
+    setInput("");
+  }
+
   return (
     <form
       data-testid="chat-input-bar"
@@ -104,6 +149,7 @@ export function ChatInputBar({
           data-testid="context-note-input"
           value={input}
           onChange={(event) => setInput(event.target.value)}
+          onFocus={onInputFocus}
           disabled={inputDisabled}
           rows={3}
           placeholder={placeholderForStage(stage, activeNodeType)}
@@ -126,7 +172,7 @@ export function ChatInputBar({
               data-testid={isHumanConfirm ? "send-human-decision" : "send-context-note"}
               type="submit"
               disabled={!canSend}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+              className="btn-secondary h-9 disabled:opacity-50"
             >
               <Send className="h-4 w-4" />
               {isHumanConfirm ? "发送修改意见" : "发送"}
@@ -138,7 +184,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onRequestOutlineRevision()}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <RefreshCcw className="h-4 w-4" />
                 重写 Outline
@@ -147,7 +193,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onAuthorDecision("accept")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className="btn-primary h-9 disabled:opacity-50"
               >
                 <Check className="h-4 w-4" />
                 接受 Outline
@@ -159,7 +205,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onSelectWorkItemGenerationMode("serial")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <GitBranch className="h-4 w-4" />
                 逐个生成
@@ -168,7 +214,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onSelectWorkItemGenerationMode("batch")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className="btn-primary h-9 disabled:opacity-50"
               >
                 <Layers className="h-4 w-4" />
                 自动生成
@@ -177,7 +223,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={onRequestOutlineRevision}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <RefreshCcw className="h-4 w-4" />
                 返回 Outline 返修
@@ -195,7 +241,7 @@ export function ChatInputBar({
                     onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "accept")
                   }
                   disabled={disabled}
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                  className="btn-primary h-9 disabled:opacity-50"
                 >
                   <Check className="h-4 w-4" />
                   接受
@@ -209,7 +255,7 @@ export function ChatInputBar({
                       onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "rewrite")
                     }
                     disabled={disabled}
-                    className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                    className="btn-secondary h-9 disabled:opacity-50"
                   >
                     <RefreshCcw className="h-4 w-4" />
                     {draftPayload.can_accept ? "重写" : "根据校验错误重写"}
@@ -220,7 +266,7 @@ export function ChatInputBar({
                       onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "pause")
                     }
                     disabled={disabled}
-                    className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                    className="btn-secondary h-9 disabled:opacity-50"
                   >
                     <X className="h-4 w-4" />
                     暂停
@@ -234,7 +280,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onWorkItemBatchDecision("accept_all")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+                className="btn-primary h-9 disabled:opacity-50"
               >
                 <Check className="h-4 w-4" />
                 接受全部
@@ -243,7 +289,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onWorkItemBatchDecision("rewrite_batch")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <RefreshCcw className="h-4 w-4" />
                 整组重写
@@ -252,7 +298,7 @@ export function ChatInputBar({
                 type="button"
                 onClick={() => onWorkItemBatchDecision("pause")}
                 disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                className="btn-secondary h-9 disabled:opacity-50"
               >
                 <X className="h-4 w-4" />
                 暂停
@@ -268,7 +314,7 @@ export function ChatInputBar({
                     )
                   }
                   disabled={disabled}
-                  className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+                  className="btn-secondary h-9 disabled:opacity-50"
                 >
                   <GitBranch className="h-4 w-4" />
                   降级串行
@@ -276,26 +322,15 @@ export function ChatInputBar({
               ) : null}
             </>
           ) : isAuthorConfirm ? (
-            <>
-              <button
-                type="button"
-                onClick={() => onAuthorDecision("reject")}
-                disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
-              >
-                <RefreshCcw className="h-4 w-4" />
-                重新编写
-              </button>
-              <button
-                type="button"
-                onClick={() => onAuthorDecision("accept")}
-                disabled={disabled}
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
-              >
-                <Check className="h-4 w-4" />
-                进入 Review
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={handleSendAuthorFeedback}
+              disabled={disabled || trimmedInput.length === 0}
+              className="btn-secondary h-9 disabled:opacity-50"
+            >
+              <Send className="h-4 w-4" />
+              发送反馈
+            </button>
           ) : null}
           {isPrepareContext && !hideStartGeneration ? (
             <button
@@ -303,7 +338,7 @@ export function ChatInputBar({
               type="button"
               onClick={handleStartGeneration}
               disabled={disabled}
-              className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+              className="btn-primary h-9 disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
               开始生成
@@ -313,7 +348,7 @@ export function ChatInputBar({
       </div>
     </form>
   );
-}
+});
 
 function placeholderForStage(stage: string, activeNodeType?: string | null) {
   if (activeNodeType === "work_item_plan_outline_confirm") {
@@ -332,7 +367,8 @@ function placeholderForStage(stage: string, activeNodeType?: string | null) {
     return "输入修改意见...";
   }
   if (stage === "author_confirm") {
-    return "等待确认 Author 结果";
+    // spec-design-dialog-revision T8：推倒重来出口移除，反馈修订成为主路径。
+    return "输入修改意见，或直接确认";
   }
   if (BUSY_STAGES.has(stage)) {
     return "Provider 运行中，暂不可输入";
@@ -353,3 +389,4 @@ function appendOptimisticEntry(type: ChatEntryType, content: string) {
   };
   useWorkspaceStore.getState().appendChatEntry(entry);
 }
+

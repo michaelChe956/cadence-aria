@@ -360,8 +360,9 @@ async fn workspace_ws_reviewer_does_not_resume_author_provider_session() {
 
     let _checkpoint = recv_until_message_complete(&mut ws).await;
     accept_author_output(&mut ws).await;
-    let stage = recv_until_stage(&mut ws, "human_confirm").await;
-    assert_eq!(stage, "human_confirm");
+    // spec-design-dialog-revision T5：codex 真实评审完成后统一回 AuthorConfirm（不再进 HumanConfirm）。
+    let stage = recv_until_stage(&mut ws, "author_confirm").await;
+    assert_eq!(stage, "author_confirm");
 
     assert_eq!(
         provider_state.author_resume_ids.lock().unwrap().as_slice(),

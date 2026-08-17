@@ -131,17 +131,26 @@ async fn start_generation_locks_provider_and_creates_node() {
 }
 
 #[tokio::test]
-async fn reviewer_disabled_enters_human_confirm_without_review_node() {
+async fn reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node() {
+    // spec-design-dialog-revision T3：旧记录（reviewer_enabled_at_start=None）+ review 未启用
+    // → Accept 走 legacy 有效态判定 → HumanConfirm，且不创建 review 节点。
+    // T6 Minor-4 修订：Story/Design 已退役 HumanConfirm（无 reviewer 时直接定稿，见
+    // author_revision_loop::legacy_accept_without_reviewer_finalizes_for_story_design_not_human_confirm），
+    // 本用例改为 WorkItemPlan——该类型 HumanConfirm 仍有效，保留原“无 review 节点落入 HumanConfirm”覆盖。
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let mut session = make_session("sess_reviewer_disabled");
-    session.stage = WorkspaceStage::Running;
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    session.stage = WorkspaceStage::AuthorConfirm;
     session.reviewer_provider = None;
     session.review_rounds = 0;
     let mut engine = WorkspaceEngine::new(store, tx, session);
 
-    engine.start_review_or_skip().await;
-
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(outcome, AuthorDecisionOutcome::HumanConfirm);
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
     assert!(
         !engine
@@ -565,15 +574,18 @@ async fn author_decision_accept_starts_review_or_final_confirmation() {
         .await
         .unwrap();
 
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    // T6 Minor-4：Story/Design 已退役 HumanConfirm——无 review 时 Accept 直接定稿（Completed），
+    // 不再进入人工确认阶段（WorkItemPlan 的 HumanConfirm 覆盖见
+    // reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node）。
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
     assert!(engine.timeline_nodes.iter().any(|node| {
-        node.node_type == TimelineNodeType::HumanConfirm
-            && node.status == TimelineNodeStatus::Active
+        node.node_type == TimelineNodeType::Completed
+            && node.status == TimelineNodeStatus::Completed
     }));
 }
 
 #[tokio::test]
-async fn author_decision_reject_returns_to_prepare_without_losing_history() {
+async fn author_decision_reject_returns_guidance_error_without_reset() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let mut session = make_session("sess_author_reject");
@@ -591,20 +603,23 @@ async fn author_decision_reject_returns_to_prepare_without_losing_history() {
         )
         .await;
 
-    engine
+    let err = engine
         .handle_author_decision(AuthorDecision::Reject)
         .await
-        .unwrap();
-
-    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
-    assert_eq!(engine.session().artifact, None);
+        .unwrap_err();
+    assert!(err.contains("反馈"), "应引导改用反馈修订: {err}");
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+    assert!(
+        engine.session().artifact.is_some(),
+        "拒绝不得清空产物（改用反馈修订）"
+    );
     assert!(
         engine
             .session()
             .messages
             .iter()
             .any(|message| message.role == "assistant" && message.content.contains("不满意的候选")),
-        "rejected author output should remain in message history"
+        "author output should remain in message history"
     );
     assert_eq!(engine.artifact_versions.len(), 1);
     assert!(
@@ -613,37 +628,30 @@ async fn author_decision_reject_returns_to_prepare_without_losing_history() {
             .contains("不满意的候选")
     );
     assert!(
-        !engine.artifact_versions[0].is_current,
-        "rejected artifact version should remain historical but not active"
-    );
-    assert!(
-        engine.timeline_nodes.iter().any(|node| {
-            node.node_type == TimelineNodeType::AuthorConfirm
-                && node.status == TimelineNodeStatus::Completed
-                && node.summary.as_deref() == Some("用户要求重新编写")
-        }),
-        "author_confirm node should record the rejection decision"
+        engine.artifact_versions[0].is_current,
+        "拒绝不再作废产物，当前稿保持 current"
     );
 }
 
 #[tokio::test]
-async fn rejected_author_artifact_is_not_restored_after_reconnect() {
+async fn rejected_author_artifact_survives_reject_error_after_reconnect() {
     let (tmp, lifecycle_store, mut engine) = persistent_test_engine();
     engine
         .handle_user_message(
             "开始生成".to_string(),
             Arc::new(ImmediateOutputRecordingProvider {
                 inputs: Arc::new(Mutex::new(Vec::new())),
-                output: complete_story_artifact("被拒绝候选。", "不应恢复为当前稿。"),
+                output: complete_story_artifact("候选。", "不因拒绝被清空。"),
             }),
             empty_provider_commands(),
         )
         .await;
 
-    engine
+    let err = engine
         .handle_author_decision(AuthorDecision::Reject)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(err.contains("反馈"), "应引导改用反馈修订: {err}");
 
     let session_record = lifecycle_store
         .get_workspace_session(&engine.session().session_id)
@@ -655,10 +663,13 @@ async fn rejected_author_artifact_is_not_restored_after_reconnect() {
         WorkspaceSession::from_record(session_record),
     );
 
-    assert_eq!(reloaded.session().stage, WorkspaceStage::PrepareContext);
-    assert_eq!(reloaded.session().artifact, None);
+    assert_eq!(reloaded.session().stage, WorkspaceStage::AuthorConfirm);
+    assert!(
+        reloaded.session().artifact.is_some(),
+        "拒绝返回引导错误后产物应保留，不推倒重来"
+    );
     match reloaded.build_session_state() {
-        WsOutMessage::SessionState { artifact, .. } => assert_eq!(artifact, None),
+        WsOutMessage::SessionState { artifact, .. } => assert!(artifact.is_some()),
         other => panic!("expected SessionState, got {other:?}"),
     }
 }

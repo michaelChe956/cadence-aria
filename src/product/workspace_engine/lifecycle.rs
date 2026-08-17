@@ -1,5 +1,26 @@
 use super::*;
 
+/// spec-design-dialog-revision T6：HumanConfirm/ReviewDecision 已从 Story/Design 流程退役，
+/// 存量会话恢复时迁移回 AuthorConfirm（保留产物与消息，review verdict 留在消息流）。
+/// 仅迁移 stage，不触碰 timeline/持久化存储（恢复语义由消息流保留，懒迁移随下次持久化落盘）。
+pub(crate) fn recover_story_design_retired_stage_fallback(
+    mut session: WorkspaceSession,
+) -> WorkspaceSession {
+    let retired = matches!(
+        session.stage,
+        WorkspaceStage::HumanConfirm | WorkspaceStage::ReviewDecision
+    );
+    if retired
+        && matches!(
+            session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        )
+    {
+        session.stage = WorkspaceStage::AuthorConfirm;
+    }
+    session
+}
+
 fn recover_complete_artifact_misclassified_as_text_fallback(
     checkpoint_store: &CheckpointStore,
     lifecycle_store: &LifecycleStore,
@@ -297,6 +318,8 @@ impl WorkspaceEngine {
         ) {
             tracing::warn!(%error, "failed to recover WorkItemPlan outline review schema fallback");
         }
+        // 存量 Story/Design 会话若停留在已退役的 HumanConfirm/ReviewDecision 阶段，恢复时迁移回 AuthorConfirm。
+        session = recover_story_design_retired_stage_fallback(session);
         let latest_review_verdict = latest_review_verdict_from_node_details(
             &lifecycle_store,
             &session.project_id,
@@ -631,6 +654,10 @@ impl WorkspaceEngine {
                 locked_snapshot.permission_modes.reviewer.clone(),
             );
         }
+        // Capture the raw snapshot reviewer BEFORE the disabled-review clear below:
+        // provisional must retain the original selection even when reviewer_enabled=false
+        // (design.md §3, provisional 恢复闭环); reviewer_provider/review_rounds are still cleared.
+        let provisional_reviewer = locked_snapshot.reviewer.clone();
         if !reviewer_enabled {
             locked_snapshot.reviewer = None;
             locked_snapshot.review_rounds = 0;
@@ -640,6 +667,18 @@ impl WorkspaceEngine {
         self.session.reviewer_provider = locked_snapshot.reviewer.clone();
         self.session.review_rounds = locked_snapshot.review_rounds;
         self.session.permission_modes = locked_snapshot.permission_modes.clone();
+
+        self.session.provisional_reviewer_provider = provisional_reviewer;
+        self.session.reviewer_enabled_at_start = Some(reviewer_enabled);
+        if let Some(store) = &self.lifecycle_store {
+            store
+                .update_workspace_session_provisional_reviewer(
+                    &self.session.session_id,
+                    self.session.provisional_reviewer_provider.clone(),
+                    self.session.reviewer_enabled_at_start,
+                )
+                .map_err(|error| format!("persist provisional reviewer failed: {error}"))?;
+        }
 
         if let Some(store) = &self.lifecycle_store {
             let reviewer_provider = locked_snapshot

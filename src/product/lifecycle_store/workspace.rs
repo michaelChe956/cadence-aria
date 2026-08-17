@@ -239,6 +239,8 @@ impl LifecycleStore {
             reviewer_provider: input.reviewer_provider,
             review_rounds: input.review_rounds,
             permission_modes: WorkspaceRolePermissionModes::default(),
+            provisional_reviewer_provider: None,
+            reviewer_enabled_at_start: None,
             superpowers_enabled: input.superpowers_enabled,
             openspec_enabled: input.openspec_enabled,
             work_item_runtime_binding: None,
@@ -430,6 +432,22 @@ impl LifecycleStore {
         let session_path = self.find_workspace_session_path(session_id)?;
         let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
         session.permission_modes = permission_modes;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
+    pub fn update_workspace_session_provisional_reviewer(
+        &self,
+        session_id: &str,
+        provisional_reviewer_provider: Option<crate::product::models::ProviderName>,
+        reviewer_enabled_at_start: Option<bool>,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.provisional_reviewer_provider = provisional_reviewer_provider;
+        session.reviewer_enabled_at_start = reviewer_enabled_at_start;
         session.updated_at = Utc::now().to_rfc3339();
         write_json(&session_path, &session)?;
         Ok(session)
