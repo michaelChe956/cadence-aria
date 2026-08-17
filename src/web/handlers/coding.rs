@@ -7,7 +7,9 @@ use crate::product::coding_attempt_repository::{
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
 use crate::product::coding_models::{AttemptTargetSnapshot, CodingAttemptScope};
-use crate::product::logical_codebase::{RepositoryRouting, RepositoryRoutingErrorCode};
+use crate::product::logical_codebase::{
+    LegacySharedWorktreeMigration, RepositoryRouting, RepositoryRoutingErrorCode,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
@@ -166,6 +168,23 @@ pub async fn create_coding_attempt(
                 .map_err(product_store_api_error)?;
         }
         IssueWorktreeRoute::Repository { repository_id } => {
+            let legacy_error = match LegacySharedWorktreeMigration::load_legacy_shared_worktree(
+                &app_paths,
+                &project_id,
+                &issue_id,
+            ) {
+                Ok(None) => None,
+                Ok(Some(_)) => Some("legacy_shared_worktree_present"),
+                Err(ProductStoreError::InvalidRecord { reason, .. })
+                    if reason.starts_with("legacy_shared_worktree_inconsistent:") =>
+                {
+                    Some("legacy_shared_worktree_inconsistent")
+                }
+                Err(error) => return Err(product_store_api_error(error)),
+            };
+            if let Some(code) = legacy_error {
+                return Err(ApiError::validation(code, "legacy"));
+            }
             let shared_worktree_path = target_snapshot
                 .as_ref()
                 .expect("repository route has target snapshot")

@@ -10,6 +10,7 @@ pub mod evidence_mediator;
 pub mod evidence_token;
 pub mod feature;
 pub mod issue_selection;
+pub mod legacy_shared_worktree_migration;
 pub mod migration;
 pub mod planning_context;
 pub mod planning_context_resolver;
@@ -53,6 +54,10 @@ pub use feature::LogicalCodebaseFeature;
 pub use issue_selection::{
     EffectiveMemberResolution, InvalidationRecord, IssueCodebaseSelection,
     IssueCodebaseSelectionStore, SelectionPolicy, load_selection,
+};
+pub use legacy_shared_worktree_migration::{
+    LegacySharedWorktreeMigration, LegacySharedWorktreeMigrationJournal,
+    LegacySharedWorktreeRecord, LegacySharedWorktreeRedirect,
 };
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,

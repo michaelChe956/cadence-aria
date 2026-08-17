@@ -121,15 +121,29 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
-        if lifecycle
-            .issue_shared_worktree_path(&attempt.project_id, &attempt.issue_id)
-            .exists()
-        {
-            return Err(CodingWorkspaceEngineError::LegacySharedWorktreePresent(
-                format!("{}/{}", attempt.project_id, attempt.issue_id),
-            ));
+        let legacy_path =
+            lifecycle.issue_shared_worktree_path(&attempt.project_id, &attempt.issue_id);
+        if !legacy_path.exists() {
+            return Ok(());
         }
-        Ok(())
+        match crate::product::logical_codebase::LegacySharedWorktreeMigration::load_legacy_shared_worktree(
+            &self.store.paths(),
+            &attempt.project_id,
+            &attempt.issue_id,
+        ) {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err(CodingWorkspaceEngineError::LegacySharedWorktreePresent(
+                format!("{}/{}", attempt.project_id, attempt.issue_id),
+            )),
+            Err(ProductStoreError::InvalidRecord { reason, .. })
+                if reason.starts_with("legacy_shared_worktree_inconsistent:") =>
+            {
+                Err(CodingWorkspaceEngineError::Store(ProductStoreError::Io(
+                    "legacy_shared_worktree_inconsistent".to_string(),
+                )))
+            }
+            Err(error) => Err(CodingWorkspaceEngineError::Store(error)),
+        }
     }
 
     /// 当 Coder 输出无法进入任何自动化路由（plan defect 契约校验失败，

@@ -814,6 +814,11 @@ pub(crate) fn coding_workspace_api_error(error: CodingWorkspaceEngineError) -> A
                     "coding attempt target snapshot policy drifted",
                     json!({}),
                 ),
+                "legacy_shared_worktree_inconsistent" => ApiError::runtime(
+                    "legacy_shared_worktree_inconsistent",
+                    "legacy issue shared worktree migration record is inconsistent",
+                    json!({}),
+                ),
                 _ => fallback(),
             }
         }
@@ -1163,6 +1168,7 @@ mod tests {
             ),
             ("target_snapshot_identity_drifted", StatusCode::CONFLICT),
             ("target_snapshot_policy_drifted", StatusCode::CONFLICT),
+            ("legacy_shared_worktree_inconsistent", StatusCode::CONFLICT),
         ];
 
         for (stable_code, expected_status) in cases {

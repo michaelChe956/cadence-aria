@@ -10,6 +10,7 @@ use cadence_aria::product::logical_codebase::{
     IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
     LogicalCodebaseStore, LogicalRepositoryId, CodebaseMemberRecord, MemberStatus,
     RepositorySourceIdentity, RepositoryType, IdentityMigrationExecutor,
+    LegacySharedWorktreeMigration,
 };
 use cadence_aria::product::models::{
     WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,

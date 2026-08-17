@@ -82,6 +82,7 @@ impl IntoResponse for ApiError {
             "target_snapshot_identity_drifted"
             | "target_snapshot_policy_drifted"
             | "legacy_shared_worktree_present"
+            | "legacy_shared_worktree_inconsistent"
             | "repo_worktree_active"
             | "cross_target_violation_detected" => StatusCode::CONFLICT,
             "cross_target_baseline_missing" | "cross_target_store_failure" => {
@@ -440,9 +441,9 @@ mod tests {
         }
     }
     #[test]
-    fn stable_code_http_contract_covers_all_9_codes() {
-        // §4.6 稳定码契约收口：未知码默认 500，必须显式声明。覆盖 Task 6/8/9/10/12/14/15
-        // 引入的全部 9 个稳定码的 HTTP 状态映射。
+    fn stable_code_http_contract_covers_all_legacy_and_routing_codes() {
+        // §4.6 稳定码契约收口：未知码默认 500，必须显式声明。覆盖迁移与仓维路径引入的
+        // 全部稳定码 HTTP 状态映射。
         let cases = [
             (
                 "target_snapshot_missing_for_logical",
@@ -455,6 +456,7 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             ("legacy_shared_worktree_present", StatusCode::CONFLICT),
+            ("legacy_shared_worktree_inconsistent", StatusCode::CONFLICT),
             ("repo_worktree_active", StatusCode::CONFLICT),
             ("cross_target_violation_detected", StatusCode::CONFLICT),
             (
