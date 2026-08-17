@@ -68,10 +68,10 @@ export function selectLatestReviewReport(state: WorkspaceWsState): string | unde
   const entry = state.chatEntries
     .filter((candidate) => candidate.type === "review_verdict")
     .at(-1);
-  const content = typeof entry?.content === "string" ? entry.content.trim() : "";
-  if (!entry) {
+  if (!entry || reviewIsSupersededByRevision(state, entry.node_id)) {
     return undefined;
   }
+  const content = typeof entry.content === "string" ? entry.content.trim() : "";
   const metadata = entry.metadata;
   const summary = asTrimmedString(metadata?.summary) || content;
   const comments = asTrimmedString(metadata?.comments);
@@ -92,6 +92,25 @@ export function selectLatestReviewReport(state: WorkspaceWsState): string | unde
   }
   parts.push(`[review_findings]\n${formatReviewFindings(findings)}`);
   return parts.join("\n\n");
+}
+
+/**
+ * Timeline 顺序是节点的因果顺序，且重建 chat entries 时会按该顺序生成；它比 entry
+ * timestamp 可靠，因为后端事件可落在同一秒。只要 review 节点之后已有完成的 revision，
+ * review 报告就针对旧 artifact，不能再作为预填反馈。
+ */
+function reviewIsSupersededByRevision(state: WorkspaceWsState, reviewNodeId?: string) {
+  if (!reviewNodeId) {
+    return false;
+  }
+  const timelineNodes = state.timelineNodes ?? [];
+  const reviewNodeIndex = timelineNodes.findIndex((node) => node.node_id === reviewNodeId);
+  if (reviewNodeIndex < 0) {
+    return false;
+  }
+  return timelineNodes
+    .slice(reviewNodeIndex + 1)
+    .some((node) => node.node_type === "revision" && node.status === "completed");
 }
 
 export function selectPrepareContextNotes(state: WorkspaceWsState) {

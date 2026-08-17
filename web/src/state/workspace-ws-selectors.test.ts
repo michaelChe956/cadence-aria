@@ -1,10 +1,45 @@
 import { describe, expect, it } from "vitest";
 import { selectLatestReviewReport } from "./workspace-ws-selectors";
-import type { WorkspaceWsState } from "./workspace-ws-store-types";
+import type { WorkspaceWsState, TimelineNode } from "./workspace-ws-store-types";
 import type { ChatEntry } from "./chat-entries";
 
-function stateWithEntries(entries: ChatEntry[]): WorkspaceWsState {
-  return { chatEntries: entries } as unknown as WorkspaceWsState;
+function stateWithEntries(
+  entries: ChatEntry[],
+  timelineNodes: TimelineNode[] = [],
+): WorkspaceWsState {
+  return { chatEntries: entries, timelineNodes } as unknown as WorkspaceWsState;
+}
+
+function timelineNode(
+  node_id: string,
+  node_type: TimelineNode["node_type"],
+  status: TimelineNode["status"] = "completed",
+): TimelineNode {
+  return {
+    node_id,
+    node_type,
+    status,
+    stage: node_type === "revision" ? "revision" : "cross_review",
+    title: node_type,
+    started_at: "2026-08-17T03:00:00.000Z",
+    completed_at: "2026-08-17T03:00:00.000Z",
+    provider_config_snapshot: {
+      author: "claude_code",
+      reviewer: "codex",
+      review_rounds: 1,
+    },
+  };
+}
+
+function revisionEntry(): ChatEntry {
+  return {
+    id: "revision:stream",
+    type: "provider_stream",
+    role: "author",
+    content: "已按反馈产出新版本",
+    timestamp: "2026-08-17T03:00:00.000Z",
+    node_id: "revision",
+  };
 }
 
 function reviewVerdictEntry(metadata?: Record<string, unknown>): ChatEntry {
@@ -14,6 +49,7 @@ function reviewVerdictEntry(metadata?: Record<string, unknown>): ChatEntry {
     role: "reviewer",
     content: "遗漏边界写入范围",
     timestamp: "2026-08-17T03:00:00.000Z",
+    node_id: "reviewer",
     metadata,
   };
 }
@@ -61,6 +97,30 @@ describe("selectLatestReviewReport", () => {
 
   it("无 findings metadata 时 fallback 到消息 content", () => {
     const state = stateWithEntries([reviewVerdictEntry(undefined)]);
+    expect(selectLatestReviewReport(state)).toBe("遗漏边界写入范围");
+  });
+
+  it("最新 review 后已有完成的 revision 时不返回旧报告", () => {
+    const state = stateWithEntries(
+      [reviewVerdictEntry(), revisionEntry()],
+      [
+        timelineNode("reviewer", "reviewer_run"),
+        timelineNode("revision", "revision"),
+      ],
+    );
+
+    expect(selectLatestReviewReport(state)).toBeUndefined();
+  });
+
+  it("最新 review 后尚无 revision 时仍返回报告", () => {
+    const state = stateWithEntries(
+      [revisionEntry(), reviewVerdictEntry()],
+      [
+        timelineNode("revision", "revision"),
+        timelineNode("reviewer", "reviewer_run"),
+      ],
+    );
+
     expect(selectLatestReviewReport(state)).toBe("遗漏边界写入范围");
   });
 
