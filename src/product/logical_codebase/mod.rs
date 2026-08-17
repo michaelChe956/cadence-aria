@@ -3,6 +3,7 @@ pub mod aggregate_initialization;
 pub mod aggregate_initialization_coordinator;
 pub mod aggregate_initialization_store;
 pub mod evidence_index;
+pub mod evidence_token;
 pub mod feature;
 pub mod issue_selection;
 pub mod migration;

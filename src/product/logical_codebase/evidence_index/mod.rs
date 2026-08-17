@@ -33,13 +33,22 @@ pub struct EvidenceHit {
 /// 证据查询/解析错误。错误码字符串与设计稳定码前缀 `evidence_` 对齐
 /// （见方案设计 §5.2）：非法查询词 → `evidence_invalid_query`；
 /// 索引不可用/查询执行失败 → `evidence_query_failed`（携带底层码，如
-/// `codegraph_query_invalid_json` 透传，供 T6 映射 HTTP 状态与日志）。
+/// `codegraph_query_invalid_json` 透传，供 T6 映射 HTTP 状态与日志）；
+/// attempt 级会话令牌校验失败 → `evidence_unauthorized`（401，无令牌/令牌无效）
+/// 与 `evidence_forbidden`（403，attempt 非 Running / 归属不符）；令牌生成/落盘
+/// IO 失败 → `evidence_io`（服务端内部错误，T8 挂钩记录后按 500 处理）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvidenceError {
     #[error("evidence_invalid_query:{reason}")]
     InvalidQuery { reason: String },
     #[error("evidence_query_failed:{code}: {message}")]
     QueryFailed { code: &'static str, message: String },
+    #[error("evidence_unauthorized")]
+    Unauthorized,
+    #[error("evidence_forbidden")]
+    Forbidden,
+    #[error("evidence_io:{message}")]
+    Io { message: String },
 }
 
 /// 单次查询返回的最大命中数，超出截断。
