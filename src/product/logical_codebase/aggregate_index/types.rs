@@ -51,6 +51,10 @@ pub struct AggregateIndexRecord {
     pub membership_revision: u64,
     pub status: AggregateIndexStatus,
     pub member_snapshots: Vec<AggregateIndexMemberSnapshot>,
+    /// Snapshot captured after the CodeGraph command for drift auditing. The
+    /// active generation always continues to reference `member_snapshots`.
+    #[serde(default)]
+    pub observed_after_member_snapshots: Vec<AggregateIndexMemberSnapshot>,
     pub codegraph_version: String,
     pub codegraph_root: PathBuf,
     #[serde(default)]
@@ -77,6 +81,7 @@ impl AggregateIndexRecord {
             membership_revision,
             status: AggregateIndexStatus::Building,
             member_snapshots,
+            observed_after_member_snapshots: Vec::new(),
             codegraph_version: "1.5.0".into(),
             codegraph_root: PathBuf::new(),
             config_digest: String::new(),

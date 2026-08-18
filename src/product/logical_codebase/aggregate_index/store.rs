@@ -189,6 +189,19 @@ impl AggregateIndexStore {
         Ok(next)
     }
 
+    /// Updates an already-created generation without changing its identity.
+    /// This is used to append after-command snapshot evidence to a Building
+    /// generation before its terminal status is observed by readers.
+    pub fn update_record(
+        &self,
+        project_id: &str,
+        record: AggregateIndexRecord,
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        self.validate_record(project_id, &record)?;
+        self.save(project_id, &record)?;
+        Ok(record)
+    }
+
     pub fn mark_status(
         &self,
         project_id: &str,

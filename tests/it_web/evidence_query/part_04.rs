@@ -138,6 +138,7 @@ impl FiftyMemberFixture {
                     membership_revision: 1,
                     status: AggregateIndexStatus::Active,
                     member_snapshots: snapshots,
+                    observed_after_member_snapshots: Vec::new(),
                     codegraph_version: "synthetic-test".to_string(),
                     codegraph_root: aggregate_root.clone(),
                     config_digest: String::new(),

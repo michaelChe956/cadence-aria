@@ -287,6 +287,7 @@ mod tests {
                     "2026-08-14T00:00:00Z".to_string(),
                 ),
             ],
+            observed_after_member_snapshots: Vec::new(),
             codegraph_version: "1.5.0".to_string(),
             codegraph_root: codegraph_root.to_path_buf(),
             config_digest: String::new(),
