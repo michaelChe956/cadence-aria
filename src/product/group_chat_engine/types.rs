@@ -70,6 +70,12 @@ pub struct ArtifactLine {
     pub kind: ArtifactLineKind,
     pub drafts: Vec<DraftSlot>,
     pub finalized_versions: Vec<String>,
+    /// 对应的生命周期实体；群聊首次定稿后写入并在后续定稿中复用。
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    /// 看板桥接 workspace session；群聊首次定稿后写入并复用。
+    #[serde(default)]
+    pub bridge_session_id: Option<String>,
 }
 
 /// Agent 发言关联的草稿版本。

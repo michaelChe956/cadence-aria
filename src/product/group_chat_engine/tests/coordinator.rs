@@ -109,6 +109,8 @@ fn session(roles: Vec<RoleInstance>) -> GroupChatSessionRecord {
                 claim: None,
             }],
             finalized_versions: vec![],
+            entity_id: None,
+            bridge_session_id: None,
         }],
         created_at: "2026-08-18T00:00:00Z".into(),
         updated_at: "2026-08-18T00:00:00Z".into(),

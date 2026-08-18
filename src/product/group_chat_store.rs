@@ -81,6 +81,19 @@ impl GroupChatStore {
         Ok(session)
     }
 
+    /// 返回下一条时间线事件将使用的序号。
+    pub fn next_event_seq(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<u64, ProductStoreError> {
+        validate_ids(project_id, issue_id, session_id)?;
+        Ok(timeline::next_seq(&timeline::read_entries(
+            &self.timeline_path(project_id, issue_id, session_id),
+        )?))
+    }
+
     /// 读取会话的完整追加式时间线，按事件序号升序返回。
     ///
     /// coordinator 在每个 agent turn 前以此建立 freshness 快照；具体序号仍由

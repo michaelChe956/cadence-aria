@@ -34,6 +34,8 @@ fn story_line(markdown: &str) -> ArtifactLine {
             claim: None,
         }],
         finalized_versions: vec!["story-v1".into()],
+        entity_id: None,
+        bridge_session_id: None,
     }
 }
 

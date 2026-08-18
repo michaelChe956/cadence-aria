@@ -369,6 +369,21 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    /// 更新会话的创建来源。群聊桥接会话使用此方法标记为 GroupChat。
+    pub fn update_workspace_session_origin(
+        &self,
+        session_id: &str,
+        origin: crate::product::models::SessionOrigin,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.origin = Some(origin);
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
     pub fn update_workspace_session_status(
         &self,
         session_id: &str,
@@ -618,9 +633,14 @@ impl LifecycleStore {
     pub fn append_artifact_version(
         &self,
         session_id: &str,
-        version: ArtifactVersion,
+        mut version: ArtifactVersion,
     ) -> Result<(), ProductStoreError> {
         let mut versions = self.list_artifact_versions(session_id)?;
+        // 与 workspace engine 的追加式语义一致：文件中始终只有最新版本为 current。
+        for existing in &mut versions {
+            existing.is_current = false;
+        }
+        version.is_current = true;
         versions.push(version);
         self.save_artifact_versions(session_id, &versions)
     }

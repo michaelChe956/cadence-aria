@@ -36,6 +36,8 @@ fn design_line() -> ArtifactLine {
             },
         ],
         finalized_versions: vec![],
+        entity_id: None,
+        bridge_session_id: None,
     }
 }
 
