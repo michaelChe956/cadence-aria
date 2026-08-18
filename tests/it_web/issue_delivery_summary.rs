@@ -152,6 +152,7 @@ async fn build_delivery_fixture(
         .create(CreateProjectInput {
             name: "Delivery".to_string(),
             description: None,
+            multi_repo: false,
         })
         .expect("create project");
 

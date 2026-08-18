@@ -282,6 +282,8 @@ pub struct ProjectDto {
     pub created_at: String,
     pub updated_at: String,
     pub last_opened_at: Option<String>,
+    #[serde(default)]
+    pub multi_repo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -295,6 +297,8 @@ pub struct ProjectListResponse {
 pub struct CreateProjectRequest {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub multi_repo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

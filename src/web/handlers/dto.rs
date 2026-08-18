@@ -84,6 +84,7 @@ pub(crate) fn project_dto(record: ProjectRecord) -> ProjectDto {
         created_at: record.created_at,
         updated_at: record.updated_at,
         last_opened_at: record.last_opened_at,
+        multi_repo: record.multi_repo,
     }
 }
 

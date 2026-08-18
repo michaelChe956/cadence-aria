@@ -30,6 +30,18 @@ async fn creates_project_repository_and_issue_via_product_api() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(created["project_id"], "project_0001");
     assert_eq!(created["name"], "Aria");
+    assert_eq!(created["multi_repo"], false);
+
+    let (status, aggregate) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Aggregate","description":null,"multi_repo":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(aggregate["project_id"], "project_0002");
+    assert_eq!(aggregate["multi_repo"], true);
 
     let (status, project) = request_json(
         app.clone(),

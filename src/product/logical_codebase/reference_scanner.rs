@@ -962,6 +962,7 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
+                multi_repo: false,
             })
             .unwrap();
         let git_root = root.path().join("api");
@@ -1006,6 +1007,7 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
+                multi_repo: false,
             })
             .unwrap();
         let repository_path = root.path().join("legacy-api");

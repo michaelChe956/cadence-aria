@@ -186,6 +186,7 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
+                multi_repo: false,
             })
             .unwrap();
         IssueStore::new(paths.clone())

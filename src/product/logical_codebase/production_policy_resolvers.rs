@@ -252,6 +252,7 @@ mod tests {
             .create(CreateProjectInput {
                 name: "resolver project".to_string(),
                 description: None,
+                multi_repo: false,
             })
             .expect("create project");
 

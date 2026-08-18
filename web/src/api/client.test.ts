@@ -337,6 +337,7 @@ describe("api client", () => {
         created_at: "2026-05-14T00:00:00Z",
         updated_at: "2026-05-14T00:00:00Z",
         last_opened_at: null,
+        multi_repo: true,
       },
     ];
     vi.stubGlobal(
@@ -350,7 +351,7 @@ describe("api client", () => {
     );
 
     await listProjects();
-    await createProject({ name: "Aria", description: null });
+    await createProject({ name: "Aria", description: null, multi_repo: true });
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects",
@@ -358,7 +359,7 @@ describe("api client", () => {
     ]);
     expect(calls[1].init?.method).toBe("POST");
     expect(calls[1].init?.body).toBe(
-      JSON.stringify({ name: "Aria", description: null }),
+      JSON.stringify({ name: "Aria", description: null, multi_repo: true }),
     );
   });
 

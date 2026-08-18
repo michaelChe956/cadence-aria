@@ -12,6 +12,7 @@ use crate::product::models::ProjectRecord;
 pub struct CreateProjectInput {
     pub name: String,
     pub description: Option<String>,
+    pub multi_repo: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,7 @@ impl ProjectStore {
             created_at: now.clone(),
             updated_at: now,
             last_opened_at: None,
+            multi_repo: input.multi_repo,
         };
 
         write_json(&self.paths.project_root(&id).join("project.json"), &project)?;
@@ -138,4 +140,34 @@ fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     path.try_exists()
         .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateProjectInput, ProjectStore};
+    use crate::product::app_paths::ProductAppPaths;
+
+    #[test]
+    fn project_store_round_trips_multi_repo_and_defaults_legacy_json_to_false() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = ProjectStore::new(paths.clone());
+        let created = store
+            .create(CreateProjectInput {
+                name: "Aggregate".into(),
+                description: None,
+                multi_repo: true,
+            })
+            .unwrap();
+        assert!(created.multi_repo);
+        assert!(store.get(&created.id).unwrap().multi_repo);
+
+        std::fs::create_dir_all(paths.project_root("project_legacy")).unwrap();
+        std::fs::write(
+            paths.project_root("project_legacy").join("project.json"),
+            r#"{"id":"project_legacy","name":"Legacy","description":null,"created_at":"2026-08-18T00:00:00Z","updated_at":"2026-08-18T00:00:00Z","last_opened_at":null}"#,
+        )
+        .unwrap();
+        assert!(!store.get("project_legacy").unwrap().multi_repo);
+    }
 }

@@ -54,6 +54,7 @@ pub async fn create_project(
         .create(CreateProjectInput {
             name: request.name,
             description: request.description,
+            multi_repo: request.multi_repo,
         })
         .map_err(product_store_api_error)?;
     Ok(Json(project_dto(project)))
