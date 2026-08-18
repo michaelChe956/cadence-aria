@@ -60,6 +60,10 @@ impl ProductAppPaths {
             .join("registration-batches")
     }
 
+    pub fn registration_preflights_root(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id).join("preflights")
+    }
+
     pub fn registration_batches_lock_path(&self, project_id: &str) -> PathBuf {
         self.logical_codebase_root(project_id)
             .join(".registration-batches.lock")
@@ -117,6 +121,10 @@ mod tests {
             std::path::PathBuf::from(
                 "/tmp/aria/projects/project_0001/logical-codebase/registration-batches"
             )
+        );
+        assert_eq!(
+            paths.registration_preflights_root("project_0001"),
+            std::path::PathBuf::from("/tmp/aria/projects/project_0001/logical-codebase/preflights")
         );
         assert_eq!(
             paths.registration_batches_lock_path("project_0001"),

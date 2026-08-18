@@ -23,6 +23,7 @@ pub mod provider_capability_store;
 pub mod provider_gateway;
 pub mod reference_scanner;
 pub mod registration;
+pub mod registration_preflight_snapshot_store;
 pub mod registry;
 pub mod repository_routing;
 pub mod snapshot_validator;
@@ -106,6 +107,9 @@ pub use registration::{
     CanonicalAggregateRoot, DetectedRepositoryProfile, LogicalCodebaseRegistrationCoordinator,
     RegistrationCandidate, RegistrationCandidateState, RegistrationPreflightInput,
     RegistrationPreflightResult, RepositoryProfileDetector,
+};
+pub use registration_preflight_snapshot_store::{
+    RegistrationPreflightSnapshot, RegistrationPreflightSnapshotStore,
 };
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
