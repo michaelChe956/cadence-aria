@@ -49,6 +49,10 @@ pub use repository_initialization_run_registry::{
     InitializationOperationKind, InitializationRunKey, InitializationRunRegistry,
     RepositoryInitializationRunRegistry,
 };
+mod aggregate_index_rebuild_registry;
+pub use aggregate_index_rebuild_registry::{
+    AggregateIndexRebuildLease, AggregateIndexRebuildRegistry,
+};
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
@@ -128,6 +132,7 @@ pub struct WebAppState {
     pub coding_runs: CodingRunRegistry,
     pub coding_sockets: CodingSocketRegistry,
     pub repository_initialization_runs: RepositoryInitializationRunRegistry,
+    pub aggregate_index_rebuilds: AggregateIndexRebuildRegistry,
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
     pub logical_gateway_factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
@@ -197,6 +202,7 @@ impl WebAppState {
             coding_runs: CodingRunRegistry::default(),
             coding_sockets: CodingSocketRegistry::default(),
             repository_initialization_runs: RepositoryInitializationRunRegistry::default(),
+            aggregate_index_rebuilds: AggregateIndexRebuildRegistry::default(),
             image_create_run_registry,
             image_create_engine,
             logical_gateway_factory: Some(logical_gateway_factory),

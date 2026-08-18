@@ -141,17 +141,29 @@ async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_reje
             .contains("请使用逻辑代码库登记端点")
     );
 
-    assert_error(
-        request(
-            &app,
+    for (method, uri, body) in [
+        (
             Method::POST,
             "/api/projects/project_0002/logical-codebase/initializations",
             json!({"idempotency_key":"single-repo-key"}),
-        )
-        .await,
-        StatusCode::CONFLICT,
-        "logical_codebase_feature_disabled",
-    );
+        ),
+        (
+            Method::GET,
+            "/api/projects/project_0002/logical-codebase/aggregate-indexes/active",
+            json!({}),
+        ),
+        (
+            Method::POST,
+            "/api/projects/project_0002/logical-codebase/aggregate-indexes/rebuild",
+            json!({}),
+        ),
+    ] {
+        assert_error(
+            request(&app, method, uri, body).await,
+            StatusCode::CONFLICT,
+            "logical_codebase_feature_disabled",
+        );
+    }
     assert!(
         !paths.logical_codebase_root("project_0002").exists(),
         "single-repo guard must run before any manifest, batch, index, or operation is persisted"

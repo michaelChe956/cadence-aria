@@ -80,9 +80,11 @@ impl IntoResponse for ApiError {
             }
             "repository_routing_target_missing"
             | "mixed_target_group_rejected"
-            | "target_snapshot_missing_for_logical" => StatusCode::UNPROCESSABLE_ENTITY,
+            | "target_snapshot_missing_for_logical"
+            | "aggregate_index_unavailable" => StatusCode::UNPROCESSABLE_ENTITY,
             "registration_batch_conflict"
             | "aggregate_initialization_conflict"
+            | "aggregate_index_rebuild_in_progress"
             | "aggregate_root_mismatch"
             | "target_snapshot_identity_drifted"
             | "target_snapshot_policy_drifted"

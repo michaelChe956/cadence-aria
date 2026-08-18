@@ -63,12 +63,19 @@ pub async fn create_aggregate_initialization(
                     .await;
                     match result {
                         Ok(Ok(_)) => {}
-                        Ok(Err(error)) => tracing::warn!(
-                            project_id = %project_id,
-                            operation_id = %operation_id,
-                            error = %error,
-                            "aggregate initialization index build stopped"
-                        ),
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                project_id = %project_id,
+                                operation_id = %operation_id,
+                                error = %error,
+                                "aggregate initialization index build stopped"
+                            );
+                            // `AggregateIndexOperation::build` persists a Failed
+                            // generation before returning. Keep this detached
+                            // failure independent from the already-Completed
+                            // initialization operation, while making the
+                            // missing projection actionable through GET active.
+                        }
                         Err(error) => tracing::warn!(
                             project_id = %project_id,
                             operation_id = %operation_id,

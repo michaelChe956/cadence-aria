@@ -31,7 +31,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use crate::request;
+use crate::{assert_error, request};
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -298,6 +298,158 @@ async fn generate_story(app: &axum::Router) -> (StatusCode, serde_json::Value) {
         }),
     )
     .await
+}
+
+#[tokio::test]
+async fn aggregate_index_active_endpoint_returns_missing_without_record() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let paths = ProductAppPaths::new(workspace.path().join(".aria"));
+    ProjectStore::new(paths)
+        .create(CreateProjectInput {
+            name: "missing aggregate index".to_string(),
+            description: None,
+            multi_repo: true,
+        })
+        .expect("create project");
+    let state = WebAppState::new(
+        workspace.path().to_path_buf(),
+        WebRuntime::new_fake(workspace.path().to_path_buf()),
+    );
+    let app = build_web_router(state);
+
+    let (status, body) = request(
+        &app,
+        Method::GET,
+        "/api/projects/project_0001/logical-codebase/aggregate-indexes/active",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "active response: {body}");
+    assert_eq!(body["state"], "missing");
+    assert!(body["revision"].is_null());
+    assert!(body["indexed_at"].is_null());
+}
+
+#[tokio::test]
+async fn aggregate_index_active_endpoint_projects_active_record() {
+    let fixture = PlanningHttpFixture::new();
+
+    let (status, body) = request(
+        &fixture.app,
+        Method::GET,
+        "/api/projects/project_0001/logical-codebase/aggregate-indexes/active",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "active response: {body}");
+    assert_eq!(body["state"], "active");
+    assert_eq!(body["revision"], fixture.active_index().membership_revision);
+    assert!(body["indexed_at"].as_str().is_some());
+    assert!(body["warning"].is_null());
+}
+
+#[tokio::test]
+async fn aggregate_index_active_endpoint_projects_building_as_rebuilding() {
+    let fixture = PlanningHttpFixture::new();
+    let mut building = fixture.active_index();
+    building.aggregate_index_id = "aggregate_index_building".to_string();
+    building.status = AggregateIndexStatus::Building;
+    building.updated_at = "9999-01-01T00:00:00Z".to_string();
+    AggregateIndexStore::new(fixture.paths.clone())
+        .create(PROJECT_ID, building)
+        .expect("persist building index record");
+
+    let (status, body) = request(
+        &fixture.app,
+        Method::GET,
+        "/api/projects/project_0001/logical-codebase/aggregate-indexes/active",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "active response: {body}");
+    assert_eq!(body["state"], "rebuilding");
+}
+
+#[tokio::test]
+async fn aggregate_index_rebuild_endpoint_returns_conflict_while_project_is_registered() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let paths = ProductAppPaths::new(workspace.path().join(".aria"));
+    ProjectStore::new(paths)
+        .create(CreateProjectInput {
+            name: "registered aggregate index rebuild".to_string(),
+            description: None,
+            multi_repo: true,
+        })
+        .expect("create project");
+    let state = WebAppState::new(
+        workspace.path().to_path_buf(),
+        WebRuntime::new_fake(workspace.path().to_path_buf()),
+    );
+    let lease = state
+        .aggregate_index_rebuilds
+        .try_register(PROJECT_ID)
+        .expect("register rebuild");
+    let app = build_web_router(state);
+
+    assert_error(
+        request(
+            &app,
+            Method::POST,
+            "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild",
+            json!({}),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "aggregate_index_rebuild_in_progress",
+    );
+    drop(lease);
+}
+
+#[tokio::test]
+async fn aggregate_index_rebuild_endpoint_returns_active_projection() {
+    let fixture = PlanningHttpFixture::new();
+
+    let (status, body) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "rebuild response: {body}");
+    assert_eq!(body["state"], "active");
+    assert!(body["revision"].as_u64().is_some());
+    assert!(body["indexed_at"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn aggregate_index_failed_latest_record_projects_last_known_good_as_degraded() {
+    let fixture = PlanningHttpFixture::new();
+    let mut failed = fixture.active_index();
+    failed.aggregate_index_id = "aggregate_index_failed_latest".to_string();
+    failed.status = AggregateIndexStatus::Failed;
+    failed.warning = Some("initial build failed".to_string());
+    failed.updated_at = "9999-01-01T00:00:00Z".to_string();
+    AggregateIndexStore::new(fixture.paths.clone())
+        .create(PROJECT_ID, failed)
+        .expect("persist failed index record");
+
+    let (status, body) = request(
+        &fixture.app,
+        Method::GET,
+        "/api/projects/project_0001/logical-codebase/aggregate-indexes/active",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "active response: {body}");
+    assert_eq!(body["state"], "degraded");
+    assert_eq!(body["revision"], fixture.active_index().membership_revision);
+    assert_eq!(body["warning"], "initial build failed");
 }
 
 #[tokio::test]

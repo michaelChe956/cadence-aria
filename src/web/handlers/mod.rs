@@ -71,6 +71,7 @@ use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, ReviewVerdictType};
 
+mod aggregate_index;
 pub mod aggregate_initialization;
 mod coding;
 mod dto;
@@ -114,6 +115,9 @@ pub use providers::{providers_recheck, providers_status};
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};
 #[rustfmt::skip]
 pub use product_resources::{create_issue, create_product_issue, create_project, create_workspace, delete_issue, delete_product_issue, delete_project, delete_repository, delete_workspace, get_project, list_issues, list_product_issues, list_projects, list_repositories, list_workspaces, open_project};
+pub use aggregate_index::{
+    AggregateIndexActiveResponse, get_active_aggregate_index, rebuild_aggregate_index,
+};
 pub use aggregate_initialization::{
     AggregateInitializationDependencies, cancel_aggregate_initialization,
     create_aggregate_initialization, get_aggregate_initialization,

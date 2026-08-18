@@ -222,7 +222,13 @@ impl AggregateIndexStore {
         Ok(record)
     }
 
-    fn records(&self, project_id: &str) -> Result<Vec<AggregateIndexRecord>, AggregateIndexError> {
+    /// Returns all durable generations for a project, including superseded and
+    /// failed records. HTTP projections use this to distinguish a failed first
+    /// build from a failed rebuild with a last-known-good generation.
+    pub fn records(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<AggregateIndexRecord>, AggregateIndexError> {
         validate_relative_id(project_id)?;
         let root = self.paths.aggregate_indexes_root(project_id);
         let entries = match std::fs::read_dir(&root) {
