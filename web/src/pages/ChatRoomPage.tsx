@@ -10,6 +10,7 @@ import {
 import { ArtifactLinePanel } from "../components/chat-room/ArtifactLinePanel";
 import { ChatRoomTimeline } from "../components/chat-room/ChatRoomTimeline";
 import { MentionInput } from "../components/chat-room/MentionInput";
+import { RoleBar } from "../components/chat-room/RoleBar";
 import { useGroupChatWs } from "../hooks/useGroupChatWs";
 
 export function ChatRoomPage({
@@ -148,6 +149,12 @@ export function ChatRoomPage({
         </div>
       ) : session ? (
         <>
+          <RoleBar
+            sessionId={session.id}
+            roles={session.roles}
+            disabled={session.status !== "active"}
+            onSessionUpdated={handleSessionUpdated}
+          />
           <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
             <ChatRoomTimeline timeline={timeline} roles={session.roles} turns={turns} />
             <ArtifactLinePanel
