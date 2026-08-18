@@ -1,6 +1,7 @@
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::product::group_chat_engine::context::{
-    INJECTION_BUDGET_TOKENS, assemble_turn_context, maybe_update_rolling_summary,
+    INJECTION_BUDGET_TOKENS, assemble_turn_context, assemble_turn_context_with_summary,
+    maybe_update_rolling_summary,
 };
 use crate::product::group_chat_engine::types::{
     ArtifactDraft, ArtifactLine, ArtifactLineKind, DraftSlot, DraftSlotKey, GroupChatRoleKey,
@@ -151,6 +152,20 @@ fn 部分截断的_agent_发言不推进水位且保留给滚动摘要() {
         captured.first(),
         Some(RoomEvent::AgentMessage { text, .. }) if text == &long_message
     ));
+}
+
+#[test]
+fn 已持久化滚动摘要进入下一轮上下文() {
+    let mut author = role("author-1", GroupChatRoleKey::Author);
+    let context = assemble_turn_context_with_summary(
+        &[],
+        &mut author,
+        &[],
+        INJECTION_BUDGET_TOKENS,
+        Some("前 20 条事件的滚动摘要"),
+    );
+
+    assert_eq!(context.summary.as_deref(), Some("前 20 条事件的滚动摘要"));
 }
 
 #[test]

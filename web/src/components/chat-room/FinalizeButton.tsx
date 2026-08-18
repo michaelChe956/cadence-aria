@@ -20,7 +20,7 @@ export function FinalizeButton({
     <button
       type="button"
       aria-label={`定稿${lineLabel}`}
-      title={disabled ? disabledReason : undefined}
+      title={disabledReason}
       disabled={disabled || loading}
       onClick={onClick}
       className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--aria-primary)] px-2.5 text-xs font-semibold text-white hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"

@@ -68,7 +68,6 @@ export function ArtifactLinePanel({
     () => new Map(artifactLines.map((line) => [line.kind, line])),
     [artifactLines],
   );
-  const storyFinalized = (linesByKind.get("story_spec")?.finalized_versions.length ?? 0) > 0;
 
   async function finalize(
     line: ArtifactLine,
@@ -129,7 +128,6 @@ export function ArtifactLinePanel({
               key={kind}
               line={line}
               roles={roles}
-              storyFinalized={storyFinalized}
               sessionActive={sessionActive}
               finalizing={finalizingKind === kind}
               onDraftSlot={onDraftSlot}
@@ -157,7 +155,6 @@ export function ArtifactLinePanel({
 function ArtifactLineCard({
   line,
   roles,
-  storyFinalized,
   sessionActive,
   finalizing,
   onDraftSlot,
@@ -165,7 +162,6 @@ function ArtifactLineCard({
 }: {
   line: ArtifactLine;
   roles: RoleInstance[];
-  storyFinalized: boolean;
   sessionActive: boolean;
   finalizing: boolean;
   onDraftSlot: (slotKey: DraftSlotKey) => void;
@@ -177,7 +173,6 @@ function ArtifactLineCard({
   const unavailableReason = finalizeUnavailableReason(
     line,
     completedSlots.length,
-    storyFinalized,
     sessionActive,
   );
   const slots = orderedSlots(line);
@@ -211,7 +206,7 @@ function ArtifactLineCard({
         <FinalizeButton
           lineLabel={meta.label}
           disabled={unavailableReason !== null}
-          disabledReason={unavailableReason ?? undefined}
+          disabledReason={unavailableReason ?? finalizeHint(line)}
           loading={finalizing}
           onClick={onFinalize}
         />
@@ -330,19 +325,22 @@ function artifactLineStatus(line: ArtifactLine, roles: RoleInstance[]) {
 function finalizeUnavailableReason(
   line: ArtifactLine,
   completedSlots: number,
-  storyFinalized: boolean,
   sessionActive: boolean,
 ): string | null {
   if (!sessionActive) {
     return "当前会话不可定稿";
   }
-  if (line.kind === "design_spec" && !storyFinalized) {
-    return "需先定稿 Story Spec";
-  }
   if (completedSlots === 0) {
     return "暂无可定稿草稿";
   }
   return null;
+}
+
+function finalizeHint(line: ArtifactLine): string | undefined {
+  if (line.kind === "design_spec" && line.finalized_versions.length === 0) {
+    return "可尝试定稿；若 Story Spec 前置未满足，后端会返回 story_spec_not_confirmed";
+  }
+  return undefined;
 }
 
 function orderedSlots(line: ArtifactLine) {

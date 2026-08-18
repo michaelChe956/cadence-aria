@@ -55,6 +55,7 @@ fn session(line: ArtifactLine) -> GroupChatSessionRecord {
         roles: vec![role(GroupChatRoleKey::Author, "author-1")],
         artifact_lines: vec![line],
         triage_provider: None,
+        rolling_summary: None,
         created_at: "2026-08-18T00:00:00Z".into(),
         updated_at: "2026-08-18T00:00:00Z".into(),
     }

@@ -40,6 +40,7 @@ fn session() -> GroupChatSessionRecord {
         ],
         artifact_lines: Vec::<ArtifactLine>::new(),
         triage_provider: None,
+        rolling_summary: None,
         created_at: "2026-08-18T12:00:00Z".into(),
         updated_at: "2026-08-18T12:00:00Z".into(),
     }

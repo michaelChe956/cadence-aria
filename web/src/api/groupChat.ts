@@ -97,6 +97,7 @@ export type GroupChatSession = {
   roles: RoleInstance[];
   artifact_lines: ArtifactLine[];
   triage_provider?: GroupChatProviderName;
+  rolling_summary?: string | null;
   created_at: string;
   updated_at: string;
 };

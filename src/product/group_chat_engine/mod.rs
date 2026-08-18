@@ -114,6 +114,7 @@ impl GroupChatEngine {
             roles,
             artifact_lines: default_artifact_lines(),
             triage_provider: None,
+            rolling_summary: None,
             created_at: now.clone(),
             updated_at: now,
         };

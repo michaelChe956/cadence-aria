@@ -142,6 +142,7 @@ fn session(roles: Vec<RoleInstance>) -> GroupChatSessionRecord {
             bridge_session_id: None,
         }],
         triage_provider: None,
+        rolling_summary: None,
         created_at: "2026-08-18T00:00:00Z".into(),
         updated_at: "2026-08-18T00:00:00Z".into(),
     }
@@ -190,6 +191,43 @@ fn fixture(roles: Vec<RoleInstance>, script: Script) -> (TempDir, GroupChatStore
     let coordinator =
         Coordinator::new(store.clone(), adapters(), Box::new(script)).with_config(config());
     (temp, store, coordinator)
+}
+
+#[tokio::test]
+async fn 二十条事件后滚动摘要写入快照并可在恢复后继续使用() {
+    let (_temp, store, mut coordinator) = fixture(
+        vec![role("author-1", GroupChatRoleKey::Author, "作者")],
+        Script::ReviewerOnly,
+    );
+
+    for index in 0..20 {
+        coordinator
+            .on_user_message(
+                "project-1",
+                "issue-1",
+                "session-1",
+                &format!("事件-{index}"),
+                vec![],
+            )
+            .await
+            .expect("事件应写入");
+    }
+
+    let snapshot = store
+        .load_session("project-1", "issue-1", "session-1")
+        .expect("读取摘要快照");
+    assert!(
+        snapshot
+            .rolling_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("事件-0"))
+    );
+
+    // 模拟崩溃后的新 Coordinator：摘要由快照恢复，下一轮上下文组装仍能消费它。
+    let recovered = store
+        .load_session("project-1", "issue-1", "session-1")
+        .expect("重放后读取快照");
+    assert_eq!(recovered.rolling_summary, snapshot.rolling_summary);
 }
 
 #[tokio::test]

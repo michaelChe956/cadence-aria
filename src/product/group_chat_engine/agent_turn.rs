@@ -126,8 +126,8 @@ pub struct AgentTurnRuntime<'a> {
 /// provider 只有发出 `ProviderEvent::Completed` 才视为完成。每次 HOLD 都产生可观察的
 /// `HeldEvent`，随后按 1s/2s/4s 重新读取时间线并生成；达到三次重试上限时，额外产生
 /// `HeldEvent(reason=retry_exhausted)`。正常 AgentMessage 与 HeldEvent 都会推进角色的
-/// `seen_cursor`；正常发布后本函数将 `injection_watermark` 推至该消息下标的后一位，
-/// 重建上下文则由 `assemble_turn_context` 在同一个 `RoleInstance` 上继续推进。
+/// `seen_cursor`；注入水位由 `assemble_turn_context` 根据连续完整注入结果推进，
+/// 发布路径只更新 `seen_cursor`。
 ///
 /// 人工审批接线延后到后续 UI/迭代。当前群聊 turn 收到 provider 的写类权限或选择请求
 /// 时会自动发送拒绝命令，避免 Supervised provider 长时间等待，并在 `TurnOutcome` 记录数量。
@@ -214,8 +214,6 @@ pub async fn run_agent_turn(
         publish_event(message.clone());
         emitted.push(message);
         role.seen_cursor = cursor_after;
-        // cursor_after 是这条 AgentMessage 的 0-based 下标；水位是首个未注入下标。
-        role.injection_watermark = cursor_after + 1;
         return Ok(TurnOutcome {
             status: AgentTurnFinalStatus::Published,
             events: emitted,

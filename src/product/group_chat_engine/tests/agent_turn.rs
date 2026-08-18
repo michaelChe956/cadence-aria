@@ -176,7 +176,8 @@ async fn 正常产出_agent_message_并推进角色_cursor() {
     assert_eq!(result.status, AgentTurnFinalStatus::Published);
     assert_eq!(result.provider_attempts, 1);
     assert_eq!(author.seen_cursor, 1);
-    assert_eq!(author.injection_watermark, 2);
+    // 发布路径只更新 seen_cursor；注入水位由 assemble_turn_context 保守推进。
+    assert_eq!(author.injection_watermark, 1);
     assert_eq!(
         result.events,
         vec![RoomEvent::AgentMessage {
@@ -186,6 +187,45 @@ async fn 正常产出_agent_message_并推进角色_cursor() {
             cursor_after: 1,
         }]
     );
+}
+
+#[tokio::test]
+async fn 发布路径不会覆盖组装阶段保守保留的注入水位() {
+    let provider = scripted_provider(vec![("群聊重试轮次：0", "这是截断后发布的回复")]);
+    let timeline = Arc::new(Mutex::new(vec![RoomEvent::UserMessage {
+        text: "请继续处理".into(),
+        mentions: vec![],
+    }]));
+    let mut author = role();
+    author.injection_watermark = 0;
+
+    let mut read_events = {
+        let timeline = timeline.clone();
+        move || timeline.lock().expect("timeline lock").clone()
+    };
+    let mut publish_event = {
+        let timeline = timeline.clone();
+        move |event| timeline.lock().expect("timeline lock").push(event)
+    };
+    let mut rebuild_context = rebuild_context;
+    run_agent_turn(
+        &mut author,
+        context(),
+        &provider,
+        AgentTurnRuntime {
+            events_len_at_start: 1,
+            read_events: &mut read_events,
+            publish_event: &mut publish_event,
+            rebuild_context: &mut rebuild_context,
+            retry_policy: HoldRetryPolicy::without_delay(),
+            sleep: &mut immediate_sleep,
+        },
+    )
+    .await
+    .expect("agent turn must complete");
+
+    assert_eq!(author.seen_cursor, 1);
+    assert_eq!(author.injection_watermark, 0);
 }
 
 #[tokio::test]

@@ -126,9 +126,26 @@ fn group_chat_types_round_trip_through_serde() {
             bridge_session_id: None,
         }],
         triage_provider: None,
+        rolling_summary: None,
         created_at: "2026-08-18T12:00:00Z".into(),
         updated_at: "2026-08-18T12:01:00Z".into(),
     });
+}
+
+#[test]
+fn session_snapshot_without_rolling_summary_defaults_to_none() {
+    let json = r#"{
+        "id": "room-1",
+        "project_id": "project-1",
+        "issue_id": "issue-1",
+        "status": "active",
+        "roles": [],
+        "artifact_lines": [],
+        "created_at": "2026-08-18T00:00:00Z",
+        "updated_at": "2026-08-18T00:00:00Z"
+    }"#;
+    let session: GroupChatSessionRecord = serde_json::from_str(json).expect("旧快照可恢复");
+    assert_eq!(session.rolling_summary, None);
 }
 
 #[test]

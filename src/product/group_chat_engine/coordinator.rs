@@ -17,7 +17,10 @@ use super::agent_turn::{
     sleep_with_tokio,
 };
 use super::claims::{ClaimError, DEFAULT_CLAIM_TIMEOUT, release, release_expired, try_claim};
-use super::context::{INJECTION_BUDGET_TOKENS, assemble_turn_context};
+use super::context::{
+    INJECTION_BUDGET_TOKENS, assemble_turn_context_with_summary, maybe_update_rolling_summary,
+    render_event,
+};
 use super::roles::writable_slots;
 use super::triage::{NoOneCounter, RoomStateView, TriageInput, TriageOutput, TriageRouter};
 use super::types::{
@@ -239,6 +242,9 @@ impl Coordinator {
             &mut summary,
             user_event,
         )?;
+        // 摘要维护位于上下文组装之前；本地 v1 实现仅用于接线验证，真实小模型后续接入。
+        self.refresh_rolling_summary(&mut session, &events);
+        self.store.save_session_snapshot(&session)?;
 
         let mut triggers = VecDeque::from([Trigger {
             seq: user_seq,
@@ -366,6 +372,8 @@ impl Coordinator {
                 &scheduled.completed,
                 &events[events_before_turn..],
             );
+            // 上下文组装后再次维护，确保本轮新增事件达到窗口阈值时立即持久化。
+            self.refresh_rolling_summary(&mut session, &events);
             self.store.save_session_snapshot(&session)?;
 
             if summary.circuit_break
@@ -735,7 +743,13 @@ impl Coordinator {
             let provider = role.provider.clone();
             let initial_context = {
                 let snapshot = turn_events.lock().expect("群聊事件锁可用").clone();
-                assemble_turn_context(&snapshot, &mut role, &lines, INJECTION_BUDGET_TOKENS)
+                assemble_turn_context_with_summary(
+                    &snapshot,
+                    &mut role,
+                    &lines,
+                    INJECTION_BUDGET_TOKENS,
+                    session.rolling_summary.as_deref(),
+                )
             };
             let events_len_at_start = turn_events.lock().expect("群聊事件锁可用").len();
 
@@ -758,9 +772,16 @@ impl Coordinator {
                 let mut rebuild_context = {
                     let turn_events = turn_events.clone();
                     let lines = lines.clone();
+                    let rolling_summary = session.rolling_summary.clone();
                     move |_: &[RoomEvent], role: &mut RoleInstance| {
                         let snapshot = turn_events.lock().expect("群聊事件锁可用").clone();
-                        assemble_turn_context(&snapshot, role, &lines, INJECTION_BUDGET_TOKENS)
+                        assemble_turn_context_with_summary(
+                            &snapshot,
+                            role,
+                            &lines,
+                            INJECTION_BUDGET_TOKENS,
+                            rolling_summary.as_deref(),
+                        )
                     }
                 };
                 let mut sleep = sleep_with_tokio as fn(Duration) -> SleepFuture;
@@ -812,6 +833,34 @@ impl Coordinator {
         TurnBatch {
             completed,
             events: turn_events,
+        }
+    }
+
+    fn refresh_rolling_summary(&self, session: &mut GroupChatSessionRecord, events: &[RoomEvent]) {
+        let Some(summary) = maybe_update_rolling_summary(
+            events,
+            session.rolling_summary.as_deref(),
+            &mut |window, existing| {
+                // v1 本地 summarizer：每个事件取前 200 字，后续接入真实小模型。
+                let current = window
+                    .iter()
+                    .map(render_event)
+                    .map(|text| text.chars().take(200).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                match existing.filter(|summary| !summary.is_empty()) {
+                    // 未满下一个完整窗口时 maybe_update 会再次给出同一窗口，保持摘要幂等。
+                    Some(previous) if previous.ends_with(&current) => previous.to_owned(),
+                    Some(previous) => format!("{previous}\n{current}"),
+                    None => current,
+                }
+            },
+        ) else {
+            return;
+        };
+        if !summary.is_empty() {
+            session.rolling_summary = Some(summary);
+            session.updated_at = Utc::now().to_rfc3339();
         }
     }
 

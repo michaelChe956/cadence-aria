@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactLine, RoleInstance } from "../../api/groupChat";
 import { ApiRequestError } from "../../api/client";
 import { finalizeGroupChat } from "../../api/groupChat";
@@ -94,6 +94,10 @@ function renderPanel(
 }
 
 describe("ArtifactLinePanel", () => {
+  beforeEach(() => {
+    vi.mocked(finalizeGroupChat).mockReset();
+  });
+
   it("为三条产物线展示未开始、起草中、待审、可定稿和已定稿状态", () => {
     const { rerender } = renderPanel({
       artifactLines: artifactLines({
@@ -138,10 +142,30 @@ describe("ArtifactLinePanel", () => {
     expect(screen.getByTestId("artifact-line-story_spec")).toHaveTextContent("可定稿");
   });
 
-  it("在 Story Spec 未定稿时禁用 Design Spec 定稿，并给出前置提示", () => {
+  it("混合模式下 Story Spec 已由其他入口定稿时仍允许尝试 Design Spec 定稿", async () => {
+    const user = userEvent.setup();
+    vi.mocked(finalizeGroupChat).mockResolvedValueOnce({
+      event: {
+        type: "finalize_event",
+        artifact_line: "design_spec",
+        version: "design-v1",
+        included_slots: ["design_summary", "design_frontend", "design_backend"],
+      },
+      session: {
+        id: "session-1",
+        project_id: "project-1",
+        issue_id: "issue-1",
+        status: "active",
+        roles,
+        artifact_lines: artifactLines(),
+        created_at: "2026-08-18T00:00:00Z",
+        updated_at: "2026-08-18T00:00:00Z",
+      },
+    });
     renderPanel({
       artifactLines: artifactLines({
-        story_spec: line("story_spec", [{ key: "story_full", markdown: "# 未定稿故事" }]),
+        // 本会话没有 Story finalized 标记，模拟由其他入口确认的混合模式。
+        story_spec: line("story_spec", [{ key: "story_full", markdown: "# 外部已确认故事" }]),
         design_spec: line("design_spec", [
           { key: "design_summary", markdown: "# 概要" },
           { key: "design_frontend", markdown: "# 前端" },
@@ -150,11 +174,16 @@ describe("ArtifactLinePanel", () => {
       }),
     });
 
-    expect(screen.getByRole("button", { name: "定稿设计规格" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "定稿设计规格" })).toHaveAttribute(
+    const button = screen.getByRole("button", { name: "定稿设计规格" });
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveAttribute(
       "title",
-      "需先定稿 Story Spec",
+      "可尝试定稿；若 Story Spec 前置未满足，后端会返回 story_spec_not_confirmed",
     );
+    await user.click(button);
+    await waitFor(() => expect(finalizeGroupChat).toHaveBeenCalledWith("session-1", {
+      line_kind: "design_spec",
+    }));
   });
 
   it("确认跳过缺失的 Design Spec 槽后，携带已有槽提交定稿", async () => {

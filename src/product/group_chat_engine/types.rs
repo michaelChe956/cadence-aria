@@ -144,6 +144,9 @@ pub struct GroupChatSessionRecord {
     /// coordinator 仍使用规则路由；真实 LLM triage 接线由后续任务完成。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage_provider: Option<ProviderName>,
+    /// 已压缩的历史时间线摘要；旧快照缺失时从空值开始。
+    #[serde(default)]
+    pub rolling_summary: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

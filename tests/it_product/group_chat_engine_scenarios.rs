@@ -311,6 +311,7 @@ fn 群聊崩溃恢复时从时间线重放出一致的角色游标() {
         ],
         artifact_lines: vec![],
         triage_provider: None,
+        rolling_summary: None,
         created_at: "2026-08-18T00:00:00Z".into(),
         updated_at: "2026-08-18T00:00:00Z".into(),
     };

@@ -72,6 +72,19 @@ pub fn assemble_turn_context(
     lines: &[ArtifactLine],
     budget_tokens: usize,
 ) -> TurnContext {
+    assemble_turn_context_with_summary(events, role, lines, budget_tokens, None)
+}
+
+/// 在窗口化上下文中注入已持久化的滚动摘要。摘要是最低优先级，只有事件和草稿
+/// 消耗预算后仍有空间时才会进入本轮 prompt。
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_turn_context_with_summary(
+    events: &[RoomEvent],
+    role: &mut RoleInstance,
+    lines: &[ArtifactLine],
+    budget_tokens: usize,
+    summary: Option<&str>,
+) -> TurnContext {
     let mut remaining = budget_tokens;
     let mut selected = vec![false; events.len()];
     let mut unread_events = Vec::new();
@@ -153,8 +166,10 @@ pub fn assemble_turn_context(
             .into_iter()
             .map(|(_, _, metadata)| metadata)
             .collect(),
-        // 摘要由 maybe_update_rolling_summary 注入并持久化；本函数不持有会话状态。
-        summary: None,
+        // 摘要最低优先级：先完成事件和草稿注入，再使用剩余预算。
+        summary: summary.and_then(|summary| {
+            take_text(summary.to_owned(), &mut remaining, false).map(TextSelection::into_text)
+        }),
         relevant_drafts: relevant_drafts
             .iter()
             .map(|(rendered, _)| rendered.clone())
@@ -174,7 +189,7 @@ fn is_agent(event: &RoomEvent) -> bool {
     matches!(event, RoomEvent::AgentMessage { .. })
 }
 
-fn render_event(event: &RoomEvent) -> String {
+pub(crate) fn render_event(event: &RoomEvent) -> String {
     match event {
         RoomEvent::UserMessage { text, .. } => text.clone(),
         RoomEvent::AgentMessage {
