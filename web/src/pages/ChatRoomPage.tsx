@@ -2,9 +2,12 @@ import { ArrowLeft, Wifi, WifiOff } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   getGroupChatSession,
+  type DraftSlotKey,
+  type GroupChatSession,
   type GroupChatSessionResponse,
   type TimelineEvent,
 } from "../api/groupChat";
+import { ArtifactLinePanel } from "../components/chat-room/ArtifactLinePanel";
 import { ChatRoomTimeline } from "../components/chat-room/ChatRoomTimeline";
 import { MentionInput } from "../components/chat-room/MentionInput";
 import { useGroupChatWs } from "../hooks/useGroupChatWs";
@@ -67,11 +70,48 @@ export function ChatRoomPage({
     session.status !== "active" ||
     connectionStatus !== "connected";
 
+  useEffect(() => {
+    if (socketTimeline.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    getGroupChatSession(sessionId)
+      .then((response) => {
+        if (!cancelled) {
+          setSession(response);
+        }
+      })
+      .catch(() => {
+        // 时间线已由 WebSocket 呈现；快照刷新失败时保留当前面板数据。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, socketTimeline]);
+
   function handleSend(text: string, mentions: string[]) {
     setSendError(null);
     if (!sendMessage(text, mentions)) {
       setSendError("群聊连接尚未就绪，请稍后重试");
     }
+  }
+
+  function handleDraftSlot(slotKey: DraftSlotKey) {
+    setSendError(null);
+    if (!sendMessage(`请起草草稿槽：${slotKey}`, [], slotKey)) {
+      setSendError("群聊连接尚未就绪，请稍后重试");
+    }
+  }
+
+  function handleSessionUpdated(updated: GroupChatSession) {
+    setSession((current) =>
+      current ? { ...updated, timeline: current.timeline } : current,
+    );
+    getGroupChatSession(sessionId)
+      .then(setSession)
+      .catch(() => {
+        // 定稿结果已经返回最新会话快照，补拉时间线失败不影响面板状态。
+      });
   }
 
   return (
@@ -108,7 +148,17 @@ export function ChatRoomPage({
         </div>
       ) : session ? (
         <>
-          <ChatRoomTimeline timeline={timeline} roles={session.roles} turns={turns} />
+          <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+            <ChatRoomTimeline timeline={timeline} roles={session.roles} turns={turns} />
+            <ArtifactLinePanel
+              sessionId={session.id}
+              artifactLines={session.artifact_lines}
+              roles={session.roles}
+              sessionActive={session.status === "active"}
+              onDraftSlot={handleDraftSlot}
+              onSessionUpdated={handleSessionUpdated}
+            />
+          </div>
           {session.status !== "active" ? (
             <div className="border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-center text-sm text-[var(--aria-ink-muted)]">
               当前会话已{session.status === "finalized" ? "定稿" : "归档"}，不可继续发送消息。
