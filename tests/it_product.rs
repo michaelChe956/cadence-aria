@@ -1,4 +1,6 @@
 //! 集成测试入口：product 域。
+#[path = "it_product/group_chat_engine_scenarios.rs"]
+mod group_chat_engine_scenarios;
 #[path = "it_product/product_coding_attempt_store.rs"]
 mod product_coding_attempt_store;
 #[path = "it_product/product_coding_models.rs"]
