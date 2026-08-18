@@ -126,6 +126,7 @@ pub enum RoomEvent {
 #[serde(rename_all = "snake_case")]
 pub enum GroupChatSessionStatus {
     Active,
+    /// 预留给未来显式归档操作；产物线定稿不会将聊天室置为此状态。
     Finalized,
     Archived,
 }

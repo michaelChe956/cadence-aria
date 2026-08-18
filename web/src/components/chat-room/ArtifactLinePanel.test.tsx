@@ -163,7 +163,7 @@ describe("ArtifactLinePanel", () => {
       id: "session-1",
       project_id: "project-1",
       issue_id: "issue-1",
-      status: "finalized" as const,
+      status: "active" as const,
       roles,
       artifact_lines: artifactLines(),
       created_at: "2026-08-18T00:00:00Z",

@@ -144,6 +144,60 @@ fn story定稿写入实体和桥接并翻转旧artifact_current() {
 }
 
 #[test]
+fn story定稿后保持active并允许design在同一会话定稿() {
+    let (_temp, service, store) = setup();
+    let mut room = session(line(
+        ArtifactLineKind::StorySpec,
+        "story_full",
+        "# Story Spec",
+    ));
+    room.artifact_lines.push(line(
+        ArtifactLineKind::DesignSpec,
+        "design_summary",
+        "# Design Spec",
+    ));
+    store.save_session_snapshot(&room).expect("保存群聊会话");
+
+    service
+        .finalize_line(input(ArtifactLineKind::StorySpec))
+        .expect("定稿 Story Spec");
+    assert_eq!(
+        store
+            .load_session("project-1", "issue_0001", "room-1")
+            .expect("读取 Story 定稿后的会话")
+            .status,
+        GroupChatSessionStatus::Active
+    );
+
+    let event = service
+        .finalize_line(input(ArtifactLineKind::DesignSpec))
+        .expect("在同一会话定稿 Design Spec");
+    assert!(matches!(
+        event,
+        RoomEvent::FinalizeEvent {
+            artifact_line: ArtifactLineKind::DesignSpec,
+            ..
+        }
+    ));
+
+    let room = store
+        .load_session("project-1", "issue_0001", "room-1")
+        .expect("读取 Design 定稿后的会话");
+    assert_eq!(room.status, GroupChatSessionStatus::Active);
+    assert_eq!(room.artifact_lines[0].finalized_versions.len(), 1);
+    assert_eq!(room.artifact_lines[1].finalized_versions.len(), 1);
+    let designs = service
+        .lifecycle
+        .list_design_specs("project-1", "issue_0001")
+        .expect("读取 Design Spec");
+    assert_eq!(designs.len(), 1);
+    assert_eq!(
+        designs[0].confirmation_status,
+        LifecycleConfirmationStatus::Confirmed
+    );
+}
+
+#[test]
 fn 二次定稿复用桥接且旧版本不再current() {
     let (_temp, service, store) = setup();
     store

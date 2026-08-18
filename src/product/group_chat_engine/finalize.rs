@@ -183,7 +183,7 @@ impl FinalizeService {
             &input.session_id,
             event.clone(),
         )?;
-        session.status = super::types::GroupChatSessionStatus::Finalized;
+        // 定稿产物线不会关闭聊天室；会话保持 Active，以便继续讨论或定稿其他产物线。
         session.updated_at = Utc::now().to_rfc3339();
         self.group_chat.save_session_snapshot(&session)?;
         Ok(event)
