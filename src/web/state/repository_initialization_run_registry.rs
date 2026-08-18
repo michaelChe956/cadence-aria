@@ -1,5 +1,9 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+
+use tokio_util::sync::CancellationToken;
 
 /// Discriminator identifying which initialization flow owns a run.
 ///
@@ -59,23 +63,43 @@ impl InitializationRunKey {
 /// legacy single-repository flow.
 #[derive(Clone, Default)]
 pub struct InitializationRunRegistry {
-    active: Arc<StdMutex<HashSet<InitializationRunKey>>>,
+    active: Arc<StdMutex<HashMap<InitializationRunKey, CancellationToken>>>,
+    run_ids: Arc<StdMutex<HashMap<InitializationRunKey, u64>>>,
+    next_run_id: Arc<AtomicU64>,
 }
 
 pub struct InitializationRunLease {
     registry: InitializationRunRegistry,
     key: InitializationRunKey,
+    cancellation: CancellationToken,
+    run_id: u64,
+}
+
+impl InitializationRunLease {
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
 }
 
 impl InitializationRunRegistry {
     pub fn register(&self, key: InitializationRunKey) -> Option<InitializationRunLease> {
+        let cancellation = CancellationToken::new();
+        let run_id = self.next_run_id.fetch_add(1, Ordering::Relaxed);
         let mut active = self.active.lock().expect("initialization run lock");
-        if !active.insert(key.clone()) {
+        if let Entry::Vacant(entry) = active.entry(key.clone()) {
+            entry.insert(cancellation.clone());
+        } else {
             return None;
         }
+        self.run_ids
+            .lock()
+            .expect("initialization run lock")
+            .insert(key.clone(), run_id);
         Some(InitializationRunLease {
             registry: self.clone(),
             key,
+            cancellation,
+            run_id,
         })
     }
 
@@ -83,17 +107,41 @@ impl InitializationRunRegistry {
         self.active
             .lock()
             .expect("initialization run lock")
-            .contains(key)
+            .contains_key(key)
+    }
+
+    pub fn cancel(&self, key: &InitializationRunKey) -> bool {
+        let cancellation = self
+            .active
+            .lock()
+            .expect("initialization run lock")
+            .get(key)
+            .cloned();
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+            true
+        } else {
+            false
+        }
     }
 }
 
 impl Drop for InitializationRunLease {
     fn drop(&mut self) {
-        self.registry
+        let mut active = self
+            .registry
             .active
             .lock()
-            .expect("initialization run lock")
-            .remove(&self.key);
+            .expect("initialization run lock");
+        let mut run_ids = self
+            .registry
+            .run_ids
+            .lock()
+            .expect("initialization run lock");
+        if run_ids.get(&self.key) == Some(&self.run_id) {
+            active.remove(&self.key);
+            run_ids.remove(&self.key);
+        }
     }
 }
 
@@ -113,12 +161,11 @@ impl Drop for InitializationRunLease {
 /// block) a repository run that happens to share the same operation id.
 #[derive(Clone, Default)]
 pub struct RepositoryInitializationRunRegistry {
-    active: Arc<StdMutex<HashSet<InitializationRunKey>>>,
+    active: InitializationRunRegistry,
 }
 
 pub struct RepositoryInitializationRunLease {
-    registry: RepositoryInitializationRunRegistry,
-    operation_id: String,
+    _lease: InitializationRunLease,
 }
 
 /// Stable sentinel project id used by the legacy repository façade, which
@@ -132,18 +179,10 @@ impl RepositoryInitializationRunRegistry {
         let key = InitializationRunKey {
             kind: InitializationOperationKind::Repository,
             project_id: REPOSITORY_FAÇADE_PROJECT_SENTINEL.to_string(),
-            operation_id: operation_id.clone(),
-        };
-        let mut active = self
-            .active
-            .lock()
-            .expect("repository initialization run lock");
-        if !active.insert(key) {
-            return None;
-        }
-        Some(RepositoryInitializationRunLease {
-            registry: self.clone(),
             operation_id,
+        };
+        Some(RepositoryInitializationRunLease {
+            _lease: self.active.register(key)?,
         })
     }
 
@@ -153,31 +192,64 @@ impl RepositoryInitializationRunRegistry {
             project_id: REPOSITORY_FAÇADE_PROJECT_SENTINEL.to_string(),
             operation_id: operation_id.to_string(),
         };
-        self.active
-            .lock()
-            .expect("repository initialization run lock")
-            .contains(&key)
-    }
-}
-
-impl Drop for RepositoryInitializationRunLease {
-    fn drop(&mut self) {
-        let key = InitializationRunKey {
-            kind: InitializationOperationKind::Repository,
-            project_id: REPOSITORY_FAÇADE_PROJECT_SENTINEL.to_string(),
-            operation_id: self.operation_id.clone(),
-        };
-        self.registry
-            .active
-            .lock()
-            .expect("repository initialization run lock")
-            .remove(&key);
+        self.active.is_active(&key)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregate_lease_exposes_token_cancel_and_drop_removes_registry_entry() {
+        let registry = InitializationRunRegistry::default();
+        let key = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let lease = registry.register(key.clone()).unwrap();
+        assert!(!lease.cancellation_token().is_cancelled());
+        assert!(registry.cancel(&key));
+        assert!(lease.cancellation_token().is_cancelled());
+        drop(lease);
+        assert!(!registry.is_active(&key));
+        assert!(!registry.cancel(&key));
+    }
+
+    #[test]
+    fn stale_lease_drop_does_not_remove_replaced_run_entry() {
+        let registry = InitializationRunRegistry::default();
+        let key = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let lease = registry.register(key.clone()).unwrap();
+
+        registry
+            .active
+            .lock()
+            .expect("initialization run lock")
+            .insert(key.clone(), CancellationToken::new());
+        registry
+            .run_ids
+            .lock()
+            .expect("initialization run lock")
+            .insert(key.clone(), u64::MAX);
+
+        drop(lease);
+
+        assert!(registry.is_active(&key));
+    }
+
+    #[test]
+    fn panicking_worker_drop_releases_registry_entry() {
+        let registry = InitializationRunRegistry::default();
+        let key = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let worker_registry = registry.clone();
+        let worker_key = key.clone();
+
+        let result = std::panic::catch_unwind(move || {
+            let _lease = worker_registry.register(worker_key).unwrap();
+            panic!("worker failed");
+        });
+
+        assert!(result.is_err());
+        assert!(!registry.is_active(&key));
+    }
 
     #[test]
     fn same_operation_id_is_independent_across_kind_and_project() {
