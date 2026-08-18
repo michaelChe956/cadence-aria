@@ -116,6 +116,14 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "aggregate root does not match the logical codebase manifest",
             json!({}),
         ),
+        ProductStoreError::Conflict {
+            kind: "aggregate_initialization",
+            id,
+        } => ApiError::runtime(
+            "aggregate_initialization_conflict",
+            "aggregate initialization operation conflicts with an existing idempotency key",
+            json!({"operation_id": id}),
+        ),
         ProductStoreError::NotFound {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),

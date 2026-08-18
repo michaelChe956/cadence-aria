@@ -292,6 +292,27 @@ async fn aggregate_initialization_get_recovers_running_operation_without_lease()
 }
 
 #[tokio::test]
+async fn aggregate_initialization_terminal_replay_returns_conflict() {
+    let fixture = AggregateInitializationHttpFixture::new().await;
+    let first = fixture.start("key-terminal-replay").await;
+    let operation_id = first["operation_id"].as_str().unwrap();
+    fixture.poll_until_terminal(operation_id).await;
+
+    let replay = super::request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/initializations",
+        serde_json::json!({"idempotency_key": "key-terminal-replay"}),
+    )
+    .await;
+    super::assert_error(
+        replay,
+        StatusCode::CONFLICT,
+        "aggregate_initialization_conflict",
+    );
+}
+
+#[tokio::test]
 async fn aggregate_initialization_retry_uses_a_new_deterministic_operation_id() {
     let fixture = AggregateInitializationHttpFixture::new().await;
     let first = fixture.start("key-c").await;

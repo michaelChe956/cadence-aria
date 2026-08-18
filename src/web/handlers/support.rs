@@ -719,6 +719,14 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             (
+                ProductStoreError::Conflict {
+                    kind: "aggregate_initialization",
+                    id: "aggregate_initialization_0001".to_string(),
+                },
+                "aggregate_initialization_conflict",
+                StatusCode::CONFLICT,
+            ),
+            (
                 ProductStoreError::IdentityMismatch {
                     kind: "registration_batch_member_recovery",
                     id: "sha256:source".to_string(),

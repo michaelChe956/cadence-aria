@@ -82,6 +82,7 @@ impl IntoResponse for ApiError {
             | "mixed_target_group_rejected"
             | "target_snapshot_missing_for_logical" => StatusCode::UNPROCESSABLE_ENTITY,
             "registration_batch_conflict"
+            | "aggregate_initialization_conflict"
             | "aggregate_root_mismatch"
             | "target_snapshot_identity_drifted"
             | "target_snapshot_policy_drifted"

@@ -28,3 +28,8 @@
 
 - index 首建为 best-effort detached task；失败只记录 tracing，不改变已完成的初始化记录，符合任务约定。
 - worktree 原有未跟踪 `.pi/subagents/`、`cadence/notes/...` 保持不纳入本任务提交。
+
+## Fix round 1
+
+- 修正 `create_aggregate_initialization` 对 `begin` 非 `Created` 结果的不可达分支与错误幂等重放注释；同幂等键终态重放现在按 `aggregate_initialization_conflict` 返回 409，而非回退为 500。
+- 新增真实 HTTP 回归测试 `aggregate_initialization_terminal_replay_returns_conflict`，并补充 product-store 冲突映射及稳定 HTTP 状态单测。

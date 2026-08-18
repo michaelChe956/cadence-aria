@@ -22,11 +22,8 @@ pub async fn create_aggregate_initialization(
         .coordinator
         .begin(operation_id, &project_id, input)
         .map_err(aggregate_initialization_api_error)?;
-    // Idempotent replays of a terminal operation return its durable record;
-    // only a newly-created (or crash-left Created) operation gets a worker.
-    if !matches!(operation.status, AggregateInitializationOperationStatus::Created) {
-        return Ok((StatusCode::ACCEPTED, Json(aggregate_initialization_dto(operation))).into_response());
-    }
+    // `begin` returns only a newly-created operation: an existing terminal
+    // operation with the same key is reported as an idempotency conflict.
     let key = InitializationRunKey::aggregate(&project_id, &operation.operation_id);
     let lease = dependencies.runs.register(key).ok_or_else(|| {
         ApiError::runtime(
