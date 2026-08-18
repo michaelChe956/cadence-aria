@@ -1,5 +1,6 @@
 use crate::product::app_paths::ProductAppPaths;
 
+pub mod derivation_guard;
 pub mod inputs;
 pub mod paths;
 pub mod plan;
