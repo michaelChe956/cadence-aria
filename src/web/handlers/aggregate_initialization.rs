@@ -375,6 +375,13 @@ mod tests {
         let root_path = root.path().to_path_buf();
         // Persist a minimal manifest so create can load it.
         let paths = ProductAppPaths::new(root_path.join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "Aggregate initialization test".to_string(),
+                description: None,
+                multi_repo: true,
+            })
+            .unwrap();
         let aggregate_root = root_path.join("aggregate-root");
         std::fs::create_dir_all(&aggregate_root).unwrap();
         let manifest = crate::product::logical_codebase::store::LogicalCodebaseManifest::new(
@@ -584,6 +591,13 @@ mod tests {
         let root = tempdir().expect("root");
         let root_path = root.path().to_path_buf();
         let paths = ProductAppPaths::new(root_path.join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "Aggregate initialization test".to_string(),
+                description: None,
+                multi_repo: true,
+            })
+            .unwrap();
         let aggregate_root = root_path.join("aggregate-root");
         std::fs::create_dir_all(&aggregate_root).unwrap();
         let manifest = crate::product::logical_codebase::store::LogicalCodebaseManifest::new(
