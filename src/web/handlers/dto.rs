@@ -504,6 +504,7 @@ fn workspace_session_summary_record_from_record(
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,
+        origin: record.origin.clone(),
     }
 }
 
@@ -521,6 +522,7 @@ pub(crate) fn workspace_session_summary_dto(
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,
+        origin: record.origin.clone(),
     }
 }
 
@@ -771,3 +773,6 @@ pub(crate) fn issue_status_text(status: &IssueStatus) -> &'static str {
 
 #[cfg(test)]
 include!("dto/repository_initialization_tests.rs");
+
+#[cfg(test)]
+include!("dto/workspace_session_tests.rs");

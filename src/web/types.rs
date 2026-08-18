@@ -8,6 +8,7 @@ use crate::product::coding_models::{
     CodingTimelineNode, GroupFinalReadinessSnapshot, GroupReviewArtifactRef, InternalPrReview,
     ReviewRequest, WorkItemExecutionPlan,
 };
+use crate::product::models::SessionOrigin;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -727,6 +728,8 @@ pub struct WorkspaceSessionSummaryDto {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    #[serde(default)]
+    pub origin: Option<SessionOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

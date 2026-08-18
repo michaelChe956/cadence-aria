@@ -27,6 +27,14 @@ pub enum WorkspaceSessionStatus {
     Terminated,
 }
 
+/// 工作区会话的创建来源。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    Pipeline,
+    GroupChat,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceRolePermissionModes {
@@ -70,6 +78,8 @@ pub struct WorkspaceSessionRecord {
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub origin: Option<SessionOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +96,8 @@ pub struct WorkspaceSessionSummaryRecord {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    #[serde(default)]
+    pub origin: Option<SessionOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,5 +212,27 @@ mod tests {
             record.permission_modes.reviewer,
             ProviderPermissionMode::Auto
         );
+    }
+
+    #[test]
+    fn old_workspace_session_records_without_origin_deserialize_to_none() {
+        let record: WorkspaceSessionRecord = serde_json::from_value(serde_json::json!({
+            "id": "s1", "project_id": "p1", "issue_id": "i1", "entity_id": "e1",
+            "workspace_type": "story", "status": "open",
+            "author_provider": "claude_code", "reviewer_provider": "codex",
+            "review_rounds": 1, "superpowers_enabled": false, "openspec_enabled": false,
+            "messages": [], "created_at": "", "updated_at": ""
+        }))
+        .unwrap();
+        assert_eq!(record.origin, None);
+
+        let summary: WorkspaceSessionSummaryRecord = serde_json::from_value(serde_json::json!({
+            "id": "s1", "project_id": "p1", "issue_id": "i1", "entity_id": "e1",
+            "workspace_type": "story", "status": "open",
+            "author_provider": "claude_code", "reviewer_provider": "codex",
+            "review_rounds": 1, "superpowers_enabled": false, "openspec_enabled": false
+        }))
+        .unwrap();
+        assert_eq!(summary.origin, None);
     }
 }

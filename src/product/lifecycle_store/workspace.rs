@@ -248,6 +248,7 @@ impl LifecycleStore {
             messages: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
+            origin: None,
         };
 
         super::ensure_target_absent(&target_path)?;

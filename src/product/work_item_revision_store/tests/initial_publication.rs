@@ -824,6 +824,7 @@ fn work_item_workspace_session(
         messages: Vec::new(),
         created_at: "2026-07-26T00:00:00Z".to_string(),
         updated_at: "2026-07-26T00:00:00Z".to_string(),
+        origin: None,
     }
 }
 

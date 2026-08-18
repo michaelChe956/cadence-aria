@@ -238,6 +238,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         }],
         created_at: "2026-05-28T00:00:00Z".to_string(),
         updated_at: "2026-05-28T00:00:00Z".to_string(),
+        origin: None,
     };
 
     let selected = select_work_item_markdown(
