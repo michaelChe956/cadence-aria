@@ -178,7 +178,7 @@ impl WebAppState {
             provider_adapter.clone(),
             provider_gate.clone(),
         ));
-        Self {
+        let mut state = Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
@@ -200,7 +200,12 @@ impl WebAppState {
             image_create_run_registry,
             image_create_engine,
             logical_gateway_factory: Some(logical_gateway_factory),
-        }
+        };
+        state.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::production(&state)
+                .expect("build aggregate initialization dependencies"),
+        );
+        state
     }
 
     pub fn with_provider_availability<F>(
@@ -251,6 +256,10 @@ impl WebAppState {
             state.provider_adapter.clone(),
             state.provider_gate.clone(),
         )));
+        state.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::production(&state)
+                .expect("build aggregate initialization dependencies"),
+        );
         state
     }
 
@@ -264,6 +273,10 @@ impl WebAppState {
 
     pub fn with_gateway_factory(mut self, factory: Arc<LogicalCodebaseGatewayFactory>) -> Self {
         self.logical_gateway_factory = Some(factory);
+        self.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::production(&self)
+                .expect("build aggregate initialization dependencies"),
+        );
         self
     }
 
@@ -321,10 +334,14 @@ impl WebAppState {
         self
     }
 
+    /// Returns a clone of dependencies constructed once for this state.
+    /// Every clone keeps the same coordinator, index operation and run registry.
     pub(crate) fn aggregate_initialization_dependencies(
         &self,
-    ) -> Option<crate::web::handlers::AggregateInitializationDependencies> {
-        self.aggregate_initialization_dependencies.clone()
+    ) -> crate::web::handlers::AggregateInitializationDependencies {
+        self.aggregate_initialization_dependencies
+            .clone()
+            .expect("aggregate initialization dependencies are initialized")
     }
 
     pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {

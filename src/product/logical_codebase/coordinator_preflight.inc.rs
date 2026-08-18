@@ -62,6 +62,22 @@ impl AggregatePreflightService for DeterministicAggregatePreflightService {
             }
         })?;
 
+        let candidate_paths = members
+            .iter()
+            .filter_map(|member| {
+                checkouts
+                    .iter()
+                    .find(|checkout| checkout.logical_repository_id == member.logical_repository_id)
+                    .map(|checkout| checkout.canonical_path.clone())
+            })
+            .collect::<Vec<_>>();
+        AggregateRootPreflight::new(self.paths.clone())
+            .validate(project_id, &manifest.provider_context_root, &candidate_paths)
+            .map_err(|error| AggregateInitializationError::Preflight {
+                reason: format!("{}: {}", error.code(), error.message()),
+                retryable: false,
+            })?;
+
         let mut projections = Vec::with_capacity(members.len());
         for member in &members {
             let projection = project_member(member, &checkouts)?;

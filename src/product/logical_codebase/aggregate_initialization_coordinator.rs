@@ -43,6 +43,7 @@ use crate::product::logical_codebase::aggregate_initialization::{
     AggregateInitializationStepKind, RepositoryTypeEvidence,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
+use crate::product::logical_codebase::registration::AggregateRootPreflight;
 use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
 use crate::product::logical_codebase::types::{CodebaseMemberRecord, RepositoryCheckoutRecord};
 
