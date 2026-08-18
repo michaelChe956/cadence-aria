@@ -105,7 +105,7 @@ impl AggregateIndexFreshnessService {
     /// degraded state is explicit rather than silently trusted.
     pub fn assess(&self, project_id: &str) -> Result<AggregateIndexFreshness, AggregateIndexError> {
         validate_relative_id(project_id)?;
-        let record = self.active_required(project_id)?;
+        let record = self.store.active_required(project_id)?;
         let manifest = self
             .logical
             .load_manifest(project_id)?
@@ -123,18 +123,22 @@ impl AggregateIndexFreshnessService {
                 "member_revision_or_dirty_changed",
             ));
         }
+        if record.status == AggregateIndexStatus::Degraded {
+            let warning = record.warning.clone().unwrap_or_default();
+            return Ok(AggregateIndexFreshness::degraded(record, &warning));
+        }
         Ok(AggregateIndexFreshness::active(record))
     }
 
-    /// Refreshes the active index only when freshness detected drift. Returns
-    /// the active record (refreshed or, when already active, unchanged).
+    /// Refreshes the active index only when freshness detects drift. Returns
+    /// the readable record unchanged when it is active or degraded.
     pub fn sync_if_stale(
         &self,
         project_id: &str,
     ) -> Result<AggregateIndexRecord, AggregateIndexError> {
         validate_relative_id(project_id)?;
         let freshness = self.assess(project_id)?;
-        if freshness.status == AggregateIndexStatus::Active {
+        if freshness.status != AggregateIndexStatus::Stale {
             return Ok(freshness.record);
         }
         self.operation.sync_and_verify(project_id, freshness.record)
@@ -161,18 +165,6 @@ impl AggregateIndexFreshnessService {
             }
         }
         Ok(due)
-    }
-
-    fn active_required(
-        &self,
-        project_id: &str,
-    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
-        self.store
-            .active(project_id)?
-            .ok_or_else(|| AggregateIndexError::Failed {
-                code: "aggregate_index_active_missing",
-                message: format!("project {project_id} has no active aggregate index"),
-            })
     }
 }
 
@@ -505,6 +497,47 @@ mod tests {
         let assessed = fixture.service().assess("project_0001").unwrap();
         assert_eq!(assessed.status, AggregateIndexStatus::Active);
         assert!(assessed.reason.is_empty());
+    }
+
+    #[test]
+    fn assess_preserves_degraded_last_known_good_instead_of_reporting_active() {
+        let fixture = freshness_fixture();
+        fixture.persist_active("api", &"a".repeat(40));
+        let active = fixture.store.active("project_0001").unwrap().unwrap();
+        fixture
+            .store
+            .mark_status(
+                "project_0001",
+                &active.aggregate_index_id,
+                AggregateIndexStatus::Degraded,
+                Some("sync failed".to_string()),
+            )
+            .unwrap();
+
+        let result = fixture.service().assess("project_0001").unwrap();
+        assert_eq!(result.status, AggregateIndexStatus::Degraded);
+        assert_eq!(result.reason, "sync failed");
+        assert_eq!(result.record.warning.as_deref(), Some("sync failed"));
+    }
+
+    #[test]
+    fn sync_if_stale_preserves_degraded_last_known_good() {
+        let fixture = freshness_fixture();
+        fixture.persist_active("api", &"a".repeat(40));
+        let active = fixture.store.active("project_0001").unwrap().unwrap();
+        fixture
+            .store
+            .mark_status(
+                "project_0001",
+                &active.aggregate_index_id,
+                AggregateIndexStatus::Degraded,
+                Some("sync failed".to_string()),
+            )
+            .unwrap();
+
+        let result = fixture.service().sync_if_stale("project_0001").unwrap();
+        assert_eq!(result.status, AggregateIndexStatus::Degraded);
+        assert_eq!(result.warning.as_deref(), Some("sync failed"));
     }
 
     #[test]
