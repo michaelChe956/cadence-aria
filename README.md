@@ -33,7 +33,13 @@ AI 辅助的软件开发工作平台。Cadence Aria 把需求（Issue）系统�
 
 ![Issue 生命周期工作台](assets/readme/issue-lifecycle-workbench-overview.jpg)
 
-### 2. Project / Repository / Issue 管理
+### 2. 群聊式 Spec 生成
+
+除传统流水线外，Aria 支持在多人群聊工作台中共同讨论并定稿 Spec：创建群聊后可邀请角色、围绕 Story / Design 产物线持续讨论，定稿后版本会回到 Issue 看板并保留版本历史，也可从定稿产物进入 Work Item 派生流程。
+
+在主工作台右上角打开 **设置 → Spec 生成模式**，选择「流水线模式」或「群聊模式」。流水线模式保持原有 Story、Design 与 Work Item 生成流程不变；群聊模式下从 Issue 看板进入群聊工作台。
+
+### 3. Project / Repository / Issue 管理
 
 左侧边栏统一管理 Project 与代码库（Repository）：
 
@@ -43,7 +49,7 @@ AI 辅助的软件开发工作平台。Cadence Aria 把需求（Issue）系统�
 
 ![Project 与代码库管理](assets/readme/project-repository-management.jpg)
 
-### 3. AI Provider 驱动与依赖自检
+### 4. AI Provider 驱动与依赖自检
 
 Aria 默认依赖 **Claude Code**（必装）与 **Codex**（可选）作为底层执行器。首次启动时会自动检测环境：
 
@@ -55,7 +61,7 @@ Provider 架构可扩展，后续可低成本接入 OpenCode、Kimi Code 等新�
 
 ![Issue 描述：Provider 依赖自检](assets/readme/provider-dependency-self-check.jpg)
 
-### 4. Story / Design / Work Item 生成与版本历史
+### 5. Story / Design / Work Item 生成与版本历史
 
 每个产物卡片都支持：
 
@@ -72,7 +78,7 @@ Provider 架构可扩展，后续可低成本接入 OpenCode、Kimi Code 等新�
 
 ![Design Spec 全文预览](assets/readme/design-spec-full-preview.jpg)
 
-### 5. Work Item Group 与执行计划
+### 6. Work Item Group 与执行计划
 
 Work Item 以 Group 形式组织，包含：
 
@@ -85,7 +91,7 @@ Work Item 以 Group 形式组织，包含：
 
 ![Work Item Group 明细](assets/readme/work-item-group-details.jpg)
 
-### 6. Provider Workspace 弹窗
+### 7. Provider Workspace 弹窗
 
 统一的对话式工作区承载 Story、Design、Work Item 的全流程：
 
@@ -97,7 +103,7 @@ Work Item 以 Group 形式组织，包含：
 
 ![Design Spec 审核流程](assets/readme/design-spec-review-flow.jpg)
 
-### 7. Coding Workspace
+### 8. Coding Workspace
 
 Work Item 确认后进入 Coding Workspace：
 
