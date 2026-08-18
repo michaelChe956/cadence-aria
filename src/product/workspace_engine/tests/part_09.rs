@@ -376,6 +376,13 @@ fn make_work_item_plan_engine_with_draft_candidate(
     let tmp = TempDir::new().unwrap();
     let checkpoint_store = Arc::new(CheckpointStore::new(tmp.path().to_path_buf()));
     let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "workspace engine fixture project".to_string(),
+            description: None,
+            multi_repo: false,
+        })
+        .unwrap();
     let lifecycle = LifecycleStore::new(app_paths);
 
     let project_id = "project_0001";

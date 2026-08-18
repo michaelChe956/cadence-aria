@@ -13,6 +13,7 @@ use crate::product::models::{
     IssueWorkItemPlan, LifecycleWorkItemRecord, WorkItemDraftRecord, WorkItemPlanCompileStatus,
     WorkspaceType,
 };
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_runtime_reader::{ResolvedWorkItemRuntime, WorkItemRuntimeReader};
@@ -294,7 +295,8 @@ fn schema_v2_evaluation_context_repository_id(
     project_id: &str,
     issue_id: &str,
 ) -> Result<String, ProductStoreError> {
-    let store = RepositoryStore::new(paths.clone());
+    let project = ProjectStore::new(paths.clone()).get(project_id)?;
+    let store = RepositoryStore::for_project(paths.clone(), &project);
     match RepositoryRouting::load_for_issue(paths, project_id, issue_id)? {
         RepositoryRouting::Legacy { .. } => {
             let issue = IssueStore::new(paths.clone()).get(project_id, issue_id)?;

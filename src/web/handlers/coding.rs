@@ -13,11 +13,9 @@ use crate::product::logical_codebase::{
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
-
 mod group;
 mod scope;
 mod worktree_route;
-
 pub use group::create_group_coding_attempt;
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
 use worktree_route::{
@@ -33,7 +31,6 @@ pub(crate) struct RuntimeBindingProviderConfigInput<'a> {
     pub unit: &'a AuthoritativeCodingUnitBinding,
     pub repository_default_provider: &'a str,
 }
-
 pub async fn create_coding_attempt(
     State(state): State<WebAppState>,
     Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
@@ -392,7 +389,10 @@ fn resolve_work_item_repository(
     project_id: &str,
     work_item: &LifecycleWorkItemRecord,
 ) -> ApiResult<RepositoryRecord> {
-    let store = RepositoryStore::new(app_paths.clone());
+    let project = ProjectStore::new(app_paths.clone())
+        .get(project_id)
+        .map_err(product_store_api_error)?;
+    let store = RepositoryStore::for_project(app_paths.clone(), &project);
     match RepositoryRouting::load_for_issue(app_paths, project_id, &work_item.issue_id)
         .map_err(product_store_api_error)?
     {

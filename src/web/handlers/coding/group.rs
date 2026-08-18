@@ -405,7 +405,10 @@ fn resolve_group_repository(
                     "group target repository is not in the effective selection",
                 ));
             }
-            RepositoryStore::new(app_paths.clone())
+            let project = ProjectStore::new(app_paths.clone())
+                .get(project_id)
+                .map_err(product_store_api_error)?;
+            RepositoryStore::for_project(app_paths.clone(), &project)
                 .resolve_logical_repository_strict(project_id, logical_repository_id)
                 .map(|(_, _, repository)| repository)
                 .map_err(product_store_api_error)
@@ -419,7 +422,10 @@ fn resolve_legacy_group_repository(
     project_id: &str,
     physical_repository_id: &str,
 ) -> ApiResult<RepositoryRecord> {
-    let store = RepositoryStore::new(app_paths.clone());
+    let project = ProjectStore::new(app_paths.clone())
+        .get(project_id)
+        .map_err(product_store_api_error)?;
+    let store = RepositoryStore::for_project(app_paths.clone(), &project);
     match store.resolve_legacy_physical_repository_if_dual(project_id, physical_repository_id) {
         Ok((_, _, repository)) => return Ok(repository),
         Err(ProductStoreError::NotFound {

@@ -41,6 +41,16 @@ fn workflow_discipline_section(content: &str) -> &str {
         .expect("workflow_discipline section")
 }
 
+fn seed_legacy_project(app_paths: &ProductAppPaths) {
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "workspace websocket fixture".to_string(),
+            description: None,
+            multi_repo: false,
+        })
+        .expect("create project");
+}
+
 #[test]
 fn context_note_is_only_valid_in_prepare_context() {
     let msg = WsInMessage::ContextNote {
@@ -386,6 +396,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -514,6 +525,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -646,6 +658,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),

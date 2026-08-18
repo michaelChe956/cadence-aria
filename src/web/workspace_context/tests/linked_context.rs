@@ -5,6 +5,7 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -64,6 +65,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -151,6 +153,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
 fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
@@ -181,6 +184,7 @@ fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
 fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failure() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
@@ -221,6 +225,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),

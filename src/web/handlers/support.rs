@@ -1,9 +1,7 @@
 use super::*;
-
 use crate::product::logical_codebase::{
     LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode,
 };
-
 pub(crate) use crate::web::handlers::gateway_error_mapping::{
     coding_gateway_api_error, provider_gateway_error_code,
 };
@@ -42,7 +40,6 @@ pub struct GateResolveQuery {
 pub struct EventsQuery {
     pub cursor: Option<u64>,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderWorkspaceConfig {
@@ -185,7 +182,10 @@ pub(crate) fn find_repository(
     project_id: &str,
     repository_id: &str,
 ) -> ApiResult<RepositoryRecord> {
-    RepositoryStore::new(app_paths.clone())
+    let project = ProjectStore::new(app_paths.clone())
+        .get(project_id)
+        .map_err(product_store_api_error)?;
+    RepositoryStore::for_project(app_paths.clone(), &project)
         .list(project_id)
         .map_err(product_store_api_error)?
         .into_iter()

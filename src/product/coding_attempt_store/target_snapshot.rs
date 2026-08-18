@@ -9,6 +9,7 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::{
     AggregatePolicyArtifactStore, LogicalCodebaseStore, LogicalRepositoryId, MemberStatus,
 };
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
 const CAPTURE_SOURCE: &str = "coding_attempt_create";
@@ -43,7 +44,10 @@ pub fn build_attempt_target_snapshot(
         return Err(TargetSnapshotError::Inactive);
     }
 
-    let (member, checkout, repository) = RepositoryStore::new(paths.clone())
+    let project = ProjectStore::new(paths.clone())
+        .get(project_id)
+        .map_err(map_resolve_error)?;
+    let (member, checkout, repository) = RepositoryStore::for_project(paths.clone(), &project)
         .resolve_logical_repository_strict(project_id, logical_id)
         .map_err(map_resolve_error)?;
     let manifest = authority

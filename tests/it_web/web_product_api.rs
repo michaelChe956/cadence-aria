@@ -93,6 +93,77 @@ async fn creates_project_repository_and_issue_via_product_api() {
 }
 
 #[tokio::test]
+async fn production_repository_paths_do_not_silently_disable_missing_or_multi_repo_projects() {
+    let root = tempdir().expect("root");
+    let repository_root = git_repo();
+    let state = WebAppState::with_events(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        EventHub::new(),
+    );
+    let app = build_web_router(state);
+
+    let (status, project) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Multi","description":null,"multi_repo":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let repository = crate::create_repository_and_wait(
+        app.clone(),
+        "project_0001",
+        json!({"name":"Multi Repo","path":repository_root.path()}),
+    )
+    .await;
+    let repository_id = repository["repository"]["repository_id"]
+        .as_str()
+        .expect("repository id")
+        .to_string();
+
+    let (repositories_status, repositories) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/repositories",
+        json!({}),
+    )
+    .await;
+    assert_eq!(repositories_status, StatusCode::OK);
+    assert_eq!(
+        repositories["repositories"][0]["repository_id"],
+        repository_id
+    );
+    assert!(
+        root.path()
+            .join(".aria/projects/project_0001/logical-codebase/manifest.json")
+            .exists()
+    );
+
+    let (issue_status, issue) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"Multi issue","description":null,"repository_id":repository_id}),
+    )
+    .await;
+    assert_eq!(issue_status, StatusCode::OK);
+    assert_eq!(issue["repo_id"], repository["repository"]["repository_id"]);
+
+    let (missing, body) = request_json(
+        app,
+        Method::GET,
+        "/api/projects/project_missing/repositories",
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "project_not_found");
+    assert_eq!(project["multi_repo"], true);
+}
+
+#[tokio::test]
 async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
     let root = tempdir().expect("root");
     let repo_a = git_repo();

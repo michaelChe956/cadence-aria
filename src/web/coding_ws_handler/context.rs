@@ -247,6 +247,13 @@ mod tests {
         // 无 manifest、无 selection 的单仓 attempt → 物理 repository path，不因 selection 缺失报错。
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "legacy coding context".to_string(),
+                description: None,
+                multi_repo: false,
+            })
+            .unwrap();
         let repository_path = root.path().join("repository_0001");
         write_repository_projection(&paths, &repository_path, None, None);
         LifecycleStore::new(paths.clone())
@@ -270,6 +277,13 @@ mod tests {
         // B5：有 manifest 的快照 path 与 checkout 不一致时必须 fail-closed，不回退物理仓库。
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "logical coding context".to_string(),
+                description: None,
+                multi_repo: true,
+            })
+            .unwrap();
         let (logical_repository_id, checkout_id, canonical_path, git_dir_identity) =
             write_logical_authority_fixture(&paths, root.path());
         let attempt = attempt_fixture(Some(AttemptTargetSnapshot {

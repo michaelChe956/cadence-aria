@@ -16,6 +16,7 @@ use crate::product::models::{
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
     WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
@@ -618,6 +619,13 @@ fn runtime_reader_rejects_missing_or_non_work_item_workspace_bindings() {
 async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "runtime reader project".to_string(),
+            description: None,
+            multi_repo: false,
+        })
+        .unwrap();
     let repository = RepositoryStore::new(paths.clone())
         .create(CreateRepositoryInput {
             project_id: PROJECT_ID.to_string(),

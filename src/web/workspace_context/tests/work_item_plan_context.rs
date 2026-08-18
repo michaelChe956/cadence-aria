@@ -5,6 +5,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),

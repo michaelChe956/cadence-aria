@@ -8,6 +8,7 @@ use crate::product::logical_codebase::{
     LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
 };
 use crate::product::models::{RepositoryRecord, WorkspaceSessionRecord, WorkspaceType};
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::product::workspace_engine::draft_batch::compile_support::resolve_logical_work_item_plan_repository_targets;
@@ -206,7 +207,8 @@ fn resolve_selected_logical_repository(
             format!("logical repository target {logical_id:?} is not in the effective selection"),
         ));
     }
-    RepositoryStore::new(app_paths.clone())
+    let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
+    RepositoryStore::for_project(app_paths.clone(), &project)
         .resolve_logical_repository_strict(project_id, logical_id)
         .map(|(_, _, repository)| repository)
 }
@@ -216,7 +218,8 @@ fn resolve_legacy_physical_repository(
     project_id: &str,
     physical_repository_id: &str,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    let store = RepositoryStore::new(app_paths.clone());
+    let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
+    let store = RepositoryStore::for_project(app_paths.clone(), &project);
     if let Ok((_, _, repository)) =
         store.resolve_legacy_physical_repository_if_dual(project_id, physical_repository_id)
     {

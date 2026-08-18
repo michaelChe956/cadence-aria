@@ -1,6 +1,7 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::logical_codebase::{LogicalCodebaseStore, RepositoryRoutingErrorCode};
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
 /// revision 是观察性字段：生产路径（repository registration 与 identity 迁移）从不持久化
@@ -56,8 +57,11 @@ pub fn validate_snapshot_fields(
         return Err(RepositoryRoutingErrorCode::Inconsistent);
     }
 
+    let project = ProjectStore::new(paths.clone())
+        .get(&attempt.project_id)
+        .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
     let (resolved_member, resolved_checkout, resolved_repository) =
-        RepositoryStore::new(paths.clone())
+        RepositoryStore::for_project(paths.clone(), &project)
             .resolve_logical_repository_strict(&attempt.project_id, snapshot.logical_repository_id)
             .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
     if resolved_member.logical_repository_id != snapshot.logical_repository_id

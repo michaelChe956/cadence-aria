@@ -880,6 +880,13 @@ fn waiting_attempt_allows_gate_response_for_coder_feedback() {
 fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
     let tmp = TempDir::new().expect("temp dir");
     let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "compiled work item fixture".to_string(),
+            description: None,
+            multi_repo: false,
+        })
+        .expect("create project");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let work_item_id = "work_item_compile_20260702063721302_001";
     let verification_plan_id = "verification_plan_compile_20260702063721302_001";

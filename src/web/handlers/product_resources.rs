@@ -91,7 +91,11 @@ pub async fn list_repositories(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
 ) -> ApiResult<Json<RepositoryListResponse>> {
-    let store = RepositoryStore::new(product_app_paths(&state));
+    let app_paths = product_app_paths(&state);
+    let project = ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+    let store = RepositoryStore::for_project(app_paths, &project);
     let repositories = store.list(&project_id).map_err(product_store_api_error)?;
     Ok(Json(RepositoryListResponse {
         repositories: repositories.into_iter().map(repository_dto).collect(),
@@ -110,7 +114,11 @@ pub async fn delete_repository(
         .ok_or_else(|| {
             ApiError::validation("idempotency_key_required", "Idempotency-Key is required")
         })?;
-    RepositoryStore::new(product_app_paths(&state))
+    let app_paths = product_app_paths(&state);
+    let project = ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+    RepositoryStore::for_project(app_paths, &project)
         .delete(
             &project_id,
             &repository_id,

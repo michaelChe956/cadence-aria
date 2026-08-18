@@ -30,6 +30,48 @@ use crate::product::repository_store::{
     RepositoryRegistrationInput, RepositoryStore,
 };
 
+struct ProjectAwareRepositoryPersistence {
+    app_paths: ProductAppPaths,
+}
+
+impl ProjectAwareRepositoryPersistence {
+    fn new(app_paths: ProductAppPaths) -> Self {
+        Self { app_paths }
+    }
+
+    fn store_for_project(&self, project_id: &str) -> Result<RepositoryStore, ProductStoreError> {
+        let project = ProjectStore::new(self.app_paths.clone()).get(project_id)?;
+        Ok(RepositoryStore::for_project(
+            self.app_paths.clone(),
+            &project,
+        ))
+    }
+}
+
+impl RepositoryPersistence for ProjectAwareRepositoryPersistence {
+    fn find_by_path(
+        &self,
+        project_id: &str,
+        path: &std::path::Path,
+    ) -> Result<Option<RepositoryRecord>, ProductStoreError> {
+        self.store_for_project(project_id)?
+            .find_by_path(project_id, path)
+    }
+
+    fn initialization_operation_store(&self) -> Option<RepositoryInitializationOperationStore> {
+        Some(RepositoryInitializationOperationStore::new(
+            self.app_paths.clone(),
+        ))
+    }
+
+    fn create_repository(
+        &self,
+        input: crate::product::repository_store::CreateRepositoryInput,
+    ) -> Result<RepositoryRecord, ProductStoreError> {
+        self.store_for_project(&input.project_id)?.create(input)
+    }
+}
+
 /// Repository POST 路由可注入、可克隆的协调器依赖。
 ///
 /// 外部集成测试通过 [`RepositoryRegistrationDependenciesBuilder`] 安装临时用户根、
@@ -200,7 +242,7 @@ impl RepositoryRegistrationDependenciesBuilder {
             .unwrap_or_else(|| Arc::new(ProjectStore::new(app_paths.clone())));
         let repositories = self
             .repositories
-            .unwrap_or_else(|| Arc::new(RepositoryStore::new(app_paths.clone())));
+            .unwrap_or_else(|| Arc::new(ProjectAwareRepositoryPersistence::new(app_paths.clone())));
         let operations = RepositoryInitializationOperationStore::new(app_paths);
         let cadence_skills = self.cadence_skills.unwrap_or_else(|| {
             Arc::new(CadenceSkillsManager::with_dependencies(
@@ -263,6 +305,9 @@ pub async fn create_repository(
     Path(project_id): Path<String>,
     Json(request): Json<CreateRepositoryRequest>,
 ) -> ApiResult<Response> {
+    ProjectStore::new(product_app_paths(&state))
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
     let dependencies = match state.repository_registration_dependencies() {
         Some(dependencies) => dependencies,
         None => default_dependencies(&state).map_err(|error| ApiError::from(*error))?,

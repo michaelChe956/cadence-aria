@@ -48,8 +48,16 @@ struct PlanningResumeFixture {
 impl PlanningResumeFixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "planning resume fixture".to_string(),
+                description: None,
+                multi_repo: true,
+            })
+            .expect("create project");
         Self {
-            paths: ProductAppPaths::new(temp.path()),
+            paths,
             temp,
             api_member_id: LogicalRepositoryId(API_MEMBER_UUID),
             physical_repository_id: None,

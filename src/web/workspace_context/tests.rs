@@ -13,11 +13,22 @@ use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, ProviderName,
     WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use tempfile::tempdir;
 
 mod linked_context;
 mod work_item_plan_context;
+
+fn seed_legacy_project(app_paths: &ProductAppPaths) {
+    ProjectStore::new(app_paths.clone())
+        .create(CreateProjectInput {
+            name: "workspace context fixture".to_string(),
+            description: None,
+            multi_repo: false,
+        })
+        .expect("create project");
+}
 
 #[test]
 fn all_workspace_artifact_outputs_require_artifact_fence() {
@@ -341,6 +352,7 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),

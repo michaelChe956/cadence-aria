@@ -5,6 +5,7 @@ use crate::product::models::{
     DesignSpecRecord, IssueRecord, IssueWorkItemPlan, RepositoryRecord, SpecVersionRecord,
     StorySpecRecord, WorkspaceSessionRecord, WorkspaceType,
 };
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 
@@ -290,7 +291,8 @@ pub(super) fn repository_for(
     project_id: &str,
     repository_id: &str,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    RepositoryStore::new(app_paths.clone())
+    let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
+    RepositoryStore::for_project(app_paths.clone(), &project)
         .list(project_id)?
         .into_iter()
         .find(|repository| repository.id == repository_id)

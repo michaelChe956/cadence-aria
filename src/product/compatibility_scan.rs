@@ -41,12 +41,8 @@ pub fn rebuild_index_from_runtime(
 
     let mut summary = empty_summary();
     let project = find_or_create_project(&input.app_paths, &input.project_name, &mut summary)?;
-    let repository = find_or_create_repository(
-        &input.app_paths,
-        &project.id,
-        &input.repo_path,
-        &mut summary,
-    )?;
+    let repository =
+        find_or_create_repository(&input.app_paths, &project, &input.repo_path, &mut summary)?;
     let issue_store = IssueStore::new(input.app_paths.clone());
     let binding_store = RuntimeBindingStore::new(input.app_paths.clone());
 
@@ -172,12 +168,12 @@ fn list_projects(app_paths: &ProductAppPaths) -> Result<Vec<ProjectRecord>, Prod
 
 fn find_or_create_repository(
     app_paths: &ProductAppPaths,
-    project_id: &str,
+    project: &ProjectRecord,
     repo_path: &Path,
     summary: &mut CompatibilityScanSummary,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    let repository_store = RepositoryStore::new(app_paths.clone());
-    if let Some(repository) = repository_store.find_by_path(project_id, repo_path)? {
+    let repository_store = RepositoryStore::for_project(app_paths.clone(), project);
+    if let Some(repository) = repository_store.find_by_path(&project.id, repo_path)? {
         return Ok(repository);
     }
 
@@ -190,12 +186,12 @@ fn find_or_create_repository(
 
     summary.repositories_created += 1;
     repository_store.create(CreateRepositoryInput {
-        project_id: project_id.to_string(),
+        project_id: project.id.clone(),
         name,
         path: canonical_path,
         default_policy_preset: None,
         default_provider_mode: None,
-        idempotency_key: format!("compatibility-scan:{project_id}"),
+        idempotency_key: format!("compatibility-scan:{}", project.id),
     })
 }
 

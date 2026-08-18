@@ -12,6 +12,7 @@ use crate::product::logical_codebase::{
     MemberStatus, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
 };
 use crate::product::models::RepositoryRecord;
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -35,9 +36,10 @@ pub fn resolve_coding_attempt_repository(
     attempt: &CodingExecutionAttempt,
     group_scope_policy: SchemaV2GroupAttemptScopePolicy,
 ) -> Result<RepositoryRecord, ProductStoreError> {
+    let project = ProjectStore::new(app_paths.clone()).get(&attempt.project_id)?;
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &attempt.project_id, &attempt.issue_id)?;
-    let repository_store = RepositoryStore::new(app_paths.clone());
+    let repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
 
     if let Some(snapshot) = attempt.target_snapshot.as_ref() {
         let (manifest, selection) = match routing {
@@ -371,6 +373,7 @@ mod tests {
     };
     use crate::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
     use crate::product::models::{ProviderName, RepositoryRecord, WorkItemPlanLineage};
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::product::work_item_revision_store::WorkItemRevisionStore;
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -379,6 +382,13 @@ mod tests {
         // 无 manifest、无 selection 的单仓 attempt 必须从 work item 物理仓库解析。
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "legacy repository resolver".to_string(),
+                description: None,
+                multi_repo: false,
+            })
+            .unwrap();
         let repository_path = root.path().join("repository_0001");
         write_repository_projection(&paths, &repository_path);
         LifecycleStore::new(paths.clone())

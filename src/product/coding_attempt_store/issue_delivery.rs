@@ -3,6 +3,7 @@ use crate::product::issue_store::IssueStore;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::LifecycleWorkItemRecord;
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
 /// Issue 级交付状态的三种整体判定。
@@ -134,7 +135,9 @@ impl super::CodingAttemptStore {
         work_item: &LifecycleWorkItemRecord,
     ) -> Result<String, ProductStoreError> {
         if let Some(logical_id) = work_item.target_repository_id {
-            let (_, checkout, _) = RepositoryStore::new(self.paths())
+            let paths = self.paths();
+            let project = ProjectStore::new(paths.clone()).get(project_id)?;
+            let (_, checkout, _) = RepositoryStore::for_project(paths, &project)
                 .resolve_logical_repository_strict(project_id, logical_id)?;
             if let Some(name) = checkout
                 .canonical_path

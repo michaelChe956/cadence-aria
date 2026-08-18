@@ -25,6 +25,9 @@ pub async fn issue_lifecycle(
         .project_id
         .ok_or_else(|| ApiError::validation("project_required", "project_id is required"))?;
     let app_paths = product_app_paths(&state);
+    let project = ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
@@ -317,7 +320,7 @@ pub async fn issue_lifecycle(
             member_index.insert(member.member_id, member.alias.clone());
         }
     }
-    let repository_store = RepositoryStore::new(app_paths.clone());
+    let repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
     for record in &persisted_work_items {
         if let Some(target) = record.target_repository_id {
             if member_index.contains_key(&target) {

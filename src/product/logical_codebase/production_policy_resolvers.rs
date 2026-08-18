@@ -21,18 +21,17 @@ use crate::product::logical_codebase::{
     LogicalRepositoryId, PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource,
     ProviderGatewayError, ProviderRef, ProviderRefType, SessionLaunchRequest,
 };
+use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
-/// 生产 target resolver:持有 `RepositoryStore` 以在启动前重新解析三层身份。
+/// 生产 target resolver:按请求 project 构造 `RepositoryStore` 以在启动前重新解析三层身份。
 pub struct ProductionPolicyTargetResolver {
-    repository_store: RepositoryStore,
+    paths: ProductAppPaths,
 }
 
 impl ProductionPolicyTargetResolver {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self {
-            repository_store: RepositoryStore::new(paths),
-        }
+        Self { paths }
     }
 
     /// checkout 目标复验:解析 logical id → 严格解析三层身份 → 比对 checkout id
@@ -47,10 +46,13 @@ impl ProductionPolicyTargetResolver {
                 ProviderGatewayError::Target("invalid logical repository id".to_string())
             })?;
 
-        let (_member, checkout, _repository) = self
-            .repository_store
-            .resolve_logical_repository_strict(&request.project_id, logical_id)
+        let project = ProjectStore::new(self.paths.clone())
+            .get(&request.project_id)
             .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
+        let (_member, checkout, _repository) =
+            RepositoryStore::for_project(self.paths.clone(), &project)
+                .resolve_logical_repository_strict(&request.project_id, logical_id)
+                .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
 
         if checkout.checkout_id.0.to_string() != request.target.checkout_id {
             return Err(ProviderGatewayError::TargetMismatch {

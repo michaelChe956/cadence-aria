@@ -113,6 +113,13 @@ struct GatewayFixture {
 fn gateway_fixture() -> GatewayFixture {
     let root = tempfile::tempdir().expect("temporary product root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    crate::product::project_store::ProjectStore::new(paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "gateway fixture project".to_string(),
+            description: None,
+            multi_repo: false,
+        })
+        .expect("create project");
 
     let mut registry = ProviderRegistry::new();
     registry.register(

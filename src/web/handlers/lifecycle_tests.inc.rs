@@ -12,6 +12,7 @@
         RepositorySourceIdentity, RepositoryType,
     };
     use crate::product::models::{RepositoryRecord, WorkItemPlanLineage};
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::product::work_item_revision_store::WorkItemRevisionStore;
     use crate::web::app::build_web_router;
     use axum::body::Body;
@@ -27,6 +28,13 @@
     /// 建 issue + 3 个 work item：wi-a/wi-b 带不同 target_repository_id（有 logical codebase
     /// 权威记录支撑），wi-c 无 target。
     fn seed_issue_and_work_items(lifecycle: &LifecycleStore, paths: &ProductAppPaths) {
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "lifecycle test project".to_string(),
+                description: None,
+                multi_repo: false,
+            })
+            .unwrap();
         let issue = IssueStore::new(paths.clone())
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
