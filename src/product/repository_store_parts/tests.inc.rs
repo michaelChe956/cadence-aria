@@ -7,6 +7,7 @@ mod tests {
         IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
         LogicalCodebaseFeature, LogicalCodebaseManifest,
     };
+    use crate::product::models::ProjectRecord;
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
 
     struct RepositoryStoreFixture {
@@ -23,6 +24,74 @@ mod tests {
         physical_id: String,
         checkout_id: RepositoryCheckoutId,
         source_identity: RepositorySourceIdentity,
+    }
+
+    struct ProjectRepositoryFixture {
+        root: tempfile::TempDir,
+        paths: ProductAppPaths,
+    }
+
+    fn repository_fixture() -> ProjectRepositoryFixture {
+        let root = tempfile::tempdir().unwrap();
+        ProjectRepositoryFixture {
+            paths: ProductAppPaths::new(root.path()),
+            root,
+        }
+    }
+
+    impl ProjectRepositoryFixture {
+        fn create_project(&self, name: &str, multi_repo: bool) -> ProjectRecord {
+            ProjectStore::new(self.paths.clone())
+                .create(CreateProjectInput {
+                    name: name.to_string(),
+                    description: None,
+                    multi_repo,
+                })
+                .unwrap()
+        }
+
+        fn input(&self, project: &ProjectRecord, name: &str) -> CreateRepositoryInput {
+            let path = self.root.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            let status = Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            CreateRepositoryInput {
+                project_id: project.id.clone(),
+                name: name.to_string(),
+                path,
+                default_policy_preset: None,
+                default_provider_mode: None,
+                idempotency_key: format!("repository_{name}"),
+            }
+        }
+    }
+
+    #[test]
+    fn for_project_enables_identity_only_for_multi_repo() {
+        let fixture = repository_fixture();
+        let multi_project = fixture.create_project("project_multi", true);
+        let single_project = fixture.create_project("project_single", false);
+        let multi = RepositoryStore::for_project(fixture.paths.clone(), &multi_project);
+        let single = RepositoryStore::for_project(fixture.paths.clone(), &single_project);
+
+        assert!(
+            multi
+                .create(fixture.input(&multi_project, "api"))
+                .unwrap()
+                .logical_repository_id
+                .is_some()
+        );
+        assert!(
+            single
+                .create(fixture.input(&single_project, "legacy"))
+                .unwrap()
+                .logical_repository_id
+                .is_none()
+        );
     }
 
     fn repository_store_fixture_with_feature_enabled() -> RepositoryStoreFixture {

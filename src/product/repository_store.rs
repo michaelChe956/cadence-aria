@@ -18,7 +18,7 @@ use crate::product::logical_codebase::{
     LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
     RepositoryReferenceScanner, RepositorySourceIdentity, RepositoryType,
 };
-use crate::product::models::RepositoryRecord;
+use crate::product::models::{ProjectRecord, RepositoryRecord};
 
 mod initializer;
 mod operation;
@@ -97,6 +97,15 @@ pub struct RepositoryStore {
 impl RepositoryStore {
     pub fn new(paths: ProductAppPaths) -> Self {
         Self::with_logical_codebase_feature(paths, LogicalCodebaseFeature::disabled())
+    }
+
+    pub fn for_project(paths: ProductAppPaths, project: &ProjectRecord) -> Self {
+        let feature = if project.multi_repo {
+            LogicalCodebaseFeature::enabled()
+        } else {
+            LogicalCodebaseFeature::disabled()
+        };
+        Self::with_logical_codebase_feature(paths, feature)
     }
 
     pub fn with_logical_codebase_feature(
