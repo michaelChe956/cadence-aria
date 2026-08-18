@@ -17,7 +17,7 @@
 
 ## 3. 聚合初始化执行接线
 
-- [ ] 3.1 扩展 InitializationRunRegistry：值升级 HashMap<key, CancellationToken>（单仓调用方无感），lib 单测注册/触发/Drop 清理
+- [x] 3.1 扩展 InitializationRunRegistry：值升级 HashMap<key, CancellationToken>（单仓调用方无感），lib 单测注册/触发/Drop 清理
 - [ ] 3.2 production AggregateInitializationDependencies（真实 skills 准备 + AggregateRootPreflight + index 接线，替换 Noop），注入 AppState 共享
 - [ ] 3.3 POST 改为 begin → registry lease → tokio::spawn(execute)；cancel 取 token 在 step 边界生效；GET 对 Running 无 lease → recover_interrupted（Failed+interrupted）；重触发新幂等键（it_web：轮询推进 Completed、cancel 边界、重启恢复）
 
