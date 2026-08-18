@@ -79,6 +79,7 @@ fn create_legacy_coding_attempt_fixture(
     store: &CodingAttemptStore,
     input: CreateCodingAttemptInput,
 ) -> CodingExecutionAttempt {
+    seed_legacy_project_fixture(&store.paths());
     let attempt = store.create_attempt(input).expect("create attempt");
     rewrite_as_legacy_coding_attempt_fixture(store, attempt)
 }
@@ -87,6 +88,7 @@ fn create_legacy_group_coding_attempt_fixture(
     store: &CodingAttemptStore,
     input: CreateGroupCodingAttemptInput,
 ) -> CodingExecutionAttempt {
+    seed_legacy_project_fixture(&store.paths());
     let attempt = store
         .create_group_attempt(input)
         .expect("create group attempt");

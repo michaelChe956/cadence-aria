@@ -63,6 +63,7 @@ use cadence_aria::product::logical_codebase::{
     SessionLaunchRequest,
 };
 use cadence_aria::product::models::{ProviderName, WorkspaceRolePermissionModes};
+use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
@@ -85,6 +86,13 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
     let root = tempdir().expect("root");
     let root_path = root.path().to_path_buf();
     let paths = ProductAppPaths::new(root_path.join(".aria"));
+    ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "aggregate initialization gateway envelope fixture".to_string(),
+            description: None,
+            multi_repo: true,
+        })
+        .expect("create multi-repository project fixture");
 
     // 聚合根必须真实存在：生产 `ProductionPolicyTargetResolver` 会 canonicalize。
     let aggregate_root = root_path.join("aggregate-root");
