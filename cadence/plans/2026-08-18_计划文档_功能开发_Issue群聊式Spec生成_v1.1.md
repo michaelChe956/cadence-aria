@@ -1,4 +1,6 @@
-# Issue 群聊式 Spec 生成（Group Chat Workspace）实施计划 v1.0
+# Issue 群聊式 Spec 生成（Group Chat Workspace）实施计划 v1.1
+
+> 修订记录：v1.1 —— reviewer(k3) 计划评审修复 🔴-1/🔴-2 与 🟡-1~🟡-8：A1 codex 映射改为 sandbox 派生+approvalPolicy never（含 kimi/coding 双向转换语义决策与 approval_bridge 行为）；B9 补实体确保存在 + confirmation_status 翻转 + 复用 append_artifact_version；B2 json_store 出处精确化；C1/E1 测试挂 it_web/it_product 子模块；C1/C2 补 WebAppState；补 4 处覆盖缺口（不可信包裹/triage provider 配置/跳槽定稿 UI/桥接补建）；D2/D4 复用表述修正；依赖改为 B10→B9。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -51,11 +53,12 @@
 
 **Files:**
 - Modify: `src/cross_cutting/streaming_provider/mod.rs`（枚举 +1 变体）
-- Modify: `src/cross_cutting/claude_code_provider/mod.rs:351`、`src/cross_cutting/codex_provider/session.rs:74,98`（+match 臂）
+- Modify: `src/cross_cutting/claude_code_provider/mod.rs:351`、`src/cross_cutting/codex_provider/session.rs:73-101`、`src/cross_cutting/codex_provider/mod.rs:31`（sandbox 派生）、`src/cross_cutting/kimi_code_provider/session.rs:132`、`src/product/coding_workspace_engine/types.rs:114/141`、`src/cross_cutting/approval_bridge/mod.rs:94`
 - Test: `src/cross_cutting/streaming_provider/tests.rs`
 
 **Interfaces:**
-- Produces: `ProviderPermissionMode::ReadOnly`（serde `read_only`）；claude 映射 `"plan"`，codex 映射 `read-only` 沙箱审批串。
+- Produces: `ProviderPermissionMode::ReadOnly`（serde `read_only`）；映射决策（v1.1 定案）：claude `"plan"`（现有 `set_permission_mode` control_request 机制）；codex **sandbox 按 mode 派生** `ReadOnly => "read-only"`（当前 `CODEX_DEFAULT_SANDBOX_MODE` 硬编码 `"danger-full-access"`，`codex_provider/mod.rs:31`），codex approvalPolicy 臂 `ReadOnly => "never"`；kimi 无 plan/read-only 概念 → `ReadOnly => "default"`（等价 Supervised，文档注明降级）；`CodingProviderPermissionMode` 双向转换（`coding_workspace_engine/types.rs:114/141`）：正向 `ReadOnly => Supervised`（coding 引擎不使用 ReadOnly，反向臂加 unreachable 说明注释）。
+- approval_bridge 行为（v1.1 定案）：`approval_bridge/mod.rs:94` 以 `mode == Auto` 判断自动批准；ReadOnly 角色的权限请求**自动拒绝写类、自动批准读类**（防 claude plan 模式 ExitPlanMode 请求无人值守挂起），在 B7 agent_turn 接线时生效。
 
 - [ ] **Step 1: 写失败测试**（tests.rs 追加）
 
@@ -68,10 +71,18 @@ fn read_only_permission_mode_maps_to_provider_flags() {
     );
     assert_eq!(super::super::claude_code_provider::permission_flag(&ProviderPermissionMode::ReadOnly), "plan");
 }
+
+#[test]
+fn codex_read_only_derives_sandbox_and_never_approval() {
+    // 断言 codex configure 载荷：sandbox="read-only"、approvalPolicy="never"
+    let payload = super::super::codex_provider::session::configure_payload_for_test(&ProviderPermissionMode::ReadOnly);
+    assert_eq!(payload["sandbox"], "read-only");
+    assert_eq!(payload["approvalPolicy"], "never");
+}
 ```
 
-- [ ] **Step 2: 运行验证失败** `cargo test read_only_permission_mode` → FAIL（无此变体）
-- [ ] **Step 3: 实现**：枚举加 `ReadOnly`；两处 provider 映射各加一臂（claude `"plan"`、codex 复用现有审批串生成处加 `ReadOnly => "read-only"`）；若 provider 映射函数非 pub，提取为 `pub(crate) fn permission_flag`。
+- [ ] **Step 2: 运行验证失败** `cargo test read_only_permission_mode codex_read_only` → FAIL（无此变体）
+- [ ] **Step 3: 实现**：枚举加 `ReadOnly`；claude 映射加 `ReadOnly => "plan"`；**codex：`session.rs:77/101` 的 sandbox 从常量改为按 mode 派生（`ReadOnly => "read-only"`，其余 => 原常量），approvalPolicy match（`session.rs:73-76/97-100`）加 `ReadOnly => "never"`**；kimi 加 `ReadOnly => "default"`；`coding_workspace_engine/types.rs` 双向转换补臂（正向 Supervised）；approval_bridge 对 ReadOnly 的读/写分流；若 provider 映射函数非 pub，提取为 `pub(crate) fn permission_flag` / `configure_payload_for_test`。
 - [ ] **Step 4: 运行验证通过** `cargo test -p aria read_only` + `cargo clippy --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** `git commit -m "feat(provider): ProviderPermissionMode 新增 ReadOnly 变体（claude plan / codex read-only）"`
 
@@ -191,8 +202,8 @@ fn update_description_persists_and_appends_revision() {
 - Test: `src/product/group_chat_engine/tests/timeline.rs`
 
 **Interfaces:**
-- Consumes: `read_json/write_json/list_json_records`（json_store）、`ProductAppPaths`。
-- Produces: `GroupChatStore::append_event(...) -> Result<u64 /*seq*/>`（timeline.jsonl 追加，fsync）；`load_session(...)`（先读 session.json 缓存，再重放 timeline 覆盖 seen_cursor/注入水位，设计 §4.3 写入顺序）；`save_session_snapshot(...)`。
+- Consumes: `read_json/write_json`（`src/product/json_store.rs:27/33`，整文件 temp+rename 写）、`list_json_records`（`src/product/lifecycle_store/utils.rs:10`，crate 内经 mod.rs 再导出）、重放读侧可复用 `read_jsonl_records`（`src/product/coding_attempt_store/utils.rs:60`）。**timeline.jsonl 的追加写 + fsync 需新写**（json_store 无 append 能力，`write_json` 只 flush 不 fsync）。
+- Produces: `GroupChatStore::append_event(...) -> Result<u64 /*seq*/>`（timeline.jsonl 追加，OpenOptions append + `sync_all`）；`load_session(...)`（先读 session.json 缓存，再重放 timeline 覆盖 seen_cursor/注入水位，设计 §4.3 写入顺序）；`save_session_snapshot(...)`。
 
 - [ ] **Step 1: 写失败测试**：append 3 事件→重放→cursor 与事件内值一致；伪造「事件已写、快照未写」崩溃态→重放恢复一致。
 - [ ] **Step 2: 运行失败** → FAIL
@@ -223,9 +234,9 @@ fn update_description_persists_and_appends_revision() {
 
 **Interfaces:**
 - Consumes: RoomEvent 序列、RoleInstance、ArtifactLine。
-- Produces: `assemble_turn_context(events, role, lines, budget_tokens) -> TurnContext { unread_events, summary, relevant_drafts }`（设计 §5.2a 四层）；`INJECTION_BUDGET_TOKENS: usize = 16_000`；截断优先级 人类消息>相关草稿>未读>摘要；**被截未读事件不推进 injection_watermark**；`maybe_update_rolling_summary`（每 20 事件压缩，摘要回调注入以便测试用小模型替身）。
+- Produces: `assemble_turn_context(events, role, lines, budget_tokens) -> TurnContext { unread_events, summary, relevant_drafts }`（设计 §5.2a 四层）；`INJECTION_BUDGET_TOKENS: usize = 16_000`；截断优先级 人类消息>相关草稿>未读>摘要；**被截未读事件不推进 injection_watermark**；`maybe_update_rolling_summary`（每 20 事件压缩，摘要回调注入以便测试用小模型替身）；**不可信包裹（v1.1 补，设计 §2.1）**：注入的 agent 发言统一包裹 `<untrusted_peer_message role="...">...</untrusted_peer_message>` 标记段，人类消息不包裹。
 
-- [ ] **Step 1: 写失败测试**：①超预算时按优先级截断且被截事件水位不推进；②被截事件进入下次摘要输入；③reviewer 视角含目标草稿 diff。
+- [ ] **Step 1: 写失败测试**：①超预算时按优先级截断且被截事件水位不推进；②被截事件进入下次摘要输入；③reviewer 视角含目标草稿 diff；④agent 发言段被不可信标记包裹、人类消息不包裹。
 - [ ] **Step 2: 运行失败** → FAIL
 - [ ] **Step 3: 实现**（token 估算用字符数/4 粗算，注释标明）
 - [ ] **Step 4: 运行通过**
@@ -291,15 +302,16 @@ fn update_description_persists_and_appends_revision() {
 - Test: `src/product/group_chat_engine/tests/finalize.rs`
 
 **Interfaces:**
-- Consumes: A3 校验、`LifecycleStore::append_version`（`AppendSpecVersionInput`）、`LifecycleStore` session 创建/更新 API、`ArtifactVersion`（`src/web/workspace_ws_types/artifact_version.rs:9`，`ArtifactPayload::Markdown`）。
-- Produces: `finalize_line(line_kind, slots, confirmed_by) -> Result<FinalizeEvent>`：
+- Consumes: A3 校验、`LifecycleStore::append_version`（`AppendSpecVersionInput`，spec.rs:156）、`LifecycleStore::update_spec_confirmation_status`（spec.rs:224）、`LifecycleStore::create_workspace_session`（workspace.rs:234，初始 status=Open）+ `update_workspace_session_status`（workspace.rs:371）、`LifecycleStore::append_artifact_version`（workspace.rs:616，**直接复用**）、`ArtifactVersion`（`src/web/workspace_ws_types/artifact_version.rs:9`，`ArtifactPayload::Markdown`）。
+- Produces: `finalize_line(line_kind, slots, confirmed_by, included_slots_override: Option<Vec<DraftSlotKey>>) -> Result<FinalizeEvent>`：
+  0. **实体确保存在**（v1.1 补）：`append_version` 前置 `load_existing_spec`，实体不存在返回 NotFound——定稿前先按 product 层 spec 创建 API 确保 Story/Design 实体存在（对齐 `create_story_spec`/`create_design_spec` 的存储语义，在 product 层调用，不经过 handler）；
   1. 派生约束：DesignSpec 线先跑 A3 校验（Err→`story_spec_not_confirmed`）；
-  2. **顺序固定**：先 entity 维度 `append_version`（溯源字段 §6.4），后建/更新桥接 session；
-  3. 桥接：同线首次定稿创建 `WorkspaceSessionRecord`（status=Confirmed、reviewer_provider=author 值、messages=[]、origin=Some(GroupChat)），向其 timeline 目录 `artifact_versions.json` 追加合成 `ArtifactVersion`（generated_by=汇总 author provider、source_node_id=FinalizeEvent seq）；后续定稿复用同 session 追加；
+  2. **顺序固定**：先 entity 维度 `append_version`（溯源字段 §6.4），再 **`update_spec_confirmation_status(Confirmed)`**（v1.1 补：不翻状态则 Story 永远 Draft、Design 永久被 A3 阻塞、看板永不显示确认），后建/更新桥接 session；
+  3. 桥接：同线首次定稿创建 `WorkspaceSessionRecord`（reviewer_provider=author 值、messages=[]、origin=Some(GroupChat)，创建后 `update_workspace_session_status(Confirmed)`），复用 `append_artifact_version` 追加合成 `ArtifactVersion`（generated_by=汇总 author provider、source_node_id=FinalizeEvent seq，**追加前将旧版本 is_current 翻 false**）；后续定稿复用同 session 追加；**桥接缺失自愈**：load_session 时发现 finalized_versions 非空但桥接 session 缺失→按既有版本补建（对齐 backfill 语义）；
   4. IssueRefinement 线走 A2 `update_description`（不写桥接）；
-  5. 追加 FinalizeEvent（included_slots）。
+  5. 追加 FinalizeEvent（included_slots，`included_slots_override` 承载 §4.1「UI 显式跳过缺失槽」）。
 
-- [ ] **Step 1: 写失败测试**：①Story 定稿→entity versions +1 且桥接 artifact_versions.json +1；②Design 在 Story 未确认时→Err(story_spec_not_confirmed)；③二次定稿复用同桥接 session（版本累积为 2）；④IssueRefinement→description 更新+修订历史+1。
+- [ ] **Step 1: 写失败测试**：①Story 定稿→entity versions +1、confirmation_status=Confirmed、桥接 artifact_versions.json +1 且旧版 is_current=false；②Design 在 Story 未确认时→Err(story_spec_not_confirmed)；③二次定稿复用同桥接 session（版本累积为 2）；④IssueRefinement→description 更新+修订历史+1；⑤删除桥接 session 后 load_session→自愈补建。
 - [ ] **Step 2-5**: TDD 循环 → Commit `feat(group-chat): 定稿流程（entity 版本 + 桥接 session artifact_versions + Issue 澄清）`
 
 ### Task B10: `origin` 来源标记字段
@@ -320,11 +332,11 @@ fn update_description_persists_and_appends_revision() {
 
 **Files:**
 - Create: `src/web/handlers/group_chat.rs`（仿现有 handler 模式：ProductStoreError→ApiError）
-- Modify: `src/web/app.rs`（路由挂载，追加）
-- Test: `tests/web_group_chat_api.rs`（仿 tests/web_* 模式）
+- Modify: `src/web/app.rs`（路由挂载，追加）、`src/web/state.rs`（`WebAppState` 挂群聊引擎 registry 字段，先例 `image_create_engine: Option<Arc<ImageCreateEngine>>`，state.rs:127）
+- Test: `tests/it_web/web_group_chat_api.rs`（**仓库约定：挂 `tests/it_web.rs` 的 `#[path]` 子模块**，it_web.rs:109-116，非独立 tests/web_* 文件）
 
 **Interfaces:**
-- Endpoints：`POST /api/group-chat/sessions`（按 issue 创建/幂等返回既有）、`GET /api/group-chat/sessions/:id`（含 timeline 分页）、`POST .../messages`（用户消息+mentions，驱动 coordinator）、`POST .../roles`（添加角色实例）、`POST .../finalize`（产物线定稿）、`GET/PUT /api/settings/spec-generation-mode`。
+- Endpoints：`POST /api/group-chat/sessions`（按 issue 创建/幂等返回既有）、`GET /api/group-chat/sessions/:id`（含 timeline 分页）、`POST .../messages`（用户消息+mentions，驱动 coordinator）、`POST .../roles`（添加角色实例）、`POST .../finalize`（产物线定稿，body 含 `included_slots_override`）、`PUT .../settings/triage-provider`（聊天室级 triage provider 配置，设计 §5.3/§7.3）、`GET/PUT /api/settings/spec-generation-mode`。
 
 - [ ] **Step 1: 写失败测试**（创建→发消息→fake provider 应答→定稿→断言响应体）
 - [ ] **Step 2-5**: TDD 循环 → Commit `feat(web): 群聊 HTTP API（会话/消息/角色/定稿/模式设置）`
@@ -333,7 +345,7 @@ fn update_description_persists_and_appends_revision() {
 
 **Files:**
 - Create: `src/web/group_chat_ws_types/{mod.rs,in_.rs,out_.rs}`、`src/web/group_chat_ws_handler/{mod.rs,session.rs}`
-- Modify: `src/web/app.rs`（`/ws/group-chat` 挂载）
+- Modify: `src/web/app.rs`（`/ws/group-chat` 挂载）、`src/web/state.rs`（复用 C1 所挂 registry，追加 WS 侧依赖）
 - Test: `src/web/group_chat_ws_handler/tests.rs`
 
 **Interfaces:**
@@ -362,7 +374,7 @@ fn update_description_persists_and_appends_revision() {
 - Test: `web/src/components/chat-room/ChatRoomTimeline.test.tsx`
 
 **Interfaces:**
-- 渲染 UserMessage/AgentMessage（角色头像+名牌）/HeldEvent/ClaimEvent/FinalizeEvent/SystemNotice（各 InlineEventRow 变体）；输入栏 @提及自动补全（角色实例列表）。
+- 渲染 UserMessage/AgentMessage（角色头像+名牌——**名牌取自 RoleInstance.display_name，群聊自带 RoomEvent 渲染，不依赖共享 `ChatEntry.role` 封闭 union**（chat-entries.ts:17-23 无群聊角色；message-grouping 复用若受 role union 限制则以 chat-room 自有分组实现替代，v1.1 定案））/HeldEvent/ClaimEvent/FinalizeEvent/SystemNotice（各 InlineEventRow 变体）；输入栏 @提及自动补全（角色实例列表）。
 
 - [ ] **Step 1-5**: TDD（各事件类型渲染快照、@补全过滤、流式 TurnDelta 追加）→ Commit `feat(web-ui): ChatRoomPage 时间线与 @提及输入`
 
@@ -373,7 +385,7 @@ fn update_description_persists_and_appends_revision() {
 - Test: `web/src/components/chat-room/ArtifactLinePanel.test.tsx`
 
 **Interfaces:**
-- 三产物线状态卡（未开始/起草中 by whom/待审/可定稿/已定稿 vN）；DesignSpec 三槽展示；定稿按钮禁用态（Design 未满足前置时 tooltip「需先定稿 Story Spec」，以后端 `story_spec_not_confirmed` 错误为兜底）。
+- 三产物线状态卡（未开始/起草中 by whom/待审/可定稿/已定稿 vN）；DesignSpec 三槽展示；定稿按钮禁用态（Design 未满足前置时 tooltip「需先定稿 Story Spec」，以后端 `story_spec_not_confirmed` 错误为兜底）；**缺失槽跳过（v1.1 补，设计 §4.1）：槽未齐时定稿按钮弹出确认框列出缺失槽，用户显式确认后携带 `included_slots_override` 提交**。
 
 - [ ] **Step 1-5**: TDD（状态流转渲染、禁用态、草稿预览展开）→ Commit `feat(web-ui): 产物线面板与定稿交互`
 
@@ -381,7 +393,7 @@ fn update_description_persists_and_appends_revision() {
 
 **Files:**
 - Create: `web/src/components/chat-room/{RoleBar.tsx,AddRoleDialog.tsx}`
-- 复用：ProviderConfigPanel 的 provider 选择子组件（只读引用；若不可拆则内联 provider 下拉，数据来自现有 providers API）
+- provider 选择**正案为内联 provider 下拉**（数据来自现有 providers API；`ProviderConfigPanel.tsx:13-25` 与 author/reviewer 双角色硬绑定，不可只读复用，v1.1 定案）
 - Test: `web/src/components/chat-room/RoleBar.test.tsx`
 
 - [ ] **Step 1-5**: TDD（默认阵容渲染、添加同角色多实例、provider 绑定展示）→ Commit `feat(web-ui): 角色栏与添加角色流程`
@@ -403,9 +415,9 @@ fn update_description_persists_and_appends_revision() {
 ### Task E1: 引擎集成场景套件
 
 **Files:**
-- Create: `tests/group_chat_engine_scenarios.rs`（脚本化 fake 驱动）
+- Create: `tests/it_product/group_chat_engine_scenarios.rs`（**挂 it_product 子模块体系**，同 it_web 约定）
 
-- [ ] **Step 1-5**: 场景：①澄清→Story 讨论→审稿→修订→定稿→Design 三槽→定稿 全链路；②崩溃恢复（timeline 重放一致性）；③prompt 注入样例（agent 发言含「忽略你的权限」指令→只读角色仍无法写槽）；④混合模式桥接（先流水线定稿 v1，群聊再定稿 v2，看板读取最新）→ Commit `test(group-chat): 引擎端到端场景套件`
+- [ ] **Step 1-5**: 场景：①澄清→Story 讨论→审稿→修订→定稿→Design 三槽→定稿 全链路；②崩溃恢复（timeline 重放一致性）；③prompt 注入样例（agent 发言含「忽略你的权限」指令→只读角色仍无法写槽，**且上下文中该发言被不可信标记包裹**）；④混合模式桥接（先流水线定稿 v1，群聊再定稿 v2，看板读取最新）→ Commit `test(group-chat): 引擎端到端场景套件`
 
 ### Task E2: 全量验证 + 文档收尾
 
@@ -420,8 +432,8 @@ fn update_description_persists_and_appends_revision() {
 
 ```text
 A1 A2 A3 A4 A5（可并行，全独立）
-  └─ B1 → B2 → B3 → B4 → B5 → B6 → B7 → B8 → B9（B9 依赖 A2/A3/B1-B8；B10 可在 B9 前任意点）
-        └─ C1 C2（依赖 B 组 + B10）
+  └─ B1 → B2 → B3 → B4 → B5 → B6 → B7 → B8 → B10 → B9（B9 依赖 A2/A3/B1-B8 与 B10 的 origin 字段）
+        └─ C1 C2（依赖 B 组）
               └─ D1 → D2 → D3 D4 → D5
                     └─ E1 → E2
 ```
