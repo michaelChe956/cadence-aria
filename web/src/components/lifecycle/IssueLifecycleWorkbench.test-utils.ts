@@ -3,6 +3,8 @@ import type {
   CodingAttempt,
   IssueWorkItemPlanDetailDto,
   PointerPublicationDto,
+  RegistrationBatchDto,
+  RegistrationPreflightResponse,
 } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
@@ -49,6 +51,10 @@ export function lifecycleFetch(options?: {
   skippedIntegrationRisk?: boolean;
   codingAttempts?: CodingAttempt[];
   pointerPublications?: PointerPublicationDto[];
+  registrationPreflight?: RegistrationPreflightResponse;
+  registrationSubmit?: RegistrationBatchDto;
+  registrationResume?: RegistrationBatchDto;
+  registrationCancel?: RegistrationBatchDto;
   logicalCodebaseMembers?: Array<{
     logical_repository_id: string;
     alias: string;
@@ -797,6 +803,37 @@ export function lifecycleFetch(options?: {
         workspace_sessions: data.workspace_sessions,
         coding_attempts: data.coding_attempts,
       });
+    }
+    const registrationPreflightMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/registrations\/preflight$/,
+    );
+    if (registrationPreflightMatch && init?.method === "POST") {
+      return jsonResponse(
+        options?.registrationPreflight ?? {
+          preflight_id: "preflight_0001",
+          created_at: "2026-08-18T00:00:00Z",
+          items: [],
+        },
+      );
+    }
+    const registrationActionMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/registrations\/([^/]+)(?:\/(resume|cancel))?$/,
+    );
+    if (registrationActionMatch) {
+      const action = registrationActionMatch[3];
+      if (action === "resume" && init?.method === "POST") {
+        return jsonResponse(options?.registrationResume ?? options?.registrationSubmit ?? {});
+      }
+      if (action === "cancel" && init?.method === "POST") {
+        return jsonResponse(options?.registrationCancel ?? options?.registrationSubmit ?? {});
+      }
+      return jsonResponse(options?.registrationSubmit ?? {});
+    }
+    const registrationSubmitMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/registrations$/,
+    );
+    if (registrationSubmitMatch && init?.method === "POST") {
+      return jsonResponse(options?.registrationSubmit ?? {});
     }
     const pointerPublicationsMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,

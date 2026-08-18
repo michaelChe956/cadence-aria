@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { PointerPublicationDto } from "../../api/types";
+import type { PointerPublicationDto, RegistrationBatchDto, RegistrationPreflightResponse } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   defaultLaunchTitle,
@@ -377,6 +377,30 @@ describe("IssueLifecycleWorkbench base workflow", () => {
         }),
       }),
     );
+  });
+
+  it("opens the member registration wizard from the logical codebase panel", async () => {
+    const preflight: RegistrationPreflightResponse = {
+      preflight_id: "preflight_0001",
+      created_at: "2026-08-18T00:00:00Z",
+      items: [{ path: "/root/api", class: "eligible", reason: null }],
+    };
+    const batch: RegistrationBatchDto = {
+      batch_id: "batch_0001",
+      status: "completed",
+      items: [{ path: "/root/api", status: "completed", failure_reason: null }],
+    };
+    vi.stubGlobal("fetch", lifecycleFetch({ registrationPreflight: preflight, registrationSubmit: batch }));
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    await user.click(await screen.findByRole("button", { name: "登记成员" }));
+    await user.type(screen.getByLabelText("聚合根目录"), "/root");
+    await user.click(screen.getByRole("button", { name: "执行预检" }));
+    await user.click(await screen.findByRole("button", { name: "提交登记" }));
+
+    expect(await screen.findByText("completed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
   });
 
   it("creates project from the left sidebar and selects it", async () => {

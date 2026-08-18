@@ -23,6 +23,7 @@ import {
   listRepositories,
 } from "../../api/client";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
+import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import {
   createPointerPublication,
   listPointerPublications,
@@ -114,6 +115,7 @@ export function IssueLifecycleWorkbench({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
+  const [registrationDialogOpen, setRegistrationDialogOpen] = useState(false);
   const [pendingWorkItemPlanLaunch, setPendingWorkItemPlanLaunch] =
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
@@ -896,6 +898,16 @@ export function IssueLifecycleWorkbench({
             <div className="space-y-3">
               {selectedProjectId ? (
                 <div className="overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]">
+                  <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] px-3 py-2">
+                    <h2 className="text-sm font-semibold text-[var(--aria-ink)]">逻辑代码库</h2>
+                    <button
+                      type="button"
+                      onClick={() => setRegistrationDialogOpen(true)}
+                      className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white"
+                    >
+                      登记成员
+                    </button>
+                  </div>
                   <PointerPublicationPanel
                     publication={latestPointerPublication}
                     busy={pointerPublicationBusy}
@@ -994,6 +1006,13 @@ export function IssueLifecycleWorkbench({
         <CreateProjectDialog
           onCreate={handleCreateProject}
           onClose={() => setProjectDialogOpen(false)}
+        />
+      ) : null}
+      {registrationDialogOpen && selectedProjectId ? (
+        <LogicalCodebaseRegistrationWizard
+          projectId={selectedProjectId}
+          onCompleted={() => refresh(selectedProjectId)}
+          onClose={() => setRegistrationDialogOpen(false)}
         />
       ) : null}
       {repositoryDialogOpen ? (
