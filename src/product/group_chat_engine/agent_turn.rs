@@ -13,6 +13,7 @@ use crate::product::models::ProviderName;
 use crate::protocol::contracts::ProviderType;
 
 use super::context::TurnContext;
+use super::prompts::system_prompt_for;
 use super::roles::adapter_role_for;
 use super::types::{RoleInstance, RoomEvent};
 
@@ -265,8 +266,10 @@ fn build_provider_input(
 
 fn build_turn_prompt(role: &RoleInstance, context: &TurnContext, retry: u8) -> String {
     let mut prompt = format!(
-        "群聊 Agent Turn\n角色：{}（{}）\n群聊重试轮次：{retry}\n\n",
-        role.display_name, role.id
+        "{}\n\n群聊 Agent Turn\n角色：{}（{}）\n群聊重试轮次：{retry}\n\n",
+        system_prompt_for(role.role_key),
+        role.display_name,
+        role.id
     );
     if let Some(summary) = context.summary.as_deref() {
         prompt.push_str("滚动摘要：\n");

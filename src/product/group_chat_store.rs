@@ -81,6 +81,25 @@ impl GroupChatStore {
         Ok(session)
     }
 
+    /// 读取会话的完整追加式时间线，按事件序号升序返回。
+    ///
+    /// coordinator 在每个 agent turn 前以此建立 freshness 快照；具体序号仍由
+    /// 存储层管理，因此此接口只暴露业务事件本身。
+    pub fn load_events(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<RoomEvent>, ProductStoreError> {
+        validate_ids(project_id, issue_id, session_id)?;
+        Ok(
+            timeline::read_entries(&self.timeline_path(project_id, issue_id, session_id))?
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect(),
+        )
+    }
+
     /// 原子替换 session.json 快照。调用方应只在时间线追加成功后调用。
     pub fn save_session_snapshot(
         &self,
