@@ -48,6 +48,8 @@ mod coding_socket_registry;
 pub use coding_socket_registry::CodingSocketRegistry;
 mod repository_initialization_run_registry;
 pub use repository_initialization_run_registry::RepositoryInitializationRunRegistry;
+mod group_chat_socket_registry;
+pub use group_chat_socket_registry::GroupChatSocketRegistry;
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
@@ -128,6 +130,8 @@ pub struct WebAppState {
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
     pub group_chat_engine: Option<Arc<GroupChatEngine>>,
+    /// 群聊 WS 的进程内事件扇出；持久化时间线仍是重连的权威来源。
+    pub group_chat_sockets: GroupChatSocketRegistry,
 }
 
 impl WebAppState {
@@ -193,6 +197,7 @@ impl WebAppState {
             image_create_run_registry,
             image_create_engine,
             group_chat_engine,
+            group_chat_sockets: GroupChatSocketRegistry::default(),
         }
     }
 

@@ -8,6 +8,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::product_data_schema::ensure_product_data_schema;
 use crate::web::coding_ws_handler;
 use crate::web::events::EventHub;
+use crate::web::group_chat_ws_handler;
 use crate::web::handlers;
 use crate::web::state::WebAppState;
 use crate::web::test_controls;
@@ -285,6 +286,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/api/ws/workspace/{session_id}",
             get(workspace_ws_handler::workspace_ws),
+        )
+        .route(
+            "/ws/group-chat/{session_id}",
+            get(group_chat_ws_handler::group_chat_ws),
         )
         .route(
             "/ws/coding-attempts/{attempt_id}",

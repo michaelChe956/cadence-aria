@@ -217,7 +217,8 @@ pub async fn finalize(
         .store
         .load_event_entries(&session.project_id, &session.issue_id, &session.id)
         .map_err(product_store_api_error)?;
-    let (provider_run_refs, review_refs) = collect_refs(&entries, &session, request.line_kind);
+    let (provider_run_refs, review_refs) =
+        collect_refs_for_ws(&entries, &session, request.line_kind);
     let event = engine
         .finalize_line(FinalizeInput {
             project_id: session.project_id.clone(),
@@ -327,7 +328,7 @@ fn session_response(
     })
 }
 
-fn collect_refs(
+pub(crate) fn collect_refs_for_ws(
     entries: &[(u64, RoomEvent)],
     session: &GroupChatSessionRecord,
     line_kind: ArtifactLineKind,

@@ -2,6 +2,8 @@ pub mod app;
 pub mod coding_ws_handler;
 pub mod error;
 pub mod events;
+pub mod group_chat_ws_handler;
+pub mod group_chat_ws_types;
 pub mod handlers;
 pub mod issue_registry;
 pub mod provider_availability;
