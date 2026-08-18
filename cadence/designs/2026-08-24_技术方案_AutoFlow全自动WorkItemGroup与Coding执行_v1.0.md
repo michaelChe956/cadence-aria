@@ -89,7 +89,15 @@ plan 缺陷触发 rewrite 时，不让 Planner 推倒重来：
 
 编排器每个 phase 迁移持久化快照；进程崩溃/重启后 Auto Flow 从断点继续（at-least-once 语义，重入由现有幂等机制保证）。"等待人工"是状态机里的合法节点（`awaiting_final_confirm`、升级暂停），不是被打断的异常态。
 
-## 6. 升级人工（结构化决策请求）
+## 6. 并发与预算纪律（借鉴 Cumora COORDINATION 实践）
+
+1. **预算按 provider 分列**：Planner / Coder / Reviewer 可能是不同 provider（各自独立配额体系），预算三层（软提醒 → 工具降级 → 硬停）必须按角色-provider 对分别计数，不得用单一全局计数器覆盖所有角色（Cumora 教训：只限一层、另一层同步打满导致全队静默）。
+2. **确定性底座垫在 AI 判断之下**：rewrite 轮次、预算硬停等上限编码在宿主状态机，不依赖 provider 自律；且升级点设 decline cap——同一升级决策用户连续忽略/拒绝 N 次（默认 3）后不再重复打扰，需显式重新打开。
+3. **override 有代价（hold-token 思想）**：「继续加一轮 rewrite」等升级选项必须绑定当时呈现给用户的状态快照；轮次耗尽后同一决策不可免费重放，防止无脑点继续导致无限烧钱。
+4. **AI 判断失败 fail-open + 窄确定性回退**：某角色 provider 不可用（如 Reviewer 持续 5xx）时，编排器不卡死、不伪造结论，走窄回退（标记 unreviewed 并暂停等待人工），并留痕。
+5. **成本台账**：所有 provider 调用统一记账（角色、phase、token/成本），在 phase 总览卡片中按轮次展示。
+
+## 7. 升级人工（结构化决策请求）
 
 任何模式下，出现以下情况暂停并呈现结构化摘要：
 
@@ -100,7 +108,7 @@ plan 缺陷触发 rewrite 时，不让 Planner 推倒重来：
 
 **升级不是自由文本，是结构化决策请求**，固定 schema：暂停点、触发链（哪个 unit 的 review finding → 判定 plan defect → patch 建议为何被拒/超限）、已消耗轮次/预算、具体选项列表（继续加一轮 / 接受部分完成 / 人工修改后重入 / 终止）。前端按 schema 渲染。
 
-## 7. 用户干预
+## 8. 用户干预
 
 Auto Flow 对用户暴露三个显式操作（借鉴 pi-subagents 的 steer/stop/resume）：
 
@@ -108,7 +116,7 @@ Auto Flow 对用户暴露三个显式操作（借鉴 pi-subagents 的 steer/stop
 - **终止**：结束本次 Auto Flow，已完成的 unit 成果保留；
 - **恢复**：从暂停/升级点继续自动执行。
 
-## 8. 配置项
+## 9. 配置项
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
@@ -117,7 +125,7 @@ Auto Flow 对用户暴露三个显式操作（借鉴 pi-subagents 的 steer/stop
 | `rewrite_confirm` | `off` | rewrite 应用前人工确认开关（模式 B 可开） |
 | 角色→provider 映射 | 无默认 | Planner / Coder / Reviewer 各选一个，启动前配置 |
 
-## 9. 测试策略
+## 10. 测试策略
 
 - 编排状态机为纯 Rust 逻辑，TDD 全覆盖：phase 推进、循环上限、fatal 纪律、暂停点、断点恢复语义、干预三命令；
 - patch 校验器：合法/非法 patch、DAG 一致性、已通过 unit 保护；
@@ -125,7 +133,7 @@ Auto Flow 对用户暴露三个显式操作（借鉴 pi-subagents 的 steer/stop
 - provider 决策结构化输出解析按现有 provider 测试模式；
 - 验证命令遵循 `cadence/project-rules/build-test-commands.md`（禁止 `-j 1`）。
 
-## 10. 竞品参考清单
+## 11. 竞品参考清单
 
 | 来源 | 吸收点 |
 |---|---|
@@ -137,8 +145,20 @@ Auto Flow 对用户暴露三个显式操作（借鉴 pi-subagents 的 steer/stop
 | pi-subagents | 预算三层（软提醒/工具降级/硬停）、干预三命令（暂停/终止/恢复） |
 | Factory Missions | 计划协作期 vs 执行自主期的 UI 分段 |
 | Conductor / AgentSpan | phase 迁移持久化断点恢复；人工等待 = 合法状态节点；LLM 规划一次、执行确定性 |
+| Cumora（COORDINATION.md） | 预算按 provider 分列、升级 decline cap、override 绑定状态快照、fail-open 窄回退、统一成本台账 |
 
-## 11. 影响面
+## 12. 依赖与顺序（add-monorepo）
+
+本方案与 `feat-b-0808-add-monorepo` 分支存在大面积交叠与语义依赖：
+
+- **文件级**：monorepo 分支重度修改了本方案依赖的全部核心模块（coding_attempt_store、coding_workspace_engine 各子模块、cadence_skills/routing_reference、workspace_engine），Auto Flow 若从当前 main 独立长分支再合并，冲突代价极高。
+- **语义级**：monorepo 引入 logical codebase / per-target worktree routing（gates_worktree_routing、handoffs_worktree_routing、cross_target_check、target_snapshot）、admission 准入、issue_delivery 与指针发布链路。因此：
+  - AutoFlowOrchestrator 必须 **target-aware**：group_gen 阶段可能按 logical codebase 成员拆分目标，coding / review / readiness 各 phase 的推进语义均带 target 维度；
+  - phase 序列 `→ readiness → final_confirm` 需纳入指针发布等新环节（如：指针发布失败是否阻塞下一组、是否纳入升级条件，在实施计划中细化）；
+  - §3.3 角色声明式定义的接入点以 monorepo 版 routing_reference API 为准。
+- **顺序约束**：Auto Flow 实施依赖 add-monorepo 先合入 main（或在 monorepo 分支之上开发），避免约 9 万行规模的 rebase。
+
+## 13. 影响面
 
 - 后端：新增 AutoFlowOrchestrator 编排层（`src/product/` 新模块）、编排事件类型与持久化、patch 校验器、配置项；现有 coding_workspace_engine 子模块以被调用方式复用，语义不变。
 - 前端：Auto Flow 启动配置面板（角色 provider + 模式）、自动执行总览卡片、升级决策请求渲染、干预操作入口。
