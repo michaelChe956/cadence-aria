@@ -3,7 +3,7 @@
 ## 1. Project 多仓模式基础
 
 - [x] 1.1 ProjectRecord/CreateProjectInput/CreateProjectRequest/ProjectDto 增加 multi_repo（serde default=false），project_store 读写与旧数据兼容测试
-- [ ] 1.2 新增 RepositoryStore::for_project（multi_repo→feature enabled；project 缺失→ProjectNotFound），lib 单测映射与失败语义
+- [x] 1.2 新增 RepositoryStore::for_project（multi_repo→feature enabled；project 缺失→ProjectNotFound），lib 单测映射与失败语义
 - [ ] 1.3 替换约 16-17 处生产 RepositoryStore::new 为 for_project（逐点核对清单入 task 报告；测试 fixture 保持 new），跑全量 lib 确认单仓零回归
 - [ ] 1.4 legacy 端点防护：多仓 project 下 POST/DELETE /repositories 与 GET /repository-initializations/{oid} → 409 legacy_repository_endpoint_on_multi_repo；GET /repositories 返回成员投影；单仓误调登记/索引端点 → 409 logical_codebase_feature_disabled（it_web 负向用例）
 
