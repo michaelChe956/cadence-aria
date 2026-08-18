@@ -80,8 +80,11 @@ impl RegistrationBatchDto {
         Self {
             batch_id: batch.id.clone(),
             status: match batch.status {
+                RegistrationBatchStatus::Queued => "queued",
+                RegistrationBatchStatus::Running => "running",
+                RegistrationBatchStatus::PartialFailed => "partial_failed",
                 RegistrationBatchStatus::Completed => "completed",
-                _ => "partial_failed",
+                RegistrationBatchStatus::Cancelled => "cancelled",
             }
             .to_string(),
             items: batch

@@ -540,6 +540,88 @@ async fn registration_preflight_maps_missing_aggregate_root_to_422_stable_code()
 }
 
 #[tokio::test]
+async fn registration_http_chain_queries_resumes_and_rejects_terminal_cancel() {
+    let fixture = Fixture::new();
+    let (status, preflight) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/registrations/preflight",
+        json!({
+            "aggregate_root": fixture.root(),
+            "candidate_paths": [fixture.git_root()]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preflight}");
+    let (status, submitted) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/registrations",
+        json!({
+            "aggregate_root": fixture.root(),
+            "preflight_id": preflight["preflight_id"],
+            "confirmed_paths": [fixture.git_root()]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    let batch_id = submitted["batch_id"].as_str().unwrap();
+
+    let (status, queried) = request(
+        &fixture.app,
+        Method::GET,
+        &format!("/api/projects/project_0001/logical-codebase/registrations/{batch_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queried}");
+    assert_eq!(queried["status"], "completed", "{queried}");
+    assert_eq!(queried["items"][0]["status"], "completed", "{queried}");
+
+    let (status, resumed) = request(
+        &fixture.app,
+        Method::POST,
+        &format!("/api/projects/project_0001/logical-codebase/registrations/{batch_id}/resume"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["status"], "completed", "{resumed}");
+    assert_eq!(
+        resumed["items"][0]["failure_reason"],
+        serde_json::Value::Null
+    );
+
+    assert_error(
+        request(
+            &fixture.app,
+            Method::POST,
+            &format!("/api/projects/project_0001/logical-codebase/registrations/{batch_id}/cancel"),
+            json!({}),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "registration_batch_not_cancelable",
+    );
+}
+
+#[tokio::test]
+async fn registration_batch_not_found_is_stable_404() {
+    let fixture = Fixture::new();
+    assert_error(
+        request(
+            &fixture.app,
+            Method::GET,
+            "/api/projects/project_0001/logical-codebase/registrations/registration_batch_missing",
+            json!({}),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "registration_batch_not_found",
+    );
+}
+
+#[tokio::test]
 async fn registration_preflight_admits_root_before_classification_and_guards_single_repo() {
     let fixture = Fixture::new();
     assert_error(

@@ -73,7 +73,8 @@ impl IntoResponse for ApiError {
             | "work_item_not_found"
             | "task_workspace_not_found"
             | "workspace_session_not_found"
-            | "registration_preflight_not_found" => StatusCode::NOT_FOUND,
+            | "registration_preflight_not_found"
+            | "registration_batch_not_found" => StatusCode::NOT_FOUND,
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }
@@ -87,7 +88,8 @@ impl IntoResponse for ApiError {
             | "legacy_shared_worktree_present"
             | "legacy_shared_worktree_inconsistent"
             | "repo_worktree_active"
-            | "cross_target_violation_detected" => StatusCode::CONFLICT,
+            | "cross_target_violation_detected"
+            | "registration_batch_not_cancelable" => StatusCode::CONFLICT,
             "cross_target_baseline_missing" | "cross_target_store_failure" => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

@@ -25,3 +25,5 @@ use crate::web::types::{RegistrationPreflightRequest, RegistrationPreflightRespo
 include!("logical_codebase_registration/dto.inc.rs");
 include!("logical_codebase_registration/preflight.inc.rs");
 include!("logical_codebase_registration/submit.inc.rs");
+include!("logical_codebase_registration/query.inc.rs");
+include!("logical_codebase_registration/resume_cancel.inc.rs");
