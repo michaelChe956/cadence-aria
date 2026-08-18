@@ -45,6 +45,8 @@ pub(crate) fn assert_error(
 
 #[path = "web_logical_codebase_entrypoints/guards.rs"]
 mod guards;
+#[path = "web_logical_codebase_entrypoints/index.rs"]
+mod index;
 #[path = "web_logical_codebase_entrypoints/initialization.rs"]
 mod initialization;
 #[path = "web_logical_codebase_entrypoints/registration.rs"]

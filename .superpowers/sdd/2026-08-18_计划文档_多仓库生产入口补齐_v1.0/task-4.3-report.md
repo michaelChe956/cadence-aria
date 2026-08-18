@@ -26,3 +26,15 @@
 ## Concerns
 - `web_logical_codebase_entrypoints stale_` 当前无匹配测试；命令成功但运行 0 个测试。
 - 当前工作树中存在任务开始前已有的 `.pi/subagents/`、`cadence/notes/` 未跟踪文件，未纳入本次提交。
+
+## Fix round 1
+
+- 新增 `tests/web_logical_codebase_entrypoints/index.rs`，并在集成测试 crate 根注册；该真实 HTTP 回归用例建立两个 Git checkout 和 CodeGraph 索引，经 Story 生成入口先读取 fresh index、外部提交制造成员 revision 漂移、再次读取后断言 active index 已被 sync 为新 generation 且响应正常。
+- `tests/it_web/evidence_query/part_04.rs` 的 50 成员预算用例改为异步 `build_with_fresh_index(...).await`；store-only fixture 标记为 `Degraded` last-known-good，避免没有 Git checkout 的合成 fixture 触发无意义重建，同时保留预算与目标成员断言。
+
+### Fix round 1 验证
+
+- `cargo test --locked --test web_logical_codebase_entrypoints stale_`：通过（1）；完整 test binary 通过（19）。
+- `cargo test --locked --test it_web evidence_query`：通过（15）。
+- `cargo test --locked --lib`：通过（2366）。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`、`cargo fmt --check`：均通过。

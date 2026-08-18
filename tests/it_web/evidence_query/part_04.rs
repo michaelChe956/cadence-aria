@@ -136,7 +136,11 @@ impl FiftyMemberFixture {
                     aggregate_index_id: "aggregate_index_50_members".to_string(),
                     project_id: PROJECT_ID.to_string(),
                     membership_revision: 1,
-                    status: AggregateIndexStatus::Active,
+                    // This store-only fixture intentionally has ordinary source directories,
+                    // not Git checkout metadata. Its index is a readable last-known-good
+                    // fixture, so the production fresh entrypoint must retain it without
+                    // attempting a Git/CodeGraph rebuild.
+                    status: AggregateIndexStatus::Degraded,
                     member_snapshots: snapshots,
                     observed_after_member_snapshots: Vec::new(),
                     codegraph_version: "synthetic-test".to_string(),
@@ -390,8 +394,8 @@ async fn fifty_member_http_evidence_query_filters_directory_scope_under_five_sec
     }
 }
 
-#[test]
-fn fifty_member_planning_budget_injection_truncates_and_keeps_target() {
+#[tokio::test]
+async fn fifty_member_planning_budget_injection_truncates_and_keeps_target() {
     // Long profile metadata puts the same store-backed 50-member data beyond the soft budget.
     // This follows the production PlanningContextResolver path rather than reconstructing an
     // inventory in the test, and still requires no checkout repositories or Provider call.
@@ -415,7 +419,8 @@ fn fifty_member_planning_budget_injection_truncates_and_keeps_target() {
     let context = cadence_aria::product::logical_codebase::PlanningContextResolver::new(
         fx.app_paths.clone(),
     )
-    .build(PROJECT_ID, ISSUE_ID, &[target])
+    .build_with_fresh_index(PROJECT_ID, ISSUE_ID, &[target])
+    .await
     .expect("resolve store-backed 50-member planning context");
     let injection = context.inventory_injection;
     assert!(injection.truncated, "50-member inventory must report truncation");
