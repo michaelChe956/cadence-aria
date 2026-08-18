@@ -16,7 +16,7 @@ pub mod fake;
 #[cfg(test)]
 pub mod tests;
 
-pub use fake::FakeStreamingProvider;
+pub use fake::{FakeStreamingProvider, ScriptedFakeProvider, ScriptedReply};
 
 #[derive(Debug, Clone)]
 pub enum StreamChunk {

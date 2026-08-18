@@ -461,3 +461,136 @@ async fn run_streaming_declines_choice_request_instead_of_hanging() {
         "expected error chunk, got {chunk:?}"
     );
 }
+
+async fn collect_scripted_provider_events(mut session: ProviderSession) -> Vec<ProviderEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+        .await
+        .expect("脚本化 provider 应在超时前结束")
+    {
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn scripted_fake_provider_matches_prompts_and_emits_role_events_in_order() {
+    let author_events = vec![
+        ProviderEvent::TextDelta {
+            content: "作者草稿".to_string(),
+        },
+        ProviderEvent::TextDelta {
+            content: "作者补充".to_string(),
+        },
+        ProviderEvent::Completed(ProviderCompletion::plain("作者草稿作者补充", None)),
+    ];
+    let reviewer_events = vec![
+        ProviderEvent::TextDelta {
+            content: "审核意见".to_string(),
+        },
+        ProviderEvent::Failed {
+            message: "需要修订".to_string(),
+        },
+    ];
+    let provider = super::ScriptedFakeProvider::new(vec![
+        super::ScriptedReply {
+            match_prompt_contains: "author".to_string(),
+            events: author_events.clone(),
+        },
+        super::ScriptedReply {
+            match_prompt_contains: "reviewer".to_string(),
+            events: reviewer_events.clone(),
+        },
+    ]);
+
+    let author_session = provider
+        .start(
+            make_provider_input("群聊 author 生成候选稿"),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("启动作者脚本");
+    let mut reviewer_input = make_provider_input("群聊 reviewer 审核候选稿");
+    reviewer_input.role = crate::protocol::contracts::AdapterRole::Reviewer;
+    let reviewer_session = provider
+        .start(reviewer_input, CancellationToken::new())
+        .await
+        .expect("启动审核者脚本");
+
+    assert_eq!(
+        collect_scripted_provider_events(author_session).await,
+        author_events
+    );
+    assert_eq!(
+        collect_scripted_provider_events(reviewer_session).await,
+        reviewer_events
+    );
+}
+
+#[tokio::test]
+async fn scripted_fake_provider_uses_default_output_when_prompt_does_not_match() {
+    let provider = super::ScriptedFakeProvider::new(vec![super::ScriptedReply {
+        match_prompt_contains: "author".to_string(),
+        events: vec![ProviderEvent::TextDelta {
+            content: "不应匹配".to_string(),
+        }],
+    }]);
+    let session = provider
+        .start(
+            make_provider_input("Workspace 类型: Story Spec\nIssue: 默认输出\n[user]: 开始生成"),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("启动未匹配脚本");
+
+    let events = collect_scripted_provider_events(session).await;
+    let output = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::TextDelta { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+
+    assert!(output.contains("# Story Spec"));
+    assert!(matches!(events.last(), Some(ProviderEvent::Completed(_))));
+}
+
+#[tokio::test]
+async fn scripted_fake_provider_stops_scripted_events_after_cancel() {
+    let provider = super::ScriptedFakeProvider::new(vec![super::ScriptedReply {
+        match_prompt_contains: "author".to_string(),
+        events: vec![
+            ProviderEvent::TextDelta {
+                content: "第一段".to_string(),
+            },
+            ProviderEvent::TextDelta {
+                content: "第二段".to_string(),
+            },
+            ProviderEvent::Completed(ProviderCompletion::plain("第一段第二段", None)),
+        ],
+    }]);
+    let cancel = CancellationToken::new();
+    let mut session = provider
+        .start(make_provider_input("author 生成候选稿"), cancel.clone())
+        .await
+        .expect("启动可取消脚本");
+
+    assert_eq!(
+        session.events.recv().await,
+        Some(ProviderEvent::TextDelta {
+            content: "第一段".to_string(),
+        })
+    );
+    cancel.cancel();
+
+    while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+        .await
+        .expect("取消后脚本化 provider 应关闭")
+    {
+        assert!(
+            !matches!(event, ProviderEvent::Completed(_)),
+            "取消后的脚本不应发送完成事件"
+        );
+    }
+}

@@ -15,6 +15,23 @@ const FAKE_STREAMING_STEP_DELAY: Duration = Duration::from_millis(10);
 
 pub struct FakeStreamingProvider;
 
+#[derive(Debug, Clone)]
+pub struct ScriptedReply {
+    pub match_prompt_contains: String,
+    pub events: Vec<ProviderEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptedFakeProvider {
+    scripts: Vec<ScriptedReply>,
+}
+
+impl ScriptedFakeProvider {
+    pub fn new(scripts: Vec<ScriptedReply>) -> Self {
+        Self { scripts }
+    }
+}
+
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for FakeStreamingProvider {
     async fn start(
@@ -22,52 +39,71 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let (event_tx, event_rx) = mpsc::channel(32);
-        let (command_tx, mut command_rx) = mpsc::channel(8);
         let output = fake_provider_output(&input);
         let structured_output_contract = input.structured_output_contract;
+        let mut events = fake_stream_chunks(&output)
+            .into_iter()
+            .map(|content| ProviderEvent::TextDelta { content })
+            .collect::<Vec<_>>();
+        events.push(ProviderEvent::Completed(ProviderCompletion::from_output(
+            output,
+            structured_output_contract.as_ref(),
+            None,
+        )));
 
-        tokio::spawn(async move {
-            let chunks = fake_stream_chunks(&output);
-            let mut commands_open = true;
+        Ok(fake_provider_session(events, cancel))
+    }
+}
 
-            for content in chunks {
-                if fake_streaming_should_stop(&cancel, &mut command_rx, &mut commands_open).await {
-                    return;
-                }
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ScriptedFakeProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let scripted_events = self
+            .scripts
+            .iter()
+            .find(|script| input.prompt.contains(&script.match_prompt_contains))
+            .map(|script| script.events.clone());
 
-                if !fake_streaming_send_event(
-                    &event_tx,
-                    ProviderEvent::TextDelta { content },
-                    &cancel,
-                    &mut command_rx,
-                    &mut commands_open,
-                )
-                .await
-                {
-                    return;
-                }
-            }
+        match scripted_events {
+            Some(events) => Ok(fake_provider_session(events, cancel)),
+            None => FakeStreamingProvider.start(input, cancel).await,
+        }
+    }
+}
 
+fn fake_provider_session(events: Vec<ProviderEvent>, cancel: CancellationToken) -> ProviderSession {
+    let (event_tx, event_rx) = mpsc::channel(32);
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        let mut commands_open = true;
+
+        for event in events {
             if fake_streaming_should_stop(&cancel, &mut command_rx, &mut commands_open).await {
                 return;
             }
-            let completion =
-                ProviderCompletion::from_output(output, structured_output_contract.as_ref(), None);
-            let _ = fake_streaming_send_event(
+
+            if !fake_streaming_send_event(
                 &event_tx,
-                ProviderEvent::Completed(completion),
+                event,
                 &cancel,
                 &mut command_rx,
                 &mut commands_open,
             )
-            .await;
-        });
+            .await
+            {
+                return;
+            }
+        }
+    });
 
-        Ok(ProviderSession {
-            events: event_rx,
-            commands: command_tx,
-        })
+    ProviderSession {
+        events: event_rx,
+        commands: command_tx,
     }
 }
 
