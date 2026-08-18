@@ -440,6 +440,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         })
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .await
         .expect("initial context");
     assert!(
         session_record.messages[0]
@@ -571,6 +572,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         })
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .await
         .expect("initial context");
     assert!(
         session_record.messages[0]
@@ -712,6 +714,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         )
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .await
         .expect("initial context");
 
     let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));

@@ -386,6 +386,7 @@ async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
         &lifecycle,
         presentation_session,
     )
+    .await
     .expect("refresh Work Item human context");
     assert_eq!(
         refreshed_session.messages.len(),

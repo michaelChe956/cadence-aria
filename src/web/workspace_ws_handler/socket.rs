@@ -67,7 +67,7 @@ pub(crate) fn spawn_idle_timeout_task(
 /// - 指纹一致 → `SameContext`：沿用现有 session 审计与 prompt 上下文。
 /// - 指纹漂移 → `StaleContext`：不得沿用可能过时/越权的 prompt/cwd/policy，调用方应
 ///   启动新会话并重建上下文（重新 build）。
-pub(crate) fn planning_resume_decision(
+pub(crate) async fn planning_resume_decision_with_fresh_index(
     app_paths: &ProductAppPaths,
     project_id: &str,
     issue_id: &str,
@@ -77,8 +77,13 @@ pub(crate) fn planning_resume_decision(
     match routing {
         RepositoryRouting::Legacy { .. } => Ok(None),
         RepositoryRouting::Logical { .. } => {
-            let decision = PlanningContextResolver::new(app_paths.clone())
-                .resume(project_id, issue_id)
+            #[cfg(test)]
+            let resolver = PlanningContextResolver::new_without_freshness(app_paths.clone());
+            #[cfg(not(test))]
+            let resolver = PlanningContextResolver::new(app_paths.clone());
+            let decision = resolver
+                .resume_with_fresh_index(project_id, issue_id)
+                .await
                 .map_err(|error| format!("planning context resume failed: {error}"))?;
             Ok(Some(decision))
         }
@@ -145,7 +150,7 @@ pub(crate) async fn handle_workspace_socket(
         }
     };
     let session_record =
-        match ensure_workspace_context_message(&app_paths, &lifecycle, session_record) {
+        match ensure_workspace_context_message(&app_paths, &lifecycle, session_record).await {
             Ok(session) => session,
             Err(error) => {
                 let err = WsOutMessage::Error {
@@ -403,11 +408,13 @@ pub(crate) async fn handle_workspace_socket(
             //   provider 成功启动后才 commit（新 BLOCKER 修复：provider 失败不落盘，
             //   重连仍 StaleContext）。
             // - 校验失败：fail-closed 拒绝续跑。
-            match planning_resume_decision(
+            match planning_resume_decision_with_fresh_index(
                 &app_paths,
                 &session_record.project_id,
                 &session_record.issue_id,
-            ) {
+            )
+            .await
+            {
                 Ok(decision) => {
                     let run_kind = planning_resume_run_kind(&decision, run_kind);
                     if let Err(message) = spawn_provider_run_from_handler(

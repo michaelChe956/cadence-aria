@@ -237,6 +237,7 @@ impl WorkspaceEngine {
                 )?;
             }
             ensure_workspace_context_message(&lifecycle.app_paths(), lifecycle, bound_session)
+                .await
                 .map_err(|error| format!("ensure child workspace context failed: {error}"))?;
             tx.step_cursor = format!("child_session_{:03}_context_prepared", index + 1);
             tx.updated_at = tx.created_at.clone();

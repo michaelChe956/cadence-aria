@@ -110,6 +110,13 @@ impl AggregateIndexFreshnessService {
             .logical
             .load_manifest(project_id)?
             .ok_or_else(|| missing_manifest(project_id))?;
+        // Degraded is a readable last-known-good state. Do not probe Git (or
+        // attempt a sync) on this path: the warning must remain auditable even
+        // when the CodeGraph/Git dependencies are unavailable.
+        if record.status == AggregateIndexStatus::Degraded {
+            let warning = record.warning.clone().unwrap_or_default();
+            return Ok(AggregateIndexFreshness::degraded(record, &warning));
+        }
         if record.membership_revision != manifest.membership_revision {
             return Ok(AggregateIndexFreshness::stale(
                 record,
@@ -122,10 +129,6 @@ impl AggregateIndexFreshnessService {
                 record,
                 "member_revision_or_dirty_changed",
             ));
-        }
-        if record.status == AggregateIndexStatus::Degraded {
-            let warning = record.warning.clone().unwrap_or_default();
-            return Ok(AggregateIndexFreshness::degraded(record, &warning));
         }
         Ok(AggregateIndexFreshness::active(record))
     }

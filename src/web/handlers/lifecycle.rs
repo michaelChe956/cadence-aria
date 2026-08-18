@@ -420,7 +420,8 @@ pub async fn generate_story_specs(
         RepositoryRouting::Logical { manifest, .. } => {
             // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
             let resolved = PlanningContextResolver::new(app_paths.clone())
-                .build(&project_id, &issue_id, &[])
+                .build_with_fresh_index(&project_id, &issue_id, &[])
+                .await
                 .map_err(product_store_api_error)?;
             let scope = AggregateStorySpecScope {
                 logical_codebase_ref: manifest.logical_codebase_id,
@@ -457,6 +458,7 @@ pub async fn generate_story_specs(
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .map_err(product_store_api_error)?;
 
     let story_dto = story_spec_dto(&lifecycle, &story, Some(session.id.as_str()))?;
@@ -494,7 +496,8 @@ pub async fn generate_design_specs(
         RepositoryRouting::Legacy { .. } => None,
         RepositoryRouting::Logical { manifest, .. } => {
             let resolved = PlanningContextResolver::new(app_paths.clone())
-                .build(&project_id, &issue_id, &[])
+                .build_with_fresh_index(&project_id, &issue_id, &[])
+                .await
                 .map_err(product_store_api_error)?;
             Some(AggregateDesignSpecScope {
                 logical_codebase_ref: manifest.logical_codebase_id,
@@ -530,6 +533,7 @@ pub async fn generate_design_specs(
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .map_err(product_store_api_error)?;
 
     let design_dto = design_spec_dto(&lifecycle, &design, Some(session.id.as_str()))?;
@@ -588,7 +592,8 @@ pub async fn prepare_work_item_plan(
                     })
                 })?;
             let resolved = PlanningContextResolver::new(app_paths.clone())
-                .build(&project_id, &issue_id, &design.involved_repository_ids)
+                .build_with_fresh_index(&project_id, &issue_id, &design.involved_repository_ids)
+                .await
                 .map_err(product_store_api_error)?;
             // REQ-TGT-01：design involved 必须 ⊆ selection 有效成员，否则 4xx blocker。
             for target in &design.involved_repository_ids {
@@ -644,6 +649,7 @@ pub async fn prepare_work_item_plan(
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .map_err(product_store_api_error)?;
 
     Ok(Json(PrepareWorkItemPlanResponse {

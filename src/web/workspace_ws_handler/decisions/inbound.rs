@@ -778,6 +778,7 @@ async fn refresh_workspace_context_for_session(
         .map_err(|error| format!("reload workspace session after provider lock failed: {error}"))?;
     let session_record =
         ensure_workspace_context_message(&run_context.app_paths, &lifecycle, session_record)
+            .await
             .map_err(|error| {
                 format!("refresh workspace context after provider lock failed: {error}")
             })?;

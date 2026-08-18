@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn story_workspace_context_codex_author_requires_request_user_input() {
+#[tokio::test]
+async fn story_workspace_context_codex_author_requires_request_user_input() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -51,6 +51,7 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 
@@ -60,8 +61,8 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
     assert!(context.contains("text_fallback 异常兜底"));
 }
 
-#[test]
-fn design_workspace_context_includes_linked_story_markdown() {
+#[tokio::test]
+async fn design_workspace_context_includes_linked_story_markdown() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -139,6 +140,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 
@@ -149,8 +151,8 @@ fn design_workspace_context_includes_linked_story_markdown() {
     assert!(context.contains("[REQ-001] 返回爬楼梯方法数。"));
 }
 
-#[test]
-fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
+#[tokio::test]
+async fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     seed_legacy_project(&app_paths);
@@ -169,7 +171,9 @@ fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
         })
         .expect("session");
 
-    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session).unwrap_err();
+    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -180,8 +184,8 @@ fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
     ));
 }
 
-#[test]
-fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failure() {
+#[tokio::test]
+async fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failure() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     seed_legacy_project(&app_paths);
@@ -200,8 +204,9 @@ fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failu
         })
         .expect("session");
 
-    let error =
-        ensure_workspace_context_message(&app_paths, &lifecycle, session.clone()).unwrap_err();
+    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session.clone())
+        .await
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -220,8 +225,8 @@ fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failu
     );
 }
 
-#[test]
-fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
+#[tokio::test]
+async fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -314,6 +319,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
         .expect("replace stale messages");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
 
     assert_eq!(session.messages.len(), 2);

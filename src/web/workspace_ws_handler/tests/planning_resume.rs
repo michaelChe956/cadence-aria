@@ -70,7 +70,7 @@ impl PlanningResumeFixture {
     }
 
     fn resolver(&self) -> PlanningContextResolver {
-        PlanningContextResolver::new(self.paths.clone())
+        PlanningContextResolver::new_without_freshness(self.paths.clone())
     }
 
     /// 写入单成员 selection + active aggregate index；物理仓库存在时复用迁移生成的
@@ -271,16 +271,19 @@ impl StreamingProviderAdapter for RebuildRecordingProvider {
     }
 }
 
-#[test]
-fn planning_resume_decision_is_none_for_legacy_single_repo_path() {
+#[tokio::test]
+async fn planning_resume_decision_is_none_for_legacy_single_repo_path() {
     let fixture = PlanningResumeFixture::new();
     // 无 manifest/selection：传统单仓路径不校验，不受影响。
-    let decision = planning_resume_decision(&fixture.paths, "project_0001", "issue_0001").unwrap();
+    let decision =
+        planning_resume_decision_with_fresh_index(&fixture.paths, "project_0001", "issue_0001")
+            .await
+            .unwrap();
     assert!(decision.is_none());
 }
 
-#[test]
-fn planning_resume_fail_closed_when_manifest_without_selection() {
+#[tokio::test]
+async fn planning_resume_fail_closed_when_manifest_without_selection() {
     // 有 manifest、无 selection → 与 compile 一致 fail-closed（返回稳定错误码 repository_routing_target_missing）。
     let root = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -295,26 +298,29 @@ fn planning_resume_fail_closed_when_manifest_without_selection() {
         )
         .unwrap();
 
-    let error = planning_resume_decision(&paths, "project_0001", "issue_0001").unwrap_err();
+    let error = planning_resume_decision_with_fresh_index(&paths, "project_0001", "issue_0001")
+        .await
+        .unwrap_err();
     assert!(error.contains("repository_routing_target_missing"));
     assert!(error.contains("work_item_target_missing"));
 }
 
-#[test]
-fn planning_resume_legacy_when_none_none() {
+#[tokio::test]
+async fn planning_resume_legacy_when_none_none() {
     // 无 manifest、无 selection → Ok(None)，传统单仓不受影响。
     let root = tempfile::tempdir().unwrap();
-    let result = planning_resume_decision(
+    let result = planning_resume_decision_with_fresh_index(
         &ProductAppPaths::new(root.path().join(".aria")),
         "project_0001",
         "issue_0001",
-    );
+    )
+    .await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 }
 
-#[test]
-fn planning_resume_decision_reuses_context_on_matching_fingerprint() {
+#[tokio::test]
+async fn planning_resume_decision_reuses_context_on_matching_fingerprint() {
     let fixture = PlanningResumeFixture::new();
     fixture.write_logical_codebase();
     fixture
@@ -322,14 +328,16 @@ fn planning_resume_decision_reuses_context_on_matching_fingerprint() {
         .build("project_0001", "issue_0001", &[])
         .unwrap();
 
-    let decision = planning_resume_decision(&fixture.paths, "project_0001", "issue_0001")
-        .unwrap()
-        .expect("logical codebase branch must produce a decision");
+    let decision =
+        planning_resume_decision_with_fresh_index(&fixture.paths, "project_0001", "issue_0001")
+            .await
+            .unwrap()
+            .expect("logical codebase branch must produce a decision");
     assert!(matches!(decision, ResumeDecision::SameContext(_)));
 }
 
-#[test]
-fn planning_resume_decision_returns_stale_when_membership_drifted() {
+#[tokio::test]
+async fn planning_resume_decision_returns_stale_when_membership_drifted() {
     let fixture = PlanningResumeFixture::new();
     fixture.write_logical_codebase();
     fixture
@@ -339,14 +347,16 @@ fn planning_resume_decision_returns_stale_when_membership_drifted() {
 
     fixture.change_membership_revision();
 
-    let decision = planning_resume_decision(&fixture.paths, "project_0001", "issue_0001")
-        .unwrap()
-        .expect("logical codebase branch must produce a decision");
+    let decision =
+        planning_resume_decision_with_fresh_index(&fixture.paths, "project_0001", "issue_0001")
+            .await
+            .unwrap()
+            .expect("logical codebase branch must produce a decision");
     assert!(matches!(decision, ResumeDecision::StaleContext { .. }));
 }
 
-#[test]
-fn planning_resume_run_kind_rebuilds_on_stale_context_and_resumes_on_same() {
+#[tokio::test]
+async fn planning_resume_run_kind_rebuilds_on_stale_context_and_resumes_on_same() {
     // B3 修复：StaleContext 时 Web 分支以 `WorkItemPlanOutlineRebuild` 启动全新 run，
     // 携带 rebuilt planning context（cwd/inventory/snapshot），不沿用可能复用旧 provider
     // 会话内容的 revision run kind；None（传统单仓）/ SameContext 沿用 fallback 续跑。
@@ -355,7 +365,10 @@ fn planning_resume_run_kind_rebuilds_on_stale_context_and_resumes_on_same() {
     let resolver = fixture.resolver();
     let first = resolver.build("project_0001", "issue_0001", &[]).unwrap();
 
-    let same = resolver.resume("project_0001", "issue_0001").unwrap();
+    let same = resolver
+        .resume_with_fresh_index("project_0001", "issue_0001")
+        .await
+        .unwrap();
     let kind = planning_resume_run_kind(
         &Some(same),
         ProviderRunKind::WorkItemPlanOutlineRevision { feedback: None },
@@ -366,7 +379,10 @@ fn planning_resume_run_kind_rebuilds_on_stale_context_and_resumes_on_same() {
     ));
 
     fixture.change_membership_revision();
-    let stale = resolver.resume("project_0001", "issue_0001").unwrap();
+    let stale = resolver
+        .resume_with_fresh_index("project_0001", "issue_0001")
+        .await
+        .unwrap();
     let kind = planning_resume_run_kind(
         &Some(stale),
         ProviderRunKind::WorkItemPlanOutlineRevision { feedback: None },
@@ -394,8 +410,8 @@ fn planning_resume_run_kind_rebuilds_on_stale_context_and_resumes_on_same() {
     ));
 }
 
-#[test]
-fn rebuilt_snapshot_committed_only_after_provider_start_success() {
+#[tokio::test]
+async fn rebuilt_snapshot_committed_only_after_provider_start_success() {
     // 新 BLOCKER 修复：rebuilt snapshot 仅在 provider 成功启动后 commit。
     // provider 启动失败不落盘 —— 重连仍 StaleContext（避免再次 TOCTOU）。
     let fixture = PlanningResumeFixture::new();
@@ -404,7 +420,10 @@ fn rebuilt_snapshot_committed_only_after_provider_start_success() {
     resolver.build("project_0001", "issue_0001", &[]).unwrap();
 
     fixture.change_membership_revision();
-    let stale = resolver.resume("project_0001", "issue_0001").unwrap();
+    let stale = resolver
+        .resume_with_fresh_index("project_0001", "issue_0001")
+        .await
+        .unwrap();
     let ResumeDecision::StaleContext { rebuilt, .. } = stale else {
         panic!("expected StaleContext");
     };
@@ -425,7 +444,10 @@ fn rebuilt_snapshot_committed_only_after_provider_start_success() {
         persisted.access_fingerprint,
         rebuilt.snapshot.access_fingerprint
     );
-    let again = resolver.resume("project_0001", "issue_0001").unwrap();
+    let again = resolver
+        .resume_with_fresh_index("project_0001", "issue_0001")
+        .await
+        .unwrap();
     assert!(matches!(again, ResumeDecision::StaleContext { .. }));
 
     // provider 成功启动：commit rebuilt 快照，新会话/后续重连恢复 SameContext。
@@ -440,7 +462,10 @@ fn rebuilt_snapshot_committed_only_after_provider_start_success() {
         persisted.access_fingerprint,
         rebuilt.snapshot.access_fingerprint
     );
-    let resumed = resolver.resume("project_0001", "issue_0001").unwrap();
+    let resumed = resolver
+        .resume_with_fresh_index("project_0001", "issue_0001")
+        .await
+        .unwrap();
     assert!(matches!(resumed, ResumeDecision::SameContext(_)));
 }
 
@@ -510,7 +535,10 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
     let resolver = fixture.resolver();
     resolver.build("project_0001", "issue_0001", &[]).unwrap();
     fixture.change_membership_revision();
-    let stale = resolver.resume("project_0001", "issue_0001").unwrap();
+    let stale = resolver
+        .resume_with_fresh_index("project_0001", "issue_0001")
+        .await
+        .unwrap();
     let ResumeDecision::StaleContext { rebuilt, .. } = stale else {
         panic!("expected StaleContext");
     };

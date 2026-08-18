@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
+#[tokio::test]
+async fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -120,6 +120,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 

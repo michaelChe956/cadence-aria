@@ -23,7 +23,7 @@ use crate::product::workspace_engine::{
 };
 use chrono::Utc;
 
-pub fn ensure_workspace_context_message(
+pub async fn ensure_workspace_context_message(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: WorkspaceSessionRecord,
@@ -33,7 +33,7 @@ pub fn ensure_workspace_context_message(
     let has_legacy_brief = session.messages.iter().any(is_legacy_context_message);
 
     if has_generation_brief {
-        let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+        let content = build_workspace_context_message(app_paths, lifecycle, &session).await?;
         if !has_legacy_brief
             && session
                 .messages
@@ -69,7 +69,7 @@ pub fn ensure_workspace_context_message(
     }
 
     if has_runtime_context {
-        let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+        let content = build_workspace_context_message(app_paths, lifecycle, &session).await?;
         if !has_legacy_brief
             && session
                 .messages
@@ -94,7 +94,7 @@ pub fn ensure_workspace_context_message(
         return lifecycle.replace_workspace_messages(&session.id, messages);
     }
 
-    let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+    let content = build_workspace_context_message(app_paths, lifecycle, &session).await?;
     let mut messages: Vec<WorkspaceMessageRecord> = session
         .messages
         .into_iter()
@@ -111,7 +111,7 @@ pub fn ensure_workspace_context_message(
     lifecycle.replace_workspace_messages(&session.id, messages)
 }
 
-fn build_workspace_context_message(
+async fn build_workspace_context_message(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
@@ -140,11 +140,11 @@ fn build_workspace_context_message(
             ) =>
         {
             // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
-            Some(PlanningContextResolver::new(app_paths.clone()).build(
-                &session.project_id,
-                &session.issue_id,
-                &[],
-            )?)
+            Some(
+                PlanningContextResolver::new(app_paths.clone())
+                    .build_with_fresh_index(&session.project_id, &session.issue_id, &[])
+                    .await?,
+            )
         }
         _ => None,
     };

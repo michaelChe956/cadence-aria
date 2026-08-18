@@ -347,8 +347,8 @@ fn pi_story_context_requires_ask_user_tool() {
     assert!(!guidance.contains("Pi 未声明原生结构化交互能力"));
 }
 
-#[test]
-fn claude_code_story_context_requires_structured_ask_user_question() {
+#[tokio::test]
+async fn claude_code_story_context_requires_structured_ask_user_question() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -398,6 +398,7 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 
