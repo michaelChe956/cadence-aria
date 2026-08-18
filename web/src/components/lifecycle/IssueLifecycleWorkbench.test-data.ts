@@ -49,6 +49,7 @@ export function projectRecord(
   projectId: string,
   name: string,
   description: string | null = null,
+  multiRepo = false,
 ) {
   return {
     project_id: projectId,
@@ -57,6 +58,7 @@ export function projectRecord(
     created_at: "2026-05-16T00:00:00Z",
     updated_at: "2026-05-16T00:00:00Z",
     last_opened_at: null,
+    multi_repo: multiRepo,
   };
 }
 

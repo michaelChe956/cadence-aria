@@ -1,7 +1,12 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { PointerPublicationDto, RegistrationBatchDto, RegistrationPreflightResponse } from "../../api/types";
+import type {
+  AggregateIndexActiveResponse,
+  PointerPublicationDto,
+  RegistrationBatchDto,
+  RegistrationPreflightResponse,
+} from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   defaultLaunchTitle,
@@ -25,6 +30,18 @@ vi.mock("../shared/MonacoViewer", () => ({
   ),
 }));
 
+function aggregateIndex(
+  overrides: Partial<AggregateIndexActiveResponse> = {},
+): AggregateIndexActiveResponse {
+  return {
+    state: "active",
+    revision: 7,
+    indexed_at: "2026-08-18T00:00:00Z",
+    warning: null,
+    ...overrides,
+  };
+}
+
 function pointerPublication(
   overrides: Partial<PointerPublicationDto> = {},
 ): PointerPublicationDto {
@@ -43,6 +60,88 @@ function pointerPublication(
 
 describe("IssueLifecycleWorkbench base workflow", () => {
   installIssueLifecycleWorkbenchTestHooks();
+
+  it("loads the aggregate index, disables rebuild while pending, replaces it on success, and shows API errors", async () => {
+    const rebuildingResponse = deferred<Response>();
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria", null, true)],
+      aggregateIndex: aggregateIndex({ state: "missing", revision: null, indexed_at: null }),
+      aggregateIndexRebuild: aggregateIndex({
+        state: "active",
+        revision: 8,
+        indexed_at: "2026-08-18T01:00:00Z",
+      }),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input) ===
+            "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild" &&
+          init?.method === "POST"
+        ) {
+          return rebuildingResponse.promise;
+        }
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    expect(await screen.findByTestId("aggregate-index-status")).toHaveTextContent(
+      "missing",
+    );
+    await user.click(screen.getByRole("button", { name: "重建索引" }));
+    expect(screen.getByRole("button", { name: "重建索引" })).toBeDisabled();
+    expect(screen.getByTestId("aggregate-index-spinner")).toBeInTheDocument();
+
+    await act(async () => {
+      rebuildingResponse.resolve(
+        new Response(JSON.stringify(aggregateIndex({ state: "active", revision: 8 }))),
+      );
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("aggregate-index-status")).toHaveTextContent(
+        "active",
+      ),
+    );
+    expect(screen.getByText(/成员版本：8/)).toBeInTheDocument();
+  });
+
+  it("shows ApiRequestError.message when aggregate index rebuild fails", async () => {
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria", null, true)],
+      aggregateIndex: aggregateIndex({ state: "stale" }),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input) ===
+            "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild" &&
+          init?.method === "POST"
+        ) {
+          return new Response(
+            JSON.stringify({
+              code: "aggregate_index_unavailable",
+              message: "sync failed",
+            }),
+            { status: 422 },
+          );
+        }
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByRole("button", { name: "重建索引" }));
+
+    expect(await screen.findByText("sync failed")).toBeInTheDocument();
+  });
 
   it("wires pointer publication actions to APIs and upserts each returned publication", async () => {
     const initialPublication = pointerPublication({

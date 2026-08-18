@@ -1,5 +1,6 @@
 import { beforeEach, vi } from "vitest";
 import type {
+  AggregateIndexActiveResponse,
   CodingAttempt,
   IssueWorkItemPlanDetailDto,
   PointerPublicationDto,
@@ -51,6 +52,8 @@ export function lifecycleFetch(options?: {
   skippedIntegrationRisk?: boolean;
   codingAttempts?: CodingAttempt[];
   pointerPublications?: PointerPublicationDto[];
+  aggregateIndex?: AggregateIndexActiveResponse;
+  aggregateIndexRebuild?: AggregateIndexActiveResponse;
   registrationPreflight?: RegistrationPreflightResponse;
   registrationSubmit?: RegistrationBatchDto;
   registrationResume?: RegistrationBatchDto;
@@ -834,6 +837,27 @@ export function lifecycleFetch(options?: {
     );
     if (registrationSubmitMatch && init?.method === "POST") {
       return jsonResponse(options?.registrationSubmit ?? {});
+    }
+    const aggregateIndexMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/aggregate-indexes\/(active|rebuild)$/,
+    );
+    if (aggregateIndexMatch) {
+      const action = aggregateIndexMatch[2];
+      return jsonResponse(
+        action === "rebuild"
+          ? (options?.aggregateIndexRebuild ?? options?.aggregateIndex ?? {
+              state: "active",
+              revision: 1,
+              indexed_at: "2026-08-18T00:00:00Z",
+              warning: null,
+            })
+          : (options?.aggregateIndex ?? {
+              state: "missing",
+              revision: null,
+              indexed_at: null,
+              warning: null,
+            }),
+      );
     }
     const pointerPublicationsMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,

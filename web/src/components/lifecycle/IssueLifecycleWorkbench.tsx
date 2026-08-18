@@ -1,6 +1,7 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ApiRequestError,
   createCodingAttempt,
   createGroupCodingAttempt,
   createProject,
@@ -22,6 +23,10 @@ import {
   listProjects,
   listRepositories,
 } from "../../api/client";
+import {
+  getActiveAggregateIndex,
+  rebuildAggregateIndex,
+} from "../../api/aggregate-index";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import {
@@ -31,6 +36,7 @@ import {
   revokePointerPublication,
 } from "../../api/pointer-publication";
 import type {
+  AggregateIndexActiveResponse,
   CodingAttemptAddress,
   IssueLifecycleResponse,
   LogicalCodebaseMemberDto,
@@ -56,6 +62,7 @@ import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
+import { AggregateIndexCard } from "./AggregateIndexCard";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
 import { PointerPublicationPanel } from "./PointerPublicationPanel";
 import { ProjectSidebar } from "./ProjectSidebar";
@@ -127,6 +134,10 @@ export function IssueLifecycleWorkbench({
     LogicalCodebaseMemberDto[]
   >([]);
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
+  const [aggregateIndex, setAggregateIndex] =
+    useState<AggregateIndexActiveResponse | null>(null);
+  const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
+    useState(false);
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
@@ -190,21 +201,29 @@ export function IssueLifecycleWorkbench({
         setLifecycles([]);
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
+        setAggregateIndex(null);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
         return;
       }
 
+      const selectedProjectForRefresh = projectResponse.projects.find(
+        (project) => project.project_id === projectId,
+      );
       const [
         repositoryResponse,
         issueResponse,
         publicationResponse,
         membersResponse,
+        aggregateIndexResponse,
       ] = await Promise.all([
         listRepositories(projectId),
         listProductIssues(projectId),
         listPointerPublications(projectId),
         listLogicalCodebaseMembers(projectId),
+        selectedProjectForRefresh?.multi_repo
+          ? getActiveAggregateIndex(projectId)
+          : Promise.resolve(null),
       ]);
       if (!isLatestRefresh(requestId)) {
         return;
@@ -226,6 +245,7 @@ export function IssueLifecycleWorkbench({
       setLifecycles(lifecycleResponses);
       setPointerPublications(publicationResponse ?? []);
       setLogicalCodebaseMembers(membersResponse.members ?? []);
+      setAggregateIndex(aggregateIndexResponse);
       setFocusedIssueId(
         focusedIssueId &&
           lifecycleResponses.some(
@@ -625,6 +645,27 @@ export function IssueLifecycleWorkbench({
     }
   }
 
+  async function handleRebuildAggregateIndex() {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    setAggregateIndexRebuilding(true);
+    setError(null);
+    try {
+      setAggregateIndex(await rebuildAggregateIndex(selectedProjectId));
+    } catch (reason) {
+      setError(
+        reason instanceof ApiRequestError
+          ? reason.message
+          : errorMessage(reason, "重建聚合索引失败"),
+      );
+    } finally {
+      setAggregateIndexRebuilding(false);
+    }
+  }
+
   async function handleDeleteProject(projectId: string) {
     setError(null);
     await deleteProject(projectId);
@@ -908,6 +949,13 @@ export function IssueLifecycleWorkbench({
                       登记成员
                     </button>
                   </div>
+                  {aggregateIndex ? (
+                    <AggregateIndexCard
+                      index={aggregateIndex}
+                      rebuilding={aggregateIndexRebuilding}
+                      onRebuild={() => void handleRebuildAggregateIndex()}
+                    />
+                  ) : null}
                   <PointerPublicationPanel
                     publication={latestPointerPublication}
                     busy={pointerPublicationBusy}
