@@ -78,6 +78,12 @@ function WorkbenchRouteComponent() {
           params: { projectId, issueId, attemptId },
         })
       }
+      onOpenGroupChat={(sessionId) =>
+        void navigate({
+          to: "/group-chat/$sessionId",
+          params: { sessionId },
+        })
+      }
     />
   );
 }

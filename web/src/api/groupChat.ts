@@ -248,7 +248,7 @@ export function getSpecGenerationMode(): Promise<SpecGenerationMode> {
   return requestJson<SpecGenerationMode>("/api/settings/spec-generation-mode");
 }
 
-export function updateSpecGenerationMode(
+export function setSpecGenerationMode(
   mode: SpecGenerationMode,
 ): Promise<SpecGenerationMode> {
   return requestJson<SpecGenerationMode>("/api/settings/spec-generation-mode", {
@@ -256,6 +256,9 @@ export function updateSpecGenerationMode(
     body: JSON.stringify(mode),
   });
 }
+
+/** 保留旧名称，避免调用方升级时破坏 API。 */
+export const updateSpecGenerationMode = setSpecGenerationMode;
 
 export type GroupChatWsInMessage =
   | {

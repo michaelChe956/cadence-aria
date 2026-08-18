@@ -39,6 +39,8 @@ export type WorkspaceMessage = {
   created_at: string;
 };
 
+export type WorkspaceSessionOrigin = "pipeline" | "group_chat";
+
 export type WorkspaceSessionSummary = {
   workspace_session_id: string;
   issue_id: string;
@@ -57,6 +59,7 @@ export type WorkspaceSessionSummary = {
   review_rounds: number;
   superpowers_enabled: boolean;
   openspec_enabled: boolean;
+  origin?: WorkspaceSessionOrigin | null;
 };
 
 export type WorkspaceSession = WorkspaceSessionSummary & {

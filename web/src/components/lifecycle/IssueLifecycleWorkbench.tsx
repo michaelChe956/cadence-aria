@@ -1,5 +1,6 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { SpecGenerationMode } from "../../api/groupChat";
 import {
   createCodingAttempt,
   createGroupCodingAttempt,
@@ -35,6 +36,7 @@ import {
   useLifecycleWorkbenchStore,
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
+import { GroupChatWorkbenchCard } from "../chat-room/GroupChatWorkbenchCard";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import {
   CreateProjectDialog,
@@ -84,11 +86,16 @@ export function IssueLifecycleWorkbench({
   onDrawerFocusChange,
   onOpenWorkspace = defaultOpenWorkspace,
   onOpenCodingWorkspace = defaultOpenCodingWorkspace,
+  onOpenGroupChat = (sessionId) =>
+    window.location.assign(`/group-chat/${encodeURIComponent(sessionId)}`),
+  specGenerationMode = "pipeline",
 }: {
   focusEntityKey?: string | null;
   onDrawerFocusChange?: (entityKey: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
   onOpenCodingWorkspace?: (address: CodingAttemptAddress) => void;
+  onOpenGroupChat?: (sessionId: string) => void;
+  specGenerationMode?: SpecGenerationMode;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -709,17 +716,43 @@ export function IssueLifecycleWorkbench({
                 onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
                 deletingKey={deletingCardKey}
               />
-              <IssueLifecycleDetail
-                issue={selectedIssueColumns.issue[0] ?? null}
-                storySpecs={selectedIssueColumns.story_spec}
-                designSpecs={selectedIssueColumns.design_spec}
-                workItems={selectedIssueColumns.work_item}
-                selectedKey={selectedCardKey}
-                onSelect={handleSelectCard}
-                onOpenFullIssue={handleOpenFullIssue}
-                onDelete={handleDeleteLifecycleCard}
-                deletingKey={deletingCardKey}
-              />
+              {specGenerationMode === "group_chat" &&
+              selectedIssueColumns.issue[0] &&
+              selectedProjectId ? (
+                <GroupChatWorkbenchCard
+                  projectId={selectedProjectId}
+                  issueId={selectedIssueColumns.issue[0].issueId}
+                  issueTitle={selectedIssueColumns.issue[0].title}
+                  workspaceSessions={
+                    lifecycles.find(
+                      (lifecycle) =>
+                        lifecycle.issue.issue_id ===
+                        selectedIssueColumns.issue[0]?.issueId,
+                    )?.workspace_sessions ?? []
+                  }
+                  artifactVersions={[
+                    ...selectedIssueColumns.story_spec.flatMap((card) =>
+                      card.kind === "story_spec" ? card.raw.artifact_versions : [],
+                    ),
+                    ...selectedIssueColumns.design_spec.flatMap((card) =>
+                      card.kind === "design_spec" ? card.raw.artifact_versions : [],
+                    ),
+                  ]}
+                  onOpenSession={onOpenGroupChat}
+                />
+              ) : (
+                <IssueLifecycleDetail
+                  issue={selectedIssueColumns.issue[0] ?? null}
+                  storySpecs={selectedIssueColumns.story_spec}
+                  designSpecs={selectedIssueColumns.design_spec}
+                  workItems={selectedIssueColumns.work_item}
+                  selectedKey={selectedCardKey}
+                  onSelect={handleSelectCard}
+                  onOpenFullIssue={handleOpenFullIssue}
+                  onDelete={handleDeleteLifecycleCard}
+                  deletingKey={deletingCardKey}
+                />
+              )}
             </div>
           }
         />
