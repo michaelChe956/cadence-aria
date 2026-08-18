@@ -81,6 +81,7 @@ mod health;
 pub mod image_create;
 mod lifecycle;
 mod logical_codebase_members;
+mod logical_codebase_registration;
 mod pointer_publication;
 mod pointer_publish_error_mapping;
 mod product_resources;
@@ -103,6 +104,7 @@ pub use image_create::{
     list_sessions as list_image_create_sessions, update_settings as update_image_create_settings,
 };
 pub use logical_codebase_members::list_logical_codebase_members;
+pub use logical_codebase_registration::preflight_logical_codebase_registration;
 pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};

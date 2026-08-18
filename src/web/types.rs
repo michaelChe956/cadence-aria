@@ -335,6 +335,11 @@ pub use aggregate_initialization::{
     CreateAggregateInitializationRequest,
 };
 
+mod logical_codebase_registration;
+pub use logical_codebase_registration::{
+    RegistrationPreflightItemDto, RegistrationPreflightRequest, RegistrationPreflightResponse,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateRepositoryRequest {

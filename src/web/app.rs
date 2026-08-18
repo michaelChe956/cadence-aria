@@ -100,6 +100,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::list_logical_codebase_members),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebase/registrations/preflight",
+            post(handlers::preflight_logical_codebase_registration),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/pointer-publications",
             get(handlers::list_pointer_publications).post(handlers::create_pointer_publication),
         )

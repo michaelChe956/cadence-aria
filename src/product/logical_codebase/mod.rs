@@ -104,8 +104,10 @@ pub use reference_scanner::{
 };
 pub use registration::{
     AggregateRootPreflight, AggregateRootPreflightError, AttachOnlyRegistrationInput,
-    CanonicalAggregateRoot, DetectedRepositoryProfile, LogicalCodebaseRegistrationCoordinator,
-    RegistrationCandidate, RegistrationCandidateState, RegistrationPreflightInput,
+    CanonicalAggregateRoot, ConfirmedRegistrationBatchInput, DetectedRepositoryProfile,
+    LogicalCodebaseRegistrationCoordinator, RegistrationBatchItem, RegistrationBatchRecord,
+    RegistrationBatchStatus, RegistrationBatchStore, RegistrationCandidate,
+    RegistrationCandidateState, RegistrationItemStatus, RegistrationPreflightInput,
     RegistrationPreflightResult, RepositoryProfileDetector,
 };
 pub use registration_preflight_snapshot_store::{

@@ -1,3 +1,24 @@
+pub(crate) fn aggregate_root_api_error(
+    error: crate::product::logical_codebase::AggregateRootPreflightError,
+) -> ApiError {
+    let code = match error.code() {
+        "aggregate_root_is_git" => "aggregate_root_is_git",
+        "member_path_outside_root" => "aggregate_root_member_outside_root",
+        "member_symlink_escape" => "aggregate_root_member_symlink_escape",
+        "nested_worktree" => "aggregate_root_nested_worktree",
+        "aggregate_root_ownership_conflict" | "aggregate_root_overlap" => {
+            "aggregate_root_ownership_conflict"
+        }
+        "aggregate_root_missing" | "aggregate_root_invalid_project_id" => "invalid_project_id",
+        _ => "aggregate_root_ownership_conflict",
+    };
+    ApiError::runtime(
+        code,
+        "aggregate root preflight rejected",
+        json!({ "reason": error.message() }),
+    )
+}
+
 pub(crate) fn logical_codebase_feature_disabled_api_error(project_id: &str) -> ApiError {
     ApiError::runtime(
         "logical_codebase_feature_disabled",
