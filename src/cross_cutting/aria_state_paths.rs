@@ -39,6 +39,10 @@ impl AriaStatePaths {
         self.aria_root.join("image_create.json")
     }
 
+    pub fn spec_generation_mode_file(&self) -> PathBuf {
+        self.aria_root.join("spec_generation_mode.json")
+    }
+
     pub fn image_create_sessions_dir(&self) -> PathBuf {
         self.aria_root.join("image_create/sessions")
     }
