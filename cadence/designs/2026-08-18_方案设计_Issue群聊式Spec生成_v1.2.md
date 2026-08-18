@@ -1,10 +1,13 @@
-# 方案设计：Issue 群聊式 Spec 生成（Group Chat Workspace）v1.1
+# 方案设计：Issue 群聊式 Spec 生成（Group Chat Workspace）v1.2
 
 - 分支：`feat-b-0818-rewrite-spec-workspace`
 - 日期：2026-08-18
 - 状态：待评审
 - 参考案例：[yetone/cumora](https://github.com/yetone/cumora)（重点参考其 `docs/COORDINATION.md` 协调机制）
-- 修订记录：v1.1 —— 依据 reviewer（k3）评审修复 🔴B1 与 🟡S1–S9：DesignSpec 草稿槽模型重构、复用点归属改正（派生校验 / issue_store / adapter trait）、角色权限映射表、seen_cursor 落盘语义统一、熔断条件细化、只读角色写保护、定稿溯源字段、triage 配置与并行 HOLD 收敛、假 provider 脚本化扩展。
+- 配套调研：`cadence/analysis-docs/2026-08-18_调研报告_多Agent群聊式Spec生成产品对比.md`
+- 修订记录：
+  - v1.1 —— 依据 reviewer（k3）评审修复 🔴B1 与 🟡S1–S9：DesignSpec 草稿槽模型重构、复用点归属改正（派生校验 / issue_store / adapter trait）、角色权限映射表、seen_cursor 落盘语义统一、熔断条件细化、只读角色写保护、定稿溯源字段、triage 配置与并行 HOLD 收敛、假 provider 脚本化扩展。
+  - v1.2 —— 依据调研报告吸收业界模式：**价值定位修正**（群聊模式的价值是「人类可介入/可观察的协作体验 + 角色专业化分工」，而非默认更高产物质量——同等 token 预算下多 agent 讨论常不优于强提示单 agent，双模式并存即对冲）、**上下文注入策略**（窗口化上下文替代全量时间线广播，成本杠杆）、**triage 显式可插拔 + 自然终止**（对齐 AutoGen speaker_selection 模式）、**发言预算 + 反附和角色提示**（针对实证 sycophancy 失败模式）。
 
 ## 1. 背景与目标
 
@@ -113,22 +116,36 @@ DraftSlot { slot_key, current: Option<ArtifactDraft>, claim: Option<Claim> }
 
 ## 5. Coordinator 仲裁与 agent 间讨论循环
 
-机制对照 Cumora `COORDINATION.md`，适配 Aria 单机进程内引擎（agent 为按需拉起的 CLI 子进程，无 SSE 常驻 daemon，限流可简化，仲裁语义完整保留）。
+机制对照 Cumora `COORDINATION.md`，并结合调研结论对齐 AutoGen `speaker_selection_func` 成熟模式；适配 Aria 单机进程内引擎（agent 为按需拉起的 CLI 子进程，无 SSE 常驻 daemon，限流可简化，仲裁语义完整保留）。
 
-### 5.1 消息处理流水线
+### 5.1 Triage 接口（显式可插拔，v1.2 定义）
+
+triage 定义为一个**可插拔函数**，对齐 AutoGen `speaker_selection_func` 语义：
+
+````text
+TriageInput  { triggering_event, last_speaker, room_state,
+               artifact_lines 快照, roles 阵容 }
+TriageOutput = RespondTo(Vec<RoleInstanceId>)   // 被路由的发言者集合（0~2 个）
+             | NoOneNeedsToRespond              // 自然终止：无人需发言
+````
+
+- 实现双路径：小模型调用（可配置，§5.2）/ 规则兜底；原则式 prompt，不枚举场景。
+- **`NoOneNeedsToRespond` 是讨论自然结束的正常路径**（而非仅靠熔断兜底）：连续两轮 triage 返回 NoOne → 引擎在时间线发系统提示「当前讨论暂无待响应方」，房间进入等待人类状态。AutoGen 中 `speaker_selection_func` 返回 None 即结束，同一模式。
+- 被 @ 的角色不经 triage，**必定** actionable（人类点名必须响应）。
+
+### 5.2 消息处理流水线
 
 ````text
 用户消息（可带 @mentions）
    │
    ▼
-① Triage Gate（纯门控）
+① Triage Gate（§5.1 接口，纯门控）
    - 被 @ 的角色 → 必定 actionable（人类点名必须响应）
    - 未 @ → 按「角色职责 × 消息内容 + 当前产物线状态」路由 0~2 个角色
-   - 原则式 prompt，不枚举场景（Cumora 反模式教训）
    │
    ▼
 ② Agent Turn 执行（被选中角色有限并行发言）
-   快照 seen_cursor 之后的时间线 → 组 prompt → 调 StreamingProviderAdapter
+   组装窗口化上下文（§5.2a）→ 组 prompt → 调 StreamingProviderAdapter
    │
    ▼
 ③ Freshness 门控（seen-cursor）
@@ -142,12 +159,15 @@ DraftSlot { slot_key, current: Option<ArtifactDraft>, claim: Option<Claim> }
    │
    ▼
 ⑤ Agent 间讨论循环
-   agent 发言本身是新消息 → 回到 ①，由 triage 判定是否有其他角色需要响应
+   agent 发言本身是新消息 → 回到 ① 再次 triage；NoOneNeedsToRespond
+   即自然终止（§5.1）
    │
    ▼
 ⑥ 循环熔断（确定性下限，硬编码不靠模型）
    - 硬上限：两次人类消息之间，agent 消息总数（含 HOLD 后重试产出）
      ≤ HARD_LOOP_CAP（默认 12）
+   - **发言预算（v1.2 新增）**：每轮每角色 ≤ 1 条发言（同一触发事件下
+     同一角色不允许连续发言两次），由引擎在调度层硬约束
    - 空转检测（合取条件，v1.1 细化）：连续 N（默认 4）条 agent 消息
      满足「响应者集合无新增参与者」**且**「无任何草稿槽状态/版本变化」
      → 熔断。仅"无新增参与者"不熔断——reviewer 对 author 的 v2/v3
@@ -155,11 +175,22 @@ DraftSlot { slot_key, current: Option<ArtifactDraft>, claim: Option<Claim> }
    - 熔断时聊天室发系统提示：「讨论已暂停，等待你的输入」
 ````
 
-**① triage 的实现与配置**：triage 本身也是一次 provider 调用（流式短调用），provider 在聊天室设置中独立配置（默认复用 session 内最便宜的 provider；未配置则纯规则路由）。规则兜底：triage 调用失败/超时（30s）/返回不可解析 → 退化为规则路由（角色职责关键词 + 产物线状态匹配）。两种路径都产生可观测日志。
+### 5.2a 上下文注入策略（v1.2 新增，核心成本杠杆）
 
-**②③ 并行 HOLD 的收敛保证**：引擎对「事件落盘」串行化（单写者）；并行 turn 使用同一快照时，先落盘者推进时间线，后落盘者必然 HOLD。HOLD 重试上限 3 次（退避 1s/2s/4s），超限则该 turn 放弃并在时间线留 HeldEvent（reason=retry_exhausted），等待人类下次消息自然重新触发——保证不无限循环、不丢上下文。
+调研结论：把全量群聊历史广播给每个角色是业界最常见的成本失控点（成本随轮数×人数平方膨胀）。因此 **agent turn 的上下文不是全量时间线**，而是按角色组装的「窗口化上下文」：
 
-### 5.2 认领机制（Claim）
+1. **该角色未读的关键消息**：seen_cursor 之后的事件（人类消息、@自己的消息、相关草稿槽的新版本、审稿意见）——这部分完整注入。
+2. **角色相关摘要**：更早的历史时间线由引擎维护滚动摘要（每 HOLD_LOOP 窗口或每 20 条事件压缩一次，摘要生成用小模型），只注入与该角色职责相关的摘要段。
+3. **相关草稿全文**：该角色写权限内的草稿槽当前稿全文（执笔角色）；reviewer 注入其审查目标草稿的全文 + 与上一版的 diff。
+4. **per-turn 上下文预算**：窗口化上下文总量设 token 上限（默认 16k，可配置），超限按「人类消息 > 相关草稿 > 未读消息 > 摘要」优先级截断。
+
+seen_cursor 仍记录已推进位置（§4.3），但「已读」≠「每轮都重新注入」——只是保证不重读遗漏；窗口化上下文决定每轮实际进 prompt 的内容。
+
+### 5.3 triage 实现与配置：triage 调用本身是流式短调用（§5.1 接口的实现之一），provider 在聊天室设置中独立配置（默认复用 session 内最便宜的 provider；未配置则纯规则路由）。规则兜底：triage 调用失败/超时（30s）/返回不可解析 → 退化为规则路由（角色职责关键词 + 产物线状态匹配）。两种路径都产生可观测日志。
+
+（另见 §5.1）**并行 HOLD 的收敛保证**：引擎对「事件落盘」串行化（单写者）；并行 turn 使用同一快照时，先落盘者推进时间线，后落盘者必然 HOLD。HOLD 重试上限 3 次（退避 1s/2s/4s），超限则该 turn 放弃并在时间线留 HeldEvent（reason=retry_exhausted），等待人类下次消息自然重新触发——保证不无限循环、不丢上下文。
+
+### 5.4 认领机制（Claim）
 
 采用 Cumora 原则：**claim 只存在于真实的共享交付物（草稿槽）上，聊天发言永远不 claim**。
 
@@ -167,14 +198,14 @@ DraftSlot { slot_key, current: Option<ArtifactDraft>, claim: Option<Claim> }
 - UI 展示「Story 稿当前由 author 执笔中」「design_frontend 由 fe-design 执笔中」。
 - reviewer / researcher 无写权限（§2.1 双层只读），天然不需要认领。
 
-### 5.3 并发与节奏（Cumora 限流层的简化版）
+### 5.5 并发与节奏（Cumora 限流层的简化版）
 
 - **并发上限**：同一 provider 同时最多 N 个 agent turn（默认 2，可配置）；triage 调用同受此限——两层一起限（Cumora 反模式：只限一层曾导致全机静默）。
 - **spawn 间隔**：同 provider 调用至少间隔 500ms（确定性间隔，不用随机抖动）。
 - **速率退避**：provider 返回 rate-limit → 该 provider 所有角色静默退避 60s，不在聊天室刷错误。
 - 不需要 wake debounce（引擎自控循环，无 SSE 并发唤醒）。
 
-### 5.4 角色协作纪律（Prompt 层，对应 GLANCE_YIELD_RULES）
+### 5.6 角色协作纪律（Prompt 层，对应 GLANCE_YIELD_RULES）
 
 各角色 system prompt 共享五条 shape-level 纪律（刻意简短，不枚举场景）：
 
@@ -183,6 +214,10 @@ DraftSlot { slot_key, current: Option<ArtifactDraft>, claim: Option<Claim> }
 3. 乐观发言，引擎是安全网；被 HOLD 就重读新状态重新生成。
 4. 不重复他人观点；按任务完成度（而非人头数）判断何时收手；缺席角色的活由在场者补位。
 5. 永远不 claim 聊天发言，claim 只作用于草稿槽。
+
+**反附和（v1.2 新增）**：实证表明同质角色自由辩论存在附和（sycophancy）放大与准确率下降。缓解：① 各角色提示词必须有实质差异与唯一职责（reviewer 明示「对抗性立场：默认假设稿子有问题，禁止附和性同意；没有实质意见就明确说『无异议』而非找话讲」）；② 默认阵容保持 3 角色（author+reviewer+researcher），调研建议从 2–3 个 agent 起步验证后再扩。
+
+**价值定位（v1.2 新增）**：群聊模式的价值是「人类可介入/可观察的协作体验 + 角色专业化分工」，**不承诺默认更高的产物质量**（同等 token 预算下多 agent 讨论常不优于强提示单 agent）。双模式并存 + 双模式产物同构即为此对冲；后续可用「同 token 预算 A/B（流水线 vs 群聊）」评估是否值得保留群聊模式。
 
 ## 6. 产物线流转与人类定稿
 
