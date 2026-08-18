@@ -125,7 +125,9 @@ impl IntoResponse for ApiError {
             | "repository_already_registered"
             | "repository_initialization_in_progress"
             | "shared_worktree_dirty_manual_gate"
-            | "coding_workspace_exists" => StatusCode::CONFLICT,
+            | "coding_workspace_exists"
+            | "legacy_repository_endpoint_on_multi_repo"
+            | "logical_codebase_feature_disabled" => StatusCode::CONFLICT,
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
             // Codex danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
@@ -467,6 +469,11 @@ mod tests {
                 "cross_target_store_failure",
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
+            (
+                "legacy_repository_endpoint_on_multi_repo",
+                StatusCode::CONFLICT,
+            ),
+            ("logical_codebase_feature_disabled", StatusCode::CONFLICT),
         ];
 
         for (code, expected_status) in cases {

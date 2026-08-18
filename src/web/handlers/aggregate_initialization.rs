@@ -9,7 +9,7 @@
 //! repository GitFinalize warning DTO.
 
 use super::dto::aggregate_initialization_dto;
-use super::support::{product_app_paths, product_store_api_error};
+use super::support::{product_app_paths, product_store_api_error, require_multi_repo_project};
 use super::*;
 
 use std::sync::Arc;
@@ -112,11 +112,12 @@ pub async fn create_aggregate_initialization(
     Path(project_id): Path<String>,
     Json(request): Json<CreateAggregateInitializationRequest>,
 ) -> ApiResult<Response> {
+    let project_paths = product_app_paths(&state);
+    require_multi_repo_project(&project_paths, &project_id)?;
     validate_project_id(&project_id)?;
     validate_idempotency_key(&request.idempotency_key)?;
     let dependencies = aggregate_initialization_dependencies(&state);
     let operation_id = deterministic_operation_id(&project_id, &request.idempotency_key);
-    let project_paths = product_app_paths(&state);
     let manifest = load_manifest_for_profile(&project_paths, &project_id)?;
     let input = crate::product::logical_codebase::AggregateInitializationOperationInput {
         idempotency_key: request.idempotency_key.clone(),
@@ -153,6 +154,8 @@ pub async fn get_aggregate_initialization(
     State(state): State<WebAppState>,
     Path((project_id, operation_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
+    let project_paths = product_app_paths(&state);
+    require_multi_repo_project(&project_paths, &project_id)?;
     validate_project_id(&project_id)?;
     validate_operation_id(&operation_id)?;
     let dependencies = aggregate_initialization_dependencies(&state);
@@ -182,6 +185,8 @@ pub async fn cancel_aggregate_initialization(
     Path((project_id, operation_id)): Path<(String, String)>,
     Json(request): Json<CancelAggregateInitializationRequest>,
 ) -> ApiResult<Response> {
+    let project_paths = product_app_paths(&state);
+    require_multi_repo_project(&project_paths, &project_id)?;
     validate_project_id(&project_id)?;
     validate_operation_id(&operation_id)?;
     let dependencies = aggregate_initialization_dependencies(&state);

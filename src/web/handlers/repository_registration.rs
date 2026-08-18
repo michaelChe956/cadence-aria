@@ -1,5 +1,7 @@
 use super::dto::repository_initialization_operation_dto;
-use super::support::{product_app_paths, product_store_api_error};
+use super::support::{
+    product_app_paths, product_store_api_error, reject_legacy_repository_endpoint_on_multi_repo,
+};
 use super::*;
 
 use std::collections::BTreeMap;
@@ -7,6 +9,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::rejection::JsonRejection;
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
@@ -303,11 +306,16 @@ fn git_finalize_environment(home: &std::path::Path) -> std::collections::BTreeMa
 pub async fn create_repository(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
-    Json(request): Json<CreateRepositoryRequest>,
+    request: Result<Json<CreateRepositoryRequest>, JsonRejection>,
 ) -> ApiResult<Response> {
-    ProjectStore::new(product_app_paths(&state))
+    let project = ProjectStore::new(product_app_paths(&state))
         .get(&project_id)
         .map_err(product_store_api_error)?;
+    reject_legacy_repository_endpoint_on_multi_repo(&project)?;
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(error) => return Ok(error.into_response()),
+    };
     let dependencies = match state.repository_registration_dependencies() {
         Some(dependencies) => dependencies,
         None => default_dependencies(&state).map_err(|error| ApiError::from(*error))?,
@@ -357,6 +365,17 @@ pub async fn get_repository_initialization(
     State(state): State<WebAppState>,
     Path((project_id, operation_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
+    match ProjectStore::new(product_app_paths(&state)).get(&project_id) {
+        Ok(project) => reject_legacy_repository_endpoint_on_multi_repo(&project)?,
+        // Existing GET semantics resolve the operation first: an unknown or
+        // cross-project operation remains `repository_initialization_operation_not_found`
+        // even when its project record is absent. Only an existing multi-repo
+        // project is newly guarded.
+        Err(ProductStoreError::NotFound {
+            kind: "project", ..
+        }) => {}
+        Err(error) => return Err(product_store_api_error(error)),
+    }
     let dependencies = match state.repository_registration_dependencies() {
         Some(dependencies) => dependencies,
         None => default_dependencies(&state).map_err(|error| ApiError::from(*error))?,

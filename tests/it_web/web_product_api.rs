@@ -93,7 +93,7 @@ async fn creates_project_repository_and_issue_via_product_api() {
 }
 
 #[tokio::test]
-async fn production_repository_paths_do_not_silently_disable_missing_or_multi_repo_projects() {
+async fn production_repository_paths_reject_legacy_mutations_for_multi_repo_projects() {
     let root = tempdir().expect("root");
     let repository_root = git_repo();
     let state = WebAppState::with_events(
@@ -112,16 +112,28 @@ async fn production_repository_paths_do_not_silently_disable_missing_or_multi_re
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let repository = crate::create_repository_and_wait(
+    let (status, body) = request_json(
         app.clone(),
-        "project_0001",
+        Method::POST,
+        "/api/projects/project_0001/repositories",
         json!({"name":"Multi Repo","path":repository_root.path()}),
     )
     .await;
-    let repository_id = repository["repository"]["repository_id"]
-        .as_str()
-        .expect("repository id")
-        .to_string();
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "legacy_repository_endpoint_on_multi_repo");
+    assert!(
+        body["message"]
+            .as_str()
+            .expect("error message")
+            .contains("请使用逻辑代码库登记端点")
+    );
+    assert!(
+        !root
+            .path()
+            .join(".aria/projects/project_0001/repository-initializations")
+            .exists(),
+        "legacy mutation guard must run before initialization persistence"
+    );
 
     let (repositories_status, repositories) = request_json(
         app.clone(),
@@ -131,25 +143,7 @@ async fn production_repository_paths_do_not_silently_disable_missing_or_multi_re
     )
     .await;
     assert_eq!(repositories_status, StatusCode::OK);
-    assert_eq!(
-        repositories["repositories"][0]["repository_id"],
-        repository_id
-    );
-    assert!(
-        root.path()
-            .join(".aria/projects/project_0001/logical-codebase/manifest.json")
-            .exists()
-    );
-
-    let (issue_status, issue) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues",
-        json!({"title":"Multi issue","description":null,"repository_id":repository_id}),
-    )
-    .await;
-    assert_eq!(issue_status, StatusCode::OK);
-    assert_eq!(issue["repo_id"], repository["repository"]["repository_id"]);
+    assert_eq!(repositories["repositories"], json!([]));
 
     let (missing, body) = request_json(
         app,
