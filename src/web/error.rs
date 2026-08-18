@@ -72,14 +72,17 @@ impl IntoResponse for ApiError {
             | "workspace_not_found"
             | "work_item_not_found"
             | "task_workspace_not_found"
-            | "workspace_session_not_found" => StatusCode::NOT_FOUND,
+            | "workspace_session_not_found"
+            | "registration_preflight_not_found" => StatusCode::NOT_FOUND,
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }
             "repository_routing_target_missing"
             | "mixed_target_group_rejected"
             | "target_snapshot_missing_for_logical" => StatusCode::UNPROCESSABLE_ENTITY,
-            "target_snapshot_identity_drifted"
+            "registration_batch_conflict"
+            | "aggregate_root_mismatch"
+            | "target_snapshot_identity_drifted"
             | "target_snapshot_policy_drifted"
             | "legacy_shared_worktree_present"
             | "legacy_shared_worktree_inconsistent"

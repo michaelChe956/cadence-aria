@@ -33,6 +33,11 @@ impl LogicalCodebaseRegistrationCoordinator {
                 reason: "confirmed preflight must contain at least one candidate".to_string(),
             });
         }
+        // The submitted root is an invariant of every batch, including a
+        // queued one. Check it before writing a receipt so root conflicts
+        // never leave an unrelated batch behind.
+        LogicalCodebaseStore::new(self.paths.clone())
+            .validate_registration_root(&input.project_id, &input.aggregate_root.canonical_path)?;
 
         let items = input
             .candidates
@@ -111,6 +116,41 @@ impl LogicalCodebaseRegistrationCoordinator {
         validate_relative_id(project_id)?;
         validate_relative_id(batch_id)?;
         let batches = RegistrationBatchStore::new(self.paths.clone());
+        let initial = batches.load(project_id, batch_id)?;
+        if matches!(
+            initial.status,
+            RegistrationBatchStatus::Cancelled | RegistrationBatchStatus::Completed
+        ) {
+            return Ok(initial);
+        }
+        // Reject an incompatible root before making a durable state change, so
+        // a caller can receive the stable conflict without stranding a batch
+        // in `running`.
+        LogicalCodebaseStore::new(self.paths.clone())
+            .validate_registration_root(project_id, &initial.aggregate_root)?;
+        // Identity drift is batch-scoped. Validate every unfinished item before
+        // attaching any member; otherwise a later identity conflict could
+        // leave earlier items attached even though the caller receives 409.
+        if let Err(error) = self.validate_pending_batch_identities(project_id, &initial) {
+            if matches!(initial.status, RegistrationBatchStatus::Running)
+                && matches!(
+                    &error,
+                    ProductStoreError::Conflict {
+                        kind: "registration_batch_candidate_identity_changed",
+                        ..
+                    }
+                )
+            {
+                batches.with_batch_mutation(project_id, batch_id, |batch| {
+                    if batch.status == RegistrationBatchStatus::Running {
+                        batch.status = RegistrationBatchStatus::PartialFailed;
+                        batch.updated_at = Utc::now().to_rfc3339();
+                    }
+                    Ok(())
+                })?;
+            }
+            return Err(error);
+        }
         let (batch, ()) = batches.with_batch_mutation(project_id, batch_id, |batch| {
             if batch.status == RegistrationBatchStatus::Cancelled
                 || batch.status == RegistrationBatchStatus::Completed
@@ -172,6 +212,10 @@ impl LogicalCodebaseRegistrationCoordinator {
 
             let revalidated =
                 self.revalidate_batch_item(project_id, &current.aggregate_root, item)?;
+            // Identity drift is a batch-level conflict; revision drift is a
+            // recoverable item-level acknowledgement. `revalidate_batch_item`
+            // performs the identity comparison before returning the candidate,
+            // so this revision check is reached only for the same source.
             if revalidated.preflight_revision != item.preflight_revision {
                 item.status = RegistrationItemStatus::NeedsAttention;
                 item.failure_reason = Some("preflight_revision_changed".to_string());
@@ -190,15 +234,18 @@ impl LogicalCodebaseRegistrationCoordinator {
             item.repo_type = profile.repo_type.clone();
             item.tech_stack = profile.tech_stack.clone();
             let item_key = batch_item_idempotency_key(batch_id, &item.source_digest);
-            match self.attach_member(AttachOnlyRegistrationInput {
-                project_id: project_id.to_string(),
-                alias: item.alias.clone(),
-                role: item.role.clone(),
-                canonical_path: item.canonical_path.clone(),
-                repo_type: profile.repo_type,
-                tech_stack: profile.tech_stack,
-                idempotency_key: item_key,
-            }) {
+            match self.attach_member_with_root(
+                AttachOnlyRegistrationInput {
+                    project_id: project_id.to_string(),
+                    alias: item.alias.clone(),
+                    role: item.role.clone(),
+                    canonical_path: item.canonical_path.clone(),
+                    repo_type: profile.repo_type,
+                    tech_stack: profile.tech_stack,
+                    idempotency_key: item_key,
+                },
+                &current.aggregate_root,
+            ) {
                 Ok(_) => {
                     item.status = RegistrationItemStatus::Completed;
                     item.failure_reason = None;
@@ -238,6 +285,29 @@ impl LogicalCodebaseRegistrationCoordinator {
         Ok(completed)
     }
 
+    fn validate_pending_batch_identities(
+        &self,
+        project_id: &str,
+        batch: &RegistrationBatchRecord,
+    ) -> Result<(), ProductStoreError> {
+        for item in &batch.items {
+            if matches!(
+                item.status,
+                RegistrationItemStatus::Completed
+                    | RegistrationItemStatus::Skipped
+                    | RegistrationItemStatus::NeedsAttention
+            ) || self.member_already_attached(project_id, item)?
+            {
+                continue;
+            }
+            // This probe compares only canonical path, Git root and source
+            // identity. Revision/worktree changes remain item-level
+            // `NeedsAttention` and are handled by the execution loop.
+            self.revalidate_batch_item(project_id, &batch.aggregate_root, item)?;
+        }
+        Ok(())
+    }
+
     fn member_already_attached(
         &self,
         project_id: &str,
@@ -265,6 +335,27 @@ impl LogicalCodebaseRegistrationCoordinator {
                 id: item.source_digest.clone(),
             });
         }
+        let [checkout_id] = member.checkout_ids.as_slice() else {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "registration_batch_member_recovery",
+                id: item.source_digest.clone(),
+            });
+        };
+        let checkout = authority
+            .load_checkout(project_id, *checkout_id)?
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "registration_batch_member_recovery",
+                id: item.source_digest.clone(),
+            })?;
+        if checkout.canonical_path != item.canonical_path
+            || checkout.physical_repository_id != entry.physical_repository_id
+            || checkout.git_dir_identity != item.source_identity.git_dir_identity()
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "registration_batch_member_recovery",
+                id: item.source_digest.clone(),
+            });
+        }
         Ok(true)
     }
 
@@ -274,15 +365,15 @@ impl LogicalCodebaseRegistrationCoordinator {
         aggregate_root: &Path,
         item: &RegistrationBatchItem,
     ) -> Result<RegistrationCandidate, ProductStoreError> {
-        let canonical_path = fs::canonicalize(&item.submitted_path).map_err(|error| {
-            ProductStoreError::Io(format!(
-                "canonicalize registration batch item {}: {error}",
-                item.submitted_path.display()
-            ))
+        let canonical_path = fs::canonicalize(&item.submitted_path).map_err(|_| {
+            ProductStoreError::Conflict {
+                kind: "registration_batch_candidate_identity_changed",
+                id: item.source_digest.clone(),
+            }
         })?;
         if !canonical_path.starts_with(aggregate_root) {
             return Err(ProductStoreError::Conflict {
-                kind: "registration_batch_candidate_outside_root",
+                kind: "registration_batch_candidate_identity_changed",
                 id: item.source_digest.clone(),
             });
         }
@@ -294,7 +385,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         )?;
         let Some(evidence) = evidence else {
             return Err(ProductStoreError::Conflict {
-                kind: "registration_batch_candidate_not_git",
+                kind: "registration_batch_candidate_identity_changed",
                 id: item.source_digest.clone(),
             });
         };
@@ -512,7 +603,27 @@ impl LogicalCodebaseRegistrationCoordinator {
                 id: input.project_id,
             });
         }
+        self.attach_member_inner(input)
+    }
 
+    fn attach_member_with_root(
+        &self,
+        input: AttachOnlyRegistrationInput,
+        aggregate_root: &Path,
+    ) -> Result<CodebaseMemberRecord, ProductStoreError> {
+        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let project_id = input.project_id.clone();
+        store.with_registration_manifest_writer(
+            &project_id,
+            aggregate_root,
+            || self.attach_member_inner(input),
+        )
+    }
+
+    fn attach_member_inner(
+        &self,
+        input: AttachOnlyRegistrationInput,
+    ) -> Result<CodebaseMemberRecord, ProductStoreError> {
         let repository = self.repositories.create(CreateRepositoryInput {
             project_id: input.project_id.clone(),
             name: input.alias.clone(),

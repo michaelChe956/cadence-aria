@@ -90,6 +90,33 @@ fn routing_error_code_from_reason(kind: &str, reason: &str) -> Option<&'static s
 pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::NotFound {
+            kind: "registration_preflight", ..
+        } => ApiError::runtime(
+            "registration_preflight_not_found",
+            "registration preflight not found or expired",
+            json!({}),
+        ),
+        ProductStoreError::Conflict {
+            kind: "registration_batch_candidate_identity_changed",
+            ..
+        }
+        | ProductStoreError::IdentityMismatch {
+            kind: "registration_batch_member_recovery",
+            ..
+        } => ApiError::runtime(
+            "registration_batch_conflict",
+            "registration batch conflicts with current repository identity",
+            json!({}),
+        ),
+        ProductStoreError::Conflict {
+            kind: "aggregate_root_mismatch",
+            ..
+        } => ApiError::runtime(
+            "aggregate_root_mismatch",
+            "aggregate root does not match the logical codebase manifest",
+            json!({}),
+        ),
+        ProductStoreError::NotFound {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),
         ProductStoreError::NotFound {

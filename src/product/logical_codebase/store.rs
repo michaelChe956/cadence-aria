@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, LogicalRepositoryId, RepositoryCheckoutId, RepositoryCheckoutRecord,
@@ -152,6 +153,93 @@ impl LogicalCodebaseStore {
         }
 
         write_json(&self.manifest_path(project_id)?, manifest)
+    }
+
+    /// Checks the provider root under the manifest writer lock without
+    /// creating a manifest. Registration uses this before any member work so
+    /// a conflicting batch cannot partially attach.
+    pub fn validate_registration_root(
+        &self,
+        project_id: &str,
+        provider_context_root: &Path,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        with_exact_exclusive_lock(
+            &self.paths.logical_codebase_manifest_lock_path(project_id),
+            || {
+                if let Some(manifest) = self.load_manifest(project_id)?
+                    && manifest.provider_context_root != provider_context_root
+                {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "aggregate_root_mismatch",
+                        id: project_id.to_string(),
+                    });
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Runs first-member registration while holding the manifest single-writer
+    /// lock. A true first batch gets its manifest and first member in one
+    /// critical section; if the operation fails before membership is written,
+    /// the provisional empty manifest is removed.
+    pub fn with_registration_manifest_writer<T>(
+        &self,
+        project_id: &str,
+        provider_context_root: &Path,
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        with_exact_exclusive_lock(
+            &self.paths.logical_codebase_manifest_lock_path(project_id),
+            || {
+                let created = if let Some(manifest) = self.load_manifest(project_id)? {
+                    if manifest.provider_context_root != provider_context_root {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "aggregate_root_mismatch",
+                            id: project_id.to_string(),
+                        });
+                    }
+                    false
+                } else {
+                    self.save_manifest(
+                        project_id,
+                        &LogicalCodebaseManifest::new(
+                            project_id,
+                            provider_context_root.to_path_buf(),
+                            Vec::new(),
+                        ),
+                    )?;
+                    true
+                };
+
+                match operation() {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        if created
+                            && self
+                                .load_manifest(project_id)?
+                                .is_some_and(|manifest| manifest.member_ids.is_empty())
+                        {
+                            let path = self.manifest_path(project_id)?;
+                            match std::fs::remove_file(&path) {
+                                Ok(()) => {}
+                                Err(remove_error) if remove_error.kind() == ErrorKind::NotFound => {
+                                }
+                                Err(remove_error) => {
+                                    return Err(ProductStoreError::Io(format!(
+                                        "remove provisional manifest {}: {remove_error}",
+                                        path.display()
+                                    )));
+                                }
+                            }
+                        }
+                        Err(error)
+                    }
+                }
+            },
+        )
     }
 
     pub fn save_member(

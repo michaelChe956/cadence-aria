@@ -692,6 +692,49 @@ mod tests {
     }
 
     #[test]
+    fn product_store_api_error_maps_registration_codes_to_stable_http_statuses() {
+        let cases = [
+            (
+                ProductStoreError::NotFound {
+                    kind: "registration_preflight",
+                    id: "preflight_0001".to_string(),
+                },
+                "registration_preflight_not_found",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "registration_batch_candidate_identity_changed",
+                    id: "sha256:source".to_string(),
+                },
+                "registration_batch_conflict",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "aggregate_root_mismatch",
+                    id: "project_0001".to_string(),
+                },
+                "aggregate_root_mismatch",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::IdentityMismatch {
+                    kind: "registration_batch_member_recovery",
+                    id: "sha256:source".to_string(),
+                },
+                "registration_batch_conflict",
+                StatusCode::CONFLICT,
+            ),
+        ];
+        for (store_error, code, status) in cases {
+            let error = product_store_api_error(store_error);
+            assert_eq!(error.code, code);
+            assert_eq!(error.into_response().status(), status);
+        }
+    }
+
+    #[test]
     fn product_store_api_error_maps_routing_kinds_to_stable_codes() {
         // B3：routing 相关 ProductStoreError → 稳定错误码 + 4xx。
         let error = product_store_api_error(ProductStoreError::Ambiguous {

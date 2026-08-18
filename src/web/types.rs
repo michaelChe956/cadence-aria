@@ -337,7 +337,8 @@ pub use aggregate_initialization::{
 
 mod logical_codebase_registration;
 pub use logical_codebase_registration::{
-    RegistrationPreflightItemDto, RegistrationPreflightRequest, RegistrationPreflightResponse,
+    RegistrationBatchDto, RegistrationBatchItemDto, RegistrationPreflightItemDto,
+    RegistrationPreflightRequest, RegistrationPreflightResponse, RegistrationSubmitRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

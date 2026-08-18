@@ -335,6 +335,11 @@ impl IdentityMigrationExecutor {
             {
                 Ok(())
             }
+            // Registration creates the aggregate-root manifest before the
+            // first repository enters identity migration. With no legacy
+            // inputs yet, preserve that root; membership is added by the
+            // repository create transaction below.
+            Some(manifest) if manifest.member_ids.is_empty() && inputs.is_empty() => Ok(()),
             Some(_) => self.fail_identity_mismatch(
                 journal,
                 "logical_codebase_manifest",

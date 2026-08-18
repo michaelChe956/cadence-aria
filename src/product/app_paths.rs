@@ -69,6 +69,11 @@ impl ProductAppPaths {
             .join(".registration-batches.lock")
     }
 
+    pub fn logical_codebase_manifest_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join(".manifest-registration.lock")
+    }
+
     pub fn identity_migration_lock_path(&self, project_id: &str) -> PathBuf {
         self.logical_codebase_root(project_id)
             .join(".identity-migration.lock")

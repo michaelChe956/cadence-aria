@@ -4,17 +4,24 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::product::logical_codebase::{
-    AggregateRootPreflight, LogicalCodebaseFeature, LogicalCodebaseRegistrationCoordinator,
-    RegistrationPreflightInput, RegistrationPreflightSnapshot, RegistrationPreflightSnapshotStore,
+    AggregateRootPreflight, CanonicalAggregateRoot, ConfirmedRegistrationBatchInput,
+    LogicalCodebaseFeature, LogicalCodebaseRegistrationCoordinator, RegistrationBatchStatus,
+    RegistrationCandidateState, RegistrationItemStatus, RegistrationPreflightInput,
+    RegistrationPreflightResult, RegistrationPreflightSnapshot, RegistrationPreflightSnapshotStore,
 };
 use crate::product::repository_store::RepositoryStore;
-use crate::web::error::ApiResult;
+use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::support::{
-    aggregate_root_api_error, product_app_paths, require_multi_repo_project,
+    aggregate_root_api_error, product_app_paths, product_store_api_error,
+    require_multi_repo_project,
 };
 use crate::web::state::WebAppState;
-use crate::web::types::RegistrationPreflightItemDto;
+use crate::web::types::{
+    RegistrationBatchDto, RegistrationBatchItemDto, RegistrationPreflightItemDto,
+    RegistrationSubmitRequest,
+};
 use crate::web::types::{RegistrationPreflightRequest, RegistrationPreflightResponse};
 
 include!("logical_codebase_registration/dto.inc.rs");
 include!("logical_codebase_registration/preflight.inc.rs");
+include!("logical_codebase_registration/submit.inc.rs");
