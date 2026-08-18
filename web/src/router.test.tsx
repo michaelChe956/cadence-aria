@@ -18,6 +18,14 @@ vi.mock("./pages/ChatWorkspacePage", () => ({
   ChatWorkspacePage: () => <div data-testid="chat-workspace-page">Chat Workspace</div>,
 }));
 
+vi.mock("./pages/ChatRoomPage", () => ({
+  ChatRoomPage: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="chat-room-page" data-session-id={sessionId}>
+      Chat Room
+    </div>
+  ),
+}));
+
 vi.mock("./pages/CodingWorkspacePage", () => ({
   CodingWorkspacePage: ({ address }: { address: CodingAttemptAddress }) => (
     <div
@@ -134,6 +142,7 @@ describe("router", () => {
       ],
     ).toBeDefined();
     expect(router.routesByPath["/workbench/workspace/$sessionId"]).toBeDefined();
+    expect(router.routesByPath["/group-chat/$sessionId"]).toBeDefined();
   });
 
   it("replaces a legacy coding workspace address with the scoped address", async () => {
@@ -286,6 +295,7 @@ describe("router", () => {
   it.each([
     ["Workbench", "/workbench", "workbench-page"],
     ["Chat Workspace", "/workbench/workspace/session_0001", "chat-workspace-page"],
+    ["Chat Room", "/group-chat/session_0001", "chat-room-page"],
     [
       "Coding Workspace",
       "/workbench/projects/project_0001/issues/issue_0001/coding/attempt_0001",

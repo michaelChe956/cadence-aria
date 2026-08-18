@@ -1,0 +1,235 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ChatRoomTimeline > 渲染全部 RoomEvent 变体及角色实例名牌 1`] = `
+<DocumentFragment>
+  <div
+    class="min-h-0 flex-1 overflow-auto px-3 py-4"
+    data-testid="chat-room-timeline"
+  >
+    <div
+      class="space-y-3"
+    >
+      <div
+        class="flex justify-end"
+        data-testid="room-user-message"
+      >
+        <article
+          class="max-w-3xl rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm shadow-sm"
+        >
+          <div
+            class="text-xs font-semibold text-gray-600"
+          >
+            用户
+          </div>
+          <div
+            class="mt-2 whitespace-pre-wrap break-words text-[var(--aria-ink)]"
+          >
+            请讨论登录流程
+          </div>
+          <div
+            class="mt-2 flex flex-wrap gap-1"
+          >
+            <span
+              class="rounded bg-white px-1.5 py-0.5 text-xs text-[var(--aria-ink-muted)]"
+            >
+              @前端设计师
+            </span>
+          </div>
+        </article>
+      </div>
+      <div
+        class="flex justify-start"
+        data-testid="room-agent-message-role-frontend"
+      >
+        <article
+          class="w-full max-w-3xl rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm shadow-sm"
+        >
+          <div
+            class="flex min-w-0 items-center gap-2"
+          >
+            <span
+              class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-700"
+            >
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-user-round h-3.5 w-3.5"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <circle
+                  cx="12"
+                  cy="8"
+                  r="5"
+                />
+                <path
+                  d="M20 21a8 8 0 0 0-16 0"
+                />
+              </svg>
+            </span>
+            <span
+              class="truncate text-xs font-semibold text-blue-700"
+            >
+              前端设计师
+            </span>
+          </div>
+          <div
+            class="mt-2 space-y-3"
+          >
+            <div
+              class=""
+            >
+              <div
+                class="space-y-2 break-words text-sm text-[var(--aria-ink)]"
+              >
+                <p
+                  class="whitespace-pre-wrap break-words"
+                >
+                  建议先定义登录状态。
+                </p>
+              </div>
+              <div
+                class="mt-2 text-xs text-[var(--aria-ink-muted)]"
+              >
+                草稿：设计规格 / frontend · v2
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+      <div
+        class="flex items-center justify-center gap-2 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-center text-xs text-[var(--aria-ink-muted)]"
+        data-testid="room-held-event"
+      >
+        <svg
+          aria-hidden="true"
+          class="lucide lucide-circle-pause h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]"
+          fill="none"
+          height="24"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          viewBox="0 0 24 24"
+          width="24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle
+            cx="12"
+            cy="12"
+            r="10"
+          />
+          <line
+            x1="10"
+            x2="10"
+            y1="15"
+            y2="9"
+          />
+          <line
+            x1="14"
+            x2="14"
+            y1="15"
+            y2="9"
+          />
+        </svg>
+        <span>
+          后端设计师 暂缓发言：等待前端接口约定
+        </span>
+      </div>
+      <div
+        class="flex items-center justify-center gap-2 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-center text-xs text-[var(--aria-ink-muted)]"
+        data-testid="room-claim-event"
+      >
+        <svg
+          aria-hidden="true"
+          class="lucide lucide-circle-check h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]"
+          fill="none"
+          height="24"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          viewBox="0 0 24 24"
+          width="24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle
+            cx="12"
+            cy="12"
+            r="10"
+          />
+          <path
+            d="m9 12 2 2 4-4"
+          />
+        </svg>
+        <span>
+          前端设计师 认领设计规格 / frontend
+        </span>
+      </div>
+      <div
+        class="flex items-center justify-center gap-2 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-center text-xs text-[var(--aria-ink-muted)]"
+        data-testid="room-finalize-event"
+      >
+        <svg
+          aria-hidden="true"
+          class="lucide lucide-file-check2 h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]"
+          fill="none"
+          height="24"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          viewBox="0 0 24 24"
+          width="24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"
+          />
+          <path
+            d="M14 2v4a2 2 0 0 0 2 2h4"
+          />
+          <path
+            d="m3 15 2 2 4-4"
+          />
+        </svg>
+        <span>
+          已定稿设计规格 · design-v2（包含：frontend、backend）
+        </span>
+      </div>
+      <div
+        class="flex items-center justify-center gap-2 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-center text-xs text-[var(--aria-ink-muted)]"
+        data-testid="room-system-notice"
+      >
+        <svg
+          aria-hidden="true"
+          class="lucide lucide-message-circle h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]"
+          fill="none"
+          height="24"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          viewBox="0 0 24 24"
+          width="24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"
+          />
+        </svg>
+        <span>
+          本轮讨论已结束
+        </span>
+      </div>
+      <div />
+    </div>
+  </div>
+</DocumentFragment>
+`;

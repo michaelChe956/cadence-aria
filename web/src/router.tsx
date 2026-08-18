@@ -14,6 +14,7 @@ import { useCallback } from "react";
 import { AppShell } from "./app-shell";
 import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
+import { ChatRoomPage } from "./pages/ChatRoomPage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
 import { ImageCreatePage } from "./pages/ImageCreatePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
@@ -107,6 +108,23 @@ const workspaceRoute = createRoute({
   component: WorkspaceRouteComponent,
 });
 
+function ChatRoomRouteComponent() {
+  const { sessionId } = useParams({ strict: false });
+  const navigate = useNavigate();
+  return (
+    <ChatRoomPage
+      sessionId={sessionId}
+      onBack={() => void navigate({ to: "/workbench" })}
+    />
+  );
+}
+
+const chatRoomRoute = createRoute({
+  getParentRoute: () => guardedWorkflowRoute,
+  path: "/group-chat/$sessionId",
+  component: ChatRoomRouteComponent,
+});
+
 function CodingWorkspaceRouteComponent() {
   const { projectId, issueId, attemptId } = useParams({ strict: false });
   const navigate = useNavigate();
@@ -173,6 +191,7 @@ const guardedWorkflowTree = guardedWorkflowRoute.addChildren([
   indexRoute,
   workbenchRoute,
   workspaceRoute,
+  chatRoomRoute,
   codingWorkspaceRoute,
   legacyCodingWorkspaceRoute,
 ]);
