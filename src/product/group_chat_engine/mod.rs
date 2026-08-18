@@ -1,3 +1,4 @@
+pub mod claims;
 pub mod context;
 pub mod roles;
 pub mod settings;
