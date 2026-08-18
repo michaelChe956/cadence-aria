@@ -13,6 +13,7 @@ pub mod execution_record_store;
 pub mod gate_store;
 pub mod git_workspace_service;
 pub mod group_chat_engine;
+pub mod group_chat_store;
 pub mod id;
 pub mod image_create;
 pub mod issue_store;

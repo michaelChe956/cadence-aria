@@ -50,4 +50,17 @@ impl ProductAppPaths {
         self.project_root(project_id)
             .join("repository-initializations")
     }
+
+    /// 返回群聊会话的独立持久化目录。
+    pub fn group_chat_session_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> PathBuf {
+        self.issue_root(project_id, issue_id)
+            .join("group-chat")
+            .join("sessions")
+            .join(session_id)
+    }
 }
