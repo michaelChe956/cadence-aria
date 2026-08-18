@@ -22,6 +22,11 @@ pub async fn create_aggregate_initialization(
         .coordinator
         .begin(operation_id, &project_id, input)
         .map_err(aggregate_initialization_api_error)?;
+    // Idempotent replays of a terminal operation return its durable record;
+    // only a newly-created (or crash-left Created) operation gets a worker.
+    if !matches!(operation.status, AggregateInitializationOperationStatus::Created) {
+        return Ok((StatusCode::ACCEPTED, Json(aggregate_initialization_dto(operation))).into_response());
+    }
     let key = InitializationRunKey::aggregate(&project_id, &operation.operation_id);
     let lease = dependencies.runs.register(key).ok_or_else(|| {
         ApiError::runtime(
@@ -30,9 +35,62 @@ pub async fn create_aggregate_initialization(
             json!({}),
         )
     })?;
-    // Task 3.3 will move this lease into a background worker. Task 3.2 only
-    // installs the production dependencies and shared run registry.
-    drop(lease);
+    let token = lease.cancellation_token();
+    let coordinator = dependencies.coordinator.clone();
+    let index = dependencies.index.clone();
+    let manifest_revision = operation.input.manifest_revision;
+    let project_id_for_worker = project_id.clone();
+    let operation_id_for_worker = operation.operation_id.clone();
+    tokio::spawn(async move {
+        // Keep the lease alive for the entire coordinator execution. Dropping
+        // it before spawning would make cancellation and recovery observability
+        // racy with the first provider turn.
+        let _lease = lease;
+        match coordinator
+            .execute(&project_id_for_worker, &operation_id_for_worker, token)
+            .await
+        {
+            Ok(_) => {
+                // Index creation is deliberately detached from initialization
+                // durability. A failed index build is observable in its own
+                // operation and must not roll back a completed initialization.
+                let project_id = project_id_for_worker.clone();
+                let operation_id = operation_id_for_worker.clone();
+                // Do not extend the initialization lease over the follow-up
+                // index build: this is an independent, best-effort task.
+                tokio::spawn(async move {
+                    let build_project_id = project_id.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        index.build(&build_project_id, manifest_revision)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => tracing::warn!(
+                            project_id = %project_id,
+                            operation_id = %operation_id,
+                            error = %error,
+                            "aggregate initialization index build stopped"
+                        ),
+                        Err(error) => tracing::warn!(
+                            project_id = %project_id,
+                            operation_id = %operation_id,
+                            error = %error,
+                            "aggregate initialization index worker panicked"
+                        ),
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    project_id = %project_id_for_worker,
+                    operation_id = %operation_id_for_worker,
+                    error = %error,
+                    "aggregate initialization worker stopped"
+                );
+            }
+        }
+    });
     Ok((StatusCode::ACCEPTED, Json(aggregate_initialization_dto(operation))).into_response())
 }
 
@@ -51,15 +109,15 @@ pub async fn get_aggregate_initialization(
         .map_err(aggregate_initialization_api_error)?;
     let operation = if matches!(
         operation.status,
-        AggregateInitializationOperationStatus::Created
-            | AggregateInitializationOperationStatus::Running
+        AggregateInitializationOperationStatus::Running
     ) && !dependencies
         .runs
         .is_active(&InitializationRunKey::aggregate(&project_id, &operation_id))
     {
-        // Retain the durable record for polling. Task 3.3 will add recovery of
-        // a previously running operation when no lease remains.
-        operation
+        dependencies
+            .coordinator
+            .recover_interrupted(&project_id, &operation_id)
+            .map_err(aggregate_initialization_api_error)?
     } else {
         operation
     };
@@ -85,6 +143,12 @@ pub async fn cancel_aggregate_initialization(
             request.detail.clone(),
         )
         .map_err(aggregate_initialization_api_error)?;
+    // Persist the cancellation first, then signal the in-memory worker. The
+    // worker checks this token at every step boundary and will not advance
+    // after the provider turn currently in flight completes.
+    dependencies
+        .runs
+        .cancel(&InitializationRunKey::aggregate(&project_id, &operation_id));
     Ok((StatusCode::OK, Json(aggregate_initialization_dto(operation))).into_response())
 }
 
