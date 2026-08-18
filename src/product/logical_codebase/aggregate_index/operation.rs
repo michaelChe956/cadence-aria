@@ -236,11 +236,12 @@ impl AggregateIndexOperation {
 
     /// Refreshes an existing active index after freshness detected a drift.
     ///
-    /// The caller (freshness service) supplies the previously-active record so
-    /// that on success we supersede it with a freshly verified record. On any
-    /// failure the newly-created generation is marked stale with the error and
-    /// the original error is propagated; the before-snapshot active generation
-    /// is never silently replaced.
+    /// The caller (freshness service) supplies the previously-active record as
+    /// freshness evidence. The durable active pointer is re-read by the shared
+    /// operation, so on success the freshly verified record supersedes the
+    /// current active generation. On any failure the newly-created generation
+    /// is marked stale with the error and the original error is propagated; the
+    /// before-snapshot active generation is never silently replaced.
     pub fn sync_and_verify(
         &self,
         project_id: &str,

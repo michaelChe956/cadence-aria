@@ -213,6 +213,41 @@ mod tests {
     }
 
     #[test]
+    fn sync_drift_marks_new_record_stale_and_keeps_before_active() {
+        let fixture = aggregate_index_fixture();
+        let active = fixture.persist_active_index();
+        fixture.cli.drift_on_sync();
+
+        let error = fixture
+            .operation()
+            .sync_and_verify("project_0001", active.clone())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AggregateIndexError::Failed { code: "aggregate_index_member_drifted", .. }
+        ));
+        assert_eq!(
+            fixture
+                .store()
+                .active_required("project_0001")
+                .unwrap()
+                .aggregate_index_id,
+            active.aggregate_index_id
+        );
+        let stale = fixture
+            .records("project_0001")
+            .into_iter()
+            .find(|record| record.aggregate_index_id != active.aggregate_index_id)
+            .unwrap();
+        assert_eq!(stale.status, AggregateIndexStatus::Stale);
+        assert_eq!(stale.member_snapshots[0].revision, "a".repeat(40));
+        assert_eq!(
+            stale.observed_after_member_snapshots[0].revision,
+            "b".repeat(40)
+        );
+    }
+
+    #[test]
     fn failed_rebuild_keeps_last_known_good_readable_and_marks_new_record_stale() {
         let fixture = aggregate_index_fixture();
         let active = fixture.persist_active_index();
@@ -546,6 +581,7 @@ mod tests {
         /// non-zero exit, simulating a CodeGraph parser crash mid-rebuild.
         fail_next_init: Option<String>,
         drift_on_init: bool,
+        drift_on_sync: bool,
         revision_overrides: BTreeMap<String, String>,
         init_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     }
@@ -578,6 +614,10 @@ mod tests {
             self.state.lock().unwrap().drift_on_init = true;
         }
 
+        fn drift_on_sync(&self) {
+            self.state.lock().unwrap().drift_on_sync = true;
+        }
+
         fn observe_init(&self, observer: Arc<dyn Fn() + Send + Sync>) {
             self.state.lock().unwrap().init_observer = Some(observer);
         }
@@ -605,6 +645,12 @@ mod tests {
                 if let Some(observer) = state.init_observer.as_ref() {
                     observer();
                 }
+            }
+            if request.argv.as_slice() == ["sync", "."] && state.drift_on_sync {
+                state
+                    .revision_overrides
+                    .insert("api".to_string(), "b".repeat(40));
+                state.drift_on_sync = false;
             }
             // A scripted init failure short-circuits before any other argv match
             // so the rebuild path observes a non-zero `codegraph init` exit.
@@ -646,6 +692,7 @@ mod tests {
                     String::new()
                 }
                 [init, dot] if init == "init" && dot == "." => "Indexed 2 files\n".to_string(),
+                [sync, dot] if sync == "sync" && dot == "." => "Synced 2 files\n".to_string(),
                 [files, json] if files == "files" && json == "--json" => serde_json::to_string(
                     &state
                         .files
