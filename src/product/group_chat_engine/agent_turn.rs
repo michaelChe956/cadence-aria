@@ -92,9 +92,8 @@ impl HoldRetryPolicy {
 
 /// 注入的时钟等待 future。
 ///
-/// 此类型刻意不要求 `Send`：`run_agent_turn` 不会自行 spawn，运行时由 B8 coordinator
-/// 在其已有任务中 `.await`。这样测试可以注入只记录时长的本地 future，而无需额外同步包装。
-pub type SleepFuture = Pin<Box<dyn Future<Output = ()>>>;
+/// 该 future 可安全跨线程传递，生产环境使用 Tokio sleep，测试可注入零等待实现。
+pub type SleepFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// 生产环境使用的 Tokio 时钟实现。
 pub fn sleep_with_tokio(duration: Duration) -> SleepFuture {
@@ -111,15 +110,15 @@ pub struct AgentTurnRuntime<'a> {
     /// 初次 provider 调用所依据的时间线长度快照。
     pub events_len_at_start: usize,
     /// 读取当前完整时间线，用于 freshness 与重复门控。
-    pub read_events: &'a mut dyn FnMut() -> Vec<RoomEvent>,
+    pub read_events: &'a mut (dyn FnMut() -> Vec<RoomEvent> + Send),
     /// 交付可见事件给调用方；不表示本模块执行持久化。
-    pub publish_event: &'a mut dyn FnMut(RoomEvent),
+    pub publish_event: &'a mut (dyn FnMut(RoomEvent) + Send),
     /// HOLD 后基于最新时间线重建上下文。通常委托给 `assemble_turn_context`。
-    pub rebuild_context: &'a mut dyn FnMut(&[RoomEvent], &mut RoleInstance) -> TurnContext,
+    pub rebuild_context: &'a mut (dyn FnMut(&[RoomEvent], &mut RoleInstance) -> TurnContext + Send),
     /// 测试可注入零等待或短退避，生产调用使用默认策略。
     pub retry_policy: HoldRetryPolicy,
     /// 执行退避的可注入时钟。生产环境传入 `sleep_with_tokio`，测试可传入立即完成的 future。
-    pub sleep: &'a mut dyn FnMut(Duration) -> SleepFuture,
+    pub sleep: &'a mut (dyn FnMut(Duration) -> SleepFuture + Send),
 }
 
 /// 执行一个群聊角色的 provider turn，并在输出侧实施 freshness / verbatim-dup 门控。

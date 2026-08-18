@@ -71,6 +71,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 
 mod coding;
 mod dto;
+pub mod group_chat;
 mod health;
 pub mod image_create;
 mod lifecycle;
@@ -85,6 +86,13 @@ mod workspace_session;
 pub use coding::{create_coding_attempt, create_group_coding_attempt};
 #[rustfmt::skip]
 pub(crate) use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
+pub use group_chat::{
+    add_role as group_chat_add_role, create_session as group_chat_create_session,
+    finalize as group_chat_finalize, get_session as group_chat_get_session,
+    get_spec_generation_mode, get_triage_provider as group_chat_get_triage_provider,
+    send_message as group_chat_send_message, update_spec_generation_mode,
+    update_triage_provider as group_chat_update_triage_provider,
+};
 pub use health::{health, runtime_info};
 pub use image_create::{
     create_session as create_image_create_session, delete_session as delete_image_create_session,

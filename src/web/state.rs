@@ -19,6 +19,8 @@ use crate::cross_cutting::provider_health::{
 };
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::group_chat_engine::GroupChatEngine;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
@@ -125,6 +127,7 @@ pub struct WebAppState {
     pub repository_initialization_runs: RepositoryInitializationRunRegistry,
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
+    pub group_chat_engine: Option<Arc<GroupChatEngine>>,
 }
 
 impl WebAppState {
@@ -165,6 +168,10 @@ impl WebAppState {
             provider_registry.clone(),
             image_create_run_registry.clone(),
         ));
+        let group_chat_engine = Some(Arc::new(GroupChatEngine::new(
+            ProductAppPaths::new(AriaStatePaths::from_workspace_root(&workspace_root).aria_root()),
+            provider_registry.clone(),
+        )));
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
@@ -185,6 +192,7 @@ impl WebAppState {
             repository_initialization_runs: RepositoryInitializationRunRegistry::default(),
             image_create_run_registry,
             image_create_engine,
+            group_chat_engine,
         }
     }
 
@@ -227,6 +235,12 @@ impl WebAppState {
             state.provider_registry.clone(),
             state.image_create_run_registry.clone(),
         ));
+        state.group_chat_engine = Some(Arc::new(GroupChatEngine::new(
+            ProductAppPaths::new(
+                AriaStatePaths::from_workspace_root(&state.workspace_root).aria_root(),
+            ),
+            state.provider_registry.clone(),
+        )));
         state
     }
 

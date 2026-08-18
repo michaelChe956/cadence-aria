@@ -20,6 +20,36 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route("/api/providers/recheck", post(handlers::providers_recheck))
         .route("/api/runtime-info", get(handlers::runtime_info))
         .route(
+            "/api/group-chat/sessions",
+            post(handlers::group_chat_create_session),
+        )
+        .route(
+            "/api/group-chat/sessions/{id}",
+            get(handlers::group_chat_get_session),
+        )
+        .route(
+            "/api/group-chat/sessions/{id}/messages",
+            post(handlers::group_chat_send_message),
+        )
+        .route(
+            "/api/group-chat/sessions/{id}/roles",
+            post(handlers::group_chat_add_role),
+        )
+        .route(
+            "/api/group-chat/sessions/{id}/finalize",
+            post(handlers::group_chat_finalize),
+        )
+        .route(
+            "/api/group-chat/sessions/{id}/settings/triage-provider",
+            get(handlers::group_chat_get_triage_provider)
+                .put(handlers::group_chat_update_triage_provider),
+        )
+        .route(
+            "/api/settings/spec-generation-mode",
+            get(handlers::get_spec_generation_mode)
+                .put(handlers::update_spec_generation_mode),
+        )
+        .route(
             "/api/image-create/sessions",
             get(handlers::list_image_create_sessions).post(handlers::create_image_create_session),
         )

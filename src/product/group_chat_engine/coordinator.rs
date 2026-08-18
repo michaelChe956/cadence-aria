@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
+
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
 
@@ -14,9 +16,13 @@ use super::agent_turn::{
     AgentTurnError, AgentTurnRuntime, HoldRetryPolicy, SleepFuture, run_agent_turn,
     sleep_with_tokio,
 };
+use super::claims::{ClaimError, DEFAULT_CLAIM_TIMEOUT, release, release_expired, try_claim};
 use super::context::{INJECTION_BUDGET_TOKENS, assemble_turn_context};
+use super::roles::writable_slots;
 use super::triage::{NoOneCounter, RoomStateView, TriageInput, TriageOutput, TriageRouter};
-use super::types::{ArtifactRef, GroupChatSessionRecord, RoleInstance, RoomEvent};
+use super::types::{
+    ArtifactDraft, ArtifactRef, DraftSlotKey, GroupChatSessionRecord, RoleInstance, RoomEvent,
+};
 
 /// 两次人类消息之间允许的默认 agent 活动（含 HOLD）上限。
 pub const HARD_LOOP_CAP: usize = 12;
@@ -54,7 +60,7 @@ impl Default for CoordinatorConfig {
 }
 
 /// 一次人类消息触发的可观测结果。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct CoordinatorRunSummary {
     /// 本轮经 `GroupChatStore::append_event` 写入的所有时间线序号。
     pub appended_seqs: Vec<u64>,
@@ -205,6 +211,19 @@ impl Coordinator {
         text: &str,
         mentions: Vec<String>,
     ) -> Result<CoordinatorRunSummary, CoordinatorError> {
+        self.on_user_message_inner(project_id, issue_id, session_id, text, mentions, None)
+            .await
+    }
+
+    async fn on_user_message_inner(
+        &mut self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        text: &str,
+        mentions: Vec<String>,
+        draft_target: Option<DraftTarget>,
+    ) -> Result<CoordinatorRunSummary, CoordinatorError> {
         let mut session = self.store.load_session(project_id, issue_id, session_id)?;
         let mut events = self.read_events(project_id, issue_id, session_id)?;
         let mut summary = CoordinatorRunSummary::default();
@@ -229,6 +248,7 @@ impl Coordinator {
         }]);
         let mut no_one = NoOneCounter::default();
         let mut spoken_for_trigger = HashSet::new();
+        let mut draft_assigned = false;
 
         while let Some(trigger) = triggers.pop_front() {
             if self.agent_activity_count(&events) >= self.config.hard_loop_cap {
@@ -281,7 +301,12 @@ impl Coordinator {
                 spoken_for_trigger.insert((trigger.seq, role_id));
             }
 
-            let scheduled = self.run_turns(&session, &events, selected).await;
+            let mut scheduled = self.run_turns(&session, &events, selected).await;
+            if let Some(target) = draft_target.as_ref()
+                && !draft_assigned
+            {
+                draft_assigned = decorate_draft_event(&mut scheduled.events, target);
+            }
             let events_before_turn = events.len();
             let provider_error_roles = scheduled
                 .completed
@@ -376,6 +401,270 @@ impl Coordinator {
 
         self.store.save_session_snapshot(&session)?;
         Ok(summary)
+    }
+
+    /// C1 显式起草路径：先认领指定草稿槽，再复用正常消息闭环，最后将本轮第一条
+    /// 可写角色发言落入草稿槽。消息不带槽位时保持 Coordinator 原有纯聊天语义。
+    pub async fn on_user_message_with_draft(
+        &mut self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        text: &str,
+        mentions: Vec<String>,
+        draft_slot: Option<DraftSlotKey>,
+    ) -> Result<CoordinatorRunSummary, CoordinatorError> {
+        let Some(draft_slot) = draft_slot else {
+            return self
+                .on_user_message(project_id, issue_id, session_id, text, mentions)
+                .await;
+        };
+        let mut session = self.store.load_session(project_id, issue_id, session_id)?;
+        self.release_expired_claims(project_id, issue_id, session_id, &mut session)?;
+        if !session
+            .artifact_lines
+            .iter()
+            .flat_map(|line| line.drafts.iter())
+            .any(|slot| slot.slot_key == draft_slot)
+        {
+            return Err(CoordinatorError::Store(ProductStoreError::InvalidRecord {
+                kind: "group_chat_draft_slot",
+                reason: format!("draft slot not found: {}", draft_slot.0),
+            }));
+        }
+        let role = if mentions.is_empty() {
+            session
+                .roles
+                .iter()
+                .find(|role| writable_slots(role.role_key).contains(&draft_slot))
+                .cloned()
+        } else {
+            mentions
+                .iter()
+                .filter_map(|id| session.roles.iter().find(|role| role.id == *id))
+                .find(|role| writable_slots(role.role_key).contains(&draft_slot))
+                .cloned()
+        };
+        let Some(role) = role else {
+            return self
+                .on_user_message(project_id, issue_id, session_id, text, mentions)
+                .await;
+        };
+        let line = session
+            .artifact_lines
+            .iter_mut()
+            .find(|line| line.drafts.iter().any(|slot| slot.slot_key == draft_slot))
+            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                kind: "group_chat_draft_slot",
+                reason: format!("draft slot not found: {}", draft_slot.0),
+            })?;
+        let claim_event = match try_claim(line, &draft_slot, &role, Utc::now()) {
+            Ok(event) => event,
+            Err(ClaimError::SlotAlreadyClaimed { .. }) => {
+                let mut summary = self
+                    .on_user_message(project_id, issue_id, session_id, text, mentions)
+                    .await?;
+                let seq = self.store.append_event(
+                    project_id,
+                    issue_id,
+                    session_id,
+                    RoomEvent::HeldEvent {
+                        role_instance_id: role.id,
+                        reason: "draft_slot_claimed".to_owned(),
+                        cursor_after: self
+                            .store
+                            .load_events(project_id, issue_id, session_id)?
+                            .len() as u64,
+                    },
+                )?;
+                summary.appended_seqs.push(seq);
+                summary.held_events += 1;
+                return Ok(summary);
+            }
+            Err(error) => {
+                return Err(CoordinatorError::Store(ProductStoreError::InvalidRecord {
+                    kind: "group_chat_draft_slot",
+                    reason: error.to_string(),
+                }));
+            }
+        };
+        let line_kind = line.kind;
+        let draft_version = line
+            .drafts
+            .iter()
+            .find(|slot| slot.slot_key == draft_slot)
+            .and_then(|slot| slot.current.as_ref())
+            .map_or(1, |draft| draft.version + 1);
+        let claim_seq = self
+            .store
+            .append_event(project_id, issue_id, session_id, claim_event)?;
+        self.store.save_session_snapshot(&session)?;
+
+        let result = self
+            .on_user_message_inner(
+                project_id,
+                issue_id,
+                session_id,
+                text,
+                vec![role.id.clone()],
+                Some(DraftTarget {
+                    role_instance_id: role.id.clone(),
+                    line: line_kind,
+                    slot: draft_slot.clone(),
+                    version: draft_version,
+                }),
+            )
+            .await;
+        let Ok(mut summary) = result else {
+            if let Err(error) = self.release_draft_claim(
+                project_id,
+                issue_id,
+                session_id,
+                &role,
+                line_kind,
+                &draft_slot,
+            ) {
+                return Err(CoordinatorError::Store(error));
+            }
+            return result;
+        };
+        summary.appended_seqs.insert(0, claim_seq);
+        let entries = self
+            .store
+            .load_event_entries(project_id, issue_id, session_id)?;
+        let Some((based_on_events, markdown)) =
+            entries.iter().rev().find_map(|(seq, event)| match event {
+                RoomEvent::AgentMessage {
+                    role_instance_id,
+                    text,
+                    artifact_ref: Some(artifact_ref),
+                    ..
+                } if role_instance_id == &role.id
+                    && artifact_ref.line == line_kind
+                    && artifact_ref.slot == draft_slot
+                    && artifact_ref.version == draft_version =>
+                {
+                    Some((*seq, text.clone()))
+                }
+                _ => None,
+            })
+        else {
+            if let Some(release_seq) = self.release_draft_claim(
+                project_id,
+                issue_id,
+                session_id,
+                &role,
+                line_kind,
+                &draft_slot,
+            )? {
+                summary.appended_seqs.push(release_seq);
+            }
+            return Ok(summary);
+        };
+        let mut session = self.store.load_session(project_id, issue_id, session_id)?;
+        let (line_kind, updated) = {
+            let line = session
+                .artifact_lines
+                .iter_mut()
+                .find(|line| line.drafts.iter().any(|slot| slot.slot_key == draft_slot))
+                .expect("认领成功后草稿槽仍存在");
+            if let Some(slot) = line
+                .drafts
+                .iter_mut()
+                .find(|slot| slot.slot_key == draft_slot)
+            {
+                slot.current = Some(ArtifactDraft {
+                    version: draft_version,
+                    markdown,
+                    author_role_id: role.id.clone(),
+                    based_on_events,
+                });
+                slot.claim = None;
+                (line.kind, true)
+            } else {
+                (line.kind, false)
+            }
+        };
+        if updated {
+            session.updated_at = Utc::now().to_rfc3339();
+            self.store.save_session_snapshot(&session)?;
+            let release_seq = self.store.append_event(
+                project_id,
+                issue_id,
+                session_id,
+                RoomEvent::ClaimEvent {
+                    role_instance_id: role.id,
+                    line: line_kind,
+                    slot_key: draft_slot,
+                    claimed: false,
+                },
+            )?;
+            summary.appended_seqs.push(release_seq);
+        }
+        Ok(summary)
+    }
+
+    fn release_expired_claims(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        session: &mut GroupChatSessionRecord,
+    ) -> Result<(), ProductStoreError> {
+        let events = release_expired(
+            &mut session.artifact_lines,
+            Utc::now(),
+            DEFAULT_CLAIM_TIMEOUT,
+        );
+        if events.is_empty() {
+            return Ok(());
+        }
+        for event in events {
+            self.store
+                .append_event(project_id, issue_id, session_id, event)?;
+        }
+        session.updated_at = Utc::now().to_rfc3339();
+        self.store.save_session_snapshot(session)
+    }
+
+    fn release_draft_claim(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        role: &RoleInstance,
+        line_kind: super::types::ArtifactLineKind,
+        slot_key: &DraftSlotKey,
+    ) -> Result<Option<u64>, ProductStoreError> {
+        let mut session = self.store.load_session(project_id, issue_id, session_id)?;
+        let Some(line) = session
+            .artifact_lines
+            .iter_mut()
+            .find(|line| line.kind == line_kind)
+        else {
+            return Ok(None);
+        };
+        let Some(slot) = line.drafts.iter().find(|slot| {
+            slot.slot_key == *slot_key
+                && slot
+                    .claim
+                    .as_ref()
+                    .is_some_and(|claim| claim.holder_role_id == role.id)
+        }) else {
+            return Ok(None);
+        };
+        let slot_key = slot.slot_key.clone();
+        let event =
+            release(line, &slot_key, role).map_err(|error| ProductStoreError::InvalidRecord {
+                kind: "group_chat_draft_slot",
+                reason: error.to_string(),
+            })?;
+        let seq = self
+            .store
+            .append_event(project_id, issue_id, session_id, event)?;
+        session.updated_at = Utc::now().to_rfc3339();
+        self.store.save_session_snapshot(&session)?;
+        Ok(Some(seq))
     }
 
     fn route(&self, session: &GroupChatSessionRecord, trigger: &Trigger) -> TriageOutput {
@@ -724,6 +1013,13 @@ struct Trigger {
     forced_mentions: Vec<String>,
 }
 
+struct DraftTarget {
+    role_instance_id: String,
+    line: super::types::ArtifactLineKind,
+    slot: DraftSlotKey,
+    version: u32,
+}
+
 struct TurnBatch {
     completed: Vec<CompletedTurn>,
     events: Vec<RoomEvent>,
@@ -755,6 +1051,20 @@ impl CompletedTurn {
             rate_limited: false,
         }
     }
+}
+
+fn decorate_draft_event(events: &mut [RoomEvent], target: &DraftTarget) -> bool {
+    let Some(RoomEvent::AgentMessage { artifact_ref, .. }) = events.iter_mut().find(|event| {
+        matches!(event, RoomEvent::AgentMessage { role_instance_id, .. } if role_instance_id == &target.role_instance_id)
+    }) else {
+        return false;
+    };
+    *artifact_ref = Some(ArtifactRef {
+        line: target.line,
+        slot: target.slot.clone(),
+        version: target.version,
+    });
+    true
 }
 
 fn belongs_to_role(event: &RoomEvent, role_ids: &HashSet<String>) -> bool {

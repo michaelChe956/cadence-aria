@@ -118,6 +118,8 @@ mod web_coding_ws_handler;
 mod web_event_taxonomy;
 #[path = "it_web/web_events.rs"]
 mod web_events;
+#[path = "it_web/web_group_chat_api.rs"]
+mod web_group_chat_api;
 #[path = "it_web/web_hard_gate.rs"]
 mod web_hard_gate;
 #[path = "it_web/web_lifecycle_api.rs"]

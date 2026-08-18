@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 
 use crate::product::app_paths::ProductAppPaths;
@@ -104,13 +105,97 @@ impl GroupChatStore {
         issue_id: &str,
         session_id: &str,
     ) -> Result<Vec<RoomEvent>, ProductStoreError> {
+        Ok(self
+            .load_event_entries(project_id, issue_id, session_id)?
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect())
+    }
+
+    /// 读取带时间线序号的事件，供 HTTP 分页和 WS 重放使用。
+    pub fn load_event_entries(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<(u64, RoomEvent)>, ProductStoreError> {
         validate_ids(project_id, issue_id, session_id)?;
-        Ok(
-            timeline::read_entries(&self.timeline_path(project_id, issue_id, session_id))?
-                .into_iter()
-                .map(|(_, event)| event)
-                .collect(),
-        )
+        timeline::read_entries(&self.timeline_path(project_id, issue_id, session_id))
+    }
+
+    /// 按 session id 查找群聊会话，供不带 project/issue 路径参数的 HTTP endpoint 使用。
+    pub fn find_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<GroupChatSessionRecord>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let projects_root = self.paths.projects_root();
+        if !projects_root.exists() {
+            return Ok(None);
+        }
+        let projects = fs::read_dir(&projects_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", projects_root.display()))
+        })?;
+        for project in projects.filter_map(Result::ok) {
+            let issues_root = project.path().join("issues");
+            if !issues_root.exists() {
+                continue;
+            }
+            for issue in fs::read_dir(&issues_root)
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("read {}: {error}", issues_root.display()))
+                })?
+                .filter_map(Result::ok)
+            {
+                let path = issue
+                    .path()
+                    .join("group-chat")
+                    .join("sessions")
+                    .join(session_id)
+                    .join("session.json");
+                if path.exists() {
+                    return Ok(Some(read_json(&path)?));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 找到某个 issue 的群聊会话。v1 约束一个 issue 最多一个会话，旧数据若出现多个
+    /// 目录则按名称排序取最新，并由调用方继续按身份校验。
+    pub fn find_session_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<GroupChatSessionRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("group-chat")
+            .join("sessions");
+        if !root.exists() {
+            return Ok(None);
+        }
+        let mut paths = fs::read_dir(&root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("session.json"))
+            .filter(|path| path.exists())
+            .collect::<Vec<_>>();
+        paths.sort();
+        let Some(path) = paths.pop() else {
+            return Ok(None);
+        };
+        let session: GroupChatSessionRecord = read_json(&path)?;
+        if session.project_id != project_id || session.issue_id != issue_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "group_chat_session",
+                id: session.id,
+            });
+        }
+        Ok(Some(session))
     }
 
     /// 原子替换 session.json 快照。调用方应只在时间线追加成功后调用。

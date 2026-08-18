@@ -55,7 +55,9 @@ impl IntoResponse for ApiError {
             "coding_attempt_active"
             | "coding_attempt_ambiguous"
             | "coding_attempt_scope_mismatch"
-            | "coding_attempt_worktree_not_ready" => StatusCode::CONFLICT,
+            | "coding_attempt_worktree_not_ready"
+            | "group_chat_draft_slot_claimed"
+            | "group_chat_session_scope_mismatch" => StatusCode::CONFLICT,
             "artifact_not_found"
             | "artifact_version_not_found"
             | "coding_attempt_not_found"
@@ -71,7 +73,8 @@ impl IntoResponse for ApiError {
             | "workspace_not_found"
             | "work_item_not_found"
             | "task_workspace_not_found"
-            | "workspace_session_not_found" => StatusCode::NOT_FOUND,
+            | "workspace_session_not_found"
+            | "group_chat_session_not_found" => StatusCode::NOT_FOUND,
             "repository_project_not_found" => StatusCode::NOT_FOUND,
             "gate_ambiguous"
             | "invalid_execution_record_id"
@@ -99,7 +102,13 @@ impl IntoResponse for ApiError {
             | "repository_path_not_git_repo"
             | "repository_path_invalid"
             | "repository_not_git"
-            | "work_item_split_invalid" => StatusCode::BAD_REQUEST,
+            | "work_item_split_invalid"
+            | "group_chat_line_not_found"
+            | "group_chat_slot_not_found"
+            | "group_chat_no_draft"
+            | "invalid_group_chat_message"
+            | "invalid_group_chat_draft_slot"
+            | "invalid_provider" => StatusCode::BAD_REQUEST,
             "issue_worktree_active"
             | "repository_already_registered"
             | "repository_initialization_in_progress"

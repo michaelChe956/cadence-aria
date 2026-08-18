@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -55,6 +56,34 @@ impl TriageRouter for Script {
 }
 
 struct RequestDenyFailureProvider;
+
+struct DraftFailThenSuccessProvider {
+    starts: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for DraftFailThenSuccessProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let event = if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+            ProviderEvent::Failed {
+                message: "fake draft failure".into(),
+            }
+        } else {
+            ProviderEvent::Completed(ProviderCompletion::plain("可用草稿", None))
+        };
+        event_tx.send(event).await.expect("事件接收端仍打开");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for RequestDenyFailureProvider {
@@ -112,6 +141,7 @@ fn session(roles: Vec<RoleInstance>) -> GroupChatSessionRecord {
             entity_id: None,
             bridge_session_id: None,
         }],
+        triage_provider: None,
         created_at: "2026-08-18T00:00:00Z".into(),
         updated_at: "2026-08-18T00:00:00Z".into(),
     }
@@ -327,6 +357,73 @@ async fn request_deny_failed_记录_provider_error_held_且角色本轮停止() 
         !events
             .iter()
             .any(|event| matches!(event, RoomEvent::AgentMessage { .. }))
+    );
+}
+
+#[tokio::test]
+async fn draft_turn_failure_releases_claim_for_retry() {
+    let temp = tempfile::tempdir().expect("临时目录");
+    let store = GroupChatStore::new(ProductAppPaths::new(temp.path()));
+    store
+        .save_session_snapshot(&session(vec![role(
+            "author-1",
+            GroupChatRoleKey::Author,
+            "作者",
+        )]))
+        .expect("保存会话");
+    let adapters = HashMap::from([(
+        ProviderName::Fake,
+        Arc::new(DraftFailThenSuccessProvider {
+            starts: AtomicUsize::new(0),
+        }) as Arc<dyn StreamingProviderAdapter>,
+    )]);
+    let mut coordinator = Coordinator::new(store.clone(), adapters, Box::new(Script::ReviewerOnly))
+        .with_config(config());
+
+    let first = coordinator
+        .on_user_message_with_draft(
+            "project-1",
+            "issue-1",
+            "session-1",
+            "首次起草",
+            vec!["author-1".into()],
+            Some(DraftSlotKey(STORY_FULL_SLOT.into())),
+        )
+        .await
+        .expect("失败 turn 仍应完成并释放认领");
+    let after_failure = store
+        .load_session("project-1", "issue-1", "session-1")
+        .expect("读取失败后的会话");
+    assert!(after_failure.artifact_lines[0].drafts[0].claim.is_none());
+    assert!(first.appended_seqs.len() >= 2);
+    assert!(
+        store
+            .load_events("project-1", "issue-1", "session-1")
+            .expect("读取失败时间线")
+            .iter()
+            .any(|event| matches!(event, RoomEvent::ClaimEvent { claimed: false, .. }))
+    );
+
+    coordinator
+        .on_user_message_with_draft(
+            "project-1",
+            "issue-1",
+            "session-1",
+            "再次起草",
+            vec!["author-1".into()],
+            Some(DraftSlotKey(STORY_FULL_SLOT.into())),
+        )
+        .await
+        .expect("释放后同槽起草应成功");
+    let after_retry = store
+        .load_session("project-1", "issue-1", "session-1")
+        .expect("读取重试后的会话");
+    assert_eq!(
+        after_retry.artifact_lines[0].drafts[0]
+            .current
+            .as_ref()
+            .map(|draft| draft.markdown.as_str()),
+        Some("可用草稿")
     );
 }
 

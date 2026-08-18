@@ -125,6 +125,7 @@ fn group_chat_types_round_trip_through_serde() {
             entity_id: None,
             bridge_session_id: None,
         }],
+        triage_provider: None,
         created_at: "2026-08-18T12:00:00Z".into(),
         updated_at: "2026-08-18T12:01:00Z".into(),
     });

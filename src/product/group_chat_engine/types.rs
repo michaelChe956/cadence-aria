@@ -139,6 +139,10 @@ pub struct GroupChatSessionRecord {
     pub status: GroupChatSessionStatus,
     pub roles: Vec<RoleInstance>,
     pub artifact_lines: Vec<ArtifactLine>,
+    /// 聊天室级 triage provider 配置。当前 HTTP API 负责持久化和回显，
+    /// coordinator 仍使用规则路由；真实 LLM triage 接线由后续任务完成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage_provider: Option<ProviderName>,
     pub created_at: String,
     pub updated_at: String,
 }
