@@ -98,6 +98,13 @@ mod tests {
         coordinator: LogicalCodebaseRegistrationCoordinator,
     }
 
+    struct LinkedWorktreeFixture {
+        _root: tempfile::TempDir,
+        root: CanonicalAggregateRoot,
+        linked: PathBuf,
+        coordinator: LogicalCodebaseRegistrationCoordinator,
+    }
+
     struct FiftyRepositoryFixture {
         _root: tempfile::TempDir,
         root: CanonicalAggregateRoot,
@@ -241,6 +248,45 @@ mod tests {
         assert_eq!(result.count(RegistrationCandidateState::NeedsAttention), 1);
         assert_eq!(result.count(RegistrationCandidateState::Missing), 1);
         assert_eq!(result.count(RegistrationCandidateState::OutsideRoot), 1);
+    }
+
+    #[test]
+    fn preflight_classifies_linked_worktree_candidate_as_nested() {
+        let fixture = linked_worktree_fixture();
+        let result = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![fixture.linked.clone()],
+            })
+            .unwrap();
+
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].state,
+            RegistrationCandidateState::Nested
+        );
+        assert_eq!(result.candidates[0].reason, "nested_worktree");
+    }
+
+    #[test]
+    fn preflight_classifies_aggregate_root_itself_as_outside_root() {
+        let fixture = scan_fixture();
+        let result = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![fixture.root.canonical_path.clone()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            result.count(RegistrationCandidateState::OutsideRoot),
+            1
+        );
+        assert_eq!(result.candidates[0].reason, "outside_aggregate_root");
     }
 
     #[test]
@@ -656,6 +702,42 @@ mod tests {
             dirty_git,
             missing,
             outside,
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(
+                paths,
+                repositories,
+                LogicalCodebaseFeature::enabled(),
+            ),
+        }
+    }
+
+    fn linked_worktree_fixture() -> LinkedWorktreeFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria-state"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".to_string(),
+                description: None,
+                multi_repo: false,
+            })
+            .unwrap();
+        let root_path = temp.path().join("aggregate-root");
+        let main = root_path.join("main");
+        let linked = root_path.join("linked");
+        init_git_repository(&main);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        let repositories = RepositoryStore::with_logical_codebase_feature(
+            paths.clone(),
+            LogicalCodebaseFeature::enabled(),
+        );
+        LinkedWorktreeFixture {
+            _root: temp,
+            root: CanonicalAggregateRoot {
+                canonical_path: fs::canonicalize(&root_path).unwrap(),
+            },
+            linked,
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
                 repositories,

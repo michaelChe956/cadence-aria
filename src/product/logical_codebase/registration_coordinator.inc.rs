@@ -345,7 +345,8 @@ impl LogicalCodebaseRegistrationCoordinator {
             let (candidate, evidence) = match fs::canonicalize(&submitted_path) {
                 Err(_) => (RegistrationCandidate::missing(submitted_path), None),
                 Ok(canonical_path)
-                    if !canonical_path.starts_with(&input.aggregate_root.canonical_path) =>
+                    if canonical_path == input.aggregate_root.canonical_path
+                        || !canonical_path.starts_with(&input.aggregate_root.canonical_path) =>
                 {
                     (
                         RegistrationCandidate::outside_root(submitted_path, canonical_path),
@@ -467,12 +468,15 @@ impl LogicalCodebaseRegistrationCoordinator {
         } else {
             None
         };
+        let linked_worktree = is_linked_worktree_git_dir(&evidence.canonical_git_dir);
         let nested = seen.iter().any(|prior| {
             git_root.starts_with(&prior.git_root) || prior.git_root.starts_with(&git_root)
         });
 
         let (state, reason) = if let Some(reason) = duplicate_reason {
             (RegistrationCandidateState::Duplicate, reason)
+        } else if linked_worktree {
+            (RegistrationCandidateState::Nested, "nested_worktree")
         } else if nested {
             (RegistrationCandidateState::Nested, "nested_repository")
         } else if !status.is_empty() {
@@ -547,6 +551,13 @@ impl LogicalCodebaseRegistrationCoordinator {
         store.save_member(&input.project_id, &member)?;
         Ok(member)
     }
+}
+
+fn is_linked_worktree_git_dir(canonical_git_dir: &Path) -> bool {
+    canonical_git_dir
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "worktrees")
 }
 
 fn batch_item_from_candidate(

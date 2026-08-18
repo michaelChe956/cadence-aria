@@ -188,6 +188,22 @@ async fn registration_preflight_maps_aggregate_root_ownership_conflict_without_i
 }
 
 #[tokio::test]
+async fn registration_preflight_maps_missing_aggregate_root_to_422_stable_code() {
+    let fixture = Fixture::new();
+    assert_error(
+        request(
+            &fixture.app,
+            Method::POST,
+            "/api/projects/project_0001/logical-codebase/registrations/preflight",
+            json!({"aggregate_root": fixture.root().join("does-not-exist"), "candidate_paths": []}),
+        )
+        .await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "aggregate_root_missing",
+    );
+}
+
+#[tokio::test]
 async fn registration_preflight_admits_root_before_classification_and_guards_single_repo() {
     let fixture = Fixture::new();
     assert_error(

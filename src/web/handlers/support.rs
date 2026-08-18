@@ -890,6 +890,23 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_root_api_error_fallback_maps_unknown_code_to_internal_error() {
+        // 兜底不得把未知内部码伪装成 409 用户冲突；应显式落入 500 内部错误。
+        let error = aggregate_root_api_error(
+            crate::product::logical_codebase::AggregateRootPreflightError::new_for_test(
+                "future_internal_code",
+                "unexpected aggregate-root preflight failure",
+            ),
+        );
+
+        assert_eq!(error.code, "aggregate_root_internal_error");
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
     fn coding_workspace_exists_error_returns_stable_contract() {
         let error = coding_workspace_exists_error("plan_1", "attempt_1");
 

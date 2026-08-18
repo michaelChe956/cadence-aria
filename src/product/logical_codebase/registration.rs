@@ -243,6 +243,16 @@ impl AggregateRootPreflightError {
     }
 }
 
+#[cfg(test)]
+impl AggregateRootPreflightError {
+    pub(crate) fn new_for_test(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 /// Validates the filesystem ownership and containment invariants for an
 /// aggregate root before any member discovery or registration is performed.
 #[derive(Debug, Clone)]

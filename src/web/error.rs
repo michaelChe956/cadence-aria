@@ -122,9 +122,11 @@ impl IntoResponse for ApiError {
             | "change_order_required_for_logical_codebase"
             | "target_not_in_selection" => StatusCode::BAD_REQUEST,
             "aggregate_root_is_git"
+            | "aggregate_root_missing"
             | "aggregate_root_member_outside_root"
             | "aggregate_root_member_symlink_escape"
             | "aggregate_root_nested_worktree" => StatusCode::UNPROCESSABLE_ENTITY,
+            "aggregate_root_internal_error" => StatusCode::INTERNAL_SERVER_ERROR,
             "issue_worktree_active"
             | "repository_already_registered"
             | "repository_initialization_in_progress"

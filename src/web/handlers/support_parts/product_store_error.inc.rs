@@ -9,8 +9,9 @@ pub(crate) fn aggregate_root_api_error(
         "aggregate_root_ownership_conflict" | "aggregate_root_overlap" => {
             "aggregate_root_ownership_conflict"
         }
-        "aggregate_root_missing" | "aggregate_root_invalid_project_id" => "invalid_project_id",
-        _ => "aggregate_root_ownership_conflict",
+        "aggregate_root_missing" => "aggregate_root_missing",
+        "aggregate_root_invalid_project_id" => "invalid_project_id",
+        _ => "aggregate_root_internal_error",
     };
     ApiError::runtime(
         code,
