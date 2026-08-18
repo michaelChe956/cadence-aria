@@ -14,6 +14,8 @@
 
 ### Requirement: 多仓 Design change_order 强制
 
+多仓 Design 涉及多个 involved repository 时必须提供 change_order，缺失即 blocker。
+
 #### Scenario: 缺 change_order 被拒
 - **WHEN** 多仓 Design 涉及多个 involved repository 且未提供 change_order
 - **THEN** 生成被拒并产生 blocker change_order_required_for_logical_codebase，不得进入 compile；模型层不再保留"缺失不强制"的相反语义

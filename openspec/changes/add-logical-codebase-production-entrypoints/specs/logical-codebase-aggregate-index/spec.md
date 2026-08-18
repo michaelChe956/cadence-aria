@@ -2,7 +2,7 @@
 
 ### Requirement: 聚合索引生产触发
 
-聚合索引构建具备三层生产触发：聚合初始化成功后自动首建、规划读取发现 stale 时按需同步、手动重建端点兜底。定时轮询兜底不在本变更范围。
+聚合索引构建必须具备三层生产触发：聚合初始化成功后自动首建、规划读取发现 stale 时按需同步、手动重建端点兜底。定时轮询兜底不在本变更范围。
 
 #### Scenario: 初始化后自动首建
 - **WHEN** 聚合初始化成功完成
@@ -25,6 +25,8 @@
 - **THEN** 返回 state=rebuilding（Building 记录先于索引命令持久化）；状态映射覆盖 active/stale/degraded/rebuilding/missing（Failed 有 last-known-good 时呈现 degraded，否则 missing）
 
 ### Requirement: 构建写入的 single-writer 与快照
+
+全部索引写入路径必须经统一 single-writer 互斥，并保留命令前后成员快照证据。
 
 #### Scenario: 首建与重建共用互斥
 - **WHEN** 首次构建、重建或同步并发执行

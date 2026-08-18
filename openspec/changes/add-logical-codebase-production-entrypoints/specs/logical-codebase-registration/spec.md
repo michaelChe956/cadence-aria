@@ -32,6 +32,8 @@
 
 ### Requirement: 登记端点的前端入口
 
+多仓 project 的逻辑代码库页必须提供登记向导入口，覆盖预检分类展示、确认与同步提交。
+
 #### Scenario: 登记向导
 - **WHEN** 用户在多仓 project 的逻辑代码库页发起成员登记
 - **THEN** 向导引导：填写聚合根 → 展示候选分类（eligible/non_git/duplicate/nested/needs_attention/missing/outside_root）→ 勾选确认（勾选 needs_attention 项视为显式确认）→ 同步提交（带 loading）→ 展示批次结果与单项状态，partial_failed 可恢复

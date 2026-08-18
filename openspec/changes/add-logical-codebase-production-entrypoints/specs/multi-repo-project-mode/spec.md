@@ -6,7 +6,7 @@ project 级多仓库模式开关与 legacy 端点防护，保证单仓 project �
 
 ### Requirement: 多仓库模式 opt-in
 
-创建 project 时可选择启用多仓库模式；创建后不可切换。
+创建 project 时必须可选择启用多仓库模式；创建后不可切换。
 
 #### Scenario: 创建多仓 project
 - **WHEN** 创建 project 请求携带 multi_repo=true
@@ -18,7 +18,7 @@ project 级多仓库模式开关与 legacy 端点防护，保证单仓 project �
 
 ### Requirement: 多仓 project 的 legacy 仓库端点防护
 
-多仓 project 下传统仓库 CRUD 端点受限，避免绕过登记链产生第二套成员来源。
+多仓 project 下传统仓库 CRUD 端点必须受限，避免绕过登记链产生第二套成员来源。
 
 #### Scenario: 多仓下调 legacy 创建/删除被拒
 - **WHEN** 多仓 project 调用 POST/DELETE /api/projects/{pid}/repositories 或 GET /api/projects/{pid}/repository-initializations/{operation_id}
@@ -29,6 +29,8 @@ project 级多仓库模式开关与 legacy 端点防护，保证单仓 project �
 - **THEN** 返回逻辑成员的兼容投影（不暴露物理登记写路径）
 
 ### Requirement: 单仓 project 调多仓端点被拒
+
+单仓 project 调用多仓专属端点时必须返回稳定错误码拒绝。
 
 #### Scenario: 单仓误调登记
 - **WHEN** 单仓 project 调用登记或聚合索引端点
