@@ -1,5 +1,6 @@
-# Issue 群聊式 Spec 生成（Group Chat Workspace）实施计划 v1.1
+# Issue 群聊式 Spec 生成（Group Chat Workspace）实施计划 v1.2
 
+> 修订记录：v1.2 —— 按用户决策**删除 Task A1（`ProviderPermissionMode::ReadOnly` 执行层硬化整个延后）**：底层 provider 零改动；只读角色沿用现有 Supervised 档（与流水线 reviewer 同级风险，引擎逻辑层 claim/写槽拦截已硬约束「不能写 spec」）；ReadOnly 执行层硬化列入后续迭代（与流水线 reviewer 一起做）。
 > 修订记录：v1.1 —— reviewer(k3) 计划评审修复 🔴-1/🔴-2 与 🟡-1~🟡-8：A1 codex 映射改为 sandbox 派生+approvalPolicy never（含 kimi/coding 双向转换语义决策与 approval_bridge 行为）；B9 补实体确保存在 + confirmation_status 翻转 + 复用 append_artifact_version；B2 json_store 出处精确化；C1/E1 测试挂 it_web/it_product 子模块；C1/C2 补 WebAppState；补 4 处覆盖缺口（不可信包裹/triage provider 配置/跳槽定稿 UI/桥接补建）；D2/D4 复用表述修正；依赖改为 B10→B9。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -33,9 +34,7 @@
 - `src/web/handlers/group_chat.rs`
 
 **Rust 修改（均为增量）：**
-- `src/cross_cutting/streaming_provider/mod.rs`（`ProviderPermissionMode::ReadOnly` 变体）
-- `src/cross_cutting/claude_code_provider/mod.rs`、`codex_provider/session.rs`（ReadOnly 映射，各 +2 行 match 臂）
-- `src/cross_cutting/streaming_provider/fake.rs`（脚本化 fake）
+- `src/cross_cutting/streaming_provider/fake.rs`（脚本化 fake，仅测试设施）
 - `src/product/issue_store.rs`（`update_description` + 修订历史）
 - `src/product/models/workspace.rs`（`origin: Option<SessionOrigin>`）
 - `src/product/app_paths.rs`（`group_chat_root` 等路径方法，追加）
@@ -48,43 +47,6 @@
 ---
 
 ## 组 A：基础能力（无群聊概念，可独立交付）
-
-### Task A1: `ProviderPermissionMode::ReadOnly` 变体
-
-**Files:**
-- Modify: `src/cross_cutting/streaming_provider/mod.rs`（枚举 +1 变体）
-- Modify: `src/cross_cutting/claude_code_provider/mod.rs:351`、`src/cross_cutting/codex_provider/session.rs:73-101`、`src/cross_cutting/codex_provider/mod.rs:31`（sandbox 派生）、`src/cross_cutting/kimi_code_provider/session.rs:132`、`src/product/coding_workspace_engine/types.rs:114/141`、`src/cross_cutting/approval_bridge/mod.rs:94`
-- Test: `src/cross_cutting/streaming_provider/tests.rs`
-
-**Interfaces:**
-- Produces: `ProviderPermissionMode::ReadOnly`（serde `read_only`）；映射决策（v1.1 定案）：claude `"plan"`（现有 `set_permission_mode` control_request 机制）；codex **sandbox 按 mode 派生** `ReadOnly => "read-only"`（当前 `CODEX_DEFAULT_SANDBOX_MODE` 硬编码 `"danger-full-access"`，`codex_provider/mod.rs:31`），codex approvalPolicy 臂 `ReadOnly => "never"`；kimi 无 plan/read-only 概念 → `ReadOnly => "default"`（等价 Supervised，文档注明降级）；`CodingProviderPermissionMode` 双向转换（`coding_workspace_engine/types.rs:114/141`）：正向 `ReadOnly => Supervised`（coding 引擎不使用 ReadOnly，反向臂加 unreachable 说明注释）。
-- approval_bridge 行为（v1.1 定案）：`approval_bridge/mod.rs:94` 以 `mode == Auto` 判断自动批准；ReadOnly 角色的权限请求**自动拒绝写类、自动批准读类**（防 claude plan 模式 ExitPlanMode 请求无人值守挂起），在 B7 agent_turn 接线时生效。
-
-- [ ] **Step 1: 写失败测试**（tests.rs 追加）
-
-```rust
-#[test]
-fn read_only_permission_mode_maps_to_provider_flags() {
-    assert_eq!(
-        serde_json::to_string(&ProviderPermissionMode::ReadOnly).unwrap(),
-        "\"read_only\""
-    );
-    assert_eq!(super::super::claude_code_provider::permission_flag(&ProviderPermissionMode::ReadOnly), "plan");
-}
-
-#[test]
-fn codex_read_only_derives_sandbox_and_never_approval() {
-    // 断言 codex configure 载荷：sandbox="read-only"、approvalPolicy="never"
-    let payload = super::super::codex_provider::session::configure_payload_for_test(&ProviderPermissionMode::ReadOnly);
-    assert_eq!(payload["sandbox"], "read-only");
-    assert_eq!(payload["approvalPolicy"], "never");
-}
-```
-
-- [ ] **Step 2: 运行验证失败** `cargo test read_only_permission_mode codex_read_only` → FAIL（无此变体）
-- [ ] **Step 3: 实现**：枚举加 `ReadOnly`；claude 映射加 `ReadOnly => "plan"`；**codex：`session.rs:77/101` 的 sandbox 从常量改为按 mode 派生（`ReadOnly => "read-only"`，其余 => 原常量），approvalPolicy match（`session.rs:73-76/97-100`）加 `ReadOnly => "never"`**；kimi 加 `ReadOnly => "default"`；`coding_workspace_engine/types.rs` 双向转换补臂（正向 Supervised）；approval_bridge 对 ReadOnly 的读/写分流；若 provider 映射函数非 pub，提取为 `pub(crate) fn permission_flag` / `configure_payload_for_test`。
-- [ ] **Step 4: 运行验证通过** `cargo test -p aria read_only` + `cargo clippy --all-targets --locked -- -D warnings`
-- [ ] **Step 5: Commit** `git commit -m "feat(provider): ProviderPermissionMode 新增 ReadOnly 变体（claude plan / codex read-only）"`
 
 ### Task A2: issue_store `update_description` + 修订历史
 
@@ -218,9 +180,9 @@ fn update_description_persists_and_appends_revision() {
 - Test: 同模块 tests
 
 **Interfaces:**
-- Produces: `can_write_artifacts(role_key) -> bool`（Author/FrontendDesign/BackendDesign=true）；`writable_slots(role_key) -> Vec<DraftSlotKey>`（author→[issue_full, story_full, design_summary]，fe→[design_frontend]，be→[design_backend]，其余空）；`adapter_role_for(role_key) -> AdapterRole`（可写→Executor，只读→Reviewer）；`default_lineup() -> Vec<(GroupChatRoleKey, /*建议*/ )>`= author+reviewer+researcher；只读角色强制 `ProviderPermissionMode::ReadOnly`（A1）。
+- Produces: `can_write_artifacts(role_key) -> bool`（Author/FrontendDesign/BackendDesign=true）；`writable_slots(role_key) -> Vec<DraftSlotKey>`（author→[issue_full, story_full, design_summary]，fe→[design_frontend]，be→[design_backend]，其余空）；`adapter_role_for(role_key) -> AdapterRole`（可写→Executor，只读→Reviewer）；`default_lineup() -> Vec<(GroupChatRoleKey, /*建议*/ )>`= author+reviewer+researcher；只读角色 permission 沿用现有 `Supervised` 档（与流水线 reviewer 同级；v1.2 决策：执行层 ReadOnly 硬化延后，不在本计划）。
 
-- [ ] **Step 1: 写失败测试**（映射表全覆盖断言 + 只读角色 permission 强制断言）
+- [ ] **Step 1: 写失败测试**（映射表全覆盖断言 + 只读角色 permission 为 Supervised 断言）
 - [ ] **Step 2: 运行失败** → FAIL
 - [ ] **Step 3: 实现**
 - [ ] **Step 4: 运行通过**
@@ -431,7 +393,7 @@ fn update_description_persists_and_appends_revision() {
 ## 依赖顺序
 
 ```text
-A1 A2 A3 A4 A5（可并行，全独立）
+A2 A3 A4 A5（可并行，全独立）
   └─ B1 → B2 → B3 → B4 → B5 → B6 → B7 → B8 → B10 → B9（B9 依赖 A2/A3/B1-B8 与 B10 的 origin 字段）
         └─ C1 C2（依赖 B 组）
               └─ D1 → D2 → D3 D4 → D5
@@ -440,6 +402,6 @@ A1 A2 A3 A4 A5（可并行，全独立）
 
 ## Self-Review 记录
 
-- 覆盖核对：设计 §2(A1/B3) §4(B1/B2) §5.1-5.6(B4-B8) §6.1(A2) §6.2(A3) §6.4-6.5(B9/B10) §7(C1/C2/D1-D5) §8(A5/E1) §11(A3 零改动约束/D5 注入方式) —— 全部有任务承载。
+- 覆盖核对：设计 §2(B3) §4(B1/B2) §5.1-5.6(B4-B8) §6.1(A2) §6.2(A3) §6.4-6.5(B9/B10) §7(C1/C2/D1-D5) §8(A5/E1) §11(A3 零改动约束/D5 注入方式) —— 全部有任务承载。
 - 占位符扫描：无 TBD/TODO；测试代码均给出断言主体。
 - 类型一致性：`DraftSlotKey`/`RoomEvent`/`TriageOutput`/`origin` 等命名跨任务一致；`ArtifactVersion` 字段与 `src/web/workspace_ws_types/artifact_version.rs:9` 对齐。
