@@ -24,7 +24,7 @@
 ## 4. 聚合索引生产触发
 
 - [x] 4.1 apply_index 状态机：store.create 先持久化 Building → 命令 → replace_active/转 Failed；build 包 single-writer 锁；前后双快照，重建/同步漂移→stale、首建漂移→Failed（lib 单测）
-- [ ] 4.2 修 AggregateIndexFreshnessService::assess 对 Degraded 误报 active 的 bug（保留 last-known-good 告警）
+- [x] 4.2 修 AggregateIndexFreshnessService::assess 对 Degraded 误报 active 的 bug（保留 last-known-good 告警）
 - [ ] 4.3 PlanningContextResolver 读路径接 sync_if_stale（spawn_blocking；degraded 不重建仅注入告警）（lib 单测 + it_web stale→sync）
 - [ ] 4.4 handlers/aggregate_index.rs：POST rebuild（同步 spawn_blocking + try-register 409 aggregate_index_rebuild_in_progress）+ GET active（四态映射：Failed 有 good→degraded 无→missing）；初始化 execute 成功尾步 spawn 首建（it_web：初始化后 active 出现、并发 409）
 - [ ] 4.5 前端索引卡片 + aggregate-index API client（状态徽标、stale 提示、重建按钮 loading）
