@@ -18,19 +18,37 @@ use cadence_aria::product::logical_codebase::aggregate_index::{
 };
 use cadence_aria::product::logical_codebase::policy::AggregatePolicyArtifactStore;
 
-/// 单成员逻辑代码库 prompt fixture（无真实 git，与 web_lifecycle_api/part_02 的
-/// `seed_logical_codebase` 同构）：manifest + member + checkout + selection +
-/// active aggregate index + policy bootstrap。
+/// 单成员逻辑代码库 prompt fixture：manifest + member + checkout + selection + active
+/// aggregate index + policy bootstrap。Planning 读取会做 freshness assess，所以成员 main
+/// checkout 必须是带提交的真实 Git 仓，已发布的 index evidence 必须对应该提交。
 fn seed_logical_codebase_prompt(app_paths: &ProductAppPaths, member_id: LogicalRepositoryId) {
     let aggregate_root = app_paths.root().join("aggregate-root");
     std::fs::create_dir_all(&aggregate_root).unwrap();
+    let checkout_path = aggregate_root.join("api");
+    std::fs::create_dir_all(&checkout_path).expect("create api checkout fixture dir");
+    git(&checkout_path, &["init", "-q"]);
+    std::fs::write(checkout_path.join("lib.rs"), "pub fn fixture() {}\n")
+        .expect("write api checkout fixture source");
+    git(&checkout_path, &["add", "lib.rs"]);
+    git(
+        &checkout_path,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "initial fixture",
+        ],
+    );
+    let revision = git_out(&checkout_path, &["rev-parse", "HEAD"]);
     let manifest =
         LogicalCodebaseManifest::new(PROJECT_ID, aggregate_root.clone(), vec![member_id]);
     LogicalCodebaseStore::new(app_paths.clone())
         .save_manifest(PROJECT_ID, &manifest)
         .unwrap();
     let now = "2026-08-10T00:00:00Z".to_string();
-    let checkout_path = aggregate_root.join("api");
     LogicalCodebaseStore::new(app_paths.clone())
         .save_member(
             PROJECT_ID,
@@ -68,7 +86,7 @@ fn seed_logical_codebase_prompt(app_paths: &ProductAppPaths, member_id: LogicalR
                 canonical_path: checkout_path,
                 checkout_path_hash: "sha256:checkout".to_string(),
                 git_dir_identity: "sha256:git-dir".to_string(),
-                revision: Some("abc123".to_string()),
+                revision: Some(revision.clone()),
                 availability: CheckoutAvailability::Available,
                 observed_at: now.clone(),
                 created_at: now.clone(),
@@ -89,11 +107,11 @@ fn seed_logical_codebase_prompt(app_paths: &ProductAppPaths, member_id: LogicalR
     let index = AggregateIndexRecord::building(
         "aggregate_index_0001".to_string(),
         PROJECT_ID.to_string(),
-        1,
+        manifest.membership_revision,
         vec![AggregateIndexMemberSnapshot::indexed(
             member_id,
             RepositoryCheckoutId(uuid::Uuid::nil()),
-            "abc123".to_string(),
+            revision,
             false,
             now.clone(),
         )],

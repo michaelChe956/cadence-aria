@@ -564,15 +564,76 @@ use cadence_aria::product::models::LifecycleConfirmationStatus;
 
 /// 多仓场景 fixture：写 manifest + active member + checkout + 显式 selection + active
 /// aggregate index + policy bootstrap，使 `RepositoryRouting::load_for_issue` 判为 Logical。
+///
+/// PlanningContextResolver 会在读取 active index 前采集成员 Git evidence，因此这里的
+/// main checkout 必须是带提交的真实 Git 仓，且已发布快照必须匹配该提交。
 fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalRepositoryId) {
     let aggregate_root = app_paths.root().join("aggregate-root");
     std::fs::create_dir_all(&aggregate_root).expect("create aggregate-root fixture dir");
+    let checkout_path = aggregate_root.join("api");
+    std::fs::create_dir_all(&checkout_path).expect("create api checkout fixture dir");
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("initialize api checkout git repository");
+    assert!(
+        init.status.success(),
+        "git init fixture failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(checkout_path.join("lib.rs"), "pub fn fixture() {}\n")
+        .expect("write api checkout fixture source");
+    let commit = Command::new("git")
+        .args([
+            "add",
+            "lib.rs",
+        ])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("stage api checkout fixture source");
+    assert!(
+        commit.status.success(),
+        "git add fixture failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "initial fixture",
+        ])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("commit api checkout fixture source");
+    assert!(
+        commit.status.success(),
+        "git commit fixture failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let revision_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("read api checkout fixture revision");
+    assert!(
+        revision_output.status.success(),
+        "git rev-parse fixture failed: {}",
+        String::from_utf8_lossy(&revision_output.stderr)
+    );
+    let revision = String::from_utf8(revision_output.stdout)
+        .expect("git revision is UTF-8")
+        .trim()
+        .to_string();
     let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![member_id]);
     LogicalCodebaseStore::new(app_paths.clone())
         .save_manifest("project_0001", &manifest)
         .unwrap();
     let now = "2026-08-10T00:00:00Z".to_string();
-    let checkout_path = aggregate_root.join("api");
     LogicalCodebaseStore::new(app_paths.clone())
         .save_member(
             "project_0001",
@@ -610,7 +671,7 @@ fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalReposito
                 canonical_path: checkout_path,
                 checkout_path_hash: "sha256:checkout".to_string(),
                 git_dir_identity: "sha256:git-dir".to_string(),
-                revision: Some("abc123".to_string()),
+                revision: Some(revision.clone()),
                 availability: CheckoutAvailability::Available,
                 observed_at: now.clone(),
                 created_at: now.clone(),
@@ -631,11 +692,11 @@ fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalReposito
     let index = AggregateIndexRecord::building(
         "aggregate_index_0001".to_string(),
         "project_0001".to_string(),
-        1,
+        manifest.membership_revision,
         vec![AggregateIndexMemberSnapshot::indexed(
             member_id,
             RepositoryCheckoutId(uuid::Uuid::nil()),
-            "abc123".to_string(),
+            revision,
             false,
             now.clone(),
         )],
