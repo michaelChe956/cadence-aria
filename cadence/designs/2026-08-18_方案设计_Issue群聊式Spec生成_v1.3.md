@@ -252,16 +252,31 @@ triage 调用本身是流式短调用（§5.1 接口的实现之一），provide
 ### 6.4 人类定稿交互与溯源字段
 
 - 产物线面板常驻状态卡：`未开始 / 起草中(by whom) / 待审 / 可定稿 / 已定稿 vN`。
-- 点「定稿」→ 派生约束校验（product 层，§6.2）→ 通过后写入 `LifecycleStore`（复用 `AppendSpecVersionInput`），时间线追加 `FinalizeEvent`。定稿后聊天室不关闭：可继续讨论并再次定稿出新版本。
+- 点「定稿」→ 派生约束校验（product 层，§6.2）→ 通过后写入 `LifecycleStore`（复用 `AppendSpecVersionInput` / `LifecycleStore::append_version`），时间线追加 `FinalizeEvent`。定稿后聊天室不关闭：可继续讨论并再次定稿出新版本。
 - **溯源字段填充（v1.1 明确，修复评审 S8）**：`AppendSpecVersionInput` 的 `provider_run_refs` 填本次定稿所依据草稿的**全部贡献 turn 引用**（各槽起草/修订 turn 的 AgentMessage 事件 id 集合）；`review_refs` 填 reviewer 相关审查发言事件 id 集合；`confirmed_by` 填当前用户。即溯源在事件粒度完整保留，`SpecVersionRecord` 本体仍不携带「生成模式」字段（两模式产物同构，看板不区分）。
+
+### 6.5 看板桥接（v1.3 新增，修复「产物同源同展示」缺口）
+
+**问题（代码核验发现）**：Issue 看板的产物展示**经由 workspace session 关联**，不是直接读 `SpecVersionRecord`：
+
+- 最新稿 markdown 取自 `latest_workspace_artifact_markdown(sessions, WorkspaceType, entity_id)`，内容来源是 `session.messages` 的最后一条 provider 消息（`src/web/handlers/dto.rs:154`）；
+- 版本历史走 `artifact_version_dtos(session_id)` → `list_artifact_versions_for_issue_session`（session 维度，`dto.rs:228`）。
+
+群聊模式没有 workspace session，只写 entity 维度的 `SpecVersionRecord` → **老看板上看不到群聊定稿的内容与版本历史**。
+
+**桥接方案（选定）**：群聊定稿时，引擎同步创建一条**桥接 workspace session 记录**（`WorkspaceSessionRecord`，status=Completed，workspace_type 对应 Story/Design，entity_id 为该产物实体，`messages` 注入一条含定稿 markdown 的 provider 消息，`author_provider` 填实际执笔 provider，`reviewer_provider` 可空）——老看板的所有读取路径（最新稿、版本历史、聚焦态过滤、WorkItem 派生发起）**零改动**即可看到群聊产物。
+
+- 桥接 session 是「投影」，真实讨论与版本演进都在群聊时间线；定稿 v2 时在桥接 session 上追加消息即可（或新建桥接 session，以看板读取语义为准，实施时按 `latest_workspace_artifact_markdown` 的 `.rev().find()` 语义选追加）。
+- 备选（未选）：扩展看板 DTO 直接读 `SpecVersionRecord`——改动面大且会碰 monorepo 正在改的 `handlers/lifecycle.rs`（§11 冲突表），不取。
+- 该桥接同时解决「群聊产物发起 WorkItem workspace 派生」的入口兼容（派生链原本就认 workspace session / entity 记录）。
 
 ## 7. UI、开关与配置
 
 ### 7.1 开关与入口
 
-- 全局设置新增「Spec 生成模式」：`流水线模式（默认）| 群聊模式`。
+- **「Spec 生成模式」设置放在应用级设置存储**（不放 `ProjectRecord`——add-monorepo 正在改该模型，§11）：`流水线模式（默认）| 群聊模式`，全局生效。
 - Issue 看板聚焦态下，群聊模式中 Story/Design 列卡片替换为「群聊工作台」卡片（显示聊天室状态与已定稿产物版本）；点击进入 `ChatRoomPage`；Issue 详情可「开始群聊」直接创建 session。
-- 两种模式产物同源同展示。
+- 两种模式产物同源同展示（经由 §6.5 桥接实现）。
 
 ### 7.2 ChatRoomPage 布局
 
@@ -312,9 +327,34 @@ triage 调用本身是流式短调用（§5.1 接口的实现之一），provide
 
 | 风险 | 缓解 |
 |---|---|
-| token 消耗显著高于流水线模式（多角色 × 多轮讨论） | HARD_LOOP_CAP、triage 只路由 0~2 角色、小模型 triage、HOLD 重试上限 |
+| token 消耗显著高于流水线模式（多角色 × 多轮讨论） | HARD_LOOP_CAP、triage 只路由 0~2 角色、小模型 triage、HOLD 重试上限、窗口化上下文（§5.2a） |
 | triage 小模型路由质量不佳 | 规则兜底路径（§5.1），triage 失败退化规则路由 |
-| agent 间讨论发散不收敛 | 熔断机制 + 人类显式定稿作为唯一收敛点 |
+| agent 间讨论发散不收敛 | 自然终止（NoOne，§5.1）+ 熔断机制 + 人类显式定稿作为唯一收敛点 |
 | 双模式同步演进的维护成本 | 引擎目录级隔离；共享层（Adapter/LifecycleStore）改动需两侧测试 |
-| **多 agent 互相引用发言放大 prompt 注入**（v1.1 新增） | 他方发言统一包裹不可信上下文标记段；角色 prompt 声明权限不受聊天指令改变；只读角色双层只读（§2.1）降低注入危害面；集成测试加入注入样例 |
-| issue_store 新增 update/修订历史与未来其他写入方冲突（v1.1 新增） | update_description 仅限 description 字段；修订历史 append-only；老流水线不触碰该方法 |
+| 多 agent 互相引用发言放大 prompt 注入 | 他方发言统一包裹不可信上下文标记段；角色 prompt 声明权限不受聊天指令改变；只读角色双层只读（§2.1）；集成测试加入注入样例 |
+| issue_store 新增 update/修订历史与未来其他写入方冲突 | update_description 仅限 description 字段；修订历史 append-only；老流水线不触碰该方法 |
+| 桥接 session 被误认为真实流水线会话（§6.5） | 桥接记录仅含定稿投影；UI 上点击进入群聊工作台而非 ChatWorkspacePage（通过 session 来源标记路由） |
+
+## 11. 对现有功能影响清单与共享文件纪律（v1.3 新增）
+
+### 11.1 影响结论：零行为影响、仅多一种交互方式
+
+- **零行为影响**：群聊引擎/时间线/UI 页面全部新建文件；枚举/方法/事件/设置均为纯增量；模式开关默认流水线模式。
+- **唯一直接改动现有代码**：`validate_confirmed_story_specs` 从 handler 层下沉 product 层（§6.2，行为保持型重构，配回归测试，作为计划中独立先行任务）。
+- **共享写入纪律（必须守住）**：不改 `SpecVersionRecord` / `AppendSpecVersionInput` 结构（不新增字段），只调用 `LifecycleStore::append_version`；不改 `WorkspaceSessionRecord` 结构，桥接只写入。
+
+### 11.2 与 add-monorepo 分支冲突对照（截至 main 基线对比，monorepo 534 文件 +91140 行）
+
+| 共享文件 | monorepo 改动 | 本设计改动 | 风险 | 规避策略 |
+|---|---|---|---|---|
+| `src/web/handlers/lifecycle.rs` | +274 | 校验下沉 + 看板桥接读取 | 🟠 中高 | 下沉重构尽量小（提取函数 + handler 改调用）；或推迟到 monorepo 合并后 |
+| `web/src/components/lifecycle/IssueLifecycleWorkbench.*` | +271 等 | 群聊模式卡片替换 | 🟡 中 | 改动集中在模式分支渲染处，隔离为新子组件 |
+| `src/web/workspace_ws_handler/` | +2200 | 新事件类型 | 🟡 中 | 新事件/处理放独立模块文件，不改 socket.rs 核心 |
+| `src/product/issue_store.rs` | +72（`update_status`） | `update_description`（不同方法） | 🟢 低 | 追加式 |
+| `src/cross_cutting/streaming_provider/mod.rs` | +60（头部 `cfg(test)` fake 包装） | `ReadOnly` 变体（枚举处） | 🟢 低 | 区域不重叠 |
+| `src/product/app_paths.rs` | +89 | 群聊目录路径方法 | 🟢 低 | 追加式 |
+| `src/product/lifecycle_store/spec.rs` | +718 | 只调用不改结构 | 🟢 低 | 守住 11.1 纪律 |
+| `src/product/models/project.rs` | +14 | 模式开关 | 🟢 已规避 | 开关放应用级设置（§7.1） |
+| `web/src/api/types.ts` | +2 | 群聊 DTO 类型 | 🟢 低 | 追加式 |
+
+**合并策略**：共享文件改动一律 append 式/独立模块；合并顺序建议 add-monorepo 先合（体量更大），本分支定期 rebase 消化。
