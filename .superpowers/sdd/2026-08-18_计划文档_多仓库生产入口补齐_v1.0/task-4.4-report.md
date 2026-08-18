@@ -19,10 +19,23 @@
 - `cargo check --locked`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo test --locked --lib aggregate_index_rebuild_registry`
-- `cargo test --locked --test web_logical_codebase_entrypoints aggregate_index_`（6 passed）
+- `cargo test --locked --test web_logical_codebase_entrypoints aggregate_index_`（6 passed；Fix round 1 后为 7 passed）
 - `cargo test --locked --test web_logical_codebase_entrypoints multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_rejects_existing_logical_route`
 
 全量 `cargo test --locked` 编译通过，但现有 `it_web` 中 5 个 logical fixture 测试失败：fixture 的 checkout 目录不是实际 Git 仓库，freshness 读取时报 `aggregate_index_git_missing: git: provider command not found: git`；这些失败与本次端点代码无关，需后续由 fixture/测试环境修复。
+
+## Fix round 1
+
+- 补充 `aggregate_initialization_completion_eventually_exposes_active_index`：通过真实初始化 POST/GET 轮询确认初始化进入 Completed，再通过 active HTTP 端点确认 detached 首建最终投影为 `active`，并断言 revision/indexed_at。
+- 补充 `aggregate_index_endpoints_expose_building_and_reject_concurrent_rebuilds`：测试 fixture 注入可控阻塞的 fake CodeGraph CLI，以真实 in-flight rebuild 暴露 `rebuilding`，并验证同 project 并发 POST 返回 `409 aggregate_index_rebuild_in_progress`，释放后首请求返回 active。
+- 为集成测试增加仅用于注入 aggregate-index operation 的 state seam；初始化依赖的 coordinator/run registry 保持不变。
+
+### Fix round 1 验证
+
+- `cargo fmt --check`
+- `cargo test --locked --test web_logical_codebase_entrypoints`
+- `cargo test --locked --lib`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 
 ## 变更文件
 

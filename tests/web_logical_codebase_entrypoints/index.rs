@@ -8,30 +8,194 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex};
 
+use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
+use cadence_aria::cross_cutting::bounded_command_runner::{
+    BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
-    IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
-    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
-    RepositorySourceIdentity, RepositoryType,
+    AggregateInitializationStepKind, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
+    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
     aggregate_index::{
-        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
-        AggregateIndexStore,
+        AggregateIndexMemberSnapshot, AggregateIndexOperation, AggregateIndexRecord,
+        AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
     },
+    aggregate_initialization_coordinator::{
+        AggregateInitializationCoordinator, AggregateInitializationError,
+        AggregatePreflightService, AggregatePreflightSnapshot, AggregateProviderTurnDriver,
+        AggregateSkillsPreparation, MachineSkillsPreparation,
+    },
+    aggregate_initialization_store::AggregateInitializationOperationStore,
     policy::AggregatePolicyArtifactStore,
 };
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::web::app::build_web_router;
+use cadence_aria::web::handlers::AggregateInitializationDependencies;
 use cadence_aria::web::runtime::WebRuntime;
-use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::state::{InitializationRunRegistry, WebAppState};
 use serde_json::json;
 use tempfile::TempDir;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{assert_error, request};
+
+const AGGREGATE_INDEX_REBUILD_PATH: &str =
+    "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild";
+const AGGREGATE_INDEX_ACTIVE_PATH: &str =
+    "/api/projects/project_0001/logical-codebase/aggregate-indexes/active";
+
+struct NoopSkills;
+
+#[async_trait]
+impl AggregateSkillsPreparation for NoopSkills {
+    async fn prepare_skills(
+        &self,
+        _project_id: &str,
+        _operation_id: &str,
+        _cancellation: CancellationToken,
+    ) -> Result<MachineSkillsPreparation, AggregateInitializationError> {
+        Ok(MachineSkillsPreparation {
+            source_digest: "sha256:test-source".to_string(),
+            link_digest: "sha256:test-links".to_string(),
+            skills_root: PathBuf::from("/test-skills"),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+struct NoopPreflight;
+
+impl AggregatePreflightService for NoopPreflight {
+    fn inspect(
+        &self,
+        _project_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        cancellation: &CancellationToken,
+    ) -> Result<AggregatePreflightSnapshot, AggregateInitializationError> {
+        if cancellation.is_cancelled() {
+            return Err(AggregateInitializationError::Cancelled);
+        }
+        Ok(AggregatePreflightSnapshot {
+            aggregate_root: manifest.provider_context_root.display().to_string(),
+            index_excludes_assets: true,
+            members: Vec::new(),
+            manifest_revision: manifest.membership_revision,
+            manifest_digest: "sha256:test-manifest".to_string(),
+        })
+    }
+}
+
+struct NoopProvider;
+
+#[async_trait]
+impl AggregateProviderTurnDriver for NoopProvider {
+    async fn run_turn(
+        &self,
+        _project_id: &str,
+        _operation_id: &str,
+        _step: AggregateInitializationStepKind,
+        _preflight: &AggregatePreflightSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<String, AggregateInitializationError> {
+        if cancellation.is_cancelled() {
+            return Err(AggregateInitializationError::Cancelled);
+        }
+        Ok("turn complete".to_string())
+    }
+}
+
+#[derive(Default)]
+struct BlockingIndexCliState {
+    started: bool,
+    released: bool,
+}
+
+#[derive(Clone)]
+struct BlockingIndexCli {
+    gate: Arc<(Mutex<BlockingIndexCliState>, Condvar)>,
+}
+
+impl BlockingIndexCli {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new((Mutex::new(BlockingIndexCliState::default()), Condvar::new())),
+        }
+    }
+
+    fn release(&self) {
+        let (state, wake) = &*self.gate;
+        state.lock().expect("blocking CLI gate").released = true;
+        wake.notify_all();
+    }
+
+    fn wait_until_started(&self) {
+        let (state, wake) = &*self.gate;
+        let mut state = state.lock().expect("blocking CLI gate");
+        while !state.started {
+            state = wake.wait(state).expect("blocking CLI gate wait");
+        }
+    }
+
+    fn success(stdout: impl Into<String>) -> BoundedCommandResult {
+        BoundedCommandResult {
+            exit_code: Some(0),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration_ms: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl BoundedCommandRunner for BlockingIndexCli {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let command = request.argv.first().map(String::as_str).unwrap_or_default();
+        match command {
+            "--version" => Ok(Self::success("1.5.0\n")),
+            "init" | "sync" => {
+                let (state, wake) = &*self.gate;
+                let mut state = state.lock().expect("blocking CLI gate");
+                state.started = true;
+                wake.notify_all();
+                while !state.released {
+                    state = wake.wait(state).expect("blocking CLI gate wait");
+                }
+                Ok(Self::success(""))
+            }
+            "files" => Ok(Self::success(
+                r#"[{"path":"api/lib.rs"},{"path":"web/lib.rs"}]"#,
+            )),
+            "query" => {
+                let query = request.argv.get(1).map(String::as_str).unwrap_or_default();
+                if query == "crossRepoGreeting" {
+                    Ok(Self::success(
+                        r#"[{"path":"api/lib.rs"},{"path":"web/lib.rs"}]"#,
+                    ))
+                } else {
+                    Ok(Self::success("[]"))
+                }
+            }
+            _ => Err(BoundedCommandError::Io {
+                details: format!("unexpected fake codegraph command: {command}"),
+            }),
+        }
+    }
+}
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -41,11 +205,31 @@ struct PlanningHttpFixture {
     paths: ProductAppPaths,
     api_root: PathBuf,
     api_member_id: LogicalRepositoryId,
+    blocking_index_cli: Option<BlockingIndexCli>,
     app: axum::Router,
 }
 
 impl PlanningHttpFixture {
     fn new() -> Self {
+        Self::new_with_runner(None, false, true)
+    }
+
+    fn with_blocking_index_cli() -> Self {
+        let cli = BlockingIndexCli::new();
+        Self::new_with_runner(Some(cli), false, true)
+    }
+
+    fn with_initialization() -> Self {
+        let cli = BlockingIndexCli::new();
+        cli.release();
+        Self::new_with_runner(Some(cli), true, false)
+    }
+
+    fn new_with_runner(
+        index_runner: Option<BlockingIndexCli>,
+        with_initialization: bool,
+        seed_active: bool,
+    ) -> Self {
         let workspace = tempfile::tempdir().expect("workspace");
         let root = workspace.path().to_path_buf();
         let paths = ProductAppPaths::new(root.join(".aria"));
@@ -169,19 +353,21 @@ impl PlanningHttpFixture {
             )
         })
         .collect();
-        let mut active = AggregateIndexRecord::building(
-            "aggregate_index_before_stale".to_string(),
-            PROJECT_ID.to_string(),
-            manifest.membership_revision,
-            snapshots,
-            now,
-        );
-        active.status = AggregateIndexStatus::Active;
-        active.codegraph_root = aggregate_root;
-        active.config_digest = "fixture".to_string();
-        AggregateIndexStore::new(paths.clone())
-            .create(PROJECT_ID, active)
-            .expect("publish initial active index");
+        if seed_active {
+            let mut active = AggregateIndexRecord::building(
+                "aggregate_index_before_stale".to_string(),
+                PROJECT_ID.to_string(),
+                manifest.membership_revision,
+                snapshots,
+                now,
+            );
+            active.status = AggregateIndexStatus::Active;
+            active.codegraph_root = aggregate_root;
+            active.config_digest = "fixture".to_string();
+            AggregateIndexStore::new(paths.clone())
+                .create(PROJECT_ID, active)
+                .expect("publish initial active index");
+        }
         // Create the issue before its selection: IssueStore derives the next id from the
         // issue root, which also contains selection subdirectories.
         IssueStore::new(paths.clone())
@@ -202,12 +388,54 @@ impl PlanningHttpFixture {
             .ensure_bootstrap(&manifest)
             .expect("bootstrap aggregate policy");
 
-        let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root));
+        let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
+        let blocking_index_cli = index_runner.clone();
+        let index = index_runner.map(|runner| {
+            Arc::new(AggregateIndexOperation::with_snapshot_dependencies(
+                LogicalCodebaseStore::new(paths.clone()),
+                AggregateIndexStore::new(paths.clone()),
+                CodeGraphCli::new(Arc::new(runner), "fake-codegraph".to_string()),
+                CodeGraphExcludeGenerator,
+                cadence_aria::product::logical_codebase::aggregate_index::
+                    AggregateIndexSnapshotCollector::for_paths(paths.clone()),
+            ))
+        });
+        let state = if let Some(index) = index.clone() {
+            // Snapshot Git commands still use the production runner; only the
+            // controllable fake CodeGraph CLI is replaced for this HTTP test.
+            state.with_aggregate_index_operation(index)
+        } else {
+            state
+        };
+        let state = if with_initialization {
+            let coordinator = AggregateInitializationCoordinator::new(
+                paths.clone(),
+                AggregateInitializationOperationStore::new(paths.clone()),
+                Arc::new(NoopSkills),
+                Arc::new(NoopPreflight),
+                Arc::new(NoopProvider),
+                Arc::new(|| "2026-08-18T00:00:00Z".to_string()),
+            );
+            state.with_aggregate_initialization_dependencies(
+                AggregateInitializationDependencies::with_index(
+                    Arc::new(coordinator),
+                    InitializationRunRegistry::default(),
+                    index.expect("initialization fixture index operation"),
+                ),
+            )
+        } else {
+            state
+        };
         Self {
             _workspace: workspace,
             paths,
             api_root,
             api_member_id,
+            blocking_index_cli: if with_initialization {
+                None
+            } else {
+                blocking_index_cli
+            },
             app: build_web_router(state),
         }
     }
@@ -216,6 +444,37 @@ impl PlanningHttpFixture {
         AggregateIndexStore::new(self.paths.clone())
             .active_required(PROJECT_ID)
             .expect("read active aggregate index")
+    }
+
+    fn spawn_rebuild(&self) -> JoinHandle<(StatusCode, serde_json::Value)> {
+        let app = self.app.clone();
+        tokio::spawn(async move {
+            request(&app, Method::POST, AGGREGATE_INDEX_REBUILD_PATH, json!({})).await
+        })
+    }
+
+    fn release_cli(&self) {
+        self.blocking_index_cli
+            .as_ref()
+            .expect("blocking index CLI")
+            .release();
+    }
+
+    async fn wait_until_building(&self) {
+        for _ in 0..100 {
+            let (status, body) = request(
+                &self.app,
+                Method::GET,
+                AGGREGATE_INDEX_ACTIVE_PATH,
+                json!({}),
+            )
+            .await;
+            if status == StatusCode::OK && body["state"] == "rebuilding" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("aggregate index rebuild did not become visible as rebuilding");
     }
 
     fn make_api_member_drift(&self) {
@@ -301,6 +560,61 @@ async fn generate_story(app: &axum::Router) -> (StatusCode, serde_json::Value) {
 }
 
 #[tokio::test]
+async fn aggregate_initialization_completion_eventually_exposes_active_index() {
+    let fixture = PlanningHttpFixture::with_initialization();
+    let (status, accepted) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/initializations",
+        json!({"idempotency_key":"index-active-e2e"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "initialization response: {accepted}"
+    );
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
+
+    let mut completed = None;
+    for _ in 0..100 {
+        let (status, body) = request(
+            &fixture.app,
+            Method::GET,
+            &format!("/api/projects/project_0001/logical-codebase/initializations/{operation_id}"),
+            json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "initialization status: {body}");
+        if body["status"] == "completed" {
+            completed = Some(body);
+            break;
+        }
+        assert_ne!(body["status"], "failed", "initialization failed: {body}");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(completed.is_some(), "initialization did not complete");
+
+    for _ in 0..100 {
+        let (status, body) = request(
+            &fixture.app,
+            Method::GET,
+            AGGREGATE_INDEX_ACTIVE_PATH,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "active response: {body}");
+        if body["state"] == "active" {
+            assert!(body["revision"].as_u64().is_some());
+            assert!(body["indexed_at"].as_str().is_some());
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("initialization completed without active aggregate index");
+}
+
+#[tokio::test]
 async fn aggregate_index_active_endpoint_returns_missing_without_record() {
     let workspace = tempfile::tempdir().expect("workspace");
     let paths = ProductAppPaths::new(workspace.path().join(".aria"));
@@ -371,6 +685,45 @@ async fn aggregate_index_active_endpoint_projects_building_as_rebuilding() {
 
     assert_eq!(status, StatusCode::OK, "active response: {body}");
     assert_eq!(body["state"], "rebuilding");
+}
+
+#[tokio::test]
+async fn aggregate_index_endpoints_expose_building_and_reject_concurrent_rebuilds() {
+    let fixture = PlanningHttpFixture::with_blocking_index_cli();
+    let first = fixture.spawn_rebuild();
+    fixture.wait_until_building().await;
+    fixture
+        .blocking_index_cli
+        .as_ref()
+        .expect("blocking index CLI")
+        .wait_until_started();
+
+    let (status, body) = request(
+        &fixture.app,
+        Method::GET,
+        AGGREGATE_INDEX_ACTIVE_PATH,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "active response: {body}");
+    assert_eq!(body["state"], "rebuilding");
+
+    assert_error(
+        request(
+            &fixture.app,
+            Method::POST,
+            AGGREGATE_INDEX_REBUILD_PATH,
+            json!({}),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "aggregate_index_rebuild_in_progress",
+    );
+
+    fixture.release_cli();
+    let (status, body) = first.await.expect("first rebuild task");
+    assert_eq!(status, StatusCode::OK, "rebuild response: {body}");
+    assert_eq!(body["state"], "active");
 }
 
 #[tokio::test]

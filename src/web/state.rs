@@ -340,6 +340,28 @@ impl WebAppState {
         self
     }
 
+    /// Replaces only the aggregate-index operation while retaining the
+    /// production initialization coordinator and run registry. This is used
+    /// by integration tests to control the index CLI without replacing the
+    /// HTTP initialization path.
+    pub fn with_aggregate_index_operation(
+        mut self,
+        index: Arc<crate::product::logical_codebase::aggregate_index::AggregateIndexOperation>,
+    ) -> Self {
+        let dependencies = self
+            .aggregate_initialization_dependencies
+            .take()
+            .expect("aggregate initialization dependencies are initialized");
+        self.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::with_index(
+                dependencies.coordinator,
+                dependencies.runs,
+                index,
+            ),
+        );
+        self
+    }
+
     /// Returns a clone of dependencies constructed once for this state.
     /// Every clone keeps the same coordinator, index operation and run registry.
     pub(crate) fn aggregate_initialization_dependencies(

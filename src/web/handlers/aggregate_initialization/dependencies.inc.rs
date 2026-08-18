@@ -23,7 +23,7 @@ impl AggregateInitializationDependencies {
         )
     }
 
-    pub(crate) fn with_index(
+    pub fn with_index(
         coordinator: Arc<AggregateInitializationCoordinator>,
         runs: InitializationRunRegistry,
         index: Arc<AggregateIndexOperation>,
