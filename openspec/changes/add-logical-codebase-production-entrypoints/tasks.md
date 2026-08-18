@@ -10,7 +10,7 @@
 ## 2. 登记生产入口
 
 - [x] 2.1 新建 RegistrationPreflightSnapshotStore（磁盘 preflights/{id}.json：冻结 RegistrationCandidate 全量 + aggregate_root + created_at；TTL 24h 读取时惰性过期），lib 单测读写/TTL/重启存活
-- [ ] 2.2 mod.rs 补导出 RegistrationBatch* 系列；新建 handlers/logical_codebase_registration.rs：preflight 端点（AggregateRootPreflight::validate → coordinator.preflight → 快照落盘），aggregate_root_* 5 个错误码 HTTP 映射入 support.rs
+- [x] 2.2 mod.rs 补导出 RegistrationBatch* 系列；新建 handlers/logical_codebase_registration.rs：preflight 端点（AggregateRootPreflight::validate → coordinator.preflight → 快照落盘），aggregate_root_* 5 个错误码 HTTP 映射入 support.rs
 - [ ] 2.3 提交端点：load 快照→重建 ConfirmedRegistrationBatchInput（勾选 needs_attention 项→include_needs_attention=true）→同步执行；revision 漂移 item 级 needs_attention、identity 变化 409 registration_batch_conflict；首批 manifest 原子创建与 root 一致性 409 aggregate_root_mismatch（lib 单测 + it_web）
 - [ ] 2.4 GET/resume/cancel 端点（cancel 仅 Queued/PartialFailed，终态 409 not_cancelable），it_web 全链：7 类预检分类→提交→幂等→resume→漂移两态
 - [ ] 2.5 前端登记向导 + registration API client/types（分类展示、勾选确认、同步提交 loading、批次结果/partial 恢复）
