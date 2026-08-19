@@ -59,4 +59,4 @@
   - [x] coding.rs:367 / coding/group.rs:323：build_attempt_target_snapshot 调用点未透传 issue lc_id
   - [x] resolve_coding_attempt_repository（coding_attempt_repository.rs:34）：物理解析仍 RepositoryStore::for_project（:42）；调用点 coding_ws_handler/context.rs:89、handlers/coding.rs:458
   - [x] RepositoryStore::for_project 残留清理：target_snapshot.rs:50、coding_attempt_repository.rs:42、coding/group.rs:411/428 改按 codebase 判定
-- [ ] R10 全门禁 + 验收记录更新
+- [x] R10 全门禁 + 验收记录更新
