@@ -19,7 +19,6 @@ use cadence_aria::cross_cutting::provider_health::{
     ProviderHealthService, SystemProviderHealthClock,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::logical_codebase::{LogicalCodebaseManifest, LogicalCodebaseStore};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::runtime::WebRuntime;
@@ -182,13 +181,14 @@ impl P0HttpFixture {
         }
     }
 
-    async fn create_multi_repo_project(&self) -> String {
+    /// v1.3 新寻址（R9）：POST /logical-codebases 创建 LC，不再落地 legacy manifest。
+    async fn create_project_and_logical_codebase(&self, name: &str) -> (String, String) {
         let (status, project) = request(
             &self.app,
             Method::POST,
             "/api/projects",
             json!({
-                "name": "P0 multi-repository HTTP chain",
+                "name": name,
                 "description": "real HTTP registration through planning"
             }),
         )
@@ -198,25 +198,41 @@ impl P0HttpFixture {
             .as_str()
             .expect("project id")
             .to_string();
-        // R1 过渡：旧 logical-codebase 端点是“默认第一个逻辑代码库”的兼容别名，
-        // 因此 fixture 直接落地 manifest 以模拟已存在的逻辑代码库。
-        LogicalCodebaseStore::new(ProductAppPaths::new(self.root.join(".aria")))
-            .save_manifest(
-                &project_id,
-                &LogicalCodebaseManifest::new(&project_id, self.aggregate_root.clone(), Vec::new()),
-            )
-            .expect("save logical codebase manifest");
-        project_id
+        let (status, codebase) = request(
+            &self.app,
+            Method::POST,
+            &format!("/api/projects/{project_id}/logical-codebases"),
+            json!({
+                "name": "P0 aggregate",
+                "aggregate_root": self.aggregate_root,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create logical codebase: {codebase}"
+        );
+        let lc_id = codebase["logical_codebase_id"]
+            .as_str()
+            .or_else(|| codebase["id"].as_str())
+            .expect("logical codebase id")
+            .to_string();
+        (project_id, lc_id)
     }
 
-    async fn preflight_and_submit_all(&self, project_id: &str) -> serde_json::Value {
+    /// v1.3 新寻址：preflight auto_discover 自动发现聚合根下直连 Git 成员，再确认提交。
+    async fn preflight_and_submit_all(&self, project_id: &str, lc_id: &str) -> serde_json::Value {
         let (status, preflight) = request(
             &self.app,
             Method::POST,
-            &format!("/api/projects/{project_id}/logical-codebase/registrations/preflight"),
+            &format!(
+                "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations/preflight"
+            ),
             json!({
                 "aggregate_root": self.aggregate_root,
                 "candidate_paths": self.member_roots,
+                "auto_discover": true,
             }),
         )
         .await;
@@ -225,21 +241,31 @@ impl P0HttpFixture {
             StatusCode::OK,
             "registration preflight: {preflight}"
         );
+        let items = preflight["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("preflight items: {preflight}"));
         assert!(
-            preflight["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().all(|item| item["class"] == "eligible")),
+            items.iter().all(|item| item["class"] == "eligible"),
             "real Git members must be eligible: {preflight}"
         );
+        assert_eq!(
+            items.len(),
+            self.member_roots.len(),
+            "auto-discovered members: {preflight}"
+        );
+        let confirmed_paths: Vec<String> = items
+            .iter()
+            .map(|item| item["path"].as_str().expect("member path").to_string())
+            .collect();
 
         let (status, batch) = request(
             &self.app,
             Method::POST,
-            &format!("/api/projects/{project_id}/logical-codebase/registrations"),
+            &format!("/api/projects/{project_id}/logical-codebases/{lc_id}/registrations"),
             json!({
                 "aggregate_root": self.aggregate_root,
                 "preflight_id": preflight["preflight_id"],
-                "confirmed_paths": self.member_roots,
+                "confirmed_paths": confirmed_paths,
             }),
         )
         .await;
@@ -250,12 +276,13 @@ impl P0HttpFixture {
     async fn start_initialization(
         &self,
         project_id: &str,
+        lc_id: &str,
         idempotency_key: &str,
     ) -> serde_json::Value {
         let (status, operation) = request(
             &self.app,
             Method::POST,
-            &format!("/api/projects/{project_id}/logical-codebase/initializations"),
+            &format!("/api/projects/{project_id}/logical-codebases/{lc_id}/initializations"),
             json!({"idempotency_key": idempotency_key}),
         )
         .await;
@@ -267,13 +294,18 @@ impl P0HttpFixture {
         operation
     }
 
-    async fn poll_until_terminal(&self, project_id: &str, operation_id: &str) -> serde_json::Value {
+    async fn poll_until_terminal(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        operation_id: &str,
+    ) -> serde_json::Value {
         for _ in 0..200 {
             let (status, operation) = request(
                 &self.app,
                 Method::GET,
                 &format!(
-                    "/api/projects/{project_id}/logical-codebase/initializations/{operation_id}"
+                    "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations/{operation_id}"
                 ),
                 json!(null),
             )
@@ -290,13 +322,15 @@ impl P0HttpFixture {
         panic!("initialization {operation_id} did not reach a terminal state");
     }
 
-    async fn wait_for_active_index(&self, project_id: &str) -> serde_json::Value {
+    async fn wait_for_active_index(&self, project_id: &str, lc_id: &str) -> serde_json::Value {
         let mut last = serde_json::Value::Null;
         for _ in 0..200 {
             let (status, index) = request(
                 &self.app,
                 Method::GET,
-                &format!("/api/projects/{project_id}/logical-codebase/aggregate-indexes/active"),
+                &format!(
+                    "/api/projects/{project_id}/logical-codebases/{lc_id}/aggregate-indexes/active"
+                ),
                 json!({}),
             )
             .await;
@@ -310,15 +344,11 @@ impl P0HttpFixture {
         panic!("aggregate index did not become active: {last}");
     }
 
-    async fn primary_repository_id(&self, project_id: &str) -> String {
+    async fn primary_repository_id(&self, project_id: &str, lc_id: &str) -> String {
         // R6：GET /repositories 不再投影逻辑成员，改从成员权威记录直接读取
         // 首个 active 成员的 physical_repository_id（primary 校验接受的任意
-        // active 成员）。
-        let members_root = self
-            .root
-            .join(".aria/projects")
-            .join(project_id)
-            .join("logical-codebase/members");
+        // active 成员）。v1.3（R9）：成员权威记录在 logical-codebases/{lc_id}/ 子树。
+        let members_root = self.lc_members_root(project_id, lc_id);
         let mut physical_ids = fs::read_dir(&members_root)
             .expect("registered member records")
             .map(|entry| entry.expect("member entry").path())
@@ -340,38 +370,21 @@ impl P0HttpFixture {
         physical_ids.remove(0)
     }
 
-    async fn logical_codebase_id(&self, project_id: &str) -> String {
-        let (status, codebases) = request(
-            &self.app,
-            Method::GET,
-            &format!("/api/projects/{project_id}/codebases"),
-            json!({}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "list codebases: {codebases}");
-        codebases["codebases"]
-            .as_array()
-            .and_then(|codebases| {
-                codebases
-                    .iter()
-                    .find(|codebase| codebase["kind"] == "logical")
-            })
-            .and_then(|codebase| codebase["logical_codebase_id"].as_str())
-            .expect("registered logical codebase id")
-            .to_string()
-    }
-
-    async fn create_issue_with_primary(&self, project_id: &str) -> serde_json::Value {
-        let repository_id = self.primary_repository_id(project_id).await;
-        let logical_codebase_id = self.logical_codebase_id(project_id).await;
+    async fn create_issue_with_primary(
+        &self,
+        project_id: &str,
+        lc_id: &str,
+        title: &str,
+    ) -> serde_json::Value {
+        let repository_id = self.primary_repository_id(project_id, lc_id).await;
         let (status, issue) = request(
             &self.app,
             Method::POST,
             &format!("/api/projects/{project_id}/issues"),
             json!({
                 "repository_id": repository_id,
-                "logical_codebase_id": logical_codebase_id,
-                "title": "P0 aggregate planning issue",
+                "logical_codebase_id": lc_id,
+                "title": title,
                 "description": "selection must be written by the HTTP issue endpoint"
             }),
         )
@@ -380,22 +393,29 @@ impl P0HttpFixture {
         issue
     }
 
-    fn selection_is_persisted(&self, project_id: &str, issue_id: &str) -> bool {
+    fn lc_members_root(&self, project_id: &str, lc_id: &str) -> PathBuf {
         self.root
             .join(".aria/projects")
             .join(project_id)
-            .join("issues")
+            .join("logical-codebases")
+            .join(lc_id)
+            .join("members")
+    }
+
+    fn selection_is_persisted(&self, project_id: &str, lc_id: &str, issue_id: &str) -> bool {
+        self.root
+            .join(".aria/projects")
+            .join(project_id)
+            .join("logical-codebases")
+            .join(lc_id)
+            .join("selections")
             .join(issue_id)
             .join("codebase-selection.json")
             .is_file()
     }
 
-    fn logical_member_ids(&self, project_id: &str) -> Vec<String> {
-        let members_root = self
-            .root
-            .join(".aria/projects")
-            .join(project_id)
-            .join("logical-codebase/members");
+    fn logical_member_ids(&self, project_id: &str, lc_id: &str) -> Vec<String> {
+        let members_root = self.lc_members_root(project_id, lc_id);
         let mut ids = fs::read_dir(members_root)
             .expect("registered member records")
             .map(|entry| entry.expect("member entry").path())
@@ -527,38 +547,44 @@ impl P0MemberGitSnapshot {
     }
 }
 
-async fn p0_registered_initialized_issue() -> (P0HttpFixture, String, String, Vec<String>) {
+async fn p0_registered_initialized_issue() -> (P0HttpFixture, String, String, String, Vec<String>) {
     let fixture = P0HttpFixture::real_git_aggregate().await;
-    let project_id = fixture.create_multi_repo_project().await;
-    let batch = fixture.preflight_and_submit_all(&project_id).await;
+    let (project_id, lc_id) = fixture
+        .create_project_and_logical_codebase("P0 multi-repository HTTP chain")
+        .await;
+    let batch = fixture.preflight_and_submit_all(&project_id, &lc_id).await;
     assert_eq!(batch["status"], "completed", "registration batch: {batch}");
 
     let operation = fixture
-        .start_initialization(&project_id, "p0-init-key")
+        .start_initialization(&project_id, &lc_id, "p0-init-key")
         .await;
     let operation_id = operation["operation_id"].as_str().expect("operation id");
-    let completed = fixture.poll_until_terminal(&project_id, operation_id).await;
+    let completed = fixture
+        .poll_until_terminal(&project_id, &lc_id, operation_id)
+        .await;
     assert_eq!(
         completed["status"], "completed",
         "initialization: {completed}"
     );
     assert_eq!(
-        fixture.wait_for_active_index(&project_id).await["state"],
+        fixture.wait_for_active_index(&project_id, &lc_id).await["state"],
         "active"
     );
 
-    let issue = fixture.create_issue_with_primary(&project_id).await;
+    let issue = fixture
+        .create_issue_with_primary(&project_id, &lc_id, "P0 aggregate planning issue")
+        .await;
     let issue_id = issue["issue_id"].as_str().expect("issue id").to_string();
     assert!(
-        fixture.selection_is_persisted(&project_id, &issue_id),
+        fixture.selection_is_persisted(&project_id, &lc_id, &issue_id),
         "HTTP issue creation must persist codebase selection"
     );
-    let members = fixture.logical_member_ids(&project_id);
-    (fixture, project_id, issue_id, members)
+    let members = fixture.logical_member_ids(&project_id, &lc_id);
+    (fixture, project_id, lc_id, issue_id, members)
 }
 #[tokio::test]
 async fn reg_init_idx_pln_p0_chain_uses_only_http_routes() {
-    let (fixture, project_id, issue_id, members) = p0_registered_initialized_issue().await;
+    let (fixture, project_id, _lc_id, issue_id, members) = p0_registered_initialized_issue().await;
     let member_git_before = fixture
         .member_roots
         .iter()
@@ -616,7 +642,7 @@ async fn reg_init_idx_pln_p0_chain_uses_only_http_routes() {
 
 #[tokio::test]
 async fn multi_repo_design_missing_change_order_is_blocked_over_http() {
-    let (fixture, project_id, issue_id, members) = p0_registered_initialized_issue().await;
+    let (fixture, project_id, _lc_id, issue_id, members) = p0_registered_initialized_issue().await;
     let story = fixture
         .generate_story(&project_id, &issue_id, &members)
         .await;
@@ -684,5 +710,229 @@ async fn multi_repo_design_missing_change_order_is_blocked_over_http() {
         status,
         StatusCode::OK,
         "ordered Design must pass: {confirmed}"
+    );
+}
+
+/// R9 多 LC 并存 e2e：同一 project 两个 LC 各自登记、各建 issue，互不串扰
+/// （selection 落各自 lc 子树；LC-B 的 issue 拒绝 LC-A 的成员作为 primary）。
+#[tokio::test]
+async fn two_logical_codebases_coexist_without_cross_interference() {
+    let fixture = P0HttpFixture::real_git_aggregate().await;
+    let (project_id, lc_a) = fixture
+        .create_project_and_logical_codebase("P0 multi-LC chain A")
+        .await;
+    fixture.preflight_and_submit_all(&project_id, &lc_a).await;
+
+    // 第二个聚合根：单个真实 Git 成员。
+    let second_root = fixture.root.join("second-root");
+    let svc_root = second_root.join("svc");
+    fs::create_dir_all(&svc_root).expect("create second member");
+    git(
+        &svc_root,
+        &[
+            "-c",
+            "user.name=P0 Test",
+            "-c",
+            "user.email=p0@example.test",
+            "init",
+            "-q",
+        ],
+    );
+    fs::write(svc_root.join("lib.rs"), "pub fn svc() {}\n").expect("write member source");
+    git(&svc_root, &["add", "lib.rs"]);
+    git(
+        &svc_root,
+        &[
+            "-c",
+            "user.name=P0 Test",
+            "-c",
+            "user.email=p0@example.test",
+            "commit",
+            "-qm",
+            "svc baseline",
+        ],
+    );
+    codegraph(&second_root, "init");
+
+    let (status, codebase) = request(
+        &fixture.app,
+        Method::POST,
+        &format!("/api/projects/{project_id}/logical-codebases"),
+        json!({
+            "name": "P0 LC B",
+            "aggregate_root": second_root,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create second LC: {codebase}");
+    let lc_b = codebase["logical_codebase_id"]
+        .as_str()
+        .or_else(|| codebase["id"].as_str())
+        .expect("second lc id")
+        .to_string();
+    assert_ne!(lc_a, lc_b);
+
+    // LC-B 登记走新路径（auto_discover 只发现 svc 一个成员）。
+    let (status, preflight) = request(
+        &fixture.app,
+        Method::POST,
+        &format!("/api/projects/{project_id}/logical-codebases/{lc_b}/registrations/preflight"),
+        json!({
+            "aggregate_root": second_root,
+            "candidate_paths": [svc_root],
+            "auto_discover": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "LC-B preflight: {preflight}");
+    let items = preflight["items"].as_array().expect("preflight items");
+    assert_eq!(items.len(), 1, "LC-B discovers exactly svc: {preflight}");
+    let svc_path = items[0]["path"].as_str().expect("svc path").to_string();
+    let (status, batch) = request(
+        &fixture.app,
+        Method::POST,
+        &format!("/api/projects/{project_id}/logical-codebases/{lc_b}/registrations"),
+        json!({
+            "aggregate_root": second_root,
+            "preflight_id": preflight["preflight_id"],
+            "confirmed_paths": [svc_path],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "LC-B submit: {batch}");
+    assert_eq!(batch["status"], "completed", "LC-B batch: {batch}");
+
+    // 成员互不串扰：HTTP members 按 lc 返回各自成员。
+    let members_of = |lc_id: String| {
+        let app = fixture.app.clone();
+        let project_id = project_id.clone();
+        async move {
+            let (status, body) = request(
+                &app,
+                Method::GET,
+                &format!("/api/projects/{project_id}/logical-codebases/{lc_id}/members"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "members: {body}");
+            body["members"].as_array().expect("members array").clone()
+        }
+    };
+    let members_a = members_of(lc_a.clone()).await;
+    let members_b = members_of(lc_b.clone()).await;
+    assert_eq!(members_a.len(), 2, "LC-A members: {members_a:?}");
+    assert_eq!(members_b.len(), 1, "LC-B members: {members_b:?}");
+    let ids_a: Vec<String> = members_a
+        .iter()
+        .filter_map(|m| m["logical_repository_id"].as_str().map(str::to_string))
+        .collect();
+    let ids_b: Vec<String> = members_b
+        .iter()
+        .filter_map(|m| m["logical_repository_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        ids_b.iter().all(|id| !ids_a.contains(id)),
+        "no shared logical members: {ids_a:?} vs {ids_b:?}"
+    );
+
+    // 两 LC 各建 issue；selection 落各自 lc 子树。
+    let issue_a = fixture
+        .create_issue_with_primary(&project_id, &lc_a, "LC-A issue")
+        .await;
+    let issue_b = fixture
+        .create_issue_with_primary(&project_id, &lc_b, "LC-B issue")
+        .await;
+    let issue_a_id = issue_a["issue_id"].as_str().expect("issue A id");
+    let issue_b_id = issue_b["issue_id"].as_str().expect("issue B id");
+    assert!(
+        fixture.selection_is_persisted(&project_id, &lc_a, issue_a_id),
+        "LC-A selection must persist in its lc subtree"
+    );
+    assert!(
+        fixture.selection_is_persisted(&project_id, &lc_b, issue_b_id),
+        "LC-B selection must persist in its lc subtree"
+    );
+    assert!(
+        !fixture.selection_is_persisted(&project_id, &lc_a, issue_b_id),
+        "LC-B issue selection must not land in LC-A subtree"
+    );
+
+    // 串扰防护：LC-B 的 issue 不能用 LC-A 的成员做 primary。
+    let lc_a_primary = fixture.primary_repository_id(&project_id, &lc_a).await;
+    assert_error(
+        request(
+            &fixture.app,
+            Method::POST,
+            &format!("/api/projects/{project_id}/issues"),
+            json!({
+                "repository_id": lc_a_primary,
+                "logical_codebase_id": lc_b,
+                "title": "cross-LC primary must be rejected",
+                "description": null,
+            }),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "repository_not_found",
+    );
+
+    // 统一列表：两个逻辑条目并存。
+    let (status, codebases) = request(
+        &fixture.app,
+        Method::GET,
+        &format!("/api/projects/{project_id}/codebases"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{codebases}");
+    let logical_entries = codebases["codebases"]
+        .as_array()
+        .expect("codebases array")
+        .iter()
+        .filter(|entry| entry["kind"] == "logical")
+        .count();
+    assert_eq!(logical_entries, 2, "both LCs stay listed: {codebases}");
+}
+
+/// R9 旧别名回归：新式 LC 建立后，旧 `/logical-codebase/*` 端点作为
+/// 「默认第一个逻辑代码库」兼容别名仍路由到该 LC。
+#[tokio::test]
+async fn legacy_alias_endpoints_route_to_default_first_logical_codebase() {
+    let fixture = P0HttpFixture::real_git_aggregate().await;
+    let (project_id, lc_id) = fixture
+        .create_project_and_logical_codebase("P0 legacy alias chain")
+        .await;
+    fixture.preflight_and_submit_all(&project_id, &lc_id).await;
+
+    let (status, members) = request(
+        &fixture.app,
+        Method::GET,
+        &format!("/api/projects/{project_id}/logical-codebase/members"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "legacy alias members: {members}");
+    assert_eq!(
+        members["members"].as_array().map(Vec::len),
+        Some(2),
+        "alias resolves the default first LC: {members}"
+    );
+
+    // 旧别名登记 preflight 也保持可达（路由层守卫，不真正提交）。
+    let (status, preflight) = request(
+        &fixture.app,
+        Method::POST,
+        &format!("/api/projects/{project_id}/logical-codebase/registrations/preflight"),
+        json!({
+            "aggregate_root": fixture.aggregate_root,
+            "candidate_paths": fixture.member_roots,
+            "auto_discover": true,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "legacy alias preflight: {preflight}"
     );
 }

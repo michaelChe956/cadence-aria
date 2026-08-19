@@ -271,6 +271,11 @@ fn group_target_snapshot(
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
 ) -> ApiResult<Option<AttemptTargetSnapshot>> {
+    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths, project_id, issue_id,
+    )
+    .map_err(product_store_api_error)?;
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
@@ -289,8 +294,13 @@ fn group_target_snapshot(
                     reason,
                 ));
             }
-            let selected_ids =
-                validate_logical_group_selection(app_paths, project_id, &manifest, &selection)?;
+            let selected_ids = validate_logical_group_selection(
+                app_paths,
+                lc_id.as_deref(),
+                project_id,
+                &manifest,
+                &selection,
+            )?;
             let target_ids: BTreeSet<LogicalRepositoryId> = authoritative
                 .units
                 .iter()
@@ -320,9 +330,14 @@ fn group_target_snapshot(
                     "group target repository is not in the effective selection",
                 ));
             }
-            build_attempt_target_snapshot(app_paths, project_id, logical_repository_id)
-                .map(Some)
-                .map_err(target_snapshot_api_error)
+            build_attempt_target_snapshot(
+                app_paths,
+                project_id,
+                logical_repository_id,
+                lc_id.as_deref(),
+            )
+            .map(Some)
+            .map_err(target_snapshot_api_error)
         }
         RepositoryRouting::FailClosed { code, reason } => Err(routing_api_error(code, &reason)),
     }
@@ -344,6 +359,11 @@ fn resolve_group_repository(
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
 ) -> ApiResult<RepositoryRecord> {
+    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths, project_id, issue_id,
+    )
+    .map_err(product_store_api_error)?;
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
@@ -374,8 +394,13 @@ fn resolve_group_repository(
                     reason,
                 ));
             }
-            let selected_ids =
-                validate_logical_group_selection(app_paths, project_id, &manifest, &selection)?;
+            let selected_ids = validate_logical_group_selection(
+                app_paths,
+                lc_id.as_deref(),
+                project_id,
+                &manifest,
+                &selection,
+            )?;
             let target_ids: BTreeSet<LogicalRepositoryId> = authoritative
                 .units
                 .iter()
@@ -405,11 +430,21 @@ fn resolve_group_repository(
                     "group target repository is not in the effective selection",
                 ));
             }
-            let project = ProjectStore::new(app_paths.clone())
-                .get(project_id)
-                .map_err(product_store_api_error)?;
-            RepositoryStore::for_project(app_paths.clone(), &project)
-                .resolve_logical_repository_strict(project_id, logical_repository_id)
+            let store = match lc_id.as_deref() {
+                Some(_) => RepositoryStore::new(app_paths.clone()),
+                None => {
+                    let project = ProjectStore::new(app_paths.clone())
+                        .get(project_id)
+                        .map_err(product_store_api_error)?;
+                    RepositoryStore::for_project(app_paths.clone(), &project)
+                }
+            };
+            store
+                .resolve_logical_repository_for_issue_codebase(
+                    project_id,
+                    lc_id.as_deref(),
+                    logical_repository_id,
+                )
                 .map(|(_, _, repository)| repository)
                 .map_err(product_store_api_error)
         }
@@ -449,6 +484,7 @@ fn resolve_legacy_group_repository(
 
 fn validate_logical_group_selection(
     app_paths: &ProductAppPaths,
+    lc_id: Option<&str>,
     project_id: &str,
     manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
     selection: &crate::product::logical_codebase::IssueCodebaseSelection,
@@ -459,16 +495,19 @@ fn validate_logical_group_selection(
             "issue codebase selection has been invalidated",
         ));
     }
-    let active_members: BTreeSet<LogicalRepositoryId> =
-        crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
-            .list_members(project_id)
-            .map_err(product_store_api_error)?
-            .into_iter()
-            .filter(|member| {
-                member.status == crate::product::logical_codebase::MemberStatus::Active
-            })
-            .map(|member| member.logical_repository_id)
-            .collect();
+    let authority = match lc_id {
+        Some(lc_id) => {
+            crate::product::logical_codebase::LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id)
+        }
+        None => crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone()),
+    };
+    let active_members: BTreeSet<LogicalRepositoryId> = authority
+        .list_members(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|member| member.status == crate::product::logical_codebase::MemberStatus::Active)
+        .map(|member| member.logical_repository_id)
+        .collect();
     if manifest
         .member_ids
         .iter()

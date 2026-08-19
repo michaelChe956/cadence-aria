@@ -362,9 +362,9 @@ impl CodingAttemptStore {
                 ));
             }
             (RepositoryRouting::Logical { .. }, Some(snapshot)) => {
-                validate_snapshot_fields(&self.paths, &attempt).map_err(|_| {
-                    ProductStoreError::Io(TARGET_SNAPSHOT_IDENTITY_DRIFTED.to_string())
-                })?;
+                validate_snapshot_fields(&self.paths, &attempt, lc_id.as_deref()).map_err(
+                    |_| ProductStoreError::Io(TARGET_SNAPSHOT_IDENTITY_DRIFTED.to_string()),
+                )?;
                 let policy_store = match lc_id.as_deref() {
                     Some(lc_id) => AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id),
                     None => AggregatePolicyArtifactStore::new(self.paths.clone()),

@@ -10,6 +10,7 @@ use crate::product::logical_codebase::snapshot_validator::validate_snapshot_fiel
 use crate::product::logical_codebase::{
     IssueCodebaseSelection, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
     MemberStatus, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
+    resolve_issue_logical_codebase_id,
 };
 use crate::product::models::RepositoryRecord;
 use crate::product::project_store::ProjectStore;
@@ -31,6 +32,8 @@ pub enum SchemaV2GroupAttemptScopePolicy {
 ///
 /// 所有 coding 入口必须通过该函数执行三态 routing、snapshot 优先校验、
 /// group target 唯一性和 legacy 物理回退，避免不同入口产生 fail-closed 语义漂移。
+/// v1.3：按 issue 所属 lc_id 寻址（R9 编码/交付链切换点）；单仓/无 LC issue
+/// 回退 legacy project 级路径，行为不变。
 pub fn resolve_coding_attempt_repository(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
@@ -39,7 +42,10 @@ pub fn resolve_coding_attempt_repository(
     let project = ProjectStore::new(app_paths.clone()).get(&attempt.project_id)?;
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &attempt.project_id, &attempt.issue_id)?;
-    let repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
+    let lc_id =
+        resolve_issue_logical_codebase_id(app_paths, &attempt.project_id, &attempt.issue_id)?;
+    // Legacy 回退 store：仅单仓/无 LC issue 使用（R9 残留清理后唯一 for_project 用途）。
+    let legacy_repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
 
     if let Some(snapshot) = attempt.target_snapshot.as_ref() {
         let (manifest, selection) = match routing {
@@ -59,6 +65,7 @@ pub fn resolve_coding_attempt_repository(
         };
         let selected_ids = validate_logical_selection(
             app_paths,
+            lc_id.as_deref(),
             &attempt.project_id,
             &attempt.issue_id,
             &manifest,
@@ -70,22 +77,23 @@ pub fn resolve_coding_attempt_repository(
                 "target snapshot repository is not in the effective selection",
             ));
         }
-        validate_snapshot_fields(app_paths, attempt).map_err(|code| {
+        validate_snapshot_fields(app_paths, attempt, lc_id.as_deref()).map_err(|code| {
             routing_error(
                 code,
                 "target snapshot does not match logical codebase authority",
             )
         })?;
         return resolve_logical_repository(
-            &repository_store,
+            app_paths,
             &attempt.project_id,
+            lc_id.as_deref(),
             snapshot.logical_repository_id,
         );
     }
 
     match routing {
         RepositoryRouting::Legacy { .. } => {
-            legacy_repository_for_attempt(&repository_store, app_paths, attempt)
+            legacy_repository_for_attempt(&legacy_repository_store, app_paths, attempt)
         }
         RepositoryRouting::Logical {
             manifest,
@@ -93,6 +101,7 @@ pub fn resolve_coding_attempt_repository(
         } => {
             let selected_ids = validate_logical_selection(
                 app_paths,
+                lc_id.as_deref(),
                 &attempt.project_id,
                 &attempt.issue_id,
                 &manifest,
@@ -124,8 +133,9 @@ pub fn resolve_coding_attempt_repository(
                 ));
             }
             resolve_logical_repository(
-                &repository_store,
+                app_paths,
                 &attempt.project_id,
+                lc_id.as_deref(),
                 logical_repository_id,
             )
         }
@@ -164,12 +174,20 @@ pub fn is_schema_v2_group_attempt(
 }
 
 fn resolve_logical_repository(
-    repository_store: &RepositoryStore,
+    app_paths: &ProductAppPaths,
     project_id: &str,
+    lc_id: Option<&str>,
     logical_repository_id: LogicalRepositoryId,
 ) -> Result<RepositoryRecord, ProductStoreError> {
+    let repository_store = match lc_id {
+        Some(_) => RepositoryStore::new(app_paths.clone()),
+        None => {
+            let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
+            RepositoryStore::for_project(app_paths.clone(), &project)
+        }
+    };
     repository_store
-        .resolve_logical_repository_strict(project_id, logical_repository_id)
+        .resolve_logical_repository_for_issue_codebase(project_id, lc_id, logical_repository_id)
         .map(|(_, _, repository)| repository)
         .map_err(|_| {
             routing_error(
@@ -268,6 +286,7 @@ fn logical_repository_for_group_attempt(
 
 fn validate_logical_selection(
     app_paths: &ProductAppPaths,
+    lc_id: Option<&str>,
     project_id: &str,
     issue_id: &str,
     manifest: &LogicalCodebaseManifest,
@@ -285,13 +304,16 @@ fn validate_logical_selection(
             "issue codebase selection has been invalidated",
         ));
     }
-    let active_members: BTreeSet<LogicalRepositoryId> =
-        LogicalCodebaseStore::new(app_paths.clone())
-            .list_members(project_id)?
-            .into_iter()
-            .filter(|member| member.status == MemberStatus::Active)
-            .map(|member| member.logical_repository_id)
-            .collect();
+    let authority = match lc_id {
+        Some(lc_id) => LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id),
+        None => LogicalCodebaseStore::new(app_paths.clone()),
+    };
+    let active_members: BTreeSet<LogicalRepositoryId> = authority
+        .list_members(project_id)?
+        .into_iter()
+        .filter(|member| member.status == MemberStatus::Active)
+        .map(|member| member.logical_repository_id)
+        .collect();
     if manifest
         .member_ids
         .iter()
@@ -509,5 +531,182 @@ mod tests {
             }],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn repository_resolver_resolves_new_lc_attempt_from_lc_subtree() {
+        // R9：非 legacy 新 LC——权威记录/selection 只落在 logical-codebases/{lc_id}/
+        // 子树（repos.json 无投影），attempt 携带 target snapshot，resolver 必须按
+        // issue 所属 lc_id 寻址并从权威记录合成物理 RepositoryRecord。
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "new lc resolver".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let record = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project.id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "new-lc".to_string(),
+                    aggregate_root: root.path().join("aggregate-root"),
+                },
+            )
+            .unwrap();
+        let lc_id = record.id;
+
+        let canonical_path = root.path().join("api");
+        std::fs::create_dir_all(&canonical_path).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&canonical_path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "resolver@example.test"]);
+        git(&["config", "user.name", "Resolver"]);
+        std::fs::write(canonical_path.join("README.md"), "# api\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-qm", "initial"]);
+
+        let authority = LogicalCodebaseStore::for_lc(paths.clone(), lc_id.clone());
+        let logical_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout_id =
+            crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let physical_repository_id = format!("repository_{}", uuid::Uuid::new_v4().simple());
+        let manifest = LogicalCodebaseManifest::new(
+            &project.id,
+            root.path().join("aggregate-root"),
+            vec![logical_id],
+        );
+        authority.save_manifest(&project.id, &manifest).unwrap();
+        let now = "2026-08-18T00:00:00Z".to_string();
+        let source_identity =
+            crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+                &canonical_path,
+                canonical_path.join(".git"),
+                None,
+            );
+        authority
+            .save_member(
+                &project.id,
+                &crate::product::logical_codebase::CodebaseMemberRecord {
+                    logical_repository_id: logical_id,
+                    physical_repository_id: physical_repository_id.clone(),
+                    alias: "api".to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 0,
+                    source_identity: source_identity.clone(),
+                    repo_type: crate::product::logical_codebase::RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: MemberStatus::Active,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .unwrap();
+        authority
+            .save_checkout(
+                &project.id,
+                &crate::product::logical_codebase::RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: logical_id,
+                    physical_repository_id: physical_repository_id.clone(),
+                    kind: crate::product::logical_codebase::CheckoutKind::Main,
+                    canonical_path: canonical_path.clone(),
+                    checkout_path_hash: "sha256:checkout".to_string(),
+                    git_dir_identity: source_identity.git_dir_identity().to_string(),
+                    revision: None,
+                    availability: crate::product::logical_codebase::CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        crate::product::logical_codebase::IdentityRegistryStore::new(paths.clone())
+            .upsert_active(
+                &project.id,
+                crate::product::logical_codebase::IdentityRegistryEntry::active(
+                    source_identity,
+                    logical_id,
+                    physical_repository_id.clone(),
+                    checkout_id,
+                    "resolver-new-lc-fixture".to_string(),
+                ),
+            )
+            .unwrap();
+        let policy = crate::product::logical_codebase::AggregatePolicyArtifactStore::for_lc(
+            paths.clone(),
+            lc_id.clone(),
+        )
+        .ensure_bootstrap(&manifest)
+        .unwrap();
+
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project.id.clone(),
+                repo_id: Some(physical_repository_id.clone()),
+                logical_codebase_id: Some(lc_id.clone()),
+                title: "new lc issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::for_lc(
+            paths.clone(),
+            lc_id.clone(),
+        )
+        .save(
+            &IssueCodebaseSelection::all_members(&project.id, &issue.id, None)
+                .for_logical_codebase(lc_id.clone()),
+        )
+        .unwrap();
+
+        let snapshot = crate::product::coding_models::AttemptTargetSnapshot {
+            logical_repository_id: logical_id,
+            checkout_id,
+            physical_repository_id: physical_repository_id.clone(),
+            canonical_path: canonical_path.clone(),
+            git_dir_identity: policy.digest.clone(),
+            revision: None,
+            policy_digest: policy.digest,
+            membership_revision: manifest.membership_revision,
+            captured_at: "2026-08-18T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        };
+        // git_dir_identity 必须与 checkout 权威一致：重新以权威记录为准。
+        let mut snapshot = snapshot;
+        snapshot.git_dir_identity = authority
+            .load_checkout(&project.id, checkout_id)
+            .unwrap()
+            .unwrap()
+            .git_dir_identity;
+        let mut attempt = attempt_fixture();
+        attempt.project_id = project.id.clone();
+        attempt.issue_id = issue.id.clone();
+        attempt.target_snapshot = Some(snapshot);
+
+        let repository = resolve_coding_attempt_repository(
+            &paths,
+            &attempt,
+            SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope,
+        )
+        .expect("resolver must address the lc subtree");
+
+        assert_eq!(repository.id, physical_repository_id);
+        assert_eq!(repository.path, canonical_path);
+        assert_eq!(repository.project_id, project.id);
+        assert_eq!(repository.logical_repository_id, Some(logical_id));
+        assert_eq!(repository.primary_checkout_id, Some(checkout_id));
     }
 }

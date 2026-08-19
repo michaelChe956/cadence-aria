@@ -27,7 +27,7 @@ async fn multi_repo_attempt_persists_frozen_target_snapshot() {
 
     assert_eq!(status, StatusCode::OK, "response: {created}");
     let attempt_id = assert_global_attempt_id(&created);
-    let persisted = CodingAttemptStore::new(app_paths)
+    let persisted = CodingAttemptStore::new(app_paths.clone())
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
     let snapshot = persisted
@@ -220,7 +220,7 @@ async fn multi_repo_group_attempt_persists_frozen_target_snapshot() {
 
     assert_eq!(status, StatusCode::OK, "response: {created}");
     let attempt_id = assert_global_attempt_id(&created);
-    let persisted = CodingAttemptStore::new(app_paths)
+    let persisted = CodingAttemptStore::new(app_paths.clone())
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted group attempt");
     let snapshot = persisted
@@ -587,4 +587,168 @@ async fn delete_coding_attempt_then_rebuild_does_not_conflict_on_handoff() {
     assert_ne!(body["code"], "group_completion_handoff_revision_conflict");
     let second_attempt_id = assert_global_attempt_id(&body);
     assert_ne!(second_attempt_id, first_attempt_id);
+}
+
+/// R9：非 legacy 新 LC issue 的 coding attempt 目标快照必须按 issue 所属 lc_id
+/// 从 `logical-codebases/{lc_id}/` 子树权威记录采集（repos.json 无投影）。
+#[tokio::test]
+async fn new_lc_attempt_persists_frozen_target_snapshot_from_lc_subtree() {
+    use cadence_aria::product::models::{IssueRecord, LifecycleWorkItemRecord};
+    use cadence_aria::product::json_store::{read_json, write_json};
+    use cadence_aria::product::logical_codebase::{
+        AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind,
+        CodebaseMemberRecord as LcMemberRecord, IdentityRegistryEntry, IdentityRegistryStore,
+        LogicalCodebaseCreateInput, LogicalCodebaseManifest, MemberStatus,
+        RepositoryCheckoutId, RepositoryCheckoutRecord, RepositoryType,
+    };
+    use uuid::Uuid;
+
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+
+    // 新 LC：权威记录只落在 logical-codebases/{lc_id}/ 子树。
+    let record = LogicalCodebaseStore::new(app_paths.clone())
+        .create(
+            "project_0001",
+            LogicalCodebaseCreateInput {
+                name: "new-lc".to_string(),
+                aggregate_root: root.path().join("aggregate-root"),
+            },
+        )
+        .expect("create logical codebase");
+    let lc_id = record.id;
+    let authority = LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id.clone());
+    let logical_id = LogicalRepositoryId(Uuid::new_v4());
+    let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+    let physical_id = format!("repository_{}", Uuid::new_v4().simple());
+    let canonical_path = repo.path().to_path_buf();
+    let manifest = LogicalCodebaseManifest::new(
+        "project_0001",
+        root.path().join("aggregate-root"),
+        vec![logical_id],
+    );
+    authority
+        .save_manifest("project_0001", &manifest)
+        .expect("save lc manifest");
+    let now = "2026-08-18T00:00:00Z".to_string();
+    let source_identity =
+        RepositorySourceIdentity::from_git_parts(&canonical_path, canonical_path.join(".git"), None);
+    authority
+        .save_member(
+            "project_0001",
+            &LcMemberRecord {
+                logical_repository_id: logical_id,
+                physical_repository_id: physical_id.clone(),
+                alias: "repo".to_string(),
+                role: "repository".to_string(),
+                ordinal: 0,
+                source_identity: source_identity.clone(),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .expect("save lc member");
+    authority
+        .save_checkout(
+            "project_0001",
+            &RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: logical_id,
+                physical_repository_id: physical_id.clone(),
+                kind: CheckoutKind::Main,
+                canonical_path: canonical_path.clone(),
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: source_identity.git_dir_identity().to_string(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )
+        .expect("save lc checkout");
+    IdentityRegistryStore::new(app_paths.clone())
+        .upsert_active(
+            "project_0001",
+            IdentityRegistryEntry::active(
+                source_identity,
+                logical_id,
+                physical_id.clone(),
+                checkout_id,
+                "new-lc-attempt-fixture".to_string(),
+            ),
+        )
+        .expect("register identity");
+    let policy = AggregatePolicyArtifactStore::for_lc(app_paths.clone(), lc_id.clone())
+        .ensure_bootstrap(&manifest)
+        .expect("ensure lc policy");
+
+    // issue 归属 + selection + work item 目标仓（测试内直接落盘权威记录）。
+    let issue_path = app_paths.issue_root("project_0001", "issue_0001").join("issue.json");
+    let mut issue: IssueRecord = read_json(&issue_path).expect("read issue");
+    issue.logical_codebase_id = Some(lc_id.clone());
+    write_json(&issue_path, &issue).expect("write issue attribution");
+    IssueCodebaseSelectionStore::for_lc(app_paths.clone(), lc_id.clone())
+        .save(&IssueCodebaseSelection::all_members(
+            "project_0001",
+            "issue_0001",
+            None,
+        )
+        .for_logical_codebase(lc_id.clone()))
+        .expect("save lc selection");
+    let work_item_path = app_paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work-items")
+        .join("work_item_0001.json");
+    let mut work_item: LifecycleWorkItemRecord =
+        read_json(&work_item_path).expect("read work item");
+    work_item.target_repository_id = Some(logical_id);
+    write_json(&work_item_path, &work_item).expect("write work item target");
+
+    let (status, created) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "response: {created}");
+    let attempt_id = assert_global_attempt_id(&created);
+    let persisted = CodingAttemptStore::new(app_paths.clone())
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("persisted attempt");
+    let snapshot = persisted
+        .target_snapshot
+        .expect("new-lc attempt must persist a frozen target snapshot");
+    assert_eq!(snapshot.logical_repository_id, logical_id);
+    assert_eq!(snapshot.checkout_id, checkout_id);
+    assert_eq!(snapshot.physical_repository_id, physical_id);
+    assert_eq!(snapshot.canonical_path, canonical_path);
+    assert_eq!(snapshot.policy_digest, policy.digest);
+    assert_eq!(snapshot.membership_revision, manifest.membership_revision);
+    assert!(
+        snapshot.revision.as_deref().is_some_and(|r| !r.is_empty()),
+        "snapshot revision must be non-empty"
+    );
+    // 新 LC 成员不写 repos.json 投影（仅 bootstrap 的单仓记录在）。
+    let repositories: Vec<cadence_aria::product::models::RepositoryRecord> =
+        read_json(&app_paths.project_root("project_0001").join("repos.json"))
+            .expect("read repos.json");
+    assert!(repositories
+        .iter()
+        .all(|record| record.id != physical_id));
 }

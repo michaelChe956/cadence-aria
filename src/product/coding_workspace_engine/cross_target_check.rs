@@ -64,7 +64,18 @@ pub(crate) fn capture_cross_target_baseline(
         });
     }
 
-    let authority = LogicalCodebaseStore::new(paths.clone());
+    // v1.3：按 attempt 所属 issue 的 lc_id 寻址（R9 编码/交付链切换点）；
+    // 单仓/无 LC 回退 legacy project 级路径。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        paths,
+        &attempt.project_id,
+        &attempt.issue_id,
+    )
+    .map_err(|_| StableCode::CrossTargetStoreFailure)?;
+    let authority = match lc_id.as_deref() {
+        Some(lc_id) => LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
+        None => LogicalCodebaseStore::new(paths.clone()),
+    };
     let manifest = authority
         .load_manifest(&attempt.project_id)
         .map_err(|_| StableCode::CrossTargetStoreFailure)?
@@ -643,5 +654,159 @@ mod tests {
             }
             other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
         }
+    }
+
+    /// R9：非 legacy 新 LC fixture——manifest/member/checkout 全部只落在
+    /// `logical-codebases/{lc_id}/` 子树，issue 记录携带 lc 归属。
+    fn new_lc_single_member_fixture() -> Fixture {
+        let temp = tempfile::tempdir().expect("cross target temp");
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "cross target new lc".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let project_id = PROJECT_ID.to_string();
+        let record = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project_id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "new-lc".to_string(),
+                    aggregate_root: temp.path().join("aggregate-root"),
+                },
+            )
+            .unwrap();
+        let lc_id = record.id;
+
+        let member_id = LogicalRepositoryId(Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let checkout_path = temp.path().join("repo_a");
+        init_repo(&checkout_path);
+
+        let authority = LogicalCodebaseStore::for_lc(paths.clone(), lc_id.clone());
+        authority
+            .save_manifest(
+                &project_id,
+                &LogicalCodebaseManifest::new(
+                    &project_id,
+                    temp.path().join("aggregate-root"),
+                    vec![member_id],
+                ),
+            )
+            .unwrap();
+        let now = "2026-08-18T00:00:00Z".to_string();
+        let source_identity = RepositorySourceIdentity::from_git_parts(
+            &checkout_path,
+            checkout_path.join(".git"),
+            None,
+        );
+        authority
+            .save_member(
+                &project_id,
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_0001".to_string(),
+                    alias: "repo_a".to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 0,
+                    source_identity: source_identity.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: MemberStatus::Active,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .unwrap();
+        authority
+            .save_checkout(
+                &project_id,
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_0001".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: checkout_path.clone(),
+                    checkout_path_hash: "sha256:checkout".to_string(),
+                    git_dir_identity: source_identity.git_dir_identity().to_string(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        crate::product::logical_codebase::IdentityRegistryStore::new(paths.clone())
+            .upsert_active(
+                &project_id,
+                crate::product::logical_codebase::IdentityRegistryEntry::active(
+                    source_identity,
+                    member_id,
+                    "repository_0001".to_string(),
+                    checkout_id,
+                    "cross-target-new-lc-fixture".to_string(),
+                ),
+            )
+            .unwrap();
+        // issue 归属 lc（v1.3）。
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project_id.clone(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: Some(lc_id),
+                title: "new lc issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+
+        let mut attempt = logical_attempt(&project_id, &issue.id, ATTEMPT_ID, &checkout_path);
+        let snapshot = attempt.target_snapshot.as_mut().unwrap();
+        snapshot.logical_repository_id = member_id;
+        snapshot.checkout_id = checkout_id;
+
+        Fixture {
+            _temp: temp,
+            paths,
+            attempt,
+            checkout_paths: vec![checkout_path],
+        }
+    }
+
+    #[test]
+    fn capture_resolves_member_checkouts_from_new_lc_subtree() {
+        let fixture = new_lc_single_member_fixture();
+        let run_id = "coding_role_run_0001";
+
+        let baseline = capture_cross_target_baseline(&fixture.paths, &fixture.attempt, run_id)
+            .expect("baseline capture must resolve the lc subtree authority");
+
+        assert_eq!(baseline.member_checkouts.len(), 1);
+        assert_eq!(
+            baseline.member_checkouts[0].canonical_path,
+            fixture.checkout_paths[0]
+        );
+        assert!(baseline_path(&fixture, run_id).exists());
+    }
+
+    #[test]
+    fn detect_across_new_lc_baseline_passes_until_member_checkout_changes() {
+        let fixture = new_lc_single_member_fixture();
+        let run_id = "coding_role_run_0001";
+        capture_cross_target_baseline(&fixture.paths, &fixture.attempt, run_id).unwrap();
+        detect_cross_target_violation(&fixture.paths, &fixture.attempt, run_id)
+            .expect("unchanged member checkout must pass");
+
+        fs::write(fixture.checkout_paths[0].join("README.md"), "changed\n").unwrap();
+        assert_eq!(
+            detect_cross_target_violation(&fixture.paths, &fixture.attempt, run_id).unwrap_err(),
+            StableCode::CrossTargetViolationDetected
+        );
     }
 }

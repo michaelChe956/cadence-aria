@@ -12,6 +12,7 @@ use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::json;
 use tempfile::tempdir;
+use tower::ServiceExt;
 
 use crate::{assert_error, request};
 use uuid::Uuid;
@@ -170,5 +171,121 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
             .codebase_selection_path("project_0002", issue["issue_id"].as_str().unwrap())
             .exists(),
         "single-repository issue creation must not write codebase-selection.json"
+    );
+}
+
+/// R6 concern③ / R9 回归：v1.2 迁移 project（legacy 根 manifest + 成员 +
+/// repos.json 兼容投影）经 DELETE /repositories 删除投影记录时，只移除
+/// repos.json 条目（legacy 语义），LC 成员权威记录保持 active、逻辑条目
+/// 仍在统一 codebases 列表中。
+#[tokio::test]
+async fn migrated_project_delete_repository_removes_only_projection_entry() {
+    let root = tempdir().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let projects = ProjectStore::new(paths.clone());
+    projects
+        .create(cadence_aria::product::project_store::CreateProjectInput {
+            name: "migrated".into(),
+            description: None,
+        })
+        .unwrap();
+    // v1.2 迁移形态：legacy 根权威 + repos.json 兼容投影。
+    let logical = LogicalCodebaseStore::new(paths.clone());
+    let id = LogicalRepositoryId(Uuid::new_v4());
+    logical
+        .save_manifest(
+            "project_0001",
+            &LogicalCodebaseManifest::new("project_0001", root.path().into(), vec![id]),
+        )
+        .unwrap();
+    let migrated_member = member(id, "api");
+    logical
+        .save_member("project_0001", &migrated_member)
+        .unwrap();
+    write_json(
+        &paths.project_root("project_0001").join("repos.json"),
+        &vec![RepositoryRecord {
+            id: "repository_api".to_string(),
+            project_id: "project_0001".to_string(),
+            name: "api".to_string(),
+            path: root.path().join("api"),
+            repo_hash: "api-hash".to_string(),
+            runtime_root: root.path().join("api/.aria/runtime"),
+            default_policy_preset: "manual-write".to_string(),
+            default_provider_mode: "fake".to_string(),
+            created_at: "2026-08-18T00:00:00Z".to_string(),
+            updated_at: "2026-08-18T00:00:00Z".to_string(),
+            logical_repository_id: Some(id),
+            primary_checkout_id: None,
+            identity_schema_version: 1,
+        }],
+    )
+    .unwrap();
+
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    // 统一列表先呈现逻辑条目（迁移别名 LC）。
+    let (status, codebases) = request(
+        &app,
+        Method::GET,
+        "/api/projects/project_0001/codebases",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{codebases}");
+    assert!(
+        codebases["codebases"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["kind"] == "logical")),
+        "migrated logical codebase must stay listed: {codebases}"
+    );
+
+    // DELETE 投影记录：仅 repos.json 条目被移除（legacy 语义回执）。
+    let delete = axum::http::Request::builder()
+        .method(Method::DELETE)
+        .uri("/api/projects/project_0001/repositories/repository_api")
+        .header("content-type", "application/json")
+        .header("Idempotency-Key", "migrated-delete-0001")
+        .body(axum::body::Body::from("{}".to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(delete).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["legacy_delete"], true, "{receipt}");
+
+    // repos.json 投影条目消失；LC 成员权威记录仍 active。
+    let repositories: Vec<RepositoryRecord> = cadence_aria::product::json_store::read_json(
+        &paths.project_root("project_0001").join("repos.json"),
+    )
+    .unwrap();
+    assert!(repositories.is_empty(), "projection entry removed");
+    let reloaded = LogicalCodebaseStore::new(paths.clone())
+        .load_member("project_0001", id)
+        .unwrap()
+        .expect("member authority record survives");
+    assert_eq!(reloaded.status, MemberStatus::Active);
+
+    // 逻辑条目不受影响。
+    let (status, codebases) = request(
+        &app,
+        Method::GET,
+        "/api/projects/project_0001/codebases",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{codebases}");
+    assert!(
+        codebases["codebases"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["kind"] == "logical")),
+        "logical entry must survive the projection delete: {codebases}"
     );
 }

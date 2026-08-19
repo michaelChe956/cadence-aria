@@ -19,14 +19,20 @@ fn revision_matches(checkout_revision: Option<&str>, snapshot_revision: Option<&
 /// 校验 attempt 快照仍与当前逻辑代码库权威记录完全一致。
 ///
 /// 快照存在时不得降级到物理仓库：无法验证的任何字段都统一视为不一致。
+/// v1.3：`lc_id = Some` 时按 `logical-codebases/{lc_id}/` 子树权威记录校验
+/// （R9 编码/交付链切换点）；`None`（单仓/旧数据）保持 legacy project 级路径。
 pub fn validate_snapshot_fields(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
+    lc_id: Option<&str>,
 ) -> Result<(), RepositoryRoutingErrorCode> {
     let Some(snapshot) = attempt.target_snapshot.as_ref() else {
         return Err(RepositoryRoutingErrorCode::Inconsistent);
     };
-    let authority = LogicalCodebaseStore::new(paths.clone());
+    let authority = match lc_id {
+        Some(lc_id) => LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
+        None => LogicalCodebaseStore::new(paths.clone()),
+    };
     let manifest = authority
         .load_manifest(&attempt.project_id)
         .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?
@@ -57,13 +63,27 @@ pub fn validate_snapshot_fields(
         return Err(RepositoryRoutingErrorCode::Inconsistent);
     }
 
-    let project = ProjectStore::new(paths.clone())
-        .get(&attempt.project_id)
-        .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
-    let (resolved_member, resolved_checkout, resolved_repository) =
-        RepositoryStore::for_project(paths.clone(), &project)
-            .resolve_logical_repository_strict(&attempt.project_id, snapshot.logical_repository_id)
-            .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
+    let (resolved_member, resolved_checkout, resolved_repository) = match lc_id {
+        Some(lc_id) => RepositoryStore::new(paths.clone())
+            .resolve_logical_repository_for_issue_codebase(
+                &attempt.project_id,
+                Some(lc_id),
+                snapshot.logical_repository_id,
+            )
+            .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?,
+        None => {
+            let project = ProjectStore::new(paths.clone())
+                .get(&attempt.project_id)
+                .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
+            RepositoryStore::for_project(paths.clone(), &project)
+                .resolve_logical_repository_for_issue_codebase(
+                    &attempt.project_id,
+                    None,
+                    snapshot.logical_repository_id,
+                )
+                .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?
+        }
+    };
     if resolved_member.logical_repository_id != snapshot.logical_repository_id
         || resolved_member.physical_repository_id != snapshot.physical_repository_id
         || resolved_checkout.checkout_id != snapshot.checkout_id
@@ -147,7 +167,7 @@ mod tests {
         repositories[0].primary_checkout_id = Some(replacement_checkout_id);
         write_json(&repos_path, &repositories).unwrap();
 
-        let result = validate_snapshot_fields(&fixture.paths, &fixture.attempt);
+        let result = validate_snapshot_fields(&fixture.paths, &fixture.attempt, None);
 
         assert!(matches!(
             result,
@@ -161,7 +181,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let fixture = snapshot_with_stale_membership_revision(temp.path());
 
-        let result = validate_snapshot_fields(&fixture.paths, &fixture.attempt);
+        let result = validate_snapshot_fields(&fixture.paths, &fixture.attempt, None);
 
         assert!(matches!(
             result,
@@ -348,7 +368,7 @@ mod tests {
         let fixture = snapshot_fixture_with_revisions(temp.path(), None, Some("observed-head"));
 
         assert_eq!(
-            validate_snapshot_fields(&fixture.paths, &fixture.attempt),
+            validate_snapshot_fields(&fixture.paths, &fixture.attempt, None),
             Ok(())
         );
     }
@@ -361,7 +381,7 @@ mod tests {
             snapshot_fixture_with_revisions(temp.path(), Some("old-head"), Some("new-head"));
 
         assert!(matches!(
-            validate_snapshot_fields(&fixture.paths, &fixture.attempt),
+            validate_snapshot_fields(&fixture.paths, &fixture.attempt, None),
             Err(RepositoryRoutingErrorCode::Inconsistent)
         ));
     }
