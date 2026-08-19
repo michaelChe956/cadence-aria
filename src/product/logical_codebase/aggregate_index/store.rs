@@ -9,19 +9,41 @@ use super::{AggregateIndexError, AggregateIndexRecord, AggregateIndexStatus};
 #[derive(Debug, Clone)]
 pub struct AggregateIndexStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl AggregateIndexStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
     }
 
-    /// Returns the project-scoped single-writer lock path used to serialize
+    /// Scopes index generations and the single-writer lock to one logical
+    /// codebase subtree (`aggregate-indexes/` under the v1.3 per-LC layout;
+    /// the legacy alias codebase keeps the legacy project-scoped root).
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
+    }
+
+    fn indexes_root(&self, project_id: &str) -> Result<std::path::PathBuf, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join("aggregate-indexes"),
+        )
+    }
+
+    /// Returns the single-writer lock path used to serialize
     /// concurrent rebuild/sync operations so a half-written index cannot
     /// corrupt a readable generation.
     pub fn lock_path(&self, project_id: &str) -> Result<std::path::PathBuf, AggregateIndexError> {
         validate_relative_id(project_id)?;
-        Ok(self.paths.aggregate_index_lock_path(project_id))
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join(".aggregate-index.lock"),
+        )
     }
 
     pub fn create(
@@ -230,7 +252,7 @@ impl AggregateIndexStore {
         project_id: &str,
     ) -> Result<Vec<AggregateIndexRecord>, AggregateIndexError> {
         validate_relative_id(project_id)?;
-        let root = self.paths.aggregate_indexes_root(project_id);
+        let root = self.indexes_root(project_id)?;
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -312,8 +334,7 @@ impl AggregateIndexStore {
         validate_relative_id(project_id)?;
         validate_relative_id(aggregate_index_id)?;
         Ok(self
-            .paths
-            .aggregate_indexes_root(project_id)
+            .indexes_root(project_id)?
             .join(format!("{aggregate_index_id}.json")))
     }
 

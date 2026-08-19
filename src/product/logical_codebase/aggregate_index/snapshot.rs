@@ -50,6 +50,14 @@ impl AggregateIndexSnapshotCollector {
         )
     }
 
+    /// Re-scopes member/checkout reads to one logical codebase subtree.
+    pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
+        Self::with_dependencies(
+            LogicalCodebaseStore::for_lc(self.logical.paths().clone(), lc_id),
+            Arc::clone(&self.runner),
+        )
+    }
+
     pub fn capture_included(
         &self,
         project_id: &str,

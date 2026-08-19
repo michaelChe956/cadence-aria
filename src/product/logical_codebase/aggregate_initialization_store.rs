@@ -21,11 +21,30 @@ use super::aggregate_initialization::{
 #[derive(Debug, Clone)]
 pub struct AggregateInitializationOperationStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl AggregateInitializationOperationStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes operation records to one logical codebase subtree
+    /// (`aggregate-initializations/` under the v1.3 per-LC layout; the legacy
+    /// alias codebase keeps the legacy project-scoped root).
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
+    }
+
+    fn operations_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join("aggregate-initializations"),
+        )
     }
 
     /// Create the operation idempotently. A retried create with the same
@@ -379,8 +398,7 @@ impl AggregateInitializationOperationStore {
         validate_relative_id(project_id)?;
         validate_relative_id(operation_id)?;
         Ok(self
-            .paths
-            .aggregate_initializations_root(project_id)
+            .operations_root(project_id)?
             .join(format!("{operation_id}.json")))
     }
 
@@ -396,8 +414,7 @@ impl AggregateInitializationOperationStore {
         validate_relative_id(project_id)?;
         validate_relative_id(operation_id)?;
         Ok(self
-            .paths
-            .aggregate_initializations_root(project_id)
+            .operations_root(project_id)?
             .join(operation_id)
             .join("staging"))
     }

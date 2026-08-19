@@ -89,6 +89,18 @@ impl PointerPublishCoordinator {
         }
     }
 
+    /// Scopes publication records and manifest/member/checkout reads to one
+    /// logical codebase subtree (the legacy alias keeps the legacy root).
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        let lc_id = lc_id.into();
+        Self {
+            publications: PointerPublicationStore::for_lc(paths.clone(), lc_id.clone()),
+            logical: LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
+            git_ops: CodingAttemptStore::new(paths),
+            git: GitWorkspaceService::new(),
+        }
+    }
+
     /// 全量/增量批次发布。`logical_codebase_id` 必须与 project 的 manifest 一致。
     /// 单仓失败不阻断其他仓；整体按 CompletedAll / CompletedPartial 呈现。
     pub async fn publish_all(

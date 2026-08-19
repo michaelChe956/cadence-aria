@@ -32,12 +32,44 @@ impl AggregateInitializationCoordinator {
     ) -> Self {
         Self {
             paths,
+            lc_id: None,
             operations,
             skills,
             preflight,
             provider,
             detector,
             clock,
+        }
+    }
+
+    /// Re-scopes the durable operation store, manifest/member reads and the
+    /// deterministic preflight service to one logical codebase subtree, while
+    /// reusing the same skills/provider/detector/clock components.
+    pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
+        let lc_id = lc_id.into();
+        let preflight = self
+            .preflight
+            .rescoped(&lc_id)
+            .unwrap_or_else(|| Arc::clone(&self.preflight));
+        Self {
+            paths: self.paths.clone(),
+            lc_id: Some(lc_id.clone()),
+            operations: AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                lc_id,
+            ),
+            skills: Arc::clone(&self.skills),
+            preflight,
+            provider: Arc::clone(&self.provider),
+            detector: Arc::clone(&self.detector),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+
+    fn authority_store(&self) -> LogicalCodebaseStore {
+        match &self.lc_id {
+            Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id.clone()),
+            None => LogicalCodebaseStore::new(self.paths.clone()),
         }
     }
 
@@ -237,7 +269,8 @@ impl AggregateInitializationCoordinator {
         validate_relative_id(project_id).map_err(|error| {
             AggregateInitializationError::state(project_id, format!("invalid project id: {error}"))
         })?;
-        let _manifest = LogicalCodebaseStore::new(self.paths.clone())
+        let _manifest = self
+            .authority_store()
             .load_manifest(project_id)
             .map_err(|error| AggregateInitializationError::Preflight {
                 reason: format!("manifest could not be loaded: {error}"),
@@ -247,7 +280,7 @@ impl AggregateInitializationCoordinator {
                 reason: "logical codebase manifest is missing; register members first".to_string(),
                 retryable: false,
             })?;
-        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let store = self.authority_store();
         let members = store.list_members(project_id).map_err(|error| {
             AggregateInitializationError::Preflight {
                 reason: format!("members could not be loaded: {error}"),
@@ -453,7 +486,7 @@ impl AggregateInitializationCoordinator {
         project_id: &str,
         operation: &AggregateInitializationOperation,
     ) -> Result<LogicalCodebaseManifest, AggregateInitializationError> {
-        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let store = self.authority_store();
         store
             .load_manifest(project_id)
             .map_err(|error| {

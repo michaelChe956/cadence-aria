@@ -121,6 +121,12 @@ impl LogicalCodebaseStore {
         }
     }
 
+    /// Exposes the product paths backing this store for sibling services that
+    /// rebuild a scoped view from the same roots.
+    pub(crate) fn paths(&self) -> &ProductAppPaths {
+        &self.paths
+    }
+
     fn scope_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         lc_scope_root(&self.paths, project_id, &self.lc_id)
     }

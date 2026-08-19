@@ -189,6 +189,14 @@ pub trait AggregatePreflightService: Send + Sync {
         manifest: &LogicalCodebaseManifest,
         cancellation: &CancellationToken,
     ) -> Result<AggregatePreflightSnapshot, AggregateInitializationError>;
+
+    /// Re-scopes this service to one logical codebase subtree. The default
+    /// returns `None` for scope-agnostic implementations (e.g. test doubles);
+    /// the production [`DeterministicAggregatePreflightService`] overrides it
+    /// so member/checkout reads resolve inside the named codebase.
+    fn rescoped(&self, _lc_id: &str) -> Option<Arc<dyn AggregatePreflightService>> {
+        None
+    }
 }
 
 /// Drives a single provider turn for one of `pre_check`, `rule_and_mcp_config`
@@ -237,6 +245,7 @@ pub struct AggregatePreflightSnapshot {
 /// operations are recovered through [`Self::recover_interrupted`].
 pub struct AggregateInitializationCoordinator {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
     operations: AggregateInitializationOperationStore,
     skills: Arc<dyn AggregateSkillsPreparation>,
     preflight: Arc<dyn AggregatePreflightService>,

@@ -126,8 +126,8 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
     ] {
         assert_error(
             request(&app, method, uri, body).await,
-            StatusCode::CONFLICT,
-            "logical_codebase_feature_disabled",
+            StatusCode::NOT_FOUND,
+            "logical_codebase_not_found",
         );
     }
     assert!(

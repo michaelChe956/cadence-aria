@@ -108,8 +108,24 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::cancel_aggregate_initialization),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations",
+            post(handlers::create_lc_aggregate_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations/{operation_id}",
+            get(handlers::get_lc_aggregate_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations/{operation_id}/cancel",
+            post(handlers::cancel_lc_aggregate_initialization),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/members",
             get(handlers::list_logical_codebase_members),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/members",
+            get(handlers::list_lc_logical_codebase_members),
         )
         .route(
             "/api/projects/{project_id}/logical-codebase/aggregate-indexes/active",
@@ -118,6 +134,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         .route(
             "/api/projects/{project_id}/logical-codebase/aggregate-indexes/rebuild",
             post(handlers::rebuild_aggregate_index),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/aggregate-indexes/active",
+            get(handlers::get_lc_active_aggregate_index),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/aggregate-indexes/rebuild",
+            post(handlers::rebuild_lc_aggregate_index),
         )
         .route(
             "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations/preflight",
@@ -174,6 +198,23 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         .route(
             "/api/projects/{project_id}/logical-codebase/pointer-publications/{publication_id}/revoke",
             post(handlers::revoke_pointer_publication),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/pointer-publications",
+            get(handlers::list_lc_pointer_publications)
+                .post(handlers::create_lc_pointer_publication),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/pointer-publications/{publication_id}",
+            get(handlers::get_lc_pointer_publication),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/pointer-publications/{publication_id}/retry-repo",
+            post(handlers::retry_lc_pointer_publication_repo),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/pointer-publications/{publication_id}/revoke",
+            post(handlers::revoke_lc_pointer_publication),
         )
         .route(
             "/api/projects/{project_id}/issues",

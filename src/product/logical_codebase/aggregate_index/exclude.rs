@@ -36,6 +36,7 @@ pub struct CodeGraphConfig {
     pub exclude: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct CodeGraphExcludeGenerator;
 
 impl CodeGraphExcludeGenerator {

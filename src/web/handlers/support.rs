@@ -215,25 +215,6 @@ pub(crate) fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
     ProductAppPaths::new(state.workspace_root.join(".aria"))
 }
 
-/// 过渡 guard：在 R3/R5 改为请求/issue 所属代码库之前，只有存在逻辑代码库存储
-/// 的 project 才能访问旧 logical-codebase 兼容端点。纯单仓 project 不创建任何
-/// logical-codebase durable artifact。
-pub(crate) fn require_multi_repo_project(
-    paths: &ProductAppPaths,
-    project_id: &str,
-) -> ApiResult<ProjectRecord> {
-    let project = ProjectStore::new(paths.clone())
-        .get(project_id)
-        .map_err(product_store_api_error)?;
-    let has_storage = LogicalCodebaseStore::new(paths.clone())
-        .has_any_storage(project_id)
-        .map_err(product_store_api_error)?;
-    if !has_storage {
-        return Err(logical_codebase_feature_disabled_api_error(project_id));
-    }
-    Ok(project)
-}
-
 /// v1.3 guard: the request path names a logical codebase; an unknown (or
 /// single-repo-only project) id is a plain 404 `logical_codebase_not_found`.
 pub(crate) fn require_logical_codebase(

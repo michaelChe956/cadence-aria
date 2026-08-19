@@ -128,6 +128,21 @@ impl AggregateIndexOperation {
         }
     }
 
+    /// Re-scopes manifest/member reads, index generations and the single-writer
+    /// lock to one logical codebase subtree, reusing the same CLI and snapshot
+    /// command runner (D5 semantics unchanged).
+    pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
+        let lc_id = lc_id.into();
+        let paths = self.logical.paths().clone();
+        Self::with_snapshot_dependencies(
+            LogicalCodebaseStore::for_lc(paths.clone(), lc_id.clone()),
+            AggregateIndexStore::for_lc(paths.clone(), lc_id.clone()),
+            self.cli.clone(),
+            self.excludes,
+            self.snapshots.for_lc(lc_id),
+        )
+    }
+
     /// Clones the logical-codebase store handle for sibling services such as
     /// the freshness service that need independent read access.
     pub fn logical_clone(&self) -> LogicalCodebaseStore {

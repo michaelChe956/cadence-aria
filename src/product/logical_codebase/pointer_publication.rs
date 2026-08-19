@@ -94,11 +94,22 @@ pub enum PointerMergeVerdict {
 #[derive(Debug, Clone)]
 pub struct PointerPublicationStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl PointerPublicationStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes publication records to one logical codebase subtree
+    /// (`pointer-publications/` under the v1.3 per-LC layout; the legacy alias
+    /// codebase keeps the legacy project-scoped root).
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
     }
 
     /// 创建发布批次（含发布锁：同 logical_codebase 已有 InProgress 批次即拒绝，
@@ -361,10 +372,10 @@ impl PointerPublicationStore {
 
     fn publications_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
-        Ok(self
-            .paths
-            .logical_codebase_root(project_id)
-            .join("pointer-publications"))
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join("pointer-publications"),
+        )
     }
 
     fn publication_path(

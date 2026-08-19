@@ -1009,19 +1009,22 @@ async fn aggregate_index_rebuild_endpoint_returns_conflict_while_project_is_regi
             description: None,
         })
         .expect("create project");
-    LogicalCodebaseStore::new(paths)
-        .save_manifest(
+    let lc = LogicalCodebaseStore::new(paths.clone())
+        .create(
             PROJECT_ID,
-            &LogicalCodebaseManifest::new(PROJECT_ID, workspace.path().to_path_buf(), Vec::new()),
+            cadence_aria::product::logical_codebase::LogicalCodebaseCreateInput {
+                name: "Default".to_string(),
+                aggregate_root: workspace.path().to_path_buf(),
+            },
         )
-        .expect("save manifest");
+        .expect("create logical codebase");
     let state = WebAppState::new(
         workspace.path().to_path_buf(),
         WebRuntime::new_fake(workspace.path().to_path_buf()),
     );
     let lease = state
         .aggregate_index_rebuilds
-        .try_register(PROJECT_ID)
+        .try_register(&format!("{PROJECT_ID}/{}", lc.id))
         .expect("register rebuild");
     let app = build_web_router(state);
 

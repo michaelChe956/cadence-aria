@@ -1,6 +1,6 @@
 //! HTTP projection and synchronous rebuild endpoints for aggregate indexes.
 
-use super::support::{product_app_paths, require_multi_repo_project};
+use super::support::{default_logical_codebase_id, product_app_paths, require_logical_codebase};
 use super::*;
 
 use axum::Json;
@@ -30,9 +30,29 @@ pub async fn get_active_aggregate_index(
     Path(project_id): Path<String>,
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
-    require_multi_repo_project(&paths, &project_id)?;
-    validate_project_id(&project_id)?;
-    let response = read_active_projection(&paths, &project_id)?;
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    get_active_aggregate_index_for_lc(&state, &project_id, &logical_codebase_id)
+}
+
+/// v1.3 canonical endpoint: the active projection is resolved per logical
+/// codebase.
+pub async fn get_lc_active_aggregate_index(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    get_active_aggregate_index_for_lc(&state, &project_id, &logical_codebase_id)
+}
+
+fn get_active_aggregate_index_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(state);
+    validate_project_id(project_id)?;
+    let response = read_active_projection(&paths, project_id, logical_codebase_id)?;
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
@@ -41,11 +61,31 @@ pub async fn rebuild_aggregate_index(
     Path(project_id): Path<String>,
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
-    require_multi_repo_project(&paths, &project_id)?;
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    rebuild_aggregate_index_for_lc(state, project_id, logical_codebase_id).await
+}
+
+/// v1.3 canonical endpoint: the rebuild is resolved per logical codebase.
+pub async fn rebuild_lc_aggregate_index(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    rebuild_aggregate_index_for_lc(state, project_id, logical_codebase_id).await
+}
+
+async fn rebuild_aggregate_index_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
     validate_project_id(&project_id)?;
+    let rebuild_key = format!("{project_id}/{logical_codebase_id}");
     let _lease = state
         .aggregate_index_rebuilds
-        .try_register(&project_id)
+        .try_register(&rebuild_key)
         .ok_or_else(|| {
             ApiError::runtime(
                 "aggregate_index_rebuild_in_progress",
@@ -53,7 +93,9 @@ pub async fn rebuild_aggregate_index(
                 serde_json::json!({}),
             )
         })?;
-    let dependencies = state.aggregate_initialization_dependencies();
+    let dependencies = state
+        .aggregate_initialization_dependencies()
+        .for_lc(logical_codebase_id.clone());
     let operation = dependencies.index.clone();
     let project_id_for_worker = project_id.clone();
     let result = tokio::task::spawn_blocking(move || operation.rebuild(&project_id_for_worker))
@@ -69,18 +111,21 @@ pub async fn rebuild_aggregate_index(
         return Err(aggregate_index_api_error(error));
     }
     // Keep the lease until after the durable active projection is read. This
-    // makes a same-project request observe either rebuilding or the new state,
+    // makes a same-codebase request observe either rebuilding or the new state,
     // never a transient gap between operation completion and response creation.
-    let response = read_active_projection(&paths, &project_id)?;
+    let response = read_active_projection(&paths, &project_id, &logical_codebase_id)?;
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
 fn read_active_projection(
     paths: &crate::product::app_paths::ProductAppPaths,
     project_id: &str,
+    logical_codebase_id: &str,
 ) -> ApiResult<AggregateIndexActiveResponse> {
-    let store =
-        crate::product::logical_codebase::aggregate_index::AggregateIndexStore::new(paths.clone());
+    let store = crate::product::logical_codebase::aggregate_index::AggregateIndexStore::for_lc(
+        paths.clone(),
+        logical_codebase_id,
+    );
     let mut records = store
         .records(project_id)
         .map_err(aggregate_index_api_error)?;

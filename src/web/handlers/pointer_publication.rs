@@ -6,7 +6,10 @@
 //! `pointer_publish_error_mapping.rs`。
 
 use super::pointer_publish_error_mapping::{pointer_publish_api_error, pointer_store_api_error};
-use super::support::{product_app_paths, product_store_api_error};
+use super::support::{
+    default_logical_codebase_id, product_app_paths, product_store_api_error,
+    require_logical_codebase,
+};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -49,14 +52,36 @@ pub async fn create_pointer_publication(
     Path(project_id): Path<String>,
     Json(request): Json<CreatePointerPublicationRequest>,
 ) -> ApiResult<Response> {
-    validate_project_id(&project_id)?;
-    let batch_kind = request.batch_kind()?;
     let paths = product_app_paths(&state);
-    let manifest = load_manifest(&paths, &project_id)?;
-    let coordinator = PointerPublishCoordinator::new(paths);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    create_pointer_publication_for_lc(&state, &project_id, &logical_codebase_id, request).await
+}
+
+/// v1.3 canonical endpoint: pointer publication is resolved per logical codebase.
+pub async fn create_lc_pointer_publication(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+    Json(request): Json<CreatePointerPublicationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    create_pointer_publication_for_lc(&state, &project_id, &logical_codebase_id, request).await
+}
+
+async fn create_pointer_publication_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    request: CreatePointerPublicationRequest,
+) -> ApiResult<Response> {
+    validate_project_id(project_id)?;
+    let batch_kind = request.batch_kind()?;
+    let paths = product_app_paths(state);
+    let manifest = load_manifest(&paths, project_id, logical_codebase_id)?;
+    let coordinator = PointerPublishCoordinator::for_lc(paths, logical_codebase_id);
     let publication = coordinator
         .publish_all(
-            &project_id,
+            project_id,
             &manifest.logical_codebase_id.to_string(),
             batch_kind,
         )
@@ -69,10 +94,30 @@ pub async fn list_pointer_publications(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
 ) -> ApiResult<Response> {
-    validate_project_id(&project_id)?;
-    let store = PointerPublicationStore::new(product_app_paths(&state));
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    list_pointer_publications_for_lc(&state, &project_id, &logical_codebase_id)
+}
+
+/// v1.3 canonical endpoint: publications are resolved per logical codebase.
+pub async fn list_lc_pointer_publications(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    list_pointer_publications_for_lc(&state, &project_id, &logical_codebase_id)
+}
+
+fn list_pointer_publications_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<Response> {
+    validate_project_id(project_id)?;
+    let store = PointerPublicationStore::for_lc(product_app_paths(state), logical_codebase_id);
     let publications = store
-        .list_publications(&project_id)
+        .list_publications(project_id)
         .map_err(pointer_store_api_error)?;
     Ok(Json(publications).into_response())
 }
@@ -81,11 +126,32 @@ pub async fn get_pointer_publication(
     State(state): State<WebAppState>,
     Path((project_id, publication_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    validate_project_id(&project_id)?;
-    validate_publication_id(&publication_id)?;
-    let store = PointerPublicationStore::new(product_app_paths(&state));
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    get_pointer_publication_for_lc(&state, &project_id, &logical_codebase_id, &publication_id)
+}
+
+/// v1.3 canonical endpoint: a single publication is resolved per logical codebase.
+pub async fn get_lc_pointer_publication(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, publication_id)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    get_pointer_publication_for_lc(&state, &project_id, &logical_codebase_id, &publication_id)
+}
+
+fn get_pointer_publication_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    publication_id: &str,
+) -> ApiResult<Response> {
+    validate_project_id(project_id)?;
+    validate_publication_id(publication_id)?;
+    let store = PointerPublicationStore::for_lc(product_app_paths(state), logical_codebase_id);
     let publication = store
-        .load_publication(&project_id, &publication_id)
+        .load_publication(project_id, publication_id)
         .map_err(pointer_store_api_error)?;
     Ok(Json(publication).into_response())
 }
@@ -95,17 +161,55 @@ pub async fn retry_pointer_publication_repo(
     Path((project_id, publication_id)): Path<(String, String)>,
     Json(request): Json<RetryPointerPublicationRepoRequest>,
 ) -> ApiResult<Response> {
-    validate_project_id(&project_id)?;
-    validate_publication_id(&publication_id)?;
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    retry_pointer_publication_repo_for_lc(
+        &state,
+        &project_id,
+        &logical_codebase_id,
+        &publication_id,
+        request,
+    )
+    .await
+}
+
+/// v1.3 canonical endpoint: retry is resolved per logical codebase.
+pub async fn retry_lc_pointer_publication_repo(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, publication_id)): Path<(String, String, String)>,
+    Json(request): Json<RetryPointerPublicationRepoRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    retry_pointer_publication_repo_for_lc(
+        &state,
+        &project_id,
+        &logical_codebase_id,
+        &publication_id,
+        request,
+    )
+    .await
+}
+
+async fn retry_pointer_publication_repo_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    publication_id: &str,
+    request: RetryPointerPublicationRepoRequest,
+) -> ApiResult<Response> {
+    validate_project_id(project_id)?;
+    validate_publication_id(publication_id)?;
     validate_relative_id(&request.member_repo_id).map_err(|error| {
         ApiError::validation(
             "invalid_pointer_request",
             format!("invalid member_repo_id: {error}"),
         )
     })?;
-    let coordinator = PointerPublishCoordinator::new(product_app_paths(&state));
+    let coordinator =
+        PointerPublishCoordinator::for_lc(product_app_paths(state), logical_codebase_id);
     let publication = coordinator
-        .retry_member_repo(&project_id, &publication_id, &request.member_repo_id)
+        .retry_member_repo(project_id, publication_id, &request.member_repo_id)
         .await
         .map_err(pointer_publish_api_error)?;
     Ok((StatusCode::OK, Json(publication)).into_response())
@@ -115,18 +219,49 @@ pub async fn revoke_pointer_publication(
     State(state): State<WebAppState>,
     Path((project_id, publication_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    validate_project_id(&project_id)?;
-    validate_publication_id(&publication_id)?;
-    let coordinator = PointerPublishCoordinator::new(product_app_paths(&state));
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    revoke_pointer_publication_for_lc(&state, &project_id, &logical_codebase_id, &publication_id)
+        .await
+}
+
+/// v1.3 canonical endpoint: revoke is resolved per logical codebase.
+pub async fn revoke_lc_pointer_publication(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, publication_id)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    revoke_pointer_publication_for_lc(&state, &project_id, &logical_codebase_id, &publication_id)
+        .await
+}
+
+async fn revoke_pointer_publication_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    publication_id: &str,
+) -> ApiResult<Response> {
+    validate_project_id(project_id)?;
+    validate_publication_id(publication_id)?;
+    let coordinator =
+        PointerPublishCoordinator::for_lc(product_app_paths(state), logical_codebase_id);
     let publication = coordinator
-        .revoke(&project_id, &publication_id)
+        .revoke(project_id, publication_id)
         .await
         .map_err(pointer_publish_api_error)?;
     Ok((StatusCode::OK, Json(publication)).into_response())
 }
 
-fn load_manifest(paths: &ProductAppPaths, project_id: &str) -> ApiResult<LogicalCodebaseManifest> {
-    let store = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone());
+fn load_manifest(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<LogicalCodebaseManifest> {
+    let store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+        paths.clone(),
+        logical_codebase_id,
+    );
     store
         .load_manifest(project_id)
         .map_err(product_store_api_error)?
@@ -164,6 +299,7 @@ mod tests {
         RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
         render_pointer_block,
     };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::web::app::build_web_router;
     use crate::web::runtime::WebRuntime;
     use axum::body::Body;
@@ -215,6 +351,12 @@ mod tests {
         git(&repo_path, &["push", "-u", "origin", "main"]);
 
         let paths = ProductAppPaths::new(root.path().join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "pointer publication test".to_string(),
+                description: None,
+            })
+            .unwrap();
         let aggregate_root = root.path().join("aggregate-root");
         std::fs::create_dir_all(&aggregate_root).unwrap();
         let manifest =

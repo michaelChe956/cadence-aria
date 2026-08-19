@@ -4,15 +4,37 @@
 #[derive(Debug, Clone)]
 pub struct DeterministicAggregatePreflightService {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl DeterministicAggregatePreflightService {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            lc_id: None,
+        }
+    }
+
+    /// Scopes member/checkout reads to one logical codebase subtree.
+    pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths: self.paths.clone(),
+            lc_id: Some(lc_id.into()),
+        }
+    }
+
+    fn authority_store(&self) -> LogicalCodebaseStore {
+        match &self.lc_id {
+            Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id.clone()),
+            None => LogicalCodebaseStore::new(self.paths.clone()),
+        }
     }
 }
 
 impl AggregatePreflightService for DeterministicAggregatePreflightService {
+    fn rescoped(&self, lc_id: &str) -> Option<Arc<dyn AggregatePreflightService>> {
+        Some(Arc::new(self.for_lc(lc_id)))
+    }
     fn inspect(
         &self,
         project_id: &str,
@@ -48,7 +70,7 @@ impl AggregatePreflightService for DeterministicAggregatePreflightService {
             });
         }
 
-        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let store = self.authority_store();
         let members = store.list_members(project_id).map_err(|error| {
             AggregateInitializationError::Preflight {
                 reason: format!("members could not be loaded: {error}"),

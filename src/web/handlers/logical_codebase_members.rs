@@ -2,7 +2,10 @@ use axum::Json;
 use axum::extract::{Path, State};
 use serde::Serialize;
 
-use super::support::{product_app_paths, product_store_api_error};
+use super::support::{
+    default_logical_codebase_id, product_app_paths, product_store_api_error,
+    require_logical_codebase,
+};
 use crate::product::json_store::validate_relative_id;
 use crate::product::logical_codebase::{LogicalCodebaseStore, MemberStatus};
 use crate::web::error::{ApiError, ApiResult};
@@ -26,10 +29,30 @@ pub async fn list_logical_codebase_members(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
 ) -> ApiResult<Json<LogicalCodebaseMembersResponse>> {
-    validate_project_id(&project_id)?;
-    let store = LogicalCodebaseStore::new(product_app_paths(&state));
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    list_logical_codebase_members_for_lc(&state, &project_id, &logical_codebase_id)
+}
+
+/// v1.3 canonical endpoint: members are resolved per logical codebase.
+pub async fn list_lc_logical_codebase_members(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Json<LogicalCodebaseMembersResponse>> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    list_logical_codebase_members_for_lc(&state, &project_id, &logical_codebase_id)
+}
+
+fn list_logical_codebase_members_for_lc(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<Json<LogicalCodebaseMembersResponse>> {
+    validate_project_id(project_id)?;
+    let store = LogicalCodebaseStore::new(product_app_paths(state));
     if store
-        .load_manifest(&project_id)
+        .load_lc_manifest(project_id, logical_codebase_id)
         .map_err(product_store_api_error)?
         .is_none()
     {
@@ -38,7 +61,7 @@ pub async fn list_logical_codebase_members(
         }));
     }
     let members = store
-        .list_members(&project_id)
+        .list_lc_members(project_id, logical_codebase_id)
         .map_err(product_store_api_error)?
         .into_iter()
         .map(|member| LogicalCodebaseMemberDto {
@@ -64,6 +87,7 @@ mod tests {
         CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
         MemberStatus, RepositorySourceIdentity, RepositoryType,
     };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::web::app::build_web_router;
     use crate::web::runtime::WebRuntime;
     use axum::body::Body;
@@ -72,6 +96,26 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    fn seed_lc(root: &std::path::Path) -> (ProductAppPaths, String) {
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "members test".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let record = LogicalCodebaseStore::new(paths.clone())
+            .create(
+                "project_0001",
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: root.join("aggregate-root"),
+                },
+            )
+            .unwrap();
+        (paths, record.id)
+    }
 
     async fn get(app: &axum::Router, uri: &str) -> axum::http::Response<Body> {
         app.clone()
@@ -125,10 +169,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_members_projects_without_manifest_returns_empty_array() {
+    async fn list_members_lc_without_manifest_returns_empty_array() {
         let root = tempdir().unwrap();
-        let paths = ProductAppPaths::new(root.path().join(".aria"));
-        let store = LogicalCodebaseStore::new(paths);
+        let (paths, lc_id) = seed_lc(root.path());
+        let store = LogicalCodebaseStore::for_lc(paths, lc_id.clone());
         let logical_repository_id = LogicalRepositoryId(Uuid::new_v4());
         store
             .save_member(
@@ -138,7 +182,7 @@ mod tests {
             .unwrap();
         let response = get(
             &app(root.path()),
-            "/api/projects/project_0001/logical-codebase/members",
+            &format!("/api/projects/project_0001/logical-codebases/{lc_id}/members"),
         )
         .await;
 
@@ -150,11 +194,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_members_projects_with_manifest_projects_projection_fields() {
+    async fn list_members_lc_with_manifest_projects_projection_fields() {
         let root = tempdir().unwrap();
-        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let (paths, lc_id) = seed_lc(root.path());
         let logical_repository_id = LogicalRepositoryId(Uuid::new_v4());
-        let store = LogicalCodebaseStore::new(paths);
+        let store = LogicalCodebaseStore::for_lc(paths, lc_id.clone());
         store
             .save_manifest(
                 "project_0001",
@@ -174,7 +218,7 @@ mod tests {
 
         let response = get(
             &app(root.path()),
-            "/api/projects/project_0001/logical-codebase/members",
+            &format!("/api/projects/project_0001/logical-codebases/{lc_id}/members"),
         )
         .await;
 

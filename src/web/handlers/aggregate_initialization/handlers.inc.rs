@@ -1,15 +1,40 @@
+/// Legacy `/logical-codebase/initializations` compatibility alias for the
+/// default first logical codebase (v1.2 migration artifact).
 pub async fn create_aggregate_initialization(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
     Json(request): Json<CreateAggregateInitializationRequest>,
 ) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request).await
+}
+
+/// v1.3 canonical endpoint: aggregate initialization is resolved per logical
+/// codebase (D3 spawn execute / token cancel / recovery semantics unchanged).
+pub async fn create_lc_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+    Json(request): Json<CreateAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request).await
+}
+
+async fn create_aggregate_initialization_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+    request: CreateAggregateInitializationRequest,
+) -> ApiResult<Response> {
     let project_paths = product_app_paths(&state);
-    require_multi_repo_project(&project_paths, &project_id)?;
     validate_project_id(&project_id)?;
     validate_idempotency_key(&request.idempotency_key)?;
-    let dependencies = aggregate_initialization_dependencies(&state);
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
     let operation_id = deterministic_operation_id(&project_id, &request.idempotency_key);
-    let manifest = load_manifest_for_profile(&project_paths, &project_id)?;
+    let manifest = load_manifest_for_profile(&project_paths, &project_id, &logical_codebase_id)?;
     let input = crate::product::logical_codebase::AggregateInitializationOperationInput {
         idempotency_key: request.idempotency_key.clone(),
         manifest_revision: manifest.membership_revision,
@@ -98,15 +123,38 @@ pub async fn create_aggregate_initialization(
     Ok((StatusCode::ACCEPTED, Json(aggregate_initialization_dto(operation))).into_response())
 }
 
+/// Legacy `/logical-codebase/initializations/{operation_id}` compatibility
+/// alias for the default first logical codebase.
 pub async fn get_aggregate_initialization(
     State(state): State<WebAppState>,
     Path((project_id, operation_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let project_paths = product_app_paths(&state);
-    require_multi_repo_project(&project_paths, &project_id)?;
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    get_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id)
+}
+
+/// v1.3 canonical endpoint: operation recovery is resolved per logical
+/// codebase.
+pub async fn get_lc_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, operation_id)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    get_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id)
+}
+
+fn get_aggregate_initialization_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+    operation_id: String,
+) -> ApiResult<Response> {
     validate_project_id(&project_id)?;
     validate_operation_id(&operation_id)?;
-    let dependencies = aggregate_initialization_dependencies(&state);
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id);
     let operation = dependencies
         .coordinator
         .get(&project_id, &operation_id)
@@ -128,16 +176,40 @@ pub async fn get_aggregate_initialization(
     Ok(Json(aggregate_initialization_dto(operation)).into_response())
 }
 
+/// Legacy `/logical-codebase/initializations/{operation_id}/cancel`
+/// compatibility alias for the default first logical codebase.
 pub async fn cancel_aggregate_initialization(
     State(state): State<WebAppState>,
     Path((project_id, operation_id)): Path<(String, String)>,
     Json(request): Json<CancelAggregateInitializationRequest>,
 ) -> ApiResult<Response> {
-    let project_paths = product_app_paths(&state);
-    require_multi_repo_project(&project_paths, &project_id)?;
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    cancel_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id, request)
+}
+
+/// v1.3 canonical endpoint: cancellation is resolved per logical codebase.
+pub async fn cancel_lc_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, operation_id)): Path<(String, String, String)>,
+    Json(request): Json<CancelAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    cancel_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id, request)
+}
+
+fn cancel_aggregate_initialization_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+    operation_id: String,
+    request: CancelAggregateInitializationRequest,
+) -> ApiResult<Response> {
     validate_project_id(&project_id)?;
     validate_operation_id(&operation_id)?;
-    let dependencies = aggregate_initialization_dependencies(&state);
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id);
     let operation = dependencies
         .coordinator
         .cancel(
@@ -165,8 +237,10 @@ fn aggregate_initialization_dependencies(
 fn load_manifest_for_profile(
     paths: &ProductAppPaths,
     project_id: &str,
+    logical_codebase_id: &str,
 ) -> ApiResult<crate::product::logical_codebase::store::LogicalCodebaseManifest> {
-    let store = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone());
+    let store =
+        crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
     store
         .load_manifest(project_id)
         .map_err(product_store_api_error)?

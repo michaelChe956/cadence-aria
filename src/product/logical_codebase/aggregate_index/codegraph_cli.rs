@@ -66,6 +66,7 @@ impl From<ProductStoreError> for AggregateIndexError {
     }
 }
 
+#[derive(Clone)]
 pub struct CodeGraphCli {
     runner: Arc<dyn BoundedCommandRunner>,
     executable: String,

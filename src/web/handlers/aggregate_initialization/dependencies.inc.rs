@@ -35,6 +35,18 @@ impl AggregateInitializationDependencies {
         }
     }
 
+    /// Derives a per-LC view of these dependencies: the same skills/preflight/
+    /// provider/clock components and shared run registry, but the coordinator
+    /// and index operation are re-scoped to one logical codebase subtree.
+    pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
+        let lc_id = lc_id.into();
+        Self::with_index(
+            Arc::new(self.coordinator.for_lc(lc_id.clone())),
+            self.runs.clone(),
+            Arc::new(self.index.for_lc(lc_id)),
+        )
+    }
+
     #[allow(dead_code)]
     pub fn coordinator(&self) -> &AggregateInitializationCoordinator {
         &self.coordinator

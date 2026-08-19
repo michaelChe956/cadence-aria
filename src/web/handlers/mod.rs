@@ -108,7 +108,9 @@ pub use image_create::{
     get_settings as get_image_create_settings, image_create_chat_ws,
     list_sessions as list_image_create_sessions, update_settings as update_image_create_settings,
 };
-pub use logical_codebase_members::list_logical_codebase_members;
+pub use logical_codebase_members::{
+    list_lc_logical_codebase_members, list_logical_codebase_members,
+};
 pub use logical_codebase_registration::{
     cancel_lc_registration, cancel_logical_codebase_registration, get_lc_registration_batch,
     get_logical_codebase_registration_batch, preflight_lc_registration,
@@ -122,16 +124,21 @@ pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_
 #[rustfmt::skip]
 pub use product_resources::{create_issue, create_product_issue, create_project, create_workspace, delete_issue, delete_product_issue, delete_project, delete_repository, delete_workspace, get_project, list_issues, list_product_issues, list_projects, list_repositories, list_workspaces, open_project};
 pub use aggregate_index::{
-    AggregateIndexActiveResponse, get_active_aggregate_index, rebuild_aggregate_index,
+    AggregateIndexActiveResponse, get_active_aggregate_index, get_lc_active_aggregate_index,
+    rebuild_aggregate_index, rebuild_lc_aggregate_index,
 };
 pub use aggregate_initialization::{
     AggregateInitializationDependencies, cancel_aggregate_initialization,
-    create_aggregate_initialization, get_aggregate_initialization,
+    cancel_lc_aggregate_initialization, create_aggregate_initialization,
+    create_lc_aggregate_initialization, get_aggregate_initialization,
+    get_lc_aggregate_initialization,
 };
 pub(crate) use dto::{coding_attempt_scope_text, coding_execution_unit_dto};
 pub use pointer_publication::{
-    create_pointer_publication, get_pointer_publication, list_pointer_publications,
-    retry_pointer_publication_repo, revoke_pointer_publication,
+    create_lc_pointer_publication, create_pointer_publication, get_lc_pointer_publication,
+    get_pointer_publication, list_lc_pointer_publications, list_pointer_publications,
+    retry_lc_pointer_publication_repo, retry_pointer_publication_repo,
+    revoke_lc_pointer_publication, revoke_pointer_publication,
 };
 pub use repository_registration::{
     RepositoryRegistrationDependencies, RepositoryRegistrationDependenciesBuilder,

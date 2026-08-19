@@ -223,6 +223,12 @@ struct PointerFixture {
 fn setup_pointer_fixture(member_specs: &[(&str, bool)]) -> PointerFixture {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    cadence_aria::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(cadence_aria::product::project_store::CreateProjectInput {
+            name: "pointer fixture".to_string(),
+            description: None,
+        })
+        .unwrap();
     let members: Vec<MemberRepo> = member_specs
         .iter()
         .map(|(name, with_origin)| setup_member(root.path(), name, *with_origin))
