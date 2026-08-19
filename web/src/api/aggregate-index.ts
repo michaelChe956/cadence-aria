@@ -19,23 +19,32 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-function aggregateIndexPath(projectId: string): string {
-  return `/api/projects/${encodeURIComponent(projectId)}/logical-codebase/aggregate-indexes`;
+function aggregateIndexPath(
+  projectId: string,
+  logicalCodebaseId: string,
+): string {
+  return `/api/projects/${encodeURIComponent(
+    projectId,
+  )}/logical-codebases/${encodeURIComponent(
+    logicalCodebaseId,
+  )}/aggregate-indexes`;
 }
 
 export function getActiveAggregateIndex(
   projectId: string,
+  logicalCodebaseId: string,
 ): Promise<AggregateIndexActiveResponse> {
   return requestJson<AggregateIndexActiveResponse>(
-    `${aggregateIndexPath(projectId)}/active`,
+    `${aggregateIndexPath(projectId, logicalCodebaseId)}/active`,
   );
 }
 
 export function rebuildAggregateIndex(
   projectId: string,
+  logicalCodebaseId: string,
 ): Promise<AggregateIndexActiveResponse> {
   return requestJson<AggregateIndexActiveResponse>(
-    `${aggregateIndexPath(projectId)}/rebuild`,
+    `${aggregateIndexPath(projectId, logicalCodebaseId)}/rebuild`,
     {
       method: "POST",
       body: JSON.stringify({}),

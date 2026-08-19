@@ -65,6 +65,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     const rebuildingResponse = deferred<Response>();
     const fetchMock = lifecycleFetch({
       projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
       aggregateIndex: aggregateIndex({ state: "missing", revision: null, indexed_at: null }),
       aggregateIndexRebuild: aggregateIndex({
         state: "active",
@@ -77,7 +78,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         if (
           String(input) ===
-            "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild" &&
+            "/api/projects/project_0001/logical-codebases/logical-0001/aggregate-indexes/rebuild" &&
           init?.method === "POST"
         ) {
           return rebuildingResponse.promise;
@@ -113,6 +114,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
   it("shows ApiRequestError.message when aggregate index rebuild fails", async () => {
     const fetchMock = lifecycleFetch({
       projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
       aggregateIndex: aggregateIndex({ state: "stale" }),
     });
     vi.stubGlobal(
@@ -120,7 +122,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         if (
           String(input) ===
-            "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild" &&
+            "/api/projects/project_0001/logical-codebases/logical-0001/aggregate-indexes/rebuild" &&
           init?.method === "POST"
         ) {
           return new Response(
@@ -159,6 +161,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
       ],
     });
     const fetchMock = lifecycleFetch({
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
       pointerPublications: [initialPublication],
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -167,10 +170,12 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
     render(<IssueLifecycleWorkbench />);
 
-    await user.click(await screen.findByRole("button", { name: "全量发布" }));
+    // R8：LC 作用域数据（成员/发布）异步加载，先等面板数据就绪再操作。
+    await screen.findByTestId("pointer-publication-badge");
+    await user.click(screen.getByRole("button", { name: "全量发布" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/projects/project_0001/logical-codebase/pointer-publications",
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications",
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ batch_kind: "full" }),
@@ -188,7 +193,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     await user.click(screen.getByRole("button", { name: "增量发布" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/projects/project_0001/logical-codebase/pointer-publications",
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications",
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ batch_kind: "incremental" }),
@@ -199,7 +204,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/projects/project_0001/logical-codebase/pointer-publications/publication_0000/retry-repo",
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications/publication_0000/retry-repo",
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ member_repo_id: "repository_0001" }),
@@ -211,7 +216,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     await user.click(screen.getByRole("button", { name: "撤回" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/projects/project_0001/logical-codebase/pointer-publications/publication_0000/revoke",
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications/publication_0000/revoke",
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({}),
@@ -235,6 +240,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
       ],
     });
     const fetchMock = lifecycleFetch({
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
       pointerPublications: [initialPublication],
       logicalCodebaseMembers: [
         {
@@ -261,7 +267,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     await user.click(within(hint).getByRole("button", { name: "增量发布" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/projects/project_0001/logical-codebase/pointer-publications",
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications",
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ batch_kind: "incremental" }),

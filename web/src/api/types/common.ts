@@ -160,6 +160,8 @@ export type CreateProductIssueRequest = {
   description?: string | null;
   change_id?: string | null;
   repository_id: string;
+  /// v1.3：逻辑代码库归属；逻辑 issue 时必填，repository_id 为其 active primary 成员。
+  logical_codebase_id?: string | null;
 };
 
 export type LifecycleConfirmationStatus =

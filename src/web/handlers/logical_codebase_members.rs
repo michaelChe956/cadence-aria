@@ -15,6 +15,9 @@ use crate::web::state::WebAppState;
 #[serde(rename_all = "snake_case")]
 pub struct LogicalCodebaseMemberDto {
     pub logical_repository_id: String,
+    /// R8 契约补充：issue 创建对话框 primary 成员选择所需（server 侧恒 Some；
+    /// Option 仅用于向前兼容旧客户端解码与未来未投影场景）。
+    pub physical_repository_id: Option<String>,
     pub alias: String,
     pub status: MemberStatus,
 }
@@ -66,6 +69,7 @@ fn list_logical_codebase_members_for_lc(
         .into_iter()
         .map(|member| LogicalCodebaseMemberDto {
             logical_repository_id: member.logical_repository_id.0.to_string(),
+            physical_repository_id: Some(member.physical_repository_id),
             alias: member.alias,
             status: member.status,
         })
@@ -228,6 +232,7 @@ mod tests {
             serde_json::json!({
                 "members": [{
                     "logical_repository_id": logical_repository_id.0.to_string(),
+                    "physical_repository_id": "physical-api",
                     "alias": "api",
                     "status": "removed"
                 }]

@@ -71,7 +71,18 @@ export function lifecycleFetch(options?: {
     logical_repository_id: string;
     alias: string;
     status: "active" | "removed" | "tombstoned";
+    physical_repository_id?: string | null;
   }>;
+  // R8：按 lc_id 区分的成员列表（多 LC 分区/primary 选择测试）。
+  logicalCodebaseMembersByLc?: Record<
+    string,
+    Array<{
+      logical_repository_id: string;
+      alias: string;
+      status: "active" | "removed" | "tombstoned";
+      physical_repository_id?: string | null;
+    }>
+  >;
   // REQ-TGT-05：后端 work_item_repository_groups 的 mock 值；缺省空数组（单仓扁平兼容）。
   workItemRepositoryGroups?: Array<Record<string, unknown>>;
 }) {
@@ -92,6 +103,7 @@ export function lifecycleFetch(options?: {
   const latestIssueTitlesByProject = new Map<string, string>();
   const lifecycleByIssue = new Map<string, MockLifecycleData>();
   let pointerPublications = [...(options?.pointerPublications ?? [])];
+  let logicalCodebasesList = [...(options?.logicalCodebases ?? [])];
   let aggregateInitializationGetCount = 0;
 
   function issueRecord(issueId: string, title: string) {
@@ -831,7 +843,7 @@ export function lifecycleFetch(options?: {
           logical_codebase_id: null,
           member_count: null,
         })),
-        ...(options?.logicalCodebases ?? []).map((codebase) => ({
+        ...logicalCodebasesList.map((codebase) => ({
           id: codebase.id,
           name: codebase.name,
           kind: "logical",
@@ -856,6 +868,20 @@ export function lifecycleFetch(options?: {
         aggregate_root: payload.aggregate_root,
         created_at: "2026-08-19T00:00:00Z",
       });
+    }
+    const logicalCodebaseDeleteMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)$/,
+    );
+    if (
+      logicalCodebaseDeleteMatch &&
+      init?.method === "DELETE" &&
+      !codebasesMatch
+    ) {
+      const lcId = decodeURIComponent(logicalCodebaseDeleteMatch[2]);
+      logicalCodebasesList = logicalCodebasesList.filter(
+        (codebase) => codebase.id !== lcId,
+      );
+      return jsonResponse({ status: "deleted" });
     }
     const registrationPreflightMatch = url.match(
       /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations\/preflight$/,
@@ -889,10 +915,10 @@ export function lifecycleFetch(options?: {
       return jsonResponse(options?.registrationSubmit ?? {});
     }
     const aggregateIndexMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/aggregate-indexes\/(active|rebuild)$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/aggregate-indexes\/(active|rebuild)$/,
     );
     if (aggregateIndexMatch) {
-      const action = aggregateIndexMatch[2];
+      const action = aggregateIndexMatch[3];
       return jsonResponse(
         action === "rebuild"
           ? (options?.aggregateIndexRebuild ?? options?.aggregateIndex ?? {
@@ -910,7 +936,7 @@ export function lifecycleFetch(options?: {
       );
     }
     const aggregateInitializationStartMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations$/,
     );
     if (aggregateInitializationStartMatch && init?.method === "POST") {
       return jsonResponse(
@@ -920,7 +946,7 @@ export function lifecycleFetch(options?: {
       );
     }
     const aggregateInitializationCancelMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)\/cancel$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/([^/]+)\/cancel$/,
     );
     if (aggregateInitializationCancelMatch && init?.method === "POST") {
       return jsonResponse(
@@ -929,7 +955,7 @@ export function lifecycleFetch(options?: {
       );
     }
     const aggregateInitializationGetMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/([^/]+)$/,
     );
     if (aggregateInitializationGetMatch && init?.method !== "POST") {
       const snapshots = options?.aggregateInitializationSnapshots ?? [];
@@ -941,20 +967,25 @@ export function lifecycleFetch(options?: {
       return jsonResponse(snapshot);
     }
     const pointerPublicationsMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/pointer-publications$/,
     );
     const logicalCodebaseMembersMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/members$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/members$/,
     );
     if (logicalCodebaseMembersMatch) {
+      const lcId = decodeURIComponent(logicalCodebaseMembersMatch[2]);
+      const byLc = options?.logicalCodebaseMembersByLc?.[lcId];
       return jsonResponse({
-        members: options?.logicalCodebaseMembers ?? [
-          {
-            logical_repository_id: "repository_0001",
-            alias: "api",
-            status: "active",
-          },
-        ],
+        members:
+          byLc ??
+          options?.logicalCodebaseMembers ?? [
+            {
+              logical_repository_id: "repository_0001",
+              physical_repository_id: "repository_0001",
+              alias: "api",
+              status: "active",
+            },
+          ],
       });
     }
     if (pointerPublicationsMatch) {
@@ -988,13 +1019,13 @@ export function lifecycleFetch(options?: {
       return jsonResponse(publication);
     }
     const pointerPublicationActionMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications\/([^/]+)\/(retry-repo|revoke)$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/pointer-publications\/([^/]+)\/(retry-repo|revoke)$/,
     );
     if (pointerPublicationActionMatch && init?.method === "POST") {
       const [projectId, publicationId, action] = [
         pointerPublicationActionMatch[1],
-        pointerPublicationActionMatch[2],
         pointerPublicationActionMatch[3],
+        pointerPublicationActionMatch[4],
       ];
       const current = pointerPublications.find(
         (publication) => publication.id === publicationId,
@@ -1083,19 +1114,19 @@ export function aggregateInitializationFetch(
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input).replace(/\/$/u, "");
     const startMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations$/,
     );
     if (startMatch && init?.method === "POST") {
       return jsonResponse(operationSnapshots[0] ?? aggregateInitializationOperation("created"));
     }
     const cancelMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)\/cancel$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/([^/]+)\/cancel$/,
     );
     if (cancelMatch && init?.method === "POST") {
       return jsonResponse(aggregateInitializationOperation("cancelled"));
     }
     const getMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)$/,
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/([^/]+)$/,
     );
     if (getMatch && init?.method !== "POST") {
       const snapshot =

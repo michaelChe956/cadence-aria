@@ -11,12 +11,17 @@ async function requestJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-function membersPath(projectId: string): string {
-  return `/api/projects/${encodeURIComponent(projectId)}/logical-codebase/members`;
+function membersPath(projectId: string, logicalCodebaseId: string): string {
+  return `/api/projects/${encodeURIComponent(
+    projectId,
+  )}/logical-codebases/${encodeURIComponent(logicalCodebaseId)}/members`;
 }
 
 export function listLogicalCodebaseMembers(
   projectId: string,
+  logicalCodebaseId: string,
 ): Promise<LogicalCodebaseMembersResponse> {
-  return requestJson<LogicalCodebaseMembersResponse>(membersPath(projectId));
+  return requestJson<LogicalCodebaseMembersResponse>(
+    membersPath(projectId, logicalCodebaseId),
+  );
 }

@@ -13,6 +13,7 @@ export function ProjectSidebar({
   onAddCodebase,
   onDeleteProject,
   onDeleteRepository,
+  onDeleteLogicalCodebase,
 }: {
   projects: Project[];
   codebases: CodebaseSummaryDto[];
@@ -25,6 +26,8 @@ export function ProjectSidebar({
   onAddCodebase: () => void;
   onDeleteProject: (projectId: string) => void;
   onDeleteRepository: (repositoryId: string) => void;
+  /// R8：逻辑代码库软删入口（调用方负责二次确认）。
+  onDeleteLogicalCodebase: (logicalCodebaseId: string) => void;
 }) {
   return (
     <nav
@@ -162,6 +165,21 @@ export function ProjectSidebar({
                             : (repository?.path ?? "")}
                         </p>
                       </div>
+                      {codebase.kind === "logical" && codebase.logical_codebase_id ? (
+                        <button
+                          type="button"
+                          aria-label={`删除逻辑代码库 ${codebase.name}`}
+                          disabled={busy}
+                          onClick={() =>
+                            onDeleteLogicalCodebase(
+                              codebase.logical_codebase_id ?? "",
+                            )
+                          }
+                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-danger)] hover:text-[var(--aria-danger)] disabled:opacity-60"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
                       {codebase.kind === "single_repo" && codebase.repository_id ? (
                         <button
                           type="button"

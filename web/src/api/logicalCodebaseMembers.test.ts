@@ -16,6 +16,7 @@ describe("logical codebase members api client", () => {
         members: [
           {
             logical_repository_id: "repo-0001",
+            physical_repository_id: "repository_0001",
             alias: "api",
             status: "active",
           },
@@ -24,15 +25,19 @@ describe("logical codebase members api client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const response = await listLogicalCodebaseMembers("project/with space");
+    const response = await listLogicalCodebaseMembers(
+      "project/with space",
+      "lc 0001",
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project%2Fwith%20space/logical-codebase/members",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc%200001/members",
       expect.objectContaining({ headers: { "content-type": "application/json" } }),
     );
     expect(response.members).toEqual([
       {
         logical_repository_id: "repo-0001",
+        physical_repository_id: "repository_0001",
         alias: "api",
         status: "active",
       },
@@ -42,7 +47,9 @@ describe("logical codebase members api client", () => {
   it("preserves an empty response for projects without a manifest", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ members: [] })));
 
-    await expect(listLogicalCodebaseMembers("project_0001")).resolves.toEqual({
+    await expect(
+      listLogicalCodebaseMembers("project_0001", "lc_0001"),
+    ).resolves.toEqual({
       members: [],
     });
   });

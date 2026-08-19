@@ -25,10 +25,13 @@ describe("aggregate index api client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const index = await getActiveAggregateIndex("project/with space");
+    const index = await getActiveAggregateIndex(
+      "project/with space",
+      "lc-0001",
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project%2Fwith%20space/logical-codebase/aggregate-indexes/active",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc-0001/aggregate-indexes/active",
       expect.objectContaining({
         headers: { "content-type": "application/json" },
       }),
@@ -52,10 +55,10 @@ describe("aggregate index api client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const index = await rebuildAggregateIndex("project_0001");
+    const index = await rebuildAggregateIndex("project_0001", "lc-0001");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/logical-codebase/aggregate-indexes/rebuild",
+      "/api/projects/project_0001/logical-codebases/lc-0001/aggregate-indexes/rebuild",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({}),
@@ -76,7 +79,9 @@ describe("aggregate index api client", () => {
       ),
     );
 
-    await expect(getActiveAggregateIndex("project_0001")).rejects.toMatchObject(
+    await expect(
+      getActiveAggregateIndex("project_0001", "lc-0001"),
+    ).rejects.toMatchObject(
       {
         name: "ApiRequestError",
         message: "index unavailable",

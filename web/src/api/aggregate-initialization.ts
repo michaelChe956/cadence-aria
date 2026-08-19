@@ -22,16 +22,22 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-function initializationsPath(projectId: string): string {
-  return `/api/projects/${encodeURIComponent(projectId)}/logical-codebase/initializations`;
+function initializationsPath(
+  projectId: string,
+  logicalCodebaseId: string,
+): string {
+  return `/api/projects/${encodeURIComponent(
+    projectId,
+  )}/logical-codebases/${encodeURIComponent(logicalCodebaseId)}/initializations`;
 }
 
 export function startAggregateInitialization(
   projectId: string,
+  logicalCodebaseId: string,
   idempotencyKey: string,
 ): Promise<AggregateInitializationOperationSnapshot> {
   return requestJson<AggregateInitializationOperationSnapshot>(
-    initializationsPath(projectId),
+    initializationsPath(projectId, logicalCodebaseId),
     {
       method: "POST",
       body: JSON.stringify({ idempotency_key: idempotencyKey }),
@@ -41,20 +47,26 @@ export function startAggregateInitialization(
 
 export function getAggregateInitialization(
   projectId: string,
+  logicalCodebaseId: string,
   operationId: string,
 ): Promise<AggregateInitializationOperationSnapshot> {
   return requestJson<AggregateInitializationOperationSnapshot>(
-    `${initializationsPath(projectId)}/${encodeURIComponent(operationId)}`,
+    `${initializationsPath(projectId, logicalCodebaseId)}/${encodeURIComponent(
+      operationId,
+    )}`,
   );
 }
 
 export function cancelAggregateInitialization(
   projectId: string,
+  logicalCodebaseId: string,
   operationId: string,
   request: CancelAggregateInitializationRequest,
 ): Promise<AggregateInitializationOperationSnapshot> {
   return requestJson<AggregateInitializationOperationSnapshot>(
-    `${initializationsPath(projectId)}/${encodeURIComponent(operationId)}/cancel`,
+    `${initializationsPath(projectId, logicalCodebaseId)}/${encodeURIComponent(
+      operationId,
+    )}/cancel`,
     {
       method: "POST",
       body: JSON.stringify(request),

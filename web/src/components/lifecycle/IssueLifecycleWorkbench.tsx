@@ -32,7 +32,7 @@ import {
   startAggregateInitialization,
 } from "../../api/aggregate-initialization";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
-import { listCodebases } from "../../api/codebases";
+import { deleteLogicalCodebase, listCodebases } from "../../api/codebases";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import {
   createPointerPublication,
@@ -138,6 +138,10 @@ export function IssueLifecycleWorkbench({
   const [registrationWizardLcId, setRegistrationWizardLcId] = useState<
     string | null
   >(null);
+  // R8：逻辑代码库选中态（多 LC 并存时面板按选中 LC 分区）。
+  const [selectedLogicalCodebaseId, setSelectedLogicalCodebaseId] = useState<
+    string | null
+  >(null);
   const [addCodebaseDialogOpen, setAddCodebaseDialogOpen] = useState(false);
   const [pendingWorkItemPlanLaunch, setPendingWorkItemPlanLaunch] =
     useState<PendingWorkItemPlanLaunch | null>(null);
@@ -223,28 +227,19 @@ export function IssueLifecycleWorkbench({
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
+        setSelectedLogicalCodebaseId(null);
         setAggregateInitialization(null);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
         return;
       }
 
-      const [
-        repositoryResponse,
-        codebaseResponse,
-        issueResponse,
-        publicationResponse,
-        membersResponse,
-      ] = await Promise.all([
-        listRepositories(projectId),
-        listCodebases(projectId),
-        listProductIssues(projectId),
-        listPointerPublications(projectId),
-        listLogicalCodebaseMembers(projectId),
-      ]);
-      const aggregateIndexResponse = (membersResponse.members ?? []).length > 0
-        ? await getActiveAggregateIndex(projectId)
-        : null;
+      const [repositoryResponse, codebaseResponse, issueResponse] =
+        await Promise.all([
+          listRepositories(projectId),
+          listCodebases(projectId),
+          listProductIssues(projectId),
+        ]);
       if (!isLatestRefresh(requestId)) {
         return;
       }
@@ -264,9 +259,6 @@ export function IssueLifecycleWorkbench({
       setRepositories(repositoryResponse.repositories ?? []);
       setCodebases(codebaseResponse.codebases ?? []);
       setLifecycles(lifecycleResponses);
-      setPointerPublications(publicationResponse ?? []);
-      setLogicalCodebaseMembers(membersResponse.members ?? []);
-      setAggregateIndex(aggregateIndexResponse);
       setFocusedIssueId(
         focusedIssueId &&
           lifecycleResponses.some(
@@ -326,10 +318,16 @@ export function IssueLifecycleWorkbench({
   const logicalCodebases = codebases.filter(
     (codebase) => codebase.kind === "logical",
   );
+  // R8：选中态管理——显式选中优先（须仍存在），否则回退首个；修复「面板取首个」。
   const activeLogicalCodebaseId =
-    registrationWizardLcId ??
-    logicalCodebases[0]?.logical_codebase_id ??
-    null;
+    selectedLogicalCodebaseId &&
+    logicalCodebases.some(
+      (codebase) => codebase.logical_codebase_id === selectedLogicalCodebaseId,
+    )
+      ? selectedLogicalCodebaseId
+      : (logicalCodebases[0]?.logical_codebase_id ?? null);
+  const wizardLogicalCodebaseId =
+    registrationWizardLcId ?? activeLogicalCodebaseId;
   const selectedProject = projects.find(
     (project) => project.project_id === selectedProjectId,
   );
@@ -361,8 +359,52 @@ export function IssueLifecycleWorkbench({
   const showIncrementalHint =
     latestCompletedPointerPublication !== null &&
     logicalCodebaseMembers.length > latestCompletedPointerPublication.entries.length;
+  // R8：按选中 LC 拉取成员/指针发布/聚合索引（多 LC 并存时面板数据随选中态切换）。
   useEffect(() => {
-    if (!selectedProjectId || !latestPointerPublicationId) {
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setLogicalCodebaseMembers([]);
+      setPointerPublications([]);
+      setAggregateIndex(null);
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      try {
+        const [membersResponse, publicationResponse] = await Promise.all([
+          listLogicalCodebaseMembers(
+            selectedProjectId,
+            activeLogicalCodebaseId,
+          ),
+          listPointerPublications(selectedProjectId, activeLogicalCodebaseId),
+        ]);
+        if (disposed) {
+          return;
+        }
+        setLogicalCodebaseMembers(membersResponse.members ?? []);
+        setPointerPublications(publicationResponse ?? []);
+        setAggregateIndex(
+          (membersResponse.members ?? []).length > 0
+            ? await getActiveAggregateIndex(
+                selectedProjectId,
+                activeLogicalCodebaseId,
+              )
+            : null,
+        );
+      } catch {
+        // LC 作用域数据加载失败保持现状，交由全局 refresh 重试。
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [selectedProjectId, activeLogicalCodebaseId]);
+
+  useEffect(() => {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !latestPointerPublicationId
+    ) {
       return;
     }
 
@@ -374,7 +416,10 @@ export function IssueLifecycleWorkbench({
       }
       inFlight = true;
       try {
-        const publications = await listPointerPublications(selectedProjectId);
+        const publications = await listPointerPublications(
+          selectedProjectId,
+          activeLogicalCodebaseId,
+        );
         if (!disposed) {
           setPointerPublications(publications);
         }
@@ -389,11 +434,12 @@ export function IssueLifecycleWorkbench({
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [latestPointerPublicationId, selectedProjectId]);
+  }, [latestPointerPublicationId, selectedProjectId, activeLogicalCodebaseId]);
 
   useEffect(() => {
     if (
       !selectedProjectId ||
+      !activeLogicalCodebaseId ||
       !aggregateInitialization ||
       (aggregateInitialization.status !== "created" &&
         aggregateInitialization.status !== "running")
@@ -411,6 +457,7 @@ export function IssueLifecycleWorkbench({
       try {
         const operation = await getAggregateInitialization(
           selectedProjectId,
+          activeLogicalCodebaseId,
           aggregateInitialization.operation_id,
         );
         if (!disposed) {
@@ -429,6 +476,7 @@ export function IssueLifecycleWorkbench({
     };
   }, [
     selectedProjectId,
+    activeLogicalCodebaseId,
     aggregateInitialization?.operation_id,
     aggregateInitialization?.status,
   ]);
@@ -587,6 +635,7 @@ export function IssueLifecycleWorkbench({
       description: payload.description,
       change_id: null,
       repository_id: payload.repository_id,
+      logical_codebase_id: payload.logical_codebase_id,
     });
     setDialogOpen(false);
     await refresh();
@@ -648,8 +697,8 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handlePublishFull() {
-    if (!selectedProjectId) {
-      setError("缺少 Project");
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setError("缺少 Project 或逻辑代码库");
       return;
     }
 
@@ -658,6 +707,7 @@ export function IssueLifecycleWorkbench({
     try {
       const publication = await createPointerPublication(
         selectedProjectId,
+        activeLogicalCodebaseId,
         "full",
       );
       upsertPointerPublication(publication);
@@ -669,8 +719,8 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handlePublishIncremental() {
-    if (!selectedProjectId) {
-      setError("缺少 Project");
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setError("缺少 Project 或逻辑代码库");
       return;
     }
 
@@ -679,6 +729,7 @@ export function IssueLifecycleWorkbench({
     try {
       const publication = await createPointerPublication(
         selectedProjectId,
+        activeLogicalCodebaseId,
         "incremental",
       );
       upsertPointerPublication(publication);
@@ -690,7 +741,11 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleRetryRepo(memberRepoId: string) {
-    if (!selectedProjectId || !latestPointerPublication) {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !latestPointerPublication
+    ) {
       setError("缺少 Project 或发布批次");
       return;
     }
@@ -700,6 +755,7 @@ export function IssueLifecycleWorkbench({
     try {
       const publication = await retryPointerPublicationRepo(
         selectedProjectId,
+        activeLogicalCodebaseId,
         latestPointerPublication.id,
         memberRepoId,
       );
@@ -712,7 +768,11 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleRevokePublication() {
-    if (!selectedProjectId || !latestPointerPublication) {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !latestPointerPublication
+    ) {
       setError("缺少 Project 或发布批次");
       return;
     }
@@ -722,6 +782,7 @@ export function IssueLifecycleWorkbench({
     try {
       const publication = await revokePointerPublication(
         selectedProjectId,
+        activeLogicalCodebaseId,
         latestPointerPublication.id,
       );
       upsertPointerPublication(publication);
@@ -733,15 +794,17 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleRebuildAggregateIndex() {
-    if (!selectedProjectId) {
-      setError("缺少 Project");
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setError("缺少 Project 或逻辑代码库");
       return;
     }
 
     setAggregateIndexRebuilding(true);
     setError(null);
     try {
-      setAggregateIndex(await rebuildAggregateIndex(selectedProjectId));
+      setAggregateIndex(
+        await rebuildAggregateIndex(selectedProjectId, activeLogicalCodebaseId),
+      );
     } catch (reason) {
       setError(
         reason instanceof ApiRequestError
@@ -754,8 +817,8 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleStartAggregateInitialization() {
-    if (!selectedProjectId) {
-      setError("缺少 Project");
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setError("缺少 Project 或逻辑代码库");
       return;
     }
 
@@ -764,6 +827,7 @@ export function IssueLifecycleWorkbench({
     try {
       const operation = await startAggregateInitialization(
         selectedProjectId,
+        activeLogicalCodebaseId,
         crypto.randomUUID(),
       );
       setAggregateInitialization(operation);
@@ -779,7 +843,7 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleCancelAggregateInitialization() {
-    if (!selectedProjectId || !aggregateInitialization) {
+    if (!selectedProjectId || !activeLogicalCodebaseId || !aggregateInitialization) {
       setError("缺少 Project 或初始化操作");
       return;
     }
@@ -789,6 +853,7 @@ export function IssueLifecycleWorkbench({
     try {
       const operation = await cancelAggregateInitialization(
         selectedProjectId,
+        activeLogicalCodebaseId,
         aggregateInitialization.operation_id,
         { reason: "user_cancelled", detail: null },
       );
@@ -829,6 +894,32 @@ export function IssueLifecycleWorkbench({
     );
     setSelectedCardKey(null);
     await refresh(selectedProjectId);
+  }
+
+  // R8：逻辑条目软删入口（二次确认；软删后刷新混合列表）。
+  async function handleDeleteLogicalCodebase(logicalCodebaseId: string) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "删除逻辑代码库将软删除其登记成员、聚合索引与指针发布上下文，且无法在界面内撤销。确认删除？",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setError(null);
+    try {
+      await deleteLogicalCodebase(selectedProjectId, logicalCodebaseId);
+      if (selectedLogicalCodebaseId === logicalCodebaseId) {
+        setSelectedLogicalCodebaseId(null);
+      }
+      await refresh(selectedProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason, "删除逻辑代码库失败"));
+    }
   }
 
   async function handleDeleteIssue(issueId: string) {
@@ -1023,6 +1114,9 @@ export function IssueLifecycleWorkbench({
           onDeleteRepository={(repositoryId) =>
             void handleDeleteRepository(repositoryId)
           }
+          onDeleteLogicalCodebase={(logicalCodebaseId) =>
+            void handleDeleteLogicalCodebase(logicalCodebaseId)
+          }
         />
         <WorkbenchSurface
           mainLabel="Issue 生命周期工作台"
@@ -1059,6 +1153,36 @@ export function IssueLifecycleWorkbench({
                       登记成员
                     </button>
                   </div>
+                  {logicalCodebases.length > 0 ? (
+                    <div
+                      role="tablist"
+                      aria-label="逻辑代码库切换"
+                      className="flex flex-wrap gap-2 border-b border-[var(--aria-line)] px-3 py-2"
+                    >
+                      {logicalCodebases.map((codebase) => {
+                        const lcId =
+                          codebase.logical_codebase_id ?? codebase.id;
+                        const selected = lcId === activeLogicalCodebaseId;
+                        return (
+                          <button
+                            key={codebase.id}
+                            type="button"
+                            role="tab"
+                            aria-selected={selected}
+                            data-testid={`lc-selector-${codebase.name}`}
+                            onClick={() => setSelectedLogicalCodebaseId(lcId)}
+                            className={
+                              selected
+                                ? "rounded-md border border-[var(--aria-primary)] bg-[var(--aria-panel-muted)] px-3 py-1 text-xs font-semibold text-[var(--aria-primary)] ring-2 ring-[var(--aria-primary)]"
+                                : "rounded-md border border-[var(--aria-line)] px-3 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
+                            }
+                          >
+                            {codebase.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                   {logicalCodebaseMembers.length > 0 ? (
                     <AggregateInitializationCard
                       operation={aggregateInitialization}
@@ -1186,10 +1310,10 @@ export function IssueLifecycleWorkbench({
       ) : null}
       {registrationDialogOpen &&
       selectedProjectId &&
-      activeLogicalCodebaseId ? (
+      wizardLogicalCodebaseId ? (
         <LogicalCodebaseRegistrationWizard
           projectId={selectedProjectId}
-          logicalCodebaseId={activeLogicalCodebaseId}
+          logicalCodebaseId={wizardLogicalCodebaseId}
           onCompleted={() => refresh(selectedProjectId)}
           onClose={() => {
             setRegistrationDialogOpen(false);
@@ -1208,6 +1332,15 @@ export function IssueLifecycleWorkbench({
       {dialogOpen ? (
         <CreateLifecycleIssueDialog
           repositories={repositories}
+          codebases={codebases}
+          listMembers={(logicalCodebaseId) =>
+            selectedProjectId
+              ? listLogicalCodebaseMembers(
+                  selectedProjectId,
+                  logicalCodebaseId,
+                ).then((response) => response.members ?? [])
+              : Promise.resolve([])
+          }
           onCreate={handleCreateIssue}
           onClose={() => setDialogOpen(false)}
         />

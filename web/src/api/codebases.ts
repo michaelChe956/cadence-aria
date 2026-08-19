@@ -30,6 +30,18 @@ export function listCodebases(projectId: string): Promise<CodebaseListResponse> 
   );
 }
 
+export function deleteLogicalCodebase(
+  projectId: string,
+  logicalCodebaseId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(
+      projectId,
+    )}/logical-codebases/${encodeURIComponent(logicalCodebaseId)}`,
+    { method: "DELETE" },
+  );
+}
+
 export function createLogicalCodebase(
   projectId: string,
   payload: CreateLogicalCodebaseRequest,

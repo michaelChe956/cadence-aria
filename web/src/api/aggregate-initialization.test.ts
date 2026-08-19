@@ -49,10 +49,14 @@ describe("aggregate initialization api client", () => {
       }),
     );
 
-    await startAggregateInitialization("project/with space", "key-1");
+    await startAggregateInitialization(
+      "project/with space",
+      "lc-0001",
+      "key-1",
+    );
 
     expect(calls[0].input).toBe(
-      "/api/projects/project%2Fwith%20space/logical-codebase/initializations",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc-0001/initializations",
     );
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({ idempotency_key: "key-1" }));
@@ -70,11 +74,12 @@ describe("aggregate initialization api client", () => {
 
     const operation = await getAggregateInitialization(
       "project_0001",
+      "lc-0001",
       "aggregate_initialization/1",
     );
 
     expect(calls[0].input).toBe(
-      "/api/projects/project_0001/logical-codebase/initializations/aggregate_initialization%2F1",
+      "/api/projects/project_0001/logical-codebases/lc-0001/initializations/aggregate_initialization%2F1",
     );
     expect(calls[0].init?.method).toBeUndefined();
     expect(operation.status).toBe("completed");
@@ -100,12 +105,13 @@ describe("aggregate initialization api client", () => {
 
     const operation = await cancelAggregateInitialization(
       "project_0001",
+      "lc-0001",
       "aggregate_initialization_0001",
       { reason: "user_cancelled", detail: "operator requested stop" },
     );
 
     expect(calls[0].input).toBe(
-      "/api/projects/project_0001/logical-codebase/initializations/aggregate_initialization_0001/cancel",
+      "/api/projects/project_0001/logical-codebases/lc-0001/initializations/aggregate_initialization_0001/cancel",
     );
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(
@@ -132,7 +138,7 @@ describe("aggregate initialization api client", () => {
     );
 
     await expect(
-      startAggregateInitialization("project_0001", "key-1"),
+      startAggregateInitialization("project_0001", "lc-0001", "key-1"),
     ).rejects.toMatchObject({
       name: "ApiRequestError",
       message: "aggregate initialization is already in progress",

@@ -41,10 +41,10 @@ describe("pointer publication api client", () => {
       }),
     );
 
-    const result = await listPointerPublications("project/with space");
+    const result = await listPointerPublications("project/with space", "lc-0001");
 
     expect(calls[0].input).toBe(
-      "/api/projects/project%2Fwith%20space/logical-codebase/pointer-publications",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc-0001/pointer-publications",
     );
     expect(calls[0].init?.method).toBeUndefined();
     expect(result).toHaveLength(1);
@@ -61,10 +61,10 @@ describe("pointer publication api client", () => {
       }),
     );
 
-    await getPointerPublication(PROJECT_ID, "pub/1");
+    await getPointerPublication(PROJECT_ID, "lc-0001", "pub/1");
 
     expect(calls[0].input).toBe(
-      "/api/projects/project_0001/logical-codebase/pointer-publications/pub%2F1",
+      "/api/projects/project_0001/logical-codebases/lc-0001/pointer-publications/pub%2F1",
     );
     expect(calls[0].init?.method).toBeUndefined();
   });
@@ -79,10 +79,10 @@ describe("pointer publication api client", () => {
       }),
     );
 
-    await createPointerPublication(PROJECT_ID, "full");
+    await createPointerPublication(PROJECT_ID, "lc-0001", "full");
 
     expect(calls[0].input).toBe(
-      "/api/projects/project_0001/logical-codebase/pointer-publications",
+      "/api/projects/project_0001/logical-codebases/lc-0001/pointer-publications",
     );
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({ batch_kind: "full" }));
@@ -98,10 +98,15 @@ describe("pointer publication api client", () => {
       }),
     );
 
-    await retryPointerPublicationRepo(PROJECT_ID, "pub-0001", "repo/1");
+    await retryPointerPublicationRepo(
+      PROJECT_ID,
+      "lc-0001",
+      "pub-0001",
+      "repo/1",
+    );
 
     expect(calls[0].input).toBe(
-      "/api/projects/project_0001/logical-codebase/pointer-publications/pub-0001/retry-repo",
+      "/api/projects/project_0001/logical-codebases/lc-0001/pointer-publications/pub-0001/retry-repo",
     );
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({ member_repo_id: "repo/1" }));
@@ -117,10 +122,10 @@ describe("pointer publication api client", () => {
       }),
     );
 
-    const result = await revokePointerPublication(PROJECT_ID, "pub-0001");
+    const result = await revokePointerPublication(PROJECT_ID, "lc-0001", "pub-0001");
 
     expect(calls[0].input).toBe(
-      "/api/projects/project_0001/logical-codebase/pointer-publications/pub-0001/revoke",
+      "/api/projects/project_0001/logical-codebases/lc-0001/pointer-publications/pub-0001/revoke",
     );
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({}));

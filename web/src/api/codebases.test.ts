@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createLogicalCodebase, listCodebases } from "./codebases";
+import {
+  createLogicalCodebase,
+  deleteLogicalCodebase,
+  listCodebases,
+} from "./codebases";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -97,5 +101,27 @@ describe("codebases api", () => {
         aggregate_root: " ",
       }),
     ).rejects.toMatchObject({ code: "aggregate_root_required" });
+  });
+});
+
+describe("deleteLogicalCodebase", () => {
+  it("soft-deletes via DELETE /logical-codebases/{lc_id} with encoded ids", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return jsonResponse({ status: "deleted" });
+      }),
+    );
+
+    await deleteLogicalCodebase("project/with space", "lc 0001");
+
+    expect(calls).toEqual([
+      {
+        input: "/api/projects/project%2Fwith%20space/logical-codebases/lc%200001",
+        init: expect.objectContaining({ method: "DELETE" }),
+      },
+    ]);
   });
 });
