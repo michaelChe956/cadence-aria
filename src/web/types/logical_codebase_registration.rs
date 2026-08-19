@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct RegistrationPreflightRequest {
     pub aggregate_root: String,
     pub candidate_paths: Vec<String>,
+    #[serde(default)]
+    pub auto_discover: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

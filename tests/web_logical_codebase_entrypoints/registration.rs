@@ -210,6 +210,106 @@ async fn registration_preflight_persists_all_candidate_evidence_and_normalizes_d
 }
 
 #[tokio::test]
+async fn registration_preflight_auto_discovers_direct_git_children_and_ignores_submitted_paths() {
+    let fixture = Fixture::new();
+    let linked_worktree = fixture.root().join("linked-worktree");
+    let status = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            linked_worktree.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(fixture.git_root())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(linked_worktree.join(".git").is_file());
+
+    let (status, body) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/registrations/preflight",
+        json!({
+            "aggregate_root": fixture.root(),
+            "candidate_paths": [fixture.root().join("docs")],
+            "auto_discover": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{body}");
+    assert!(items.iter().any(|item| {
+        item["path"] == fixture.root().join("clean").to_string_lossy().as_ref()
+            && item["class"] == "eligible"
+    }));
+    assert!(items.iter().any(|item| {
+        item["path"] == fixture.root().join("dirty").to_string_lossy().as_ref()
+            && item["class"] == "needs_attention"
+            && item["reason"] == "dirty"
+    }));
+    assert!(items.iter().any(|item| {
+        item["path"]
+            == fixture
+                .root()
+                .join("nested-parent")
+                .to_string_lossy()
+                .as_ref()
+            && item["class"] == "needs_attention"
+            && item["reason"] == "dirty"
+    }));
+    assert!(items.iter().any(|item| {
+        item["path"] == linked_worktree.to_string_lossy().as_ref() && item["class"] == "nested"
+    }));
+    assert!(
+        items
+            .iter()
+            .all(|item| item["path"] != fixture.root().join("docs").to_string_lossy().as_ref())
+    );
+}
+
+#[tokio::test]
+async fn registration_preflight_auto_discover_returns_empty_items_when_no_git_children_exist() {
+    let fixture = Fixture::new();
+    let empty_root = fixture._workspace.path().join("empty-aggregate-root");
+    fs::create_dir_all(empty_root.join("docs")).unwrap();
+    let (status, body) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/registrations/preflight",
+        json!({
+            "aggregate_root": empty_root,
+            "candidate_paths": [fixture.git_root()],
+            "auto_discover": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"], json!([]));
+}
+
+#[tokio::test]
+async fn registration_preflight_without_auto_discover_preserves_explicit_candidates() {
+    let fixture = Fixture::new();
+    let (status, body) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebase/registrations/preflight",
+        json!({
+            "aggregate_root": fixture.root(),
+            "candidate_paths": [fixture.root().join("docs")]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["items"][0]["class"], "non_git", "{body}");
+}
+
+#[tokio::test]
 async fn registration_submit_uses_frozen_snapshot_and_runs_batch_synchronously() {
     let fixture = Fixture::new();
     let (status, preflight) = request(

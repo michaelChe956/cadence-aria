@@ -1,3 +1,44 @@
+fn discover_direct_git_children(root: &std::path::Path) -> ApiResult<Vec<std::path::PathBuf>> {
+    let discovery_error = |reason| {
+        ApiError::runtime(
+            "aggregate_root_missing",
+            "aggregate root preflight rejected",
+            serde_json::json!({ "reason": reason }),
+        )
+    };
+    let entries = std::fs::read_dir(root).map_err(|error| {
+        discovery_error(format!(
+            "could not inspect aggregate root {}: {error}",
+            root.display()
+        ))
+    })?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            discovery_error(format!(
+                "could not inspect aggregate root {}: {error}",
+                root.display()
+            ))
+        })?;
+        let path = entry.path();
+        if entry
+            .file_type()
+            .map_err(|error| {
+                discovery_error(format!(
+                    "could not inspect aggregate root entry {}: {error}",
+                    path.display()
+                ))
+            })?
+            .is_dir()
+            && path.join(".git").exists()
+        {
+            candidates.push(path);
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
 pub async fn preflight_logical_codebase_registration(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
@@ -7,12 +48,6 @@ pub async fn preflight_logical_codebase_registration(
     // Admission must precede all candidate classification and durable writes.
     require_multi_repo_project(&paths, &project_id)?;
     let root = std::path::PathBuf::from(&request.aggregate_root);
-    let candidate_paths = request
-        .candidate_paths
-        .iter()
-        .cloned()
-        .map(Into::into)
-        .collect::<Vec<_>>();
     // Candidate-level containment is classified by the coordinator into the
     // stable seven classes. The admission validator still runs first, but is
     // intentionally given no candidates so one outside/missing candidate does
@@ -20,6 +55,16 @@ pub async fn preflight_logical_codebase_registration(
     let canonical_root = AggregateRootPreflight::new(paths.clone())
         .validate(&project_id, &root, &[])
         .map_err(aggregate_root_api_error)?;
+    let candidate_paths = if request.auto_discover {
+        discover_direct_git_children(&canonical_root.canonical_path)?
+    } else {
+        request
+            .candidate_paths
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect::<Vec<_>>()
+    };
     let coordinator = LogicalCodebaseRegistrationCoordinator::new(
         paths.clone(),
         RepositoryStore::with_logical_codebase_feature(paths.clone(), LogicalCodebaseFeature::enabled()),
