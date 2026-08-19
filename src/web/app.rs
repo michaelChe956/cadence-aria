@@ -120,6 +120,26 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::rebuild_aggregate_index),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations/preflight",
+            post(handlers::preflight_lc_registration),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations",
+            post(handlers::submit_lc_registration),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations/{batch_id}",
+            get(handlers::get_lc_registration_batch),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations/{batch_id}/resume",
+            post(handlers::resume_lc_registration),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/registrations/{batch_id}/cancel",
+            post(handlers::cancel_lc_registration),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/registrations/preflight",
             post(handlers::preflight_logical_codebase_registration),
         )

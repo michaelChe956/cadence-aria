@@ -1,15 +1,39 @@
 impl LogicalCodebaseRegistrationCoordinator {
-    pub fn new(
-        paths: ProductAppPaths,
-        repositories: RepositoryStore,
-        feature: LogicalCodebaseFeature,
-    ) -> Self {
+    pub fn new(paths: ProductAppPaths, feature: LogicalCodebaseFeature) -> Self {
         Self {
             paths,
-            repositories,
+            lc_id: None,
             feature,
             #[cfg(test)]
             failure_after_completed_items: Arc::new(AtomicUsize::new(usize::MAX)),
+        }
+    }
+
+    /// Scopes the whole registration chain (snapshot store, batch store,
+    /// manifest/member writes) to one logical codebase subtree. The legacy
+    /// alias codebase resolves to the legacy project-scoped root, so legacy
+    /// endpoint behavior is byte-identical.
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+            feature: LogicalCodebaseFeature::enabled(),
+            #[cfg(test)]
+            failure_after_completed_items: Arc::new(AtomicUsize::new(usize::MAX)),
+        }
+    }
+
+    fn authority_store(&self) -> LogicalCodebaseStore {
+        match &self.lc_id {
+            Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id.clone()),
+            None => LogicalCodebaseStore::new(self.paths.clone()),
+        }
+    }
+
+    fn batch_store(&self) -> RegistrationBatchStore {
+        match &self.lc_id {
+            Some(lc_id) => RegistrationBatchStore::for_lc(self.paths.clone(), lc_id.clone()),
+            None => RegistrationBatchStore::new(self.paths.clone()),
         }
     }
 
@@ -36,7 +60,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         // The submitted root is an invariant of every batch, including a
         // queued one. Check it before writing a receipt so root conflicts
         // never leave an unrelated batch behind.
-        LogicalCodebaseStore::new(self.paths.clone())
+        self.authority_store()
             .validate_registration_root(&input.project_id, &input.aggregate_root.canonical_path)?;
 
         let items = input
@@ -75,7 +99,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         let id = format!("registration_batch_{}", Uuid::new_v4().simple());
         validate_relative_id(&id)?;
         let now = Utc::now().to_rfc3339();
-        RegistrationBatchStore::new(self.paths.clone()).create_or_get(RegistrationBatchRecord {
+        self.batch_store().create_or_get(RegistrationBatchRecord {
             id,
             project_id: input.project_id,
             idempotency_key,
@@ -93,7 +117,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         project_id: &str,
         batch_id: &str,
     ) -> Result<RegistrationBatchRecord, ProductStoreError> {
-        RegistrationBatchStore::new(self.paths.clone()).load(project_id, batch_id)
+        self.batch_store().load(project_id, batch_id)
     }
 
     pub fn cancel_batch(
@@ -101,7 +125,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         project_id: &str,
         batch_id: &str,
     ) -> Result<RegistrationBatchRecord, ProductStoreError> {
-        RegistrationBatchStore::new(self.paths.clone()).cancel(project_id, batch_id)
+        self.batch_store().cancel(project_id, batch_id)
     }
 
     /// Revalidates every unfinished item immediately before registration. The
@@ -115,7 +139,7 @@ impl LogicalCodebaseRegistrationCoordinator {
     ) -> Result<RegistrationBatchRecord, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(batch_id)?;
-        let batches = RegistrationBatchStore::new(self.paths.clone());
+        let batches = self.batch_store();
         let initial = batches.load(project_id, batch_id)?;
         if matches!(
             initial.status,
@@ -126,7 +150,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         // Reject an incompatible root before making a durable state change, so
         // a caller can receive the stable conflict without stranding a batch
         // in `running`.
-        LogicalCodebaseStore::new(self.paths.clone())
+        self.authority_store()
             .validate_registration_root(project_id, &initial.aggregate_root)?;
         // Identity drift is batch-scoped. Validate every unfinished item before
         // attaching any member; otherwise a later identity conflict could
@@ -320,7 +344,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         if entry.state != crate::product::logical_codebase::IdentityRegistryState::Active {
             return Ok(false);
         }
-        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        let authority = self.authority_store();
         let member = authority
             .load_member(project_id, entry.logical_repository_id)?
             .ok_or_else(|| ProductStoreError::IdentityMismatch {
@@ -611,7 +635,7 @@ impl LogicalCodebaseRegistrationCoordinator {
         input: AttachOnlyRegistrationInput,
         aggregate_root: &Path,
     ) -> Result<CodebaseMemberRecord, ProductStoreError> {
-        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let store = self.authority_store();
         let project_id = input.project_id.clone();
         store.with_registration_manifest_writer(
             &project_id,
@@ -620,47 +644,206 @@ impl LogicalCodebaseRegistrationCoordinator {
         )
     }
 
+    /// Attaches one confirmed member directly through the LC-scoped authority
+    /// store (v1.3 concern③ 处置): the registration chain never routes through
+    /// the feature-enabled `RepositoryStore::create`, which performs the lazy
+    /// identity migration and rewrites `repos.json` as a compatibility
+    /// projection. Identity allocation, member/checkout/registry records and
+    /// the manifest membership advance land in the logical-codebase subtree;
+    /// `repos.json` stays byte-identical across the whole chain.
     fn attach_member_inner(
         &self,
         input: AttachOnlyRegistrationInput,
     ) -> Result<CodebaseMemberRecord, ProductStoreError> {
-        let repository = self.repositories.create(CreateRepositoryInput {
-            project_id: input.project_id.clone(),
-            name: input.alias.clone(),
-            path: input.canonical_path,
-            default_policy_preset: None,
-            default_provider_mode: None,
-            idempotency_key: input.idempotency_key,
-        })?;
-        validate_relative_id(&repository.id)?;
-        let logical_repository_id = repository.logical_repository_id.ok_or_else(|| {
-            ProductStoreError::IdentityMismatch {
-                kind: "repository_projection",
-                id: repository.id.clone(),
-            }
-        })?;
+        validate_relative_id(&input.project_id)?;
+        validate_relative_id(&input.idempotency_key)?;
+        let canonical_path = canonicalize_repo_path(&input.canonical_path)?;
+        let source_identity = resolve_repository_source(&canonical_path)?;
+        let store = self.authority_store();
+        let registry = IdentityRegistryStore::new(self.paths.clone());
+        let project_id = input.project_id.clone();
 
-        let store = LogicalCodebaseStore::new(self.paths.clone());
-        let mut member = store
-            .load_member(&input.project_id, logical_repository_id)?
-            .ok_or_else(|| ProductStoreError::NotFound {
-                kind: "logical_codebase_member",
-                id: logical_repository_id.0.to_string(),
-            })?;
-        if member.physical_repository_id != repository.id {
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "logical_codebase_member",
-                id: logical_repository_id.0.to_string(),
-            });
-        }
+        // Admission mirrors `RepositoryStore::create_logical_repository` for
+        // the logical-authority path: a live identity under a different key is
+        // a conflict, a tombstoned source is rejected, and a replay of the
+        // same key reuses the durable member.
+        let mut member = match registry.find_by_source(&project_id, &source_identity)? {
+            Some(entry) if entry.state == IdentityRegistryState::Active => {
+                if entry.created_by_key != input.idempotency_key {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "repository_already_registered",
+                        id: entry.physical_repository_id,
+                    });
+                }
+                store
+                    .load_member(&project_id, entry.logical_repository_id)?
+                    .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                        kind: "logical_codebase_member",
+                        id: entry.logical_repository_id.0.to_string(),
+                    })?
+            }
+            Some(entry) => {
+                return Err(ProductStoreError::Conflict {
+                    kind: "repository_source_tombstoned",
+                    id: entry.physical_repository_id,
+                });
+            }
+            None => {
+                // Crash-window recovery: a member may exist without a registry
+                // entry. Reuse its identity instead of allocating a second one.
+                let matching = store
+                    .list_members(&project_id)?
+                    .into_iter()
+                    .filter(|member| member.source_identity == source_identity)
+                    .collect::<Vec<_>>();
+                if matching.len() > 1 {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "logical_codebase_member",
+                        id: source_identity.key_digest.clone(),
+                    });
+                }
+                match matching.into_iter().next() {
+                    Some(member) => {
+                        // Heal the crash window: the durable member exists
+                        // without a registry entry; complete the authority
+                        // records with the caller's idempotency key.
+                        let [primary_checkout_id] = member.checkout_ids.as_slice() else {
+                            return Err(ProductStoreError::IdentityMismatch {
+                                kind: "logical_codebase_member",
+                                id: member.logical_repository_id.0.to_string(),
+                            });
+                        };
+                        registry.upsert_active(
+                            &project_id,
+                            IdentityRegistryEntry::active(
+                                source_identity.clone(),
+                                member.logical_repository_id,
+                                member.physical_repository_id.clone(),
+                                *primary_checkout_id,
+                                input.idempotency_key.clone(),
+                            ),
+                        )?;
+                        member
+                    }
+                    None => self.allocate_and_attach_member(
+                        &store,
+                        &project_id,
+                        &input,
+                        &canonical_path,
+                        &source_identity,
+                    )?,
+                }
+            }
+        };
 
         member.alias = input.alias;
         member.role = input.role;
         member.repo_type = input.repo_type;
         member.tech_stack = input.tech_stack;
         member.updated_at = Utc::now().to_rfc3339();
-        store.save_member(&input.project_id, &member)?;
+        store.save_member(&project_id, &member)?;
+        self.ensure_manifest_membership(&store, &project_id, member.logical_repository_id)?;
         Ok(member)
+    }
+
+    fn allocate_and_attach_member(
+        &self,
+        store: &LogicalCodebaseStore,
+        project_id: &str,
+        input: &AttachOnlyRegistrationInput,
+        canonical_path: &Path,
+        source_identity: &RepositorySourceIdentity,
+    ) -> Result<CodebaseMemberRecord, ProductStoreError> {
+        let ordinal = store
+            .list_members(project_id)?
+            .iter()
+            .map(|member| member.ordinal)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_member",
+                reason: "repository ordinal overflow".to_string(),
+            })?;
+        let now = Utc::now().to_rfc3339();
+        let physical_repository_id = format!("repository_{}", Uuid::new_v4().simple());
+        validate_relative_id(&physical_repository_id)?;
+        let logical_repository_id = LogicalRepositoryId(Uuid::new_v4());
+        let primary_checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+
+        let member = CodebaseMemberRecord {
+            logical_repository_id,
+            physical_repository_id,
+            alias: input.alias.clone(),
+            role: input.role.clone(),
+            ordinal,
+            source_identity: source_identity.clone(),
+            repo_type: input.repo_type.clone(),
+            tech_stack: input.tech_stack.clone(),
+            owner: None,
+            tags: Vec::new(),
+            default_ref: None,
+            checkout_ids: vec![primary_checkout_id],
+            status: MemberStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_member(project_id, &member)?;
+        store.save_checkout(
+            project_id,
+            &RepositoryCheckoutRecord {
+                checkout_id: primary_checkout_id,
+                logical_repository_id,
+                physical_repository_id: member.physical_repository_id.clone(),
+                kind: CheckoutKind::Main,
+                canonical_path: canonical_path.to_path_buf(),
+                checkout_path_hash: repo_hash_for_path(canonical_path.to_string_lossy().as_ref()),
+                git_dir_identity: source_identity.git_dir_identity(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )?;
+        IdentityRegistryStore::new(self.paths.clone()).upsert_active(
+            project_id,
+            IdentityRegistryEntry::active(
+                source_identity.clone(),
+                logical_repository_id,
+                member.physical_repository_id.clone(),
+                primary_checkout_id,
+                input.idempotency_key.clone(),
+            ),
+        )?;
+        Ok(member)
+    }
+
+    fn ensure_manifest_membership(
+        &self,
+        store: &LogicalCodebaseStore,
+        project_id: &str,
+        member_id: LogicalRepositoryId,
+    ) -> Result<(), ProductStoreError> {
+        let mut manifest = store
+            .load_manifest(project_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: project_id.to_string(),
+            })?;
+        if manifest.member_ids.contains(&member_id) {
+            return Ok(());
+        }
+        manifest.member_ids.push(member_id);
+        manifest.membership_revision = manifest
+            .membership_revision
+            .checked_add(1)
+            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_manifest",
+                reason: "membership_revision overflow".to_string(),
+            })?;
+        manifest.updated_at = Utc::now().to_rfc3339();
+        store.save_manifest(project_id, &manifest)
     }
 }
 

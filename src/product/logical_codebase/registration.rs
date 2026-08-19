@@ -15,12 +15,15 @@ use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+use crate::product::id::repo_hash_for_path;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
-    CodebaseMemberRecord, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityRegistryEntry,
+    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
     RepositorySourceIdentity, RepositoryType,
 };
-use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::product::repository_store::{canonicalize_repo_path, resolve_repository_source};
 
 /// Canonical, non-Git common parent that has passed aggregate-root admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +274,7 @@ pub struct AttachOnlyRegistrationInput {
 #[derive(Debug, Clone)]
 pub struct LogicalCodebaseRegistrationCoordinator {
     paths: ProductAppPaths,
-    repositories: RepositoryStore,
+    lc_id: Option<String>,
     feature: LogicalCodebaseFeature,
     #[cfg(test)]
     failure_after_completed_items: Arc<AtomicUsize>,

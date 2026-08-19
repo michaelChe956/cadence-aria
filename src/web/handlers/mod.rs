@@ -110,8 +110,10 @@ pub use image_create::{
 };
 pub use logical_codebase_members::list_logical_codebase_members;
 pub use logical_codebase_registration::{
-    cancel_logical_codebase_registration, get_logical_codebase_registration_batch,
-    preflight_logical_codebase_registration, resume_logical_codebase_registration,
+    cancel_lc_registration, cancel_logical_codebase_registration, get_lc_registration_batch,
+    get_logical_codebase_registration_batch, preflight_lc_registration,
+    preflight_logical_codebase_registration, resume_lc_registration,
+    resume_logical_codebase_registration, submit_lc_registration,
     submit_logical_codebase_registration,
 };
 pub use providers::{providers_recheck, providers_status};

@@ -117,6 +117,7 @@ pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
 pub use repository_routing::{RepositoryRouting, RepositoryRoutingErrorCode};
+pub(crate) use store::lc_scope_root;
 pub use store::{
     LogicalCodebaseCreateInput, LogicalCodebaseLayout, LogicalCodebaseManifest,
     LogicalCodebaseRecord, LogicalCodebaseStore,

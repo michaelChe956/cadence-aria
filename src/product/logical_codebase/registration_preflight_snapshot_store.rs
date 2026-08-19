@@ -38,11 +38,21 @@ impl RegistrationPreflightSnapshot {
 
 pub struct RegistrationPreflightSnapshotStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl RegistrationPreflightSnapshotStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes snapshots to one logical codebase subtree (`preflights/` under
+    /// the v1.3 per-LC layout; the legacy alias keeps the legacy root).
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
     }
 
     pub fn save(&self, snapshot: &RegistrationPreflightSnapshot) -> Result<(), ProductStoreError> {
@@ -104,10 +114,11 @@ impl RegistrationPreflightSnapshotStore {
     fn path(&self, project_id: &str, preflight_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(preflight_id)?;
-        Ok(self
-            .paths
-            .registration_preflights_root(project_id)
-            .join(format!("{preflight_id}.json")))
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join("preflights")
+                .join(format!("{preflight_id}.json")),
+        )
     }
 }
 

@@ -12,7 +12,6 @@ mod tests {
         LogicalCodebaseFeature, LogicalCodebaseManifest, LogicalCodebaseStore,
     };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
-    use crate::product::repository_store::RepositoryStore;
 
     #[test]
     fn frontend_and_lib_manifest_profiles_are_detected_without_java_initialization() {
@@ -683,11 +682,6 @@ mod tests {
         init_git_repository(&nested_git);
         init_git_repository(&dirty_git);
         fs::write(dirty_git.join("README.md"), "dirty\n").unwrap();
-
-        let repositories = RepositoryStore::with_logical_codebase_feature(
-            paths.clone(),
-            LogicalCodebaseFeature::enabled(),
-        );
         ScanFixture {
             _temp: temp,
             paths: paths.clone(),
@@ -702,7 +696,6 @@ mod tests {
             outside,
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
-                repositories,
                 LogicalCodebaseFeature::enabled(),
             ),
         }
@@ -725,10 +718,6 @@ mod tests {
             &main,
             &["worktree", "add", "--detach", linked.to_str().unwrap()],
         );
-        let repositories = RepositoryStore::with_logical_codebase_feature(
-            paths.clone(),
-            LogicalCodebaseFeature::enabled(),
-        );
         LinkedWorktreeFixture {
             _root: temp,
             root: CanonicalAggregateRoot {
@@ -737,7 +726,6 @@ mod tests {
             linked,
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
-                repositories,
                 LogicalCodebaseFeature::enabled(),
             ),
         }
@@ -760,10 +748,6 @@ mod tests {
                 path
             })
             .collect::<Vec<_>>();
-        let repository_store = RepositoryStore::with_logical_codebase_feature(
-            paths.clone(),
-            LogicalCodebaseFeature::enabled(),
-        );
         FiftyRepositoryFixture {
             _root: temp,
             root: CanonicalAggregateRoot {
@@ -772,7 +756,6 @@ mod tests {
             repositories,
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
-                repository_store,
                 LogicalCodebaseFeature::enabled(),
             ),
         }
@@ -792,10 +775,6 @@ mod tests {
         let second = root_path.join("second");
         init_git_repository(&first);
         init_git_repository(&second);
-        let repositories = RepositoryStore::with_logical_codebase_feature(
-            paths.clone(),
-            LogicalCodebaseFeature::enabled(),
-        );
         BatchFixture {
             _root: temp,
             root: CanonicalAggregateRoot {
@@ -805,7 +784,6 @@ mod tests {
             second,
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
-                repositories,
                 LogicalCodebaseFeature::enabled(),
             ),
         }
@@ -840,20 +818,28 @@ mod tests {
         git(&git_root, &["add", "README.md"]);
         git(&git_root, &["commit", "--quiet", "-m", "initial"]);
 
+        // v1.3：登记链路不再触发懒惰 identity 迁移 bootstrap manifest；
+        // manifest 由首批登记（D7 原子语义）或既有迁移产物存在。
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new(
+                    "project_0001",
+                    root.path().to_path_buf(),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+
         let head_before = git_output(&git_root, &["rev-parse", "HEAD"]);
         let branch_before = git_output(&git_root, &["branch", "--show-current"]);
         let status_before = git_output(&git_root, &["status", "--porcelain"]);
-        let repositories = RepositoryStore::with_logical_codebase_feature(
-            paths.clone(),
-            LogicalCodebaseFeature::enabled(),
-        );
 
         AttachFixture {
             _root: root,
             paths: paths.clone(),
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
-                repositories,
                 LogicalCodebaseFeature::enabled(),
             ),
             git_root,

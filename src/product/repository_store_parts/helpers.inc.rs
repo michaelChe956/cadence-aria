@@ -438,7 +438,7 @@ impl RepositorySourceResolver {
     }
 }
 
-fn resolve_repository_source(
+pub(crate) fn resolve_repository_source(
     canonical_path: &Path,
 ) -> Result<RepositorySourceIdentity, ProductStoreError> {
     RepositorySourceResolver::resolve(canonical_path)
@@ -477,7 +477,7 @@ fn create_input_digest(input: &CreateRepositoryInput, canonical_path: &Path) -> 
     format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
 }
 
-fn canonicalize_repo_path(path: &Path) -> Result<PathBuf, ProductStoreError> {
+pub(crate) fn canonicalize_repo_path(path: &Path) -> Result<PathBuf, ProductStoreError> {
     fs::canonicalize(path)
         .map_err(|error| ProductStoreError::Io(format!("canonicalize {}: {error}", path.display())))
 }

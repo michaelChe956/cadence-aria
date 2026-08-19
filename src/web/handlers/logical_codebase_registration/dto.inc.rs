@@ -32,3 +32,45 @@ impl RegistrationPreflightItemDto {
         }
     }
 }
+
+impl RegistrationBatchDto {
+    fn from_record(batch: &crate::product::logical_codebase::RegistrationBatchRecord) -> Self {
+        Self {
+            batch_id: batch.id.clone(),
+            status: match batch.status {
+                RegistrationBatchStatus::Queued => "queued",
+                RegistrationBatchStatus::Running => "running",
+                RegistrationBatchStatus::PartialFailed => "partial_failed",
+                RegistrationBatchStatus::Completed => "completed",
+                RegistrationBatchStatus::Cancelled => "cancelled",
+            }
+            .to_string(),
+            items: batch
+                .items
+                .iter()
+                .map(|item| RegistrationBatchItemDto {
+                    path: item.submitted_path.to_string_lossy().into_owned(),
+                    status: match item.status {
+                        crate::product::logical_codebase::RegistrationItemStatus::Pending => {
+                            "pending"
+                        }
+                        crate::product::logical_codebase::RegistrationItemStatus::Skipped => {
+                            "skipped"
+                        }
+                        crate::product::logical_codebase::RegistrationItemStatus::Completed => {
+                            "completed"
+                        }
+                        crate::product::logical_codebase::RegistrationItemStatus::Failed => {
+                            "failed"
+                        }
+                        crate::product::logical_codebase::RegistrationItemStatus::NeedsAttention => {
+                            "needs_attention"
+                        }
+                    }
+                    .to_string(),
+                    failure_reason: item.failure_reason.clone(),
+                })
+                .collect(),
+        }
+    }
+}

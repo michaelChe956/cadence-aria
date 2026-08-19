@@ -759,6 +759,7 @@ async fn registration_preflight_admits_root_before_classification_and_guards_sin
             description: None,
         })
         .unwrap();
+    // R3 语义：旧路径是"默认第一个逻辑代码库"兼容别名；无任何 LC 时 404。
     assert_error(
         request(
             &fixture.app,
@@ -767,8 +768,8 @@ async fn registration_preflight_admits_root_before_classification_and_guards_sin
             json!({"aggregate_root": fixture.root(), "candidate_paths": []}),
         )
         .await,
-        StatusCode::CONFLICT,
-        "logical_codebase_feature_disabled",
+        StatusCode::NOT_FOUND,
+        "logical_codebase_not_found",
     );
     assert!(!paths.logical_codebase_root("project_0002").exists());
 }

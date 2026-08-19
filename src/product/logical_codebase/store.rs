@@ -79,14 +79,50 @@ struct LogicalCodebaseTombstone {
     deleted_at: String,
 }
 
+/// Resolves the durable subtree root a logical-codebase-scoped store must
+/// use: the legacy alias codebase keeps its authoritative data under the old
+/// `logical-codebase/` subtree, every other codebase lives under
+/// `logical-codebases/{lc_id}/` (v1.3 layout). `None` keeps the legacy
+/// project-scoped behavior unchanged for pre-R3 call sites.
+pub(crate) fn lc_scope_root(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    lc_id: &Option<String>,
+) -> Result<PathBuf, ProductStoreError> {
+    validate_relative_id(project_id)?;
+    match lc_id {
+        Some(lc_id) if *lc_id != legacy_logical_codebase_id(project_id) => {
+            validate_relative_id(lc_id)?;
+            Ok(paths.logical_codebases_root(project_id).join(lc_id))
+        }
+        _ => Ok(paths.logical_codebase_root(project_id)),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LogicalCodebaseStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl LogicalCodebaseStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes every manifest/member/checkout/registration path of this store
+    /// to one logical codebase subtree. The legacy alias codebase resolves to
+    /// the legacy project-scoped root, so its behavior is byte-identical to an
+    /// unscoped store.
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
+    }
+
+    fn scope_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
+        lc_scope_root(&self.paths, project_id, &self.lc_id)
     }
 
     pub fn create(
@@ -496,7 +532,9 @@ impl LogicalCodebaseStore {
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(project_id)?;
         with_exact_exclusive_lock(
-            &self.paths.logical_codebase_manifest_lock_path(project_id),
+            &self
+                .scope_root(project_id)?
+                .join(".manifest-registration.lock"),
             || {
                 if let Some(manifest) = self.load_manifest(project_id)?
                     && manifest.provider_context_root != provider_context_root
@@ -523,7 +561,9 @@ impl LogicalCodebaseStore {
     ) -> Result<T, ProductStoreError> {
         validate_relative_id(project_id)?;
         with_exact_exclusive_lock(
-            &self.paths.logical_codebase_manifest_lock_path(project_id),
+            &self
+                .scope_root(project_id)?
+                .join(".manifest-registration.lock"),
             || {
                 let created = if let Some(manifest) = self.load_manifest(project_id)? {
                     if manifest.provider_context_root != provider_context_root {
@@ -749,10 +789,7 @@ impl LogicalCodebaseStore {
 
     fn manifest_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
-        Ok(self
-            .paths
-            .logical_codebase_root(project_id)
-            .join("manifest.json"))
+        Ok(self.scope_root(project_id)?.join("manifest.json"))
     }
 
     fn member_path(
@@ -764,8 +801,7 @@ impl LogicalCodebaseStore {
         validate_relative_id(project_id)?;
         validate_relative_id(&file_name)?;
         Ok(self
-            .paths
-            .logical_codebase_root(project_id)
+            .scope_root(project_id)?
             .join("members")
             .join(format!("{file_name}.json")))
     }
@@ -779,8 +815,7 @@ impl LogicalCodebaseStore {
         validate_relative_id(project_id)?;
         validate_relative_id(&file_name)?;
         Ok(self
-            .paths
-            .logical_codebase_root(project_id)
+            .scope_root(project_id)?
             .join("checkouts")
             .join(format!("{file_name}.json")))
     }
@@ -792,7 +827,7 @@ impl LogicalCodebaseStore {
         kind: &'static str,
     ) -> Result<Vec<(Uuid, PathBuf)>, ProductStoreError> {
         validate_relative_id(project_id)?;
-        let root = self.paths.logical_codebase_root(project_id).join(directory);
+        let root = self.scope_root(project_id)?.join(directory);
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),

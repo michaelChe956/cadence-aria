@@ -234,6 +234,56 @@ pub(crate) fn require_multi_repo_project(
     Ok(project)
 }
 
+/// v1.3 guard: the request path names a logical codebase; an unknown (or
+/// single-repo-only project) id is a plain 404 `logical_codebase_not_found`.
+pub(crate) fn require_logical_codebase(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<crate::product::logical_codebase::LogicalCodebaseRecord> {
+    ProjectStore::new(paths.clone())
+        .get(project_id)
+        .map_err(product_store_api_error)?;
+    LogicalCodebaseStore::new(paths.clone())
+        .get(project_id, logical_codebase_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "logical_codebase_not_found",
+                "logical codebase not found",
+                json!({
+                    "project_id": project_id,
+                    "logical_codebase_id": logical_codebase_id,
+                }),
+            )
+        })
+}
+
+/// Legacy `/logical-codebase/*` endpoints alias the project's default first
+/// logical codebase (v1.2 migration artifact, deterministic id order). With no
+/// logical codebase at all the alias has no referent and returns the same 404.
+pub(crate) fn default_logical_codebase_id(
+    paths: &ProductAppPaths,
+    project_id: &str,
+) -> ApiResult<String> {
+    ProjectStore::new(paths.clone())
+        .get(project_id)
+        .map_err(product_store_api_error)?;
+    LogicalCodebaseStore::new(paths.clone())
+        .list(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .next()
+        .map(|record| record.id)
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "logical_codebase_not_found",
+                "logical codebase not found",
+                json!({ "project_id": project_id }),
+            )
+        })
+}
+
 /// Kept as a source-compatible call site during R1. R6 removes the retired
 /// project-mode protection entirely because repository mode belongs to a codebase.
 pub(crate) fn reject_legacy_repository_endpoint_on_multi_repo(

@@ -1,10 +1,24 @@
 pub struct RegistrationBatchStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl RegistrationBatchStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes batches to one logical codebase subtree (`registration-batches/`
+    /// under the v1.3 per-LC layout; the legacy alias keeps the legacy root).
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
+    }
+
+    fn scope_root(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
+        crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)
     }
 
     pub fn create_or_get(
@@ -112,10 +126,8 @@ impl RegistrationBatchStore {
         operation: impl FnOnce() -> Result<T, ProductStoreError>,
     ) -> Result<T, ProductStoreError> {
         validate_relative_id(project_id)?;
-        with_exact_exclusive_lock(
-            &self.paths.registration_batches_lock_path(project_id),
-            operation,
-        )
+        let lock_path = self.scope_root(project_id)?.join(".registration-batches.lock");
+        with_exact_exclusive_lock(&lock_path, operation)
     }
 
     fn find_by_idempotency_key_unlocked(
@@ -125,7 +137,7 @@ impl RegistrationBatchStore {
     ) -> Result<Option<RegistrationBatchRecord>, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(idempotency_key)?;
-        let root = self.paths.registration_batches_root(project_id);
+        let root = self.scope_root(project_id)?.join("registration-batches");
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -157,8 +169,8 @@ impl RegistrationBatchStore {
         validate_relative_id(project_id)?;
         validate_relative_id(batch_id)?;
         Ok(self
-            .paths
-            .registration_batches_root(project_id)
+            .scope_root(project_id)?
+            .join("registration-batches")
             .join(format!("{batch_id}.json")))
     }
 }
