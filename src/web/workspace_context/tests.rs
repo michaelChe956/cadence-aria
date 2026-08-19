@@ -25,7 +25,6 @@ fn seed_legacy_project(app_paths: &ProductAppPaths) {
         .create(CreateProjectInput {
             name: "workspace context fixture".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("create project");
 }

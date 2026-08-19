@@ -12,8 +12,6 @@ import {
   IssueLifecycleWorkbench,
 } from "./IssueLifecycleWorkbench";
 import {
-  aggregateInitializationFetch,
-  aggregateInitializationOperation,
   deferred,
   installIssueLifecycleWorkbenchTestHooks,
   issueWorkItemPlanRecord,
@@ -607,178 +605,8 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     ).toBeInTheDocument();
   });
 
-  it("creates a multi repo project and polls aggregate initialization to completion with loading", async () => {
-    const startResponse = deferred<Response>();
-    const fetchMock = aggregateInitializationFetch(
-      [
-        aggregateInitializationOperation("running"),
-        aggregateInitializationOperation("completed"),
-      ],
-      { projects: [] },
-    );
-    const fetchStub = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (
-        String(input) ===
-          "/api/projects/project_0001/logical-codebase/initializations" &&
-        init?.method === "POST"
-      ) {
-        return startResponse.promise;
-      }
-      return fetchMock(input, init);
-    });
-    vi.stubGlobal("fetch", fetchStub);
-    vi.useFakeTimers();
-
-    render(<IssueLifecycleWorkbench />);
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "新建 Project" }));
-    const dialog = screen.getByRole("dialog", { name: "新建 Project" });
-    fireEvent.change(within(dialog).getByLabelText("Project 名称"), {
-      target: { value: "Multi Repo" },
-    });
-    fireEvent.click(within(dialog).getByRole("radio", { name: "多仓库" }));
-    fireEvent.submit(dialog);
-    await flushAsyncWork();
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(fetchStub).toHaveBeenCalledWith(
-      "/api/projects",
-      expect.objectContaining({
-        body: expect.stringContaining('"multi_repo":true'),
-      }),
-    );
-
-    const startButton = screen.getByRole("button", {
-      name: "启动聚合初始化",
-    });
-    fireEvent.click(startButton);
-    await flushAsyncWork();
-    expect(
-      screen.getByRole("button", { name: "启动聚合初始化" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByTestId("aggregate-initialization-spinner"),
-    ).toBeInTheDocument();
-
-    const startCall = fetchStub.mock.calls.find(
-      ([input, init]) =>
-        String(input) ===
-          "/api/projects/project_0001/logical-codebase/initializations" &&
-        init?.method === "POST",
-    );
-    expect(JSON.parse(String(startCall?.[1]?.body))).toEqual({
-      idempotency_key: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
-      ),
-    });
-
-    await act(async () => {
-      startResponse.resolve(
-        new Response(
-          JSON.stringify(aggregateInitializationOperation("running")),
-          { status: 202 },
-        ),
-      );
-    });
-    await flushAsyncWork();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
-    });
-    await flushAsyncWork();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
-    });
-    await flushAsyncWork();
-
-    expect(
-      screen.getByTestId("aggregate-initialization-status"),
-    ).toHaveAttribute("data-status", "completed");
-    expect(screen.getByText("初始化完成")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "取消初始化" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("cancels an in-flight aggregate initialization and shows the cancelled state", async () => {
-    const cancelResponse = deferred<Response>();
-    const fetchMock = aggregateInitializationFetch(
-      [aggregateInitializationOperation("running")],
-      { projects: [] },
-    );
-    const fetchStub = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input).replace(/\/$/u, "");
-      if (
-        url.match(
-          /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)\/cancel$/,
-        ) &&
-        init?.method === "POST"
-      ) {
-        return cancelResponse.promise;
-      }
-      return fetchMock(input, init);
-    });
-    vi.stubGlobal("fetch", fetchStub);
-    vi.useFakeTimers();
-
-    render(<IssueLifecycleWorkbench />);
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "新建 Project" }));
-    const dialog = screen.getByRole("dialog", { name: "新建 Project" });
-    fireEvent.change(within(dialog).getByLabelText("Project 名称"), {
-      target: { value: "Multi Repo" },
-    });
-    fireEvent.click(within(dialog).getByRole("radio", { name: "多仓库" }));
-    fireEvent.submit(dialog);
-    await flushAsyncWork();
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "启动聚合初始化" }),
-    );
-    await flushAsyncWork();
-
-    const cancelButton = screen.getByRole("button", {
-      name: "取消初始化",
-    });
-    fireEvent.click(cancelButton);
-    await flushAsyncWork();
-    expect(screen.getByRole("button", { name: "取消初始化" })).toBeDisabled();
-    expect(
-      screen.getByTestId("aggregate-initialization-spinner"),
-    ).toBeInTheDocument();
-
-    await act(async () => {
-      cancelResponse.resolve(
-        new Response(
-          JSON.stringify(aggregateInitializationOperation("cancelled")),
-          { status: 200 },
-        ),
-      );
-    });
-    await flushAsyncWork();
-
-    expect(
-      screen.getByTestId("aggregate-initialization-status"),
-    ).toHaveAttribute("data-status", "cancelled");
-    expect(screen.getByText("已取消")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "取消初始化" }),
-    ).not.toBeInTheDocument();
-  });
-
   it("does not show the aggregate initialization entry for single repo projects", async () => {
-    vi.stubGlobal("fetch", lifecycleFetch());
+    vi.stubGlobal("fetch", lifecycleFetch({ logicalCodebaseMembers: [] }));
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
@@ -790,15 +618,6 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     expect(
       screen.queryByRole("button", { name: "启动聚合初始化" }),
     ).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "新建 Project" }));
-    const dialog = screen.getByRole("dialog", { name: "新建 Project" });
-    expect(
-      within(dialog).getByRole("radio", { name: "单仓库（默认）" }),
-    ).toBeChecked();
-    await user.click(
-      within(dialog).getByRole("button", { name: "取消" }),
-    );
   });
 
 });

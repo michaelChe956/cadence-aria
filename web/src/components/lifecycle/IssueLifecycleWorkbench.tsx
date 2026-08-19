@@ -219,24 +219,20 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
-      const selectedProjectForRefresh = projectResponse.projects.find(
-        (project) => project.project_id === projectId,
-      );
       const [
         repositoryResponse,
         issueResponse,
         publicationResponse,
         membersResponse,
-        aggregateIndexResponse,
       ] = await Promise.all([
         listRepositories(projectId),
         listProductIssues(projectId),
         listPointerPublications(projectId),
         listLogicalCodebaseMembers(projectId),
-        selectedProjectForRefresh?.multi_repo
-          ? getActiveAggregateIndex(projectId)
-          : Promise.resolve(null),
       ]);
+      const aggregateIndexResponse = (membersResponse.members ?? []).length > 0
+        ? await getActiveAggregateIndex(projectId)
+        : null;
       if (!isLatestRefresh(requestId)) {
         return;
       }
@@ -1025,7 +1021,7 @@ export function IssueLifecycleWorkbench({
                       登记成员
                     </button>
                   </div>
-                  {selectedProject?.multi_repo ? (
+                  {logicalCodebaseMembers.length > 0 ? (
                     <AggregateInitializationCard
                       operation={aggregateInitialization}
                       busy={aggregateInitializationBusy}

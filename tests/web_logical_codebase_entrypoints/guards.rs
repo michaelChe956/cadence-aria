@@ -43,8 +43,7 @@ fn member(id: LogicalRepositoryId, alias: &str) -> CodebaseMemberRecord {
 }
 
 #[tokio::test]
-async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_rejects_existing_logical_route()
- {
+async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifacts() {
     let root = tempdir().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let projects = ProjectStore::new(paths.clone());
@@ -52,14 +51,12 @@ async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_reje
         .create(cadence_aria::product::project_store::CreateProjectInput {
             name: "multi".into(),
             description: None,
-            multi_repo: true,
         })
         .unwrap();
     projects
         .create(cadence_aria::product::project_store::CreateProjectInput {
             name: "single".into(),
             description: None,
-            multi_repo: false,
         })
         .unwrap();
     let logical = LogicalCodebaseStore::new(paths.clone());
@@ -98,42 +95,8 @@ async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_reje
         WebRuntime::new_fake(root.path().to_path_buf()),
     );
     let app = build_web_router(state);
-    let body = assert_error(
-        request(
-            &app,
-            Method::POST,
-            "/api/projects/project_0001/repositories",
-            json!({}),
-        )
-        .await,
-        StatusCode::CONFLICT,
-        "legacy_repository_endpoint_on_multi_repo",
-    );
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("请使用逻辑代码库登记端点")
-    );
 
-    let body = assert_error(
-        request(
-            &app,
-            Method::DELETE,
-            "/api/projects/project_0001/repositories/repository_0001",
-            json!({}),
-        )
-        .await,
-        StatusCode::CONFLICT,
-        "legacy_repository_endpoint_on_multi_repo",
-    );
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("请使用逻辑代码库登记端点")
-    );
-
+    // 有逻辑代码库存储的 project 仍按多仓投影列出成员（R1 过渡语义）。
     let (status, body) = request(
         &app,
         Method::GET,
@@ -143,24 +106,6 @@ async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_reje
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["repositories"][0]["name"], "api");
-
-    let body = assert_error(
-        request(
-            &app,
-            Method::GET,
-            "/api/projects/project_0001/repository-initializations/operation_0001",
-            json!({}),
-        )
-        .await,
-        StatusCode::CONFLICT,
-        "legacy_repository_endpoint_on_multi_repo",
-    );
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("请使用逻辑代码库登记端点")
-    );
 
     for (method, uri, body) in [
         (

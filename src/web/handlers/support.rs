@@ -1,6 +1,6 @@
 use super::*;
 use crate::product::logical_codebase::{
-    LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode,
+    LogicalCodebaseStore, LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode,
 };
 pub(crate) use crate::web::handlers::gateway_error_mapping::{
     coding_gateway_api_error, provider_gateway_error_code,
@@ -215,10 +215,9 @@ pub(crate) fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
     ProductAppPaths::new(state.workspace_root.join(".aria"))
 }
 
-/// 确保 logical-codebase 专属端点只服务多仓 project。
-///
-/// 该读取 guard 必须在任何 manifest、batch、index 或 operation store 操作之前调用，
-/// 使单仓请求以稳定 409 fail-closed，且不创建 durable artifact。
+/// 过渡 guard：在 R3/R5 改为请求/issue 所属代码库之前，只有存在逻辑代码库存储
+/// 的 project 才能访问旧 logical-codebase 兼容端点。纯单仓 project 不创建任何
+/// logical-codebase durable artifact。
 pub(crate) fn require_multi_repo_project(
     paths: &ProductAppPaths,
     project_id: &str,
@@ -226,21 +225,20 @@ pub(crate) fn require_multi_repo_project(
     let project = ProjectStore::new(paths.clone())
         .get(project_id)
         .map_err(product_store_api_error)?;
-    if !project.multi_repo {
+    let has_storage = LogicalCodebaseStore::new(paths.clone())
+        .has_any_storage(project_id)
+        .map_err(product_store_api_error)?;
+    if !has_storage {
         return Err(logical_codebase_feature_disabled_api_error(project_id));
     }
     Ok(project)
 }
 
-/// legacy repository mutation/polling endpoint 在 multi-repo 模式不可写，必须改走登记端点。
+/// Kept as a source-compatible call site during R1. R6 removes the retired
+/// project-mode protection entirely because repository mode belongs to a codebase.
 pub(crate) fn reject_legacy_repository_endpoint_on_multi_repo(
-    project: &ProjectRecord,
+    _project: &ProjectRecord,
 ) -> ApiResult<()> {
-    if project.multi_repo {
-        return Err(legacy_repository_endpoint_on_multi_repo_api_error(
-            &project.id,
-        ));
-    }
     Ok(())
 }
 

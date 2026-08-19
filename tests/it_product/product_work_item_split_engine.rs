@@ -280,7 +280,6 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
         .create(CreateProjectInput {
             name: "Test".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("create project");
 

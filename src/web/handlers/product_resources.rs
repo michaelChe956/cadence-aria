@@ -60,7 +60,6 @@ pub async fn create_project(
         .create(CreateProjectInput {
             name: request.name,
             description: request.description,
-            multi_repo: request.multi_repo,
         })
         .map_err(product_store_api_error)?;
     Ok(Json(project_dto(project)))
@@ -101,7 +100,10 @@ pub async fn list_repositories(
     let project = ProjectStore::new(app_paths.clone())
         .get(&project_id)
         .map_err(product_store_api_error)?;
-    let repositories = if project.multi_repo {
+    let repositories = if LogicalCodebaseStore::new(app_paths.clone())
+        .has_any_storage(&project_id)
+        .map_err(product_store_api_error)?
+    {
         multi_repo_repository_projection(&app_paths, &project_id)?
     } else {
         RepositoryStore::for_project(app_paths, &project)
@@ -242,11 +244,14 @@ pub async fn create_product_issue(
         .repository_id
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
     let app_paths = product_app_paths(&state);
-    let project = ProjectStore::new(app_paths.clone())
+    ProjectStore::new(app_paths.clone())
         .get(&project_id)
         .map_err(product_store_api_error)?;
 
-    if !project.multi_repo {
+    let has_logical_codebase_storage = LogicalCodebaseStore::new(app_paths.clone())
+        .has_any_storage(&project_id)
+        .map_err(product_store_api_error)?;
+    if !has_logical_codebase_storage {
         // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json。
         let _repository = find_repository(&app_paths, &project_id, &repository_id)?;
         let store = IssueStore::new(app_paths);

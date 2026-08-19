@@ -5,11 +5,13 @@
 fn seed_legacy_project_fixture(paths: &ProductAppPaths) {
     let project_path = paths.project_root("project_0001").join("project.json");
     if project_path.exists() {
-        let project: cadence_aria::product::models::ProjectRecord =
+        let _project: cadence_aria::product::models::ProjectRecord =
             cadence_aria::product::json_store::read_json(&project_path)
                 .expect("read legacy coding fixture project");
         assert!(
-            !project.multi_repo,
+            !cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
+                .has_any_storage("project_0001")
+                .expect("probe legacy coding fixture storage"),
             "legacy coding fixture project must remain single-repository"
         );
         return;
@@ -24,7 +26,6 @@ fn seed_legacy_project_fixture(paths: &ProductAppPaths) {
             created_at: "2026-08-18T00:00:00Z".to_string(),
             updated_at: "2026-08-18T00:00:00Z".to_string(),
             last_opened_at: None,
-            multi_repo: false,
         },
     )
     .expect("persist legacy coding fixture project");

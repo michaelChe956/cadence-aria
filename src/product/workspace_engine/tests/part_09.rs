@@ -380,7 +380,6 @@ fn make_work_item_plan_engine_with_draft_candidate(
         .create(crate::product::project_store::CreateProjectInput {
             name: "workspace engine fixture project".to_string(),
             description: None,
-            multi_repo: false,
         })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths);

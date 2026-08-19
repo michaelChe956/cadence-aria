@@ -386,7 +386,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "legacy repository resolver".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let repository_path = root.path().join("repository_0001");

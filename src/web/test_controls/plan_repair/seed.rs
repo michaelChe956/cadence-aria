@@ -74,7 +74,6 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
                 .create(CreateProjectInput {
                     name: "Plan Repair fixture project".to_string(),
                     description: None,
-                    multi_repo: false,
                 })
                 .map_err(fixture_error)?;
             if project.id != PROJECT_ID {

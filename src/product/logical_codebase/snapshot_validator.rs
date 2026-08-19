@@ -175,7 +175,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let logical_repository_id = LogicalRepositoryId(Uuid::new_v4());
@@ -348,7 +347,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let fixture = snapshot_fixture_with_revisions(temp.path(), None, Some("observed-head"));
 
-        assert!(validate_snapshot_fields(&fixture.paths, &fixture.attempt).is_ok());
+        assert_eq!(
+            validate_snapshot_fields(&fixture.paths, &fixture.attempt),
+            Ok(())
+        );
     }
 
     #[test]

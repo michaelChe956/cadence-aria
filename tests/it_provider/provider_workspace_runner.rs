@@ -23,7 +23,6 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
         .create(CreateProjectInput {
             name: "Project".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("project");
     let repository = RepositoryStore::new(paths.clone())

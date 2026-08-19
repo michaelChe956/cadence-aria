@@ -42,7 +42,6 @@ impl LegacySingleRepositoryFixture {
             .create(CreateProjectInput {
                 name: "legacy project".to_string(),
                 description: Some("single-repository project before logical-codebase".to_string()),
-                multi_repo: false,
             })
             .expect("create project");
 

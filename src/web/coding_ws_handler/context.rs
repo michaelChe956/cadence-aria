@@ -251,7 +251,6 @@ mod tests {
             .create(crate::product::project_store::CreateProjectInput {
                 name: "legacy coding context".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let repository_path = root.path().join("repository_0001");
@@ -281,7 +280,6 @@ mod tests {
             .create(crate::product::project_store::CreateProjectInput {
                 name: "logical coding context".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .unwrap();
         let (logical_repository_id, checkout_id, canonical_path, git_dir_identity) =

@@ -117,7 +117,10 @@ pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
 pub use repository_routing::{RepositoryRouting, RepositoryRoutingErrorCode};
-pub use store::{LogicalCodebaseLayout, LogicalCodebaseManifest, LogicalCodebaseStore};
+pub use store::{
+    LogicalCodebaseCreateInput, LogicalCodebaseLayout, LogicalCodebaseManifest,
+    LogicalCodebaseRecord, LogicalCodebaseStore,
+};
 pub use types::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId, MemberStatus,
     RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,

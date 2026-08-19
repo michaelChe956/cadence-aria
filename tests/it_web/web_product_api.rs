@@ -30,18 +30,16 @@ async fn creates_project_repository_and_issue_via_product_api() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(created["project_id"], "project_0001");
     assert_eq!(created["name"], "Aria");
-    assert_eq!(created["multi_repo"], false);
 
     let (status, aggregate) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects",
-        json!({"name":"Aggregate","description":null,"multi_repo":true}),
+        json!({"name":"Aggregate","description":null}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(aggregate["project_id"], "project_0002");
-    assert_eq!(aggregate["multi_repo"], true);
 
     let (status, project) = request_json(
         app.clone(),
@@ -93,7 +91,7 @@ async fn creates_project_repository_and_issue_via_product_api() {
 }
 
 #[tokio::test]
-async fn production_repository_paths_reject_legacy_mutations_for_multi_repo_projects() {
+async fn project_creation_has_no_repository_mode_and_legacy_repository_mutations_succeed() {
     let root = tempdir().expect("root");
     let repository_root = git_repo();
     let state = WebAppState::with_events(
@@ -107,33 +105,25 @@ async fn production_repository_paths_reject_legacy_mutations_for_multi_repo_proj
         app.clone(),
         Method::POST,
         "/api/projects",
-        json!({"name":"Multi","description":null,"multi_repo":true}),
+        json!({"name":"Multi","description":null}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert!(
+        project.get("multi_repo").is_none(),
+        "project repository mode was removed in R1: {project}"
+    );
 
-    let (status, body) = request_json(
+    // R1 retires the legacy-repository-endpoint-on-multi-repo protection:
+    // legacy repository creation is ordinary single-repo CRUD with no project mode.
+    let (status, _body) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
         json!({"name":"Multi Repo","path":repository_root.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["code"], "legacy_repository_endpoint_on_multi_repo");
-    assert!(
-        body["message"]
-            .as_str()
-            .expect("error message")
-            .contains("请使用逻辑代码库登记端点")
-    );
-    assert!(
-        !root
-            .path()
-            .join(".aria/projects/project_0001/repository-initializations")
-            .exists(),
-        "legacy mutation guard must run before initialization persistence"
-    );
+    assert_eq!(status, StatusCode::ACCEPTED);
 
     let (repositories_status, repositories) = request_json(
         app.clone(),
@@ -154,7 +144,6 @@ async fn production_repository_paths_reject_legacy_mutations_for_multi_repo_proj
     .await;
     assert_eq!(missing, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "project_not_found");
-    assert_eq!(project["multi_repo"], true);
 }
 
 #[tokio::test]

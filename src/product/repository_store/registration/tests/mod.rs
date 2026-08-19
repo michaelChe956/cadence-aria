@@ -88,7 +88,6 @@ impl ProjectLookup for RecordingProjectLookup {
             created_at: "2026-07-13T00:00:00Z".to_string(),
             updated_at: "2026-07-13T00:00:00Z".to_string(),
             last_opened_at: None,
-            multi_repo: false,
         })
     }
 }
@@ -218,7 +217,6 @@ impl ProjectLookup for ConfigProjectLookup {
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
             last_opened_at: None,
-            multi_repo: false,
         })
     }
 }

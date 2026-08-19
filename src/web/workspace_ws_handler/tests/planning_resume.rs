@@ -53,7 +53,6 @@ impl PlanningResumeFixture {
             .create(crate::product::project_store::CreateProjectInput {
                 name: "planning resume fixture".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .expect("create project");
         Self {

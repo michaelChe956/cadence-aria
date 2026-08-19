@@ -812,7 +812,6 @@
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let logical_id = LogicalRepositoryId(Uuid::new_v4());

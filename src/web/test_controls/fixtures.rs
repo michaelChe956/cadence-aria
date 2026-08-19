@@ -48,7 +48,6 @@ pub(super) fn create_large_workspace_fixture(
     let project = ProjectStore::new(app_paths.clone()).create(CreateProjectInput {
         name: "Large Workspace Memory E2E".to_string(),
         description: Some("大型 Workspace 内存治理 E2E fixture".to_string()),
-        multi_repo: false,
     })?;
     let repository = RepositoryStore::new(app_paths.clone()).create(CreateRepositoryInput {
         project_id: project.id.clone(),
@@ -288,7 +287,6 @@ fn create_coding_role_run_fixture(
     let project = ProjectStore::new(app_paths.clone()).create(CreateProjectInput {
         name: "Coding Role Run Fixture".to_string(),
         description: Some("Role run history E2E fixture".to_string()),
-        multi_repo: false,
     })?;
     let repository = RepositoryStore::new(app_paths.clone()).create(CreateRepositoryInput {
         project_id: project.id.clone(),

@@ -3,7 +3,6 @@ import { useRef, useState, type FormEvent } from "react";
 export type CreateProjectPayload = {
   name: string;
   description: string | null;
-  multi_repo: boolean;
 };
 
 export function CreateProjectDialog({
@@ -15,7 +14,6 @@ export function CreateProjectDialog({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [multiRepo, setMultiRepo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -39,7 +37,6 @@ export function CreateProjectDialog({
       await onCreate({
         name: trimmedName,
         description: description.trim() ? description.trim() : null,
-        multi_repo: multiRepo,
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "创建 Project 失败");
@@ -91,39 +88,6 @@ export function CreateProjectDialog({
               className="mt-1 block min-h-20 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
-          <fieldset className="space-y-1">
-            <legend className="text-sm font-semibold text-[var(--aria-ink)]">
-              仓库模式
-            </legend>
-            <label className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]">
-              <input
-                type="radio"
-                name="repo-mode"
-                value="single"
-                checked={!multiRepo}
-                onChange={() => {
-                  setMultiRepo(false);
-                  setError(null);
-                }}
-                className="h-4 w-4"
-              />
-              单仓库（默认）
-            </label>
-            <label className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]">
-              <input
-                type="radio"
-                name="repo-mode"
-                value="multi"
-                checked={multiRepo}
-                onChange={() => {
-                  setMultiRepo(true);
-                  setError(null);
-                }}
-                className="h-4 w-4"
-              />
-              多仓库
-            </label>
-          </fieldset>
           {error ? (
             <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
               {error}

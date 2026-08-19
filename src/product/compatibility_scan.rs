@@ -126,7 +126,6 @@ fn find_or_create_project(
     ProjectStore::new(app_paths.clone()).create(CreateProjectInput {
         name: project_name.to_string(),
         description: None,
-        multi_repo: false,
     })
 }
 

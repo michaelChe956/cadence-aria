@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
@@ -59,6 +60,25 @@ impl LogicalCodebaseManifest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalCodebaseRecord {
+    pub id: String,
+    pub name: String,
+    pub aggregate_root: PathBuf,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalCodebaseCreateInput {
+    pub name: String,
+    pub aggregate_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LogicalCodebaseTombstone {
+    deleted_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LogicalCodebaseStore {
     paths: ProductAppPaths,
@@ -67,6 +87,245 @@ pub struct LogicalCodebaseStore {
 impl LogicalCodebaseStore {
     pub fn new(paths: ProductAppPaths) -> Self {
         Self { paths }
+    }
+
+    pub fn create(
+        &self,
+        project_id: &str,
+        input: LogicalCodebaseCreateInput,
+    ) -> Result<LogicalCodebaseRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        if input.name.trim().is_empty() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_record",
+                reason: "name must not be empty".to_string(),
+            });
+        }
+        self.migrate_legacy(project_id)?;
+        let record = LogicalCodebaseRecord {
+            id: format!("logical_codebase_{}", Uuid::new_v4().simple()),
+            name: input.name,
+            aggregate_root: input.aggregate_root,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.create_subtree(project_id, &record.id)?;
+        write_json(&self.record_path(project_id, &record.id)?, &record)?;
+        Ok(record)
+    }
+
+    pub fn get(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<Option<LogicalCodebaseRecord>, ProductStoreError> {
+        self.migrate_legacy(project_id)?;
+        self.get_existing(project_id, logical_codebase_id)
+    }
+
+    pub fn list(&self, project_id: &str) -> Result<Vec<LogicalCodebaseRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        self.migrate_legacy(project_id)?;
+        let root = self.paths.logical_codebases_root(project_id);
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    root.display()
+                )));
+            }
+        };
+
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?;
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("stat {}: {error}", entry.path().display()))
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            let id = entry.file_name().into_string().map_err(|value| {
+                ProductStoreError::InvalidRecord {
+                    kind: "logical_codebase_record",
+                    reason: format!(
+                        "logical codebase directory name is not UTF-8: {}",
+                        PathBuf::from(value).display()
+                    ),
+                }
+            })?;
+            if let Some(record) = self.get_existing(project_id, &id)? {
+                records.push(record);
+            }
+        }
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(records)
+    }
+
+    pub fn delete_soft(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        if self.get(project_id, logical_codebase_id)?.is_none() {
+            return Err(ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                id: logical_codebase_id.to_string(),
+            });
+        }
+        write_json(
+            &self.tombstone_path(project_id, logical_codebase_id)?,
+            &LogicalCodebaseTombstone {
+                deleted_at: Utc::now().to_rfc3339(),
+            },
+        )
+    }
+
+    /// Migrates the v1.2 project-scoped logical-codebase subtree once. The old
+    /// endpoints continue to use that subtree as the default first-codebase
+    /// compatibility alias until R3/R5 switch their paths to a supplied LC id.
+    pub fn migrate_legacy(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<LogicalCodebaseRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let legacy_root = self.paths.logical_codebase_root(project_id);
+        if !legacy_manifest_exists(&legacy_root)? {
+            return Ok(None);
+        }
+
+        with_exact_exclusive_lock(
+            &self.paths.logical_codebase_migration_lock_path(project_id),
+            || {
+                let id = legacy_logical_codebase_id(project_id);
+                if path_exists(&self.record_path(project_id, &id)?)? {
+                    return self.load_record(project_id, &id).map(Some);
+                }
+
+                let aggregate_root = self
+                    .load_manifest(project_id)?
+                    .map(|manifest| manifest.provider_context_root)
+                    .unwrap_or_else(|| legacy_root.clone());
+                let record = LogicalCodebaseRecord {
+                    id: id.clone(),
+                    name: aggregate_root
+                        .file_name()
+                        .filter(|value| !value.is_empty())
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "logical-codebase".to_string()),
+                    aggregate_root,
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                let destination = self.paths.logical_codebase_record_root(project_id, &id);
+                self.create_subtree(project_id, &id)?;
+                copy_directory_contents(&legacy_root, &destination)?;
+                write_json(&self.record_path(project_id, &id)?, &record)?;
+                Ok(Some(record))
+            },
+        )
+    }
+
+    pub fn has_any_storage(&self, project_id: &str) -> Result<bool, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        if legacy_manifest_exists(&self.paths.logical_codebase_root(project_id))? {
+            return Ok(true);
+        }
+
+        let root = self.paths.logical_codebases_root(project_id);
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    root.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?;
+            let candidate = entry.path();
+            if entry
+                .file_type()
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("stat {}: {error}", candidate.display()))
+                })?
+                .is_dir()
+                && path_exists(&candidate.join("record.json"))?
+                && !path_exists(&candidate.join("tombstone.json"))?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn get_existing(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<Option<LogicalCodebaseRecord>, ProductStoreError> {
+        if !path_exists(&self.record_path(project_id, logical_codebase_id)?)?
+            || path_exists(&self.tombstone_path(project_id, logical_codebase_id)?)?
+        {
+            return Ok(None);
+        }
+        self.load_record(project_id, logical_codebase_id).map(Some)
+    }
+
+    fn load_record(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<LogicalCodebaseRecord, ProductStoreError> {
+        let path = self.record_path(project_id, logical_codebase_id)?;
+        let record: LogicalCodebaseRecord = read_json(&path)?;
+        self.validate_record(project_id, logical_codebase_id, &record)?;
+        Ok(record)
+    }
+
+    fn create_subtree(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let root = self
+            .paths
+            .logical_codebase_record_root(project_id, logical_codebase_id);
+        for directory in [
+            root.join("members"),
+            root.join("checkouts"),
+            root.join("aggregate-indexes"),
+            root.join("preflights"),
+            root.join("registration-batches"),
+            root.join("pointer-publications"),
+        ] {
+            std::fs::create_dir_all(&directory).map_err(|error| {
+                ProductStoreError::Io(format!("create {}: {error}", directory.display()))
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn record_path(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(logical_codebase_id)?;
+        Ok(self
+            .paths
+            .logical_codebase_record_root(project_id, logical_codebase_id)
+            .join("record.json"))
     }
 
     pub fn load_manifest(
@@ -385,6 +644,37 @@ impl LogicalCodebaseStore {
         Ok(())
     }
 
+    fn tombstone_path(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(logical_codebase_id)?;
+        Ok(self
+            .paths
+            .logical_codebase_record_root(project_id, logical_codebase_id)
+            .join("tombstone.json"))
+    }
+
+    fn validate_record(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+        record: &LogicalCodebaseRecord,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(logical_codebase_id)?;
+        validate_relative_id(&record.id)?;
+        if record.id != logical_codebase_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_codebase_record",
+                id: logical_codebase_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn manifest_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
         Ok(self
@@ -488,6 +778,48 @@ impl LogicalCodebaseStore {
         paths.sort_by_key(|(id, _)| *id);
         Ok(paths)
     }
+}
+
+fn legacy_logical_codebase_id(project_id: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(project_id.as_bytes()));
+    format!("logical_codebase_{}", &digest[..32])
+}
+
+/// A legacy logical codebase is identified by its manifest, not by any stray
+/// file (gateway bootstrap artifacts such as `capabilities.json` or
+/// `aggregate-policy.json` alone do not constitute a logical codebase).
+fn legacy_manifest_exists(root: &Path) -> Result<bool, ProductStoreError> {
+    path_exists(&root.join("manifest.json"))
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), ProductStoreError> {
+    std::fs::create_dir_all(destination).map_err(|error| {
+        ProductStoreError::Io(format!("create {}: {error}", destination.display()))
+    })?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", source.display())))?
+    {
+        let entry = entry.map_err(|error| {
+            ProductStoreError::Io(format!("read {} entry: {error}", source.display()))
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            ProductStoreError::Io(format!("stat {}: {error}", source_path.display()))
+        })?;
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() && !path_exists(&destination_path)? {
+            std::fs::copy(&source_path, &destination_path).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
@@ -641,6 +973,127 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn logical_codebase_record_store_round_trips_and_soft_deletes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: PathBuf::from("/workspace/platform"),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.get("project_0001", &record.id).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(store.list("project_0001").unwrap(), vec![record.clone()]);
+        let logical_codebase_root = temp
+            .path()
+            .join("projects/project_0001/logical-codebases")
+            .join(&record.id);
+        assert!(logical_codebase_root.join("record.json").exists());
+        for path in [
+            "members",
+            "checkouts",
+            "aggregate-indexes",
+            "preflights",
+            "registration-batches",
+            "pointer-publications",
+        ] {
+            assert!(logical_codebase_root.join(path).is_dir(), "missing {path}");
+        }
+
+        store.delete_soft("project_0001", &record.id).unwrap();
+        assert!(store.list("project_0001").unwrap().is_empty());
+        assert!(
+            temp.path()
+                .join("projects/project_0001/logical-codebases")
+                .join(&record.id)
+                .join("tombstone.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn logical_codebase_record_requires_a_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
+
+        assert!(matches!(
+            store.create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: " ".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            ),
+            Err(ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_record",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn legacy_logical_codebase_migration_is_stable_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let legacy_root = paths.logical_codebase_root("project_0001");
+        std::fs::create_dir_all(legacy_root.join("members")).unwrap();
+        std::fs::write(legacy_root.join("members/keep.json"), "{\"keep\":true}").unwrap();
+        std::fs::write(
+            legacy_root.join("manifest.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "project_id": "project_0001",
+                "logical_codebase_id": uuid::Uuid::new_v4(),
+                "provider_context_root": "/workspace/platform",
+                "layout": "common_non_git_parent",
+                "membership_revision": 1,
+                "member_ids": [],
+                "created_at": "2026-08-18T00:00:00Z",
+                "updated_at": "2026-08-18T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let first = store.migrate_legacy("project_0001").unwrap().unwrap();
+        let second = store.migrate_legacy("project_0001").unwrap().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.list("project_0001").unwrap(), vec![first.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(
+                paths
+                    .logical_codebases_root("project_0001")
+                    .join(&first.id)
+                    .join("members/keep.json")
+            )
+            .unwrap(),
+            "{\"keep\":true}"
+        );
+    }
+
+    #[test]
+    fn gateway_bootstrap_artifacts_do_not_count_as_logical_codebase_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let legacy_root = paths.logical_codebase_root("project_0001");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(legacy_root.join("capabilities.json"), "[]").unwrap();
+        std::fs::write(legacy_root.join("aggregate-policy.json"), "{}").unwrap();
+
+        let store = LogicalCodebaseStore::new(paths.clone());
+        assert_eq!(store.migrate_legacy("project_0001").unwrap(), None);
+        assert!(!store.has_any_storage("project_0001").unwrap());
     }
 
     fn checkout_fixture(

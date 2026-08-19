@@ -623,7 +623,6 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
         .create(CreateProjectInput {
             name: "runtime reader project".to_string(),
             description: None,
-            multi_repo: false,
         })
         .unwrap();
     let repository = RepositoryStore::new(paths.clone())

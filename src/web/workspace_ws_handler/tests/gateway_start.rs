@@ -117,7 +117,6 @@ fn gateway_fixture() -> GatewayFixture {
         .create(crate::product::project_store::CreateProjectInput {
             name: "gateway fixture project".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("create project");
 

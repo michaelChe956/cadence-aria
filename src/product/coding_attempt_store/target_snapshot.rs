@@ -135,7 +135,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "snapshot project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .expect("create project");
         let canonical_path = root.path().join("api");

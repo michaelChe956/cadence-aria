@@ -46,7 +46,6 @@ fn seed_legacy_project(app_paths: &ProductAppPaths) {
         .create(crate::product::project_store::CreateProjectInput {
             name: "workspace websocket fixture".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("create project");
 }

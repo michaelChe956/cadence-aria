@@ -15,7 +15,6 @@
             .create(CreateProjectInput {
                 name: "Aggregate initialization test".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .unwrap();
         let aggregate_root = root_path.join("aggregate-root");
@@ -186,7 +185,6 @@
             .create(CreateProjectInput {
                 name: "Aggregate initialization production test".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .unwrap();
         let aggregate_root = root_path.join("aggregate-root");
@@ -338,7 +336,6 @@
             .create(CreateProjectInput {
                 name: "Aggregate initialization test".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .unwrap();
         let aggregate_root = root_path.join("aggregate-root");

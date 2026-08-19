@@ -46,12 +46,23 @@ impl Fixture {
         fs::write(outside.join("README.md"), "outside").unwrap();
 
         let paths = ProductAppPaths::new(workspace.path().join(".aria"));
-        ProjectStore::new(paths)
+        ProjectStore::new(paths.clone())
             .create(CreateProjectInput {
                 name: "multi".into(),
                 description: None,
-                multi_repo: true,
             })
+            .unwrap();
+        // R1 过渡：旧 logical-codebase 端点是“默认第一个逻辑代码库”的兼容别名，
+        // 因此 fixture 直接落地 manifest 以模拟已迁移/已存在的逻辑代码库。
+        cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(paths)
+            .save_manifest(
+                "project_0001",
+                &cadence_aria::product::logical_codebase::LogicalCodebaseManifest::new(
+                    "project_0001",
+                    root.clone(),
+                    Vec::new(),
+                ),
+            )
             .unwrap();
         let state = WebAppState::new(
             workspace.path().to_path_buf(),
@@ -538,7 +549,13 @@ async fn registration_identity_drift_aborts_before_attaching_any_member() {
     let store = cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(
         ProductAppPaths::new(fixture._workspace.path().join(".aria")),
     );
-    assert!(store.load_manifest("project_0001").unwrap().is_none());
+    assert!(
+        store
+            .load_manifest("project_0001")
+            .unwrap()
+            .is_some_and(|manifest| manifest.member_ids.is_empty()),
+        "failed identity-drift submit must not attach any member"
+    );
     assert!(store.list_members("project_0001").unwrap().is_empty());
 }
 
@@ -558,14 +575,13 @@ async fn registration_submit_rejects_manifest_root_mismatch() {
     .await;
     assert_eq!(status, StatusCode::OK, "{preflight}");
     let preflight_id = preflight["preflight_id"].as_str().unwrap();
-    let first = cadence_aria::product::logical_codebase::LogicalCodebaseManifest::new(
-        "project_0001",
-        fixture._workspace.path().join("other-root"),
-        vec![cadence_aria::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4())],
-    );
-    cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
-        .save_manifest("project_0001", &first)
-        .unwrap();
+    let store = cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(paths.clone());
+    let mut first = store
+        .load_manifest("project_0001")
+        .unwrap()
+        .expect("fixture manifest");
+    first.provider_context_root = fixture._workspace.path().join("other-root");
+    store.save_manifest("project_0001", &first).unwrap();
     assert_error(
         request(
             &fixture.app,
@@ -741,7 +757,6 @@ async fn registration_preflight_admits_root_before_classification_and_guards_sin
         .create(CreateProjectInput {
             name: "single".into(),
             description: None,
-            multi_repo: false,
         })
         .unwrap();
     assert_error(

@@ -24,7 +24,6 @@ export type Project = {
   created_at: string;
   updated_at: string;
   last_opened_at: string | null;
-  multi_repo: boolean;
 };
 
 export type Repository = {

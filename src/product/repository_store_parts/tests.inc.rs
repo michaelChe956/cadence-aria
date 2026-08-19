@@ -5,7 +5,7 @@ mod tests {
     use super::*;
     use crate::product::logical_codebase::{
         IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
-        LogicalCodebaseFeature, LogicalCodebaseManifest,
+        LogicalCodebaseCreateInput, LogicalCodebaseFeature, LogicalCodebaseManifest,
     };
     use crate::product::models::ProjectRecord;
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
@@ -40,12 +40,11 @@ mod tests {
     }
 
     impl ProjectRepositoryFixture {
-        fn create_project(&self, name: &str, multi_repo: bool) -> ProjectRecord {
+        fn create_project(&self, name: &str) -> ProjectRecord {
             ProjectStore::new(self.paths.clone())
                 .create(CreateProjectInput {
                     name: name.to_string(),
                     description: None,
-                    multi_repo,
                 })
                 .unwrap()
         }
@@ -71,10 +70,19 @@ mod tests {
     }
 
     #[test]
-    fn for_project_enables_identity_only_for_multi_repo() {
+    fn for_project_enables_identity_only_when_logical_codebase_storage_exists() {
         let fixture = repository_fixture();
-        let multi_project = fixture.create_project("project_multi", true);
-        let single_project = fixture.create_project("project_single", false);
+        let multi_project = fixture.create_project("project_multi");
+        let single_project = fixture.create_project("project_single");
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .create(
+                &multi_project.id,
+                LogicalCodebaseCreateInput {
+                    name: "aggregate".to_string(),
+                    aggregate_root: fixture.root.path().to_path_buf(),
+                },
+            )
+            .unwrap();
         let multi = RepositoryStore::for_project(fixture.paths.clone(), &multi_project);
         let single = RepositoryStore::for_project(fixture.paths.clone(), &single_project);
 
@@ -101,7 +109,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let git_root = root.path().join("api");
@@ -130,7 +137,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .expect("create project");
         let logical_id = LogicalRepositoryId(Uuid::new_v4());

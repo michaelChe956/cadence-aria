@@ -79,7 +79,6 @@ export function listProjects(): Promise<{ projects: Project[] }> {
 export function createProject(payload: {
   name: string;
   description?: string | null;
-  multi_repo?: boolean;
 }): Promise<Project> {
   return requestJson<Project>("/api/projects", {
     method: "POST",

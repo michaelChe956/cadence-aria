@@ -110,7 +110,6 @@ fn creates_named_project_instead_of_reusing_unrelated_project() {
         .create(CreateProjectInput {
             name: "Other".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("other project");
 

@@ -199,13 +199,11 @@ export function lifecycleFetch(options?: {
       const payload = JSON.parse(String(init.body)) as {
         name: string;
         description?: string | null;
-        multi_repo?: boolean;
       };
       const project = projectRecord(
         `project_${String(projects.length + 1).padStart(4, "0")}`,
         payload.name,
         payload.description ?? null,
-        payload.multi_repo ?? false,
       );
       projects.push(project);
       return jsonResponse(project);

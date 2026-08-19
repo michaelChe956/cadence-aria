@@ -90,7 +90,6 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
         .create(CreateProjectInput {
             name: "aggregate initialization gateway envelope fixture".to_string(),
             description: None,
-            multi_repo: true,
         })
         .expect("create multi-repository project fixture");
 

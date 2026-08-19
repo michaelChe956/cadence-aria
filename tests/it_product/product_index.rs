@@ -55,7 +55,6 @@ fn project_and_issue_enums_serialize_as_snake_case() {
         created_at: "2026-05-14T00:00:00Z".to_string(),
         updated_at: "2026-05-14T00:00:00Z".to_string(),
         last_opened_at: None,
-        multi_repo: false,
     };
 
     let project_json = serde_json::to_value(project).expect("project json");
@@ -78,7 +77,6 @@ fn creates_project_repository_issue_and_runtime_binding() {
         .create(CreateProjectInput {
             name: "Aria".to_string(),
             description: Some("Workbench".to_string()),
-            multi_repo: false,
         })
         .expect("project");
 
@@ -164,7 +162,6 @@ fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
         .create(CreateProjectInput {
             name: "Aria".to_string(),
             description: Some("Workbench".to_string()),
-            multi_repo: false,
         })
         .expect("project");
 

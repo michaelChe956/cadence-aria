@@ -645,7 +645,6 @@ mod tests {
                 .create(CreateProjectInput {
                     name: name.to_string(),
                     description: None,
-                multi_repo: false,
                 })
                 .unwrap();
         }
@@ -667,7 +666,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".into(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
 
@@ -717,7 +715,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let root_path = temp.path().join("aggregate-root");
@@ -753,7 +750,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let root_path = temp.path().join("aggregate-root");
@@ -789,7 +785,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let root_path = temp.path().join("aggregate-root");
@@ -833,7 +828,6 @@ mod tests {
             .create(CreateProjectInput {
                 name: "project".into(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
 

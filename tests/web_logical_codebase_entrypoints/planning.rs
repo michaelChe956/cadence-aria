@@ -241,7 +241,6 @@ impl PlanningHttpFixture {
             .create(CreateProjectInput {
                 name: "planning stale sync".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .expect("create multi-repo project");
 
@@ -655,7 +654,6 @@ impl LegacyPlanningHttpFixture {
             .create(CreateProjectInput {
                 name: "legacy planning HTTP".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .expect("create legacy project");
         let repository = RepositoryStore::new(paths.clone())
@@ -888,13 +886,18 @@ async fn aggregate_initialization_completion_eventually_exposes_active_index() {
 async fn aggregate_index_active_endpoint_returns_missing_without_record() {
     let workspace = tempfile::tempdir().expect("workspace");
     let paths = ProductAppPaths::new(workspace.path().join(".aria"));
-    ProjectStore::new(paths)
+    ProjectStore::new(paths.clone())
         .create(CreateProjectInput {
             name: "missing aggregate index".to_string(),
             description: None,
-            multi_repo: true,
         })
         .expect("create project");
+    LogicalCodebaseStore::new(paths)
+        .save_manifest(
+            PROJECT_ID,
+            &LogicalCodebaseManifest::new(PROJECT_ID, workspace.path().to_path_buf(), Vec::new()),
+        )
+        .expect("save manifest");
     let state = WebAppState::new(
         workspace.path().to_path_buf(),
         WebRuntime::new_fake(workspace.path().to_path_buf()),
@@ -1000,13 +1003,18 @@ async fn aggregate_index_endpoints_expose_building_and_reject_concurrent_rebuild
 async fn aggregate_index_rebuild_endpoint_returns_conflict_while_project_is_registered() {
     let workspace = tempfile::tempdir().expect("workspace");
     let paths = ProductAppPaths::new(workspace.path().join(".aria"));
-    ProjectStore::new(paths)
+    ProjectStore::new(paths.clone())
         .create(CreateProjectInput {
             name: "registered aggregate index rebuild".to_string(),
             description: None,
-            multi_repo: true,
         })
         .expect("create project");
+    LogicalCodebaseStore::new(paths)
+        .save_manifest(
+            PROJECT_ID,
+            &LogicalCodebaseManifest::new(PROJECT_ID, workspace.path().to_path_buf(), Vec::new()),
+        )
+        .expect("save manifest");
     let state = WebAppState::new(
         workspace.path().to_path_buf(),
         WebRuntime::new_fake(workspace.path().to_path_buf()),

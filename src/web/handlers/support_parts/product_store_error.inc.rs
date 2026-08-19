@@ -36,6 +36,7 @@ pub(crate) fn logical_codebase_feature_disabled_api_error(project_id: &str) -> A
     )
 }
 
+#[allow(dead_code)] // Retained error-code mapping; R6 removes legacy production.
 pub(crate) fn legacy_repository_endpoint_on_multi_repo_api_error(
     project_id: &str,
 ) -> ApiError {

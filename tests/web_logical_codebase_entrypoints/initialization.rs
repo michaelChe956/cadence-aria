@@ -117,7 +117,6 @@ impl AggregateInitializationHttpFixture {
             .create(CreateProjectInput {
                 name: "aggregate initialization http test".to_string(),
                 description: None,
-                multi_repo: true,
             })
             .expect("create project");
         let aggregate_root = root.join("aggregate-root");

@@ -19,6 +19,7 @@ use cadence_aria::cross_cutting::provider_health::{
     ProviderHealthService, SystemProviderHealthClock,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::logical_codebase::{LogicalCodebaseManifest, LogicalCodebaseStore};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::runtime::WebRuntime;
@@ -188,17 +189,24 @@ impl P0HttpFixture {
             "/api/projects",
             json!({
                 "name": "P0 multi-repository HTTP chain",
-                "description": "real HTTP registration through planning",
-                "multi_repo": true
+                "description": "real HTTP registration through planning"
             }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "create project: {project}");
-        assert_eq!(project["multi_repo"], true, "project response: {project}");
-        project["project_id"]
+        let project_id = project["project_id"]
             .as_str()
             .expect("project id")
-            .to_string()
+            .to_string();
+        // R1 过渡：旧 logical-codebase 端点是“默认第一个逻辑代码库”的兼容别名，
+        // 因此 fixture 直接落地 manifest 以模拟已存在的逻辑代码库。
+        LogicalCodebaseStore::new(ProductAppPaths::new(self.root.join(".aria")))
+            .save_manifest(
+                &project_id,
+                &LogicalCodebaseManifest::new(&project_id, self.aggregate_root.clone(), Vec::new()),
+            )
+            .expect("save logical codebase manifest");
+        project_id
     }
 
     async fn preflight_and_submit_all(&self, project_id: &str) -> serde_json::Value {

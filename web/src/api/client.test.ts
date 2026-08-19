@@ -337,7 +337,6 @@ describe("api client", () => {
         created_at: "2026-05-14T00:00:00Z",
         updated_at: "2026-05-14T00:00:00Z",
         last_opened_at: null,
-        multi_repo: true,
       },
     ];
     vi.stubGlobal(
@@ -351,7 +350,7 @@ describe("api client", () => {
     );
 
     await listProjects();
-    await createProject({ name: "Aria", description: null, multi_repo: true });
+    await createProject({ name: "Aria", description: null });
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects",
@@ -359,36 +358,7 @@ describe("api client", () => {
     ]);
     expect(calls[1].init?.method).toBe("POST");
     expect(calls[1].init?.body).toBe(
-      JSON.stringify({ name: "Aria", description: null, multi_repo: true }),
-    );
-  });
-
-  it("serializes an explicit multi_repo false project payload", async () => {
-    const calls: Array<{ input: string; init?: RequestInit }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push({ input: String(input), init });
-        return new Response(
-          JSON.stringify({
-            project_id: "project_0001",
-            name: "Legacy",
-            description: null,
-            created_at: "2026-05-14T00:00:00Z",
-            updated_at: "2026-05-14T00:00:00Z",
-            last_opened_at: null,
-            multi_repo: false,
-          }),
-          { status: 200 },
-        );
-      }),
-    );
-
-    await createProject({ name: "Legacy", description: null, multi_repo: false });
-
-    expect(calls[0].init?.method).toBe("POST");
-    expect(calls[0].init?.body).toBe(
-      JSON.stringify({ name: "Legacy", description: null, multi_repo: false }),
+      JSON.stringify({ name: "Aria", description: null }),
     );
   });
 

@@ -99,12 +99,21 @@ impl RepositoryStore {
         Self::with_logical_codebase_feature(paths, LogicalCodebaseFeature::disabled())
     }
 
+    /// Transitional project-scoped feature detection. It is enabled only when
+    /// this project has logical-codebase storage (new or legacy/migrated).
+    /// R3/R5 must replace this with per-codebase detection from the request or
+    /// issue; a project itself no longer has a repository-mode attribute.
     pub fn for_project(paths: ProductAppPaths, project: &ProjectRecord) -> Self {
-        let feature = if project.multi_repo {
-            LogicalCodebaseFeature::enabled()
-        } else {
-            LogicalCodebaseFeature::disabled()
-        };
+        let feature = LogicalCodebaseStore::new(paths.clone())
+            .has_any_storage(&project.id)
+            .map(|has_storage| {
+                if has_storage {
+                    LogicalCodebaseFeature::enabled()
+                } else {
+                    LogicalCodebaseFeature::disabled()
+                }
+            })
+            .unwrap_or_else(|_| LogicalCodebaseFeature::disabled());
         Self::with_logical_codebase_feature(paths, feature)
     }
 
@@ -120,7 +129,11 @@ impl RepositoryStore {
 
     pub fn ensure_identity_schema(&self, project_id: &str) -> Result<(), ProductStoreError> {
         validate_relative_id(project_id)?;
-        if self.logical_codebase_feature.is_enabled() {
+        if self.logical_codebase_feature.is_enabled()
+            && LogicalCodebaseStore::new(self.paths.clone())
+                .load_manifest(project_id)?
+                .is_none()
+        {
             IdentityMigrationExecutor::new(self.paths.clone())
                 .ensure_identity_schema(project_id)?;
         }

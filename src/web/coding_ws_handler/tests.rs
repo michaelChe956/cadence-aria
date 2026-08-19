@@ -884,7 +884,6 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         .create(crate::product::project_store::CreateProjectInput {
             name: "compiled work item fixture".to_string(),
             description: None,
-            multi_repo: false,
         })
         .expect("create project");
     let lifecycle = LifecycleStore::new(app_paths.clone());

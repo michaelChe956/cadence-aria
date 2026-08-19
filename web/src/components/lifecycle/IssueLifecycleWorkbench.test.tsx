@@ -64,7 +64,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
   it("loads the aggregate index, disables rebuild while pending, replaces it on success, and shows API errors", async () => {
     const rebuildingResponse = deferred<Response>();
     const fetchMock = lifecycleFetch({
-      projects: [projectRecord("project_0001", "Aria", null, true)],
+      projects: [projectRecord("project_0001", "Aria")],
       aggregateIndex: aggregateIndex({ state: "missing", revision: null, indexed_at: null }),
       aggregateIndexRebuild: aggregateIndex({
         state: "active",
@@ -112,7 +112,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
   it("shows ApiRequestError.message when aggregate index rebuild fails", async () => {
     const fetchMock = lifecycleFetch({
-      projects: [projectRecord("project_0001", "Aria", null, true)],
+      projects: [projectRecord("project_0001", "Aria")],
       aggregateIndex: aggregateIndex({ state: "stale" }),
     });
     vi.stubGlobal(
@@ -534,7 +534,6 @@ describe("IssueLifecycleWorkbench base workflow", () => {
         body: JSON.stringify({
           name: "New Project",
           description: "新的生命周期项目",
-          multi_repo: false,
         }),
       }),
     );

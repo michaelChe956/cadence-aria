@@ -32,7 +32,6 @@
             .create(CreateProjectInput {
                 name: "lifecycle test project".to_string(),
                 description: None,
-                multi_repo: false,
             })
             .unwrap();
         let issue = IssueStore::new(paths.clone())

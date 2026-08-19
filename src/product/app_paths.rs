@@ -51,8 +51,27 @@ impl ProductAppPaths {
             .join("repository-initializations")
     }
 
+    /// Legacy default logical-codebase location retained as a compatibility alias.
     pub fn logical_codebase_root(&self, project_id: &str) -> PathBuf {
         self.project_root(project_id).join("logical-codebase")
+    }
+
+    pub fn logical_codebases_root(&self, project_id: &str) -> PathBuf {
+        self.project_root(project_id).join("logical-codebases")
+    }
+
+    pub fn logical_codebase_record_root(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> PathBuf {
+        self.logical_codebases_root(project_id)
+            .join(logical_codebase_id)
+    }
+
+    pub fn logical_codebase_migration_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebases_root(project_id)
+            .join(".legacy-logical-codebase-migration.lock")
     }
 
     pub fn registration_batches_root(&self, project_id: &str) -> PathBuf {
@@ -120,6 +139,16 @@ mod tests {
         assert_eq!(
             paths.logical_codebase_root("project_0001"),
             std::path::PathBuf::from("/tmp/aria/projects/project_0001/logical-codebase")
+        );
+        assert_eq!(
+            paths.logical_codebases_root("project_0001"),
+            std::path::PathBuf::from("/tmp/aria/projects/project_0001/logical-codebases")
+        );
+        assert_eq!(
+            paths.logical_codebase_record_root("project_0001", "logical_codebase_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebases/logical_codebase_0001"
+            )
         );
         assert_eq!(
             paths.registration_batches_root("project_0001"),
