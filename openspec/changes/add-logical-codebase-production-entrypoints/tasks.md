@@ -43,7 +43,7 @@
 
 ## 7. 代码库级模式修正（v1.3 Rework，2026-08-19 追加）
 
-- [ ] R1 模型与存储：LogicalCodebaseRecord/store + logical-codebases/{lc_id}/ 子树；删除 ProjectRecord.multi_repo（旧数据兼容忽略）；迁移工具（旧 logical-codebase/ → 首 LC）
+- [x] R1 模型与存储：LogicalCodebaseRecord/store + logical-codebases/{lc_id}/ 子树；删除 ProjectRecord.multi_repo（旧数据兼容忽略）；迁移工具（旧 logical-codebase/ → 首 LC）
 - [ ] R2 统一 codebases 列表端点（混合单仓/逻辑）+ LC CRUD（POST 创建/GET 详情/DELETE 软删零 git 副作用）
 - [ ] R3 登记端点换形 /logical-codebases/{lc_id}/ + guard 改 require_logical_codebase（404 logical_codebase_not_found）
 - [ ] R4 初始化/索引端点换形 + 母 change 旧端点（members/pointer/initializations）保留默认首 LC 兼容别名
