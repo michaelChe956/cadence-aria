@@ -59,6 +59,8 @@ struct TestControlsInner {
     group_attempt_acquire_pause: Mutex<Option<CodingAttemptAcquirePause>>,
     coding_attempt_persist_failure: Mutex<bool>,
     group_attempt_initialization_failure: Mutex<Option<GroupAttemptInitializationCheckpoint>>,
+    issue_selection_save_failure: Mutex<bool>,
+    issue_delete_failure: Mutex<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +131,64 @@ impl TestControls {
             .lock()
             .expect("coding attempt persist failure lock");
         std::mem::take(&mut *configured)
+    }
+
+    pub fn fail_next_issue_selection_save(&self) {
+        *self
+            .inner
+            .issue_selection_save_failure
+            .lock()
+            .expect("issue selection save failure lock") = true;
+    }
+
+    /// 默认直接执行保存操作；仅显式配置的测试控制会在这一故障点注入失败。
+    pub fn save_issue_selection(
+        &self,
+        save: impl FnOnce() -> Result<(), crate::product::json_store::ProductStoreError>,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        let configured = {
+            let mut configured = self
+                .inner
+                .issue_selection_save_failure
+                .lock()
+                .expect("issue selection save failure lock");
+            std::mem::take(&mut *configured)
+        };
+        if configured {
+            return Err(crate::product::json_store::ProductStoreError::Io(
+                "test-controlled issue selection save failure".to_string(),
+            ));
+        }
+        save()
+    }
+
+    pub fn fail_next_issue_delete(&self) {
+        *self
+            .inner
+            .issue_delete_failure
+            .lock()
+            .expect("issue delete failure lock") = true;
+    }
+
+    /// 默认直接执行删除操作；仅显式配置的测试控制会在这一故障点注入失败。
+    pub fn delete_issue(
+        &self,
+        delete: impl FnOnce() -> Result<(), crate::product::json_store::ProductStoreError>,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        let configured = {
+            let mut configured = self
+                .inner
+                .issue_delete_failure
+                .lock()
+                .expect("issue delete failure lock");
+            std::mem::take(&mut *configured)
+        };
+        if configured {
+            return Err(crate::product::json_store::ProductStoreError::Io(
+                "test-controlled issue delete failure".to_string(),
+            ));
+        }
+        delete()
     }
 
     pub fn pause_next_coding_attempt_after_worktree_acquire(&self) -> CodingAttemptAcquirePause {

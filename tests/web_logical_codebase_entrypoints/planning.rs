@@ -39,6 +39,7 @@ use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::handlers::AggregateInitializationDependencies;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::{InitializationRunRegistry, WebAppState};
+use cadence_aria::web::test_controls::TestControls;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
@@ -205,6 +206,8 @@ struct PlanningHttpFixture {
     paths: ProductAppPaths,
     api_root: PathBuf,
     api_member_id: LogicalRepositoryId,
+    web_member_id: LogicalRepositoryId,
+    test_controls: TestControls,
     blocking_index_cli: Option<BlockingIndexCli>,
     app: axum::Router,
 }
@@ -389,6 +392,7 @@ impl PlanningHttpFixture {
             .expect("bootstrap aggregate policy");
 
         let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
+        let test_controls = state.test_controls.clone();
         let blocking_index_cli = index_runner.clone();
         let index = index_runner.map(|runner| {
             Arc::new(AggregateIndexOperation::with_snapshot_dependencies(
@@ -431,6 +435,8 @@ impl PlanningHttpFixture {
             paths,
             api_root,
             api_member_id,
+            web_member_id,
+            test_controls,
             blocking_index_cli: if with_initialization {
                 None
             } else {
@@ -475,6 +481,56 @@ impl PlanningHttpFixture {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("aggregate index rebuild did not become visible as rebuilding");
+    }
+
+    async fn create_issue_with_primary(
+        &self,
+        repository_id: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        request(
+            &self.app,
+            Method::POST,
+            &format!("/api/projects/{PROJECT_ID}/issues"),
+            json!({
+                "repository_id": repository_id,
+                "title": "multi-repo issue",
+                "description": "created through multi-repo entrypoint"
+            }),
+        )
+        .await
+    }
+
+    fn load_selection(&self, issue_id: &str) -> Option<IssueCodebaseSelection> {
+        IssueCodebaseSelectionStore::new(self.paths.clone())
+            .load(PROJECT_ID, issue_id)
+            .expect("load selection")
+    }
+
+    fn issue_count(&self) -> usize {
+        IssueStore::new(self.paths.clone())
+            .list(PROJECT_ID)
+            .expect("list issues")
+            .len()
+    }
+
+    fn fail_next_selection_save(&self) {
+        self.test_controls.fail_next_issue_selection_save();
+    }
+
+    fn fail_next_issue_delete(&self) {
+        self.test_controls.fail_next_issue_delete();
+    }
+
+    fn deactivate_web_member(&self) {
+        let logical = LogicalCodebaseStore::new(self.paths.clone());
+        let mut member = logical
+            .load_member(PROJECT_ID, self.web_member_id)
+            .expect("load web member")
+            .expect("web member exists");
+        member.status = MemberStatus::Removed;
+        logical
+            .save_member(PROJECT_ID, &member)
+            .expect("deactivate web member");
     }
 
     fn make_api_member_drift(&self) {
@@ -543,10 +599,14 @@ fn codegraph(root: &Path, action: &str) {
 }
 
 async fn generate_story(app: &axum::Router) -> (StatusCode, serde_json::Value) {
+    generate_story_for(app, ISSUE_ID).await
+}
+
+async fn generate_story_for(app: &axum::Router, issue_id: &str) -> (StatusCode, serde_json::Value) {
     request(
         app,
         Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        &format!("/api/projects/{PROJECT_ID}/issues/{issue_id}/story-specs:generate"),
         json!({
             "title": "fresh planning Story",
             "author_provider": "fake",
@@ -557,6 +617,67 @@ async fn generate_story(app: &axum::Router) -> (StatusCode, serde_json::Value) {
         }),
     )
     .await
+}
+
+#[tokio::test]
+async fn multi_repo_issue_creation_writes_all_members_and_compensates_selection_failure() {
+    let fixture = PlanningHttpFixture::new();
+
+    let (status, issue) = fixture.create_issue_with_primary("repository_api").await;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {issue}");
+    let issue_id = issue["issue_id"].as_str().expect("created issue id");
+    let selection = fixture
+        .load_selection(issue_id)
+        .expect("selection persisted");
+    assert_eq!(
+        selection.selection_policy,
+        cadence_aria::product::logical_codebase::SelectionPolicy::AllMembers
+    );
+
+    let (story_status, story) = generate_story_for(&fixture.app, issue_id).await;
+    assert_eq!(
+        story_status,
+        StatusCode::OK,
+        "Story is not reachable: {story}"
+    );
+
+    let issue_count_before_failure = fixture.issue_count();
+    fixture.fail_next_selection_save();
+    assert_error(
+        fixture.create_issue_with_primary("repository_api").await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "issue_selection_write_failed",
+    );
+    assert_eq!(fixture.issue_count(), issue_count_before_failure);
+}
+
+#[tokio::test]
+async fn multi_repo_issue_creation_reports_orphan_when_compensation_delete_fails() {
+    let fixture = PlanningHttpFixture::new();
+    let issue_count_before_failure = fixture.issue_count();
+    fixture.fail_next_selection_save();
+    fixture.fail_next_issue_delete();
+
+    assert_error(
+        fixture.create_issue_with_primary("repository_api").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "product_store_error",
+    );
+    assert_eq!(fixture.issue_count(), issue_count_before_failure + 1);
+    assert!(fixture.load_selection("issue_0002").is_none());
+}
+
+#[tokio::test]
+async fn multi_repo_issue_creation_rejects_non_active_member_as_primary() {
+    let fixture = PlanningHttpFixture::new();
+    fixture.deactivate_web_member();
+
+    assert_error(
+        fixture.create_issue_with_primary("repository_web").await,
+        StatusCode::NOT_FOUND,
+        "repository_not_found",
+    );
+    assert_eq!(fixture.issue_count(), 1);
 }
 
 #[tokio::test]

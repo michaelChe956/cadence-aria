@@ -48,6 +48,40 @@ fn test_controls_are_enabled_in_e2e_env() {
 }
 
 #[test]
+fn issue_creation_failure_controls_are_default_closed_and_consumed_once() {
+    let controls = TestControls::default();
+    let mut save_executed = false;
+    controls
+        .save_issue_selection(|| {
+            save_executed = true;
+            Ok(())
+        })
+        .expect("default selection save runs");
+    assert!(save_executed);
+
+    controls.fail_next_issue_selection_save();
+    assert!(controls.save_issue_selection(|| Ok(())).is_err());
+    controls
+        .save_issue_selection(|| Ok(()))
+        .expect("selection save failure is consumed once");
+
+    let mut delete_executed = false;
+    controls
+        .delete_issue(|| {
+            delete_executed = true;
+            Ok(())
+        })
+        .expect("default issue delete runs");
+    assert!(delete_executed);
+
+    controls.fail_next_issue_delete();
+    assert!(controls.delete_issue(|| Ok(())).is_err());
+    controls
+        .delete_issue(|| Ok(()))
+        .expect("issue delete failure is consumed once");
+}
+
+#[test]
 fn large_workspace_fixture_contains_large_lazy_loaded_content() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let app_paths = ProductAppPaths::new(temp_dir.path());

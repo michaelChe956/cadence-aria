@@ -1,9 +1,11 @@
 use axum::http::{Method, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::json_store::write_json;
 use cadence_aria::product::logical_codebase::{
     CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
     MemberStatus, RepositorySourceIdentity, RepositoryType,
 };
+use cadence_aria::product::models::RepositoryRecord;
 use cadence_aria::product::project_store::ProjectStore;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
@@ -71,6 +73,25 @@ async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_reje
     logical
         .save_member("project_0001", &member(id, "api"))
         .unwrap();
+    write_json(
+        &paths.project_root("project_0002").join("repos.json"),
+        &vec![RepositoryRecord {
+            id: "repository_legacy".to_string(),
+            project_id: "project_0002".to_string(),
+            name: "legacy".to_string(),
+            path: root.path().join("legacy"),
+            repo_hash: "legacy-hash".to_string(),
+            runtime_root: root.path().join("legacy/.aria/runtime"),
+            default_policy_preset: "manual-write".to_string(),
+            default_provider_mode: "fake".to_string(),
+            created_at: "2026-08-18T00:00:00Z".to_string(),
+            updated_at: "2026-08-18T00:00:00Z".to_string(),
+            logical_repository_id: None,
+            primary_checkout_id: None,
+            identity_schema_version: 0,
+        }],
+    )
+    .unwrap();
 
     let state = WebAppState::new(
         root.path().to_path_buf(),
@@ -167,5 +188,23 @@ async fn multi_repo_blocks_legacy_mutation_projects_members_and_single_repo_reje
     assert!(
         !paths.logical_codebase_root("project_0002").exists(),
         "single-repo guard must run before any manifest, batch, index, or operation is persisted"
+    );
+
+    let (status, issue) = request(
+        &app,
+        Method::POST,
+        "/api/projects/project_0002/issues",
+        json!({
+            "repository_id": "repository_legacy",
+            "title": "legacy issue"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "legacy issue response: {issue}");
+    assert!(
+        !paths
+            .codebase_selection_path("project_0002", issue["issue_id"].as_str().unwrap())
+            .exists(),
+        "single-repository issue creation must not write codebase-selection.json"
     );
 }

@@ -1,7 +1,10 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
-use crate::product::logical_codebase::{CodebaseMemberRecord, LogicalCodebaseStore, MemberStatus};
+use crate::product::logical_codebase::{
+    CodebaseMemberRecord, IssueCodebaseSelection, IssueCodebaseSelectionStore,
+    LogicalCodebaseStore, MemberStatus,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -239,18 +242,104 @@ pub async fn create_product_issue(
         .repository_id
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
     let app_paths = product_app_paths(&state);
-    let _repository = find_repository(&app_paths, &project_id, &repository_id)?;
-    let store = IssueStore::new(app_paths);
+    let project = ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+
+    if !project.multi_repo {
+        // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json。
+        let _repository = find_repository(&app_paths, &project_id, &repository_id)?;
+        let store = IssueStore::new(app_paths);
+        let issue = store
+            .create_with_repository(CreateProductIssueWithRepositoryInput {
+                project_id,
+                repo_id: repository_id,
+                title: request.title,
+                description: request.description,
+                change_id: request.change_id,
+            })
+            .map_err(product_store_api_error)?;
+        return Ok(Json(product_issue_dto(issue, None)));
+    }
+
+    validate_multi_repo_issue_primary(&app_paths, &project_id, &repository_id)?;
+    let store = IssueStore::new(app_paths.clone());
     let issue = store
         .create_with_repository(CreateProductIssueWithRepositoryInput {
-            project_id,
+            project_id: project_id.clone(),
             repo_id: repository_id,
             title: request.title,
             description: request.description,
             change_id: request.change_id,
         })
         .map_err(product_store_api_error)?;
+    let selection = IssueCodebaseSelection::all_members(&project_id, &issue.id, None);
+    let selection_result = state.test_controls.save_issue_selection(|| {
+        IssueCodebaseSelectionStore::new(app_paths.clone()).save(&selection)
+    });
+    if let Err(selection_error) = selection_result {
+        let delete_result = state
+            .test_controls
+            .delete_issue(|| store.delete(&project_id, &issue.id));
+        return match delete_result {
+            Ok(()) => Err(issue_selection_write_failed_api_error()),
+            Err(delete_error) => {
+                tracing::error!(
+                    project_id = %project_id,
+                    issue_id = %issue.id,
+                    original_error = %selection_error,
+                    delete_error = %delete_error,
+                    "orphaned issue after codebase selection write failure"
+                );
+                Err(ApiError::runtime(
+                    "product_store_error",
+                    "product store operation failed",
+                    json!({}),
+                ))
+            }
+        };
+    }
+
     Ok(Json(product_issue_dto(issue, None)))
+}
+
+/// 多仓创建的 primary 必须来自 manifest 中的 active member，且预校验必须发生在
+/// IssueStore::create_with_repository 之前，避免留下没有 selection 的 issue。
+fn validate_multi_repo_issue_primary(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    repository_id: &str,
+) -> ApiResult<()> {
+    let authority = LogicalCodebaseStore::new(app_paths.clone());
+    let manifest = authority
+        .load_manifest(project_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: project_id.to_string(),
+            })
+        })?;
+    let active_members = authority
+        .list_members(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|member| {
+            manifest.member_ids.contains(&member.logical_repository_id)
+                && member.status == MemberStatus::Active
+        })
+        .collect::<Vec<_>>();
+    if active_members.is_empty()
+        || !active_members
+            .iter()
+            .any(|member| member.physical_repository_id == repository_id)
+    {
+        return Err(product_store_api_error(ProductStoreError::NotFound {
+            kind: "repository",
+            id: repository_id.to_string(),
+        }));
+    }
+    Ok(())
 }
 
 pub async fn delete_product_issue(

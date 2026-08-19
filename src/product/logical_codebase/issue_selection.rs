@@ -95,6 +95,12 @@ impl IssueCodebaseSelection {
         }
     }
 
+    /// 校验可持久化 selection；AllMembers 的解析语义保持由
+    /// `resolve_effective_members` 的 active-member 快照决定，不能在此改写。
+    pub fn validate_for_save(&self) -> Result<(), ProductStoreError> {
+        self.validate_focus_subset()
+    }
+
     /// 校验 focus ⊆ include；include/exclude 重叠时 exclude 优先由 resolve 表达，不在此报错。
     pub fn validate_focus_subset(&self) -> Result<(), ProductStoreError> {
         let include: std::collections::BTreeSet<_> =
@@ -175,8 +181,7 @@ impl IssueCodebaseSelectionStore {
     }
 
     pub fn save(&self, selection: &IssueCodebaseSelection) -> Result<(), ProductStoreError> {
-        // 强制校验 focus ⊆ include，避免写入不一致的 selection（阶段 A 发现 save 未强制）。
-        selection.validate_focus_subset()?;
+        selection.validate_for_save()?;
         validate_relative_id(&selection.project_id)?;
         validate_relative_id(&selection.issue_id)?;
         write_json(

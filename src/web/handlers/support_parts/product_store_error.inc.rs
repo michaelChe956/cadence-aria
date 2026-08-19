@@ -1,3 +1,11 @@
+pub(crate) fn issue_selection_write_failed_api_error() -> ApiError {
+    ApiError::runtime(
+        "issue_selection_write_failed",
+        "issue codebase selection could not be saved",
+        json!({}),
+    )
+}
+
 pub(crate) fn aggregate_root_api_error(
     error: crate::product::logical_codebase::AggregateRootPreflightError,
 ) -> ApiError {
