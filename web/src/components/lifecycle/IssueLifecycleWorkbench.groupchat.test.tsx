@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -182,5 +183,39 @@ describe("IssueLifecycleWorkbench 群聊模式入口", () => {
     await waitFor(() =>
       expect(setSpecGenerationMode).toHaveBeenCalledWith("group_chat"),
     );
+  });
+
+  it("保存期间只禁用待切换选项，不让设置面板整体闪动", async () => {
+    let resolveSave: (mode: "group_chat") => void = () => undefined;
+    vi.mocked(setSpecGenerationMode).mockReturnValue(
+      new Promise((resolve) => {
+        resolveSave = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const onModeChange = vi.fn();
+
+    function ControlledSettings() {
+      const [mode, setMode] = useState<"pipeline" | "group_chat">("pipeline");
+      return (
+        <SpecGenerationSettings
+          mode={mode}
+          onModeChange={(nextMode) => {
+            onModeChange(nextMode);
+            setMode(nextMode);
+          }}
+        />
+      );
+    }
+
+    render(<ControlledSettings />);
+    await user.click(screen.getByRole("radio", { name: "群聊模式" }));
+
+    expect(screen.getByRole("radio", { name: "群聊模式" })).not.toBeDisabled();
+    expect(screen.getByRole("radio", { name: "流水线模式" })).toBeDisabled();
+    expect(screen.getByText("正在保存…")).toBeInTheDocument();
+
+    resolveSave("group_chat");
+    await waitFor(() => expect(screen.queryByText("正在保存…")).not.toBeInTheDocument());
   });
 });

@@ -1,3 +1,4 @@
+import { Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   getSpecGenerationMode,
@@ -64,29 +65,34 @@ export function AppShell({
       {whatsNew.open && whatsNew.entry ? (
         <WhatsNewDialog entry={whatsNew.entry} onClose={whatsNew.close} />
       ) : null}
-      <a
-        href="/image-create"
-        className="fixed bottom-4 right-4 z-40 rounded-full border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-4 py-2 text-sm font-semibold text-white shadow-lg transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
-      >
-        图片创作
-      </a>
-      <div className="fixed bottom-4 right-32 z-40">
-        <button
-          type="button"
-          onClick={() => setSettingsOpen((open) => !open)}
-          aria-expanded={settingsOpen}
-          className="rounded-full border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-ink)] shadow-lg"
+      <div className="fixed bottom-4 right-4 z-40 flex items-center gap-2">
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((open) => !open)}
+            aria-label="设置"
+            aria-expanded={settingsOpen}
+            title="设置"
+            className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0"
+          >
+            <Settings aria-hidden="true" className="h-4 w-4" />
+            <span className="hidden sm:inline">设置</span>
+          </button>
+          {settingsOpen ? (
+            <div className="absolute bottom-full right-0 mb-2 w-[min(30rem,calc(100vw-2rem))]">
+              <SpecGenerationSettings
+                mode={specGenerationMode}
+                onModeChange={setSpecGenerationMode}
+              />
+            </div>
+          ) : null}
+        </div>
+        <a
+          href="/image-create"
+          className="rounded-full border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-4 py-2 text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0"
         >
-          设置
-        </button>
-        {settingsOpen ? (
-          <div className="absolute bottom-full right-0 mb-2 w-[min(30rem,calc(100vw-2rem))]">
-            <SpecGenerationSettings
-              mode={specGenerationMode}
-              onModeChange={setSpecGenerationMode}
-            />
-          </div>
-        ) : null}
+          图片创作
+        </a>
       </div>
       <IssueLifecycleWorkbench
         focusEntityKey={focusEntityKey}

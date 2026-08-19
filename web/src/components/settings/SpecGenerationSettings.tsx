@@ -71,7 +71,7 @@ export function SpecGenerationSettings({
           选择新建 Spec 时使用流水线或群聊工作台。
         </p>
       </div>
-      <fieldset className="mt-4 grid gap-2 sm:grid-cols-2" disabled={saving}>
+      <fieldset className="mt-4 grid gap-2 sm:grid-cols-2">
         <legend className="sr-only">Spec 生成模式</legend>
         <div className="flex items-start gap-2 rounded-md border border-[var(--aria-line)] p-3 text-sm">
           <input
@@ -80,6 +80,7 @@ export function SpecGenerationSettings({
             name="spec-generation-mode"
             value="pipeline"
             checked={mode === "pipeline"}
+            disabled={saving && mode !== "pipeline"}
             onChange={() => void handleChange("pipeline")}
           />
           <div>
@@ -94,6 +95,7 @@ export function SpecGenerationSettings({
             name="spec-generation-mode"
             value="group_chat"
             checked={mode === "group_chat"}
+            disabled={saving && mode !== "group_chat"}
             onChange={() => void handleChange("group_chat")}
           />
           <div>
@@ -102,8 +104,10 @@ export function SpecGenerationSettings({
           </div>
         </div>
       </fieldset>
-      {saving ? <p className="mt-3 text-xs text-[var(--aria-ink-muted)]">正在保存…</p> : null}
-      {error ? <p role="alert" className="mt-3 text-xs text-[var(--aria-danger)]">{error}</p> : null}
+      <div className="mt-3 min-h-5 text-xs" aria-live="polite">
+        {saving ? <p className="text-[var(--aria-ink-muted)]">正在保存…</p> : null}
+        {error ? <p role="alert" className="text-[var(--aria-danger)]">{error}</p> : null}
+      </div>
     </section>
   );
 }
