@@ -22,32 +22,25 @@ import {
   listProjects,
   listRepositories,
 } from "../../api/client";
-import {
-  getActiveAggregateIndex,
-  rebuildAggregateIndex,
-} from "../../api/aggregate-index";
+import { rebuildAggregateIndex } from "../../api/aggregate-index";
 import {
   cancelAggregateInitialization,
-  getAggregateInitialization,
   startAggregateInitialization,
 } from "../../api/aggregate-initialization";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { deleteLogicalCodebase, listCodebases } from "../../api/codebases";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
+import { useLogicalCodebaseScopeData } from "./useLogicalCodebaseScopeData";
 import {
   createPointerPublication,
-  listPointerPublications,
   retryPointerPublicationRepo,
   revokePointerPublication,
 } from "../../api/pointer-publication";
 import type {
-  AggregateIndexActiveResponse,
   CodebaseSummaryDto,
   LogicalCodebaseDto,
-  AggregateInitializationOperationSnapshot,
   CodingAttemptAddress,
   IssueLifecycleResponse,
-  LogicalCodebaseMemberDto,
   PointerPublicationDto,
   Project,
   Repository,
@@ -71,11 +64,9 @@ import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
-import { AggregateIndexCard } from "./AggregateIndexCard";
-import { AggregateInitializationCard } from "./AggregateInitializationCard";
 import { IssueLifecycleWorkbenchHeader } from "./IssueLifecycleWorkbenchHeader";
-import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
-import { PointerPublicationPanel } from "./PointerPublicationPanel";
+import { LogicalCodebaseManagementPanel } from "./LogicalCodebaseManagementPanel";
+import { IssueLifecycleWorkbenchDrawer } from "./IssueLifecycleWorkbenchDrawer";
 import { ProjectSidebar } from "./ProjectSidebar";
 import {
   WorkItemPlanOptionsDialog,
@@ -147,19 +138,9 @@ export function IssueLifecycleWorkbench({
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pointerPublications, setPointerPublications] = useState<
-    PointerPublicationDto[]
-  >([]);
-  const [logicalCodebaseMembers, setLogicalCodebaseMembers] = useState<
-    LogicalCodebaseMemberDto[]
-  >([]);
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
-  const [aggregateIndex, setAggregateIndex] =
-    useState<AggregateIndexActiveResponse | null>(null);
   const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
     useState(false);
-  const [aggregateInitialization, setAggregateInitialization] =
-    useState<AggregateInitializationOperationSnapshot | null>(null);
   const [aggregateInitializationBusy, setAggregateInitializationBusy] =
     useState(false);
   const refreshRequestId = useRef(0);
@@ -265,7 +246,7 @@ export function IssueLifecycleWorkbench({
             (lifecycle) => lifecycle.issue.issue_id === focusedIssueId,
           )
           ? focusedIssueId
-          : lifecycleResponses[0]?.issue.issue_id ?? null,
+          : (lifecycleResponses[0]?.issue.issue_id ?? null),
       );
       if (projectChanged) {
         setSelectedCardKey(null);
@@ -306,8 +287,7 @@ export function IssueLifecycleWorkbench({
     () =>
       focusedIssueIdForGroups
         ? (lifecycles.find(
-            (lifecycle) =>
-              lifecycle.issue.issue_id === focusedIssueIdForGroups,
+            (lifecycle) => lifecycle.issue.issue_id === focusedIssueIdForGroups,
           )?.work_item_repository_groups ?? [])
         : [],
     [lifecycles, focusedIssueIdForGroups],
@@ -333,157 +313,23 @@ export function IssueLifecycleWorkbench({
     (project) => project.project_id === selectedProjectId,
   );
   const issueCount = allColumns.issue.length;
-  const latestPointerPublication = useMemo<PointerPublicationDto | null>(() => {
-    if (pointerPublications.length === 0) {
-      return null;
-    }
-    return [...pointerPublications].sort((left, right) =>
-      right.created_at.localeCompare(left.created_at),
-    )[0];
-  }, [pointerPublications]);
-
-  const latestPointerPublicationId =
-    latestPointerPublication?.status === "in_progress"
-      ? latestPointerPublication.id
-      : null;
-  const latestCompletedPointerPublication = useMemo<PointerPublicationDto | null>(() => {
-    const completed = pointerPublications.filter(
-      (publication) => publication.status !== "in_progress",
-    );
-    if (completed.length === 0) {
-      return null;
-    }
-    return [...completed].sort((left, right) =>
-      right.created_at.localeCompare(left.created_at),
-    )[0];
-  }, [pointerPublications]);
-  const showIncrementalHint =
-    latestCompletedPointerPublication !== null &&
-    logicalCodebaseMembers.length > latestCompletedPointerPublication.entries.length;
-  // R8：按选中 LC 拉取成员/指针发布/聚合索引（多 LC 并存时面板数据随选中态切换）。
-  // I1：LC/Project 切换时同步重置 aggregateInitialization，避免残留上一 LC 的 operation
-  // （其轮询会带着陈旧 operation_id 打到新 LC 路径上）。
-  useEffect(() => {
-    setAggregateInitialization(null);
-    if (!selectedProjectId || !activeLogicalCodebaseId) {
-      setLogicalCodebaseMembers([]);
-      setPointerPublications([]);
-      setAggregateIndex(null);
-      return;
-    }
-    let disposed = false;
-    (async () => {
-      try {
-        const [membersResponse, publicationResponse] = await Promise.all([
-          listLogicalCodebaseMembers(
-            selectedProjectId,
-            activeLogicalCodebaseId,
-          ),
-          listPointerPublications(selectedProjectId, activeLogicalCodebaseId),
-        ]);
-        if (disposed) {
-          return;
-        }
-        setLogicalCodebaseMembers(membersResponse.members ?? []);
-        setPointerPublications(publicationResponse ?? []);
-        setAggregateIndex(
-          (membersResponse.members ?? []).length > 0
-            ? await getActiveAggregateIndex(
-                selectedProjectId,
-                activeLogicalCodebaseId,
-              )
-            : null,
-        );
-      } catch {
-        // LC 作用域数据加载失败保持现状，交由全局 refresh 重试。
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
-  }, [selectedProjectId, activeLogicalCodebaseId]);
-
-  useEffect(() => {
-    if (
-      !selectedProjectId ||
-      !activeLogicalCodebaseId ||
-      !latestPointerPublicationId
-    ) {
-      return;
-    }
-
-    let disposed = false;
-    let inFlight = false;
-    const poll = async () => {
-      if (inFlight) {
-        return;
-      }
-      inFlight = true;
-      try {
-        const publications = await listPointerPublications(
-          selectedProjectId,
-          activeLogicalCodebaseId,
-        );
-        if (!disposed) {
-          setPointerPublications(publications);
-        }
-      } catch {
-        // 轮询失败保持现状，下一次间隔重试。
-      } finally {
-        inFlight = false;
-      }
-    };
-    const interval = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [latestPointerPublicationId, selectedProjectId, activeLogicalCodebaseId]);
-
-  useEffect(() => {
-    if (
-      !selectedProjectId ||
-      !activeLogicalCodebaseId ||
-      !aggregateInitialization ||
-      (aggregateInitialization.status !== "created" &&
-        aggregateInitialization.status !== "running")
-    ) {
-      return;
-    }
-
-    let disposed = false;
-    let inFlight = false;
-    const poll = async () => {
-      if (inFlight) {
-        return;
-      }
-      inFlight = true;
-      try {
-        const operation = await getAggregateInitialization(
-          selectedProjectId,
-          activeLogicalCodebaseId,
-          aggregateInitialization.operation_id,
-        );
-        if (!disposed) {
-          setAggregateInitialization(operation);
-        }
-      } catch {
-        // 轮询失败保持现状，下一次间隔重试。
-      } finally {
-        inFlight = false;
-      }
-    };
-    const interval = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [
+  // R9 fix round 1【Important-2】：LC 作用域数据（成员/指针发布/聚合索引/轮询）抽取为
+  // 独立 hook（纯搬运，无行为改动）。
+  const {
+    logicalCodebaseMembers,
+    setLogicalCodebaseMembers,
+    pointerPublications,
+    setPointerPublications,
+    aggregateIndex,
+    setAggregateIndex,
+    aggregateInitialization,
+    setAggregateInitialization,
+    latestPointerPublication,
+    showIncrementalHint,
+  } = useLogicalCodebaseScopeData({
     selectedProjectId,
     activeLogicalCodebaseId,
-    aggregateInitialization?.operation_id,
-    aggregateInitialization?.status,
-  ]);
+  });
 
   async function handleSelectProject(projectId: string) {
     if (projectId === selectedProjectId) {
@@ -608,11 +454,7 @@ export function IssueLifecycleWorkbench({
       const nextId = response.design_specs[0]?.design_spec_id;
       await refresh(selectedProjectId);
       if (nextId) {
-        const nextKey = lifecycleEntityKey(
-          "design_spec",
-          card.issueId,
-          nextId,
-        );
+        const nextKey = lifecycleEntityKey("design_spec", card.issueId, nextId);
         setSelectedCardKey(nextKey);
         openDrawer(nextKey);
       }
@@ -650,9 +492,7 @@ export function IssueLifecycleWorkbench({
     setRepositoryDialogOpen(true);
   }
 
-  async function handleCreatedLogicalCodebase(
-    codebase: LogicalCodebaseDto,
-  ) {
+  async function handleCreatedLogicalCodebase(codebase: LogicalCodebaseDto) {
     setAddCodebaseDialogOpen(false);
     setRegistrationWizardLcId(codebase.id);
     setRegistrationDialogOpen(true);
@@ -847,7 +687,11 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleCancelAggregateInitialization() {
-    if (!selectedProjectId || !activeLogicalCodebaseId || !aggregateInitialization) {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !aggregateInitialization
+    ) {
       setError("缺少 Project 或初始化操作");
       return;
     }
@@ -1090,12 +934,16 @@ export function IssueLifecycleWorkbench({
     }
 
     setError(null);
-    const response = await prepareWorkItemPlan(selectedProjectId, card.issueId, {
-      title: defaultLaunchTitle({ target: "work_item", card }),
-      story_spec_ids: card.raw.story_spec_ids,
-      design_spec_ids: [card.id],
-      ...options,
-    });
+    const response = await prepareWorkItemPlan(
+      selectedProjectId,
+      card.issueId,
+      {
+        title: defaultLaunchTitle({ target: "work_item", card }),
+        story_spec_ids: card.raw.story_spec_ids,
+        design_spec_ids: [card.id],
+        ...options,
+      },
+    );
     await refresh(selectedProjectId);
     setPendingWorkItemPlanLaunch(null);
     onOpenWorkspace(response.workspace_session.workspace_session_id);
@@ -1136,7 +984,9 @@ export function IssueLifecycleWorkbench({
             <IssueLifecycleWorkbenchHeader
               projectName={selectedProject?.name}
               focusedIssueId={focusedIssueId}
-              canCreateIssue={Boolean(selectedProjectId) && repositories.length > 0}
+              canCreateIssue={
+                Boolean(selectedProjectId) && repositories.length > 0
+              }
               onShowAll={() => setFocusedIssueId(null)}
               onRefresh={() => void refresh()}
               onCreateIssue={() => setDialogOpen(true)}
@@ -1145,77 +995,35 @@ export function IssueLifecycleWorkbench({
           main={
             <div className="space-y-3">
               {selectedProjectId ? (
-                <div className="overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]">
-                  <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] px-3 py-2">
-                    <h2 className="text-sm font-semibold text-[var(--aria-ink)]">逻辑代码库</h2>
-                    <button
-                      type="button"
-                      disabled={logicalCodebases.length === 0}
-                      onClick={() => setRegistrationDialogOpen(true)}
-                      className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
-                    >
-                      登记成员
-                    </button>
-                  </div>
-                  {logicalCodebases.length > 0 ? (
-                    <div
-                      role="tablist"
-                      aria-label="逻辑代码库切换"
-                      className="flex flex-wrap gap-2 border-b border-[var(--aria-line)] px-3 py-2"
-                    >
-                      {logicalCodebases.map((codebase) => {
-                        const lcId =
-                          codebase.logical_codebase_id ?? codebase.id;
-                        const selected = lcId === activeLogicalCodebaseId;
-                        return (
-                          <button
-                            key={codebase.id}
-                            type="button"
-                            role="tab"
-                            aria-selected={selected}
-                            data-testid={`lc-selector-${codebase.name}`}
-                            onClick={() => setSelectedLogicalCodebaseId(lcId)}
-                            className={
-                              selected
-                                ? "rounded-md border border-[var(--aria-primary)] bg-[var(--aria-panel-muted)] px-3 py-1 text-xs font-semibold text-[var(--aria-primary)] ring-2 ring-[var(--aria-primary)]"
-                                : "rounded-md border border-[var(--aria-line)] px-3 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
-                            }
-                          >
-                            {codebase.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                  {logicalCodebaseMembers.length > 0 ? (
-                    <AggregateInitializationCard
-                      operation={aggregateInitialization}
-                      busy={aggregateInitializationBusy}
-                      onStart={() => void handleStartAggregateInitialization()}
-                      onCancel={() => void handleCancelAggregateInitialization()}
-                    />
-                  ) : null}
-                  {aggregateIndex ? (
-                    <AggregateIndexCard
-                      index={aggregateIndex}
-                      rebuilding={aggregateIndexRebuilding}
-                      onRebuild={() => void handleRebuildAggregateIndex()}
-                    />
-                  ) : null}
-                  <PointerPublicationPanel
-                    publication={latestPointerPublication}
-                    busy={pointerPublicationBusy}
-                    showIncrementalHint={showIncrementalHint}
-                    onPublishFull={() => void handlePublishFull()}
-                    onPublishIncremental={() =>
-                      void handlePublishIncremental()
-                    }
-                    onRetryRepo={(memberRepoId) =>
-                      void handleRetryRepo(memberRepoId)
-                    }
-                    onRevoke={() => void handleRevokePublication()}
-                  />
-                </div>
+                <LogicalCodebaseManagementPanel
+                  logicalCodebases={logicalCodebases}
+                  activeLogicalCodebaseId={activeLogicalCodebaseId}
+                  onSelectLogicalCodebase={setSelectedLogicalCodebaseId}
+                  onOpenRegistration={() => setRegistrationDialogOpen(true)}
+                  logicalCodebaseMembers={logicalCodebaseMembers}
+                  aggregateInitialization={aggregateInitialization}
+                  aggregateInitializationBusy={aggregateInitializationBusy}
+                  onStartAggregateInitialization={() =>
+                    void handleStartAggregateInitialization()
+                  }
+                  onCancelAggregateInitialization={() =>
+                    void handleCancelAggregateInitialization()
+                  }
+                  aggregateIndex={aggregateIndex}
+                  aggregateIndexRebuilding={aggregateIndexRebuilding}
+                  onRebuildAggregateIndex={() =>
+                    void handleRebuildAggregateIndex()
+                  }
+                  latestPointerPublication={latestPointerPublication}
+                  pointerPublicationBusy={pointerPublicationBusy}
+                  showIncrementalHint={showIncrementalHint}
+                  onPublishFull={() => void handlePublishFull()}
+                  onPublishIncremental={() => void handlePublishIncremental()}
+                  onRetryRepo={(memberRepoId) =>
+                    void handleRetryRepo(memberRepoId)
+                  }
+                  onRevoke={() => void handleRevokePublication()}
+                />
               ) : null}
               <div className="grid min-h-[calc(100vh-6rem)] gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
                 <IssueCardList
@@ -1246,55 +1054,36 @@ export function IssueLifecycleWorkbench({
         />
       </div>
       {isDrawerOpen && focusedEntity ? (
-        <div className="fixed right-0 top-0 z-50 h-full w-[min(480px,100vw)] shadow-xl">
-          <LifecycleCardDrawer
-            key={lifecycleCardKey(focusedEntity)}
-            entity={toDrawerEntity(
-              focusedEntity,
-              lifecycles.find(
-                (lifecycle) =>
-                  lifecycle.issue.issue_id === focusedEntity.issueId,
-              )?.work_items ?? [],
-              lifecycles.find(
-                (lifecycle) =>
-                  lifecycle.issue.issue_id === focusedEntity.issueId,
-              )?.coding_attempts ?? [],
-            )}
-            deliverySummary={
-              focusedEntity.kind === "issue"
-                ? lifecycles.find(
-                    (lifecycle) =>
-                      lifecycle.issue.issue_id === focusedEntity.issueId,
-                  )?.delivery_summary
-                : undefined
-            }
-            onClose={closeDrawer}
-            onOpenWorkspace={() =>
-              void handleOpenWorkspaceFromDrawer(focusedEntity)
-            }
-            onOpenCodingWorkspace={
-              ((focusedEntity.kind === "work_item" &&
-                focusedEntity.raw.plan_status === "confirmed") ||
-                (focusedEntity.kind === "work_item_group" &&
-                  focusedEntity.raw.status === "confirmed"))
-                ? () => void handleOpenCodingWorkspaceFromDrawer(focusedEntity)
-                : undefined
-            }
-            onGenerateNext={
-              focusedEntity.status === "confirmed" &&
-              (focusedEntity.kind === "story_spec" ||
-                focusedEntity.kind === "design_spec")
-                ? () => void handleGenerateNext(focusedEntity)
-                : undefined
-            }
-            onDelete={
-              focusedEntity.kind === "work_item" ||
-              focusedEntity.kind === "work_item_group"
-                ? () => handleDeleteLifecycleCardFromDrawer(focusedEntity)
-                : undefined
-            }
-          />
-        </div>
+        <IssueLifecycleWorkbenchDrawer
+          focusedEntity={focusedEntity}
+          workItems={
+            lifecycles.find(
+              (lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId,
+            )?.work_items ?? []
+          }
+          codingAttempts={
+            lifecycles.find(
+              (lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId,
+            )?.coding_attempts ?? []
+          }
+          deliverySummary={
+            focusedEntity.kind === "issue"
+              ? lifecycles.find(
+                  (lifecycle) =>
+                    lifecycle.issue.issue_id === focusedEntity.issueId,
+                )?.delivery_summary
+              : undefined
+          }
+          onClose={closeDrawer}
+          onOpenWorkspace={() =>
+            void handleOpenWorkspaceFromDrawer(focusedEntity)
+          }
+          onOpenCodingWorkspace={() =>
+            void handleOpenCodingWorkspaceFromDrawer(focusedEntity)
+          }
+          onGenerateNext={() => void handleGenerateNext(focusedEntity)}
+          onDelete={() => handleDeleteLifecycleCardFromDrawer(focusedEntity)}
+        />
       ) : null}
       {projectDialogOpen ? (
         <CreateProjectDialog
