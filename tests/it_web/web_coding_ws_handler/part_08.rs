@@ -42,6 +42,7 @@ fn app_with_group_full_chain_attempt_fixture(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "coding ws group fixture".to_string(),
             description: None,
             change_id: None,

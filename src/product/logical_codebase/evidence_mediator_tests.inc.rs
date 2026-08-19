@@ -338,7 +338,7 @@ mod tests {
 
         // 首次：按 manifest.active_aggregate_index_id 写 pin 并返回该 record。
         let first =
-            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest).expect("first pin load");
+            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest, None).expect("first pin load");
         assert_eq!(first.aggregate_index_id, fx.aggregate_index_id);
 
         let pin: EvidenceIndexPinRecord =
@@ -371,7 +371,7 @@ mod tests {
 
         // 二次查询读钉住值（第一代 record），不重写 pin。
         let second =
-            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest).expect("second pin load");
+            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest, None).expect("second pin load");
         assert_eq!(second.aggregate_index_id, fx.aggregate_index_id);
 
         let pin: EvidenceIndexPinRecord =

@@ -116,7 +116,9 @@ pub use registration_preflight_snapshot_store::{
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
-pub use repository_routing::{RepositoryRouting, RepositoryRoutingErrorCode};
+pub use repository_routing::{
+    RepositoryRouting, RepositoryRoutingErrorCode, resolve_issue_logical_codebase_id,
+};
 pub(crate) use store::lc_scope_root;
 pub use store::{
     LogicalCodebaseCreateInput, LogicalCodebaseLayout, LogicalCodebaseManifest,

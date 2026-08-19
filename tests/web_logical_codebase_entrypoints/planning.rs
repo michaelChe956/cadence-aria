@@ -208,6 +208,7 @@ struct PlanningHttpFixture {
     api_root: PathBuf,
     api_member_id: LogicalRepositoryId,
     web_member_id: LogicalRepositoryId,
+    lc_id: String,
     test_controls: TestControls,
     blocking_index_cli: Option<BlockingIndexCli>,
     app: axum::Router,
@@ -377,6 +378,7 @@ impl PlanningHttpFixture {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: None,
+                logical_codebase_id: None,
                 title: "stale index planning".to_string(),
                 description: Some("exercise fresh planning read".to_string()),
                 change_id: None,
@@ -390,6 +392,13 @@ impl PlanningHttpFixture {
         AggregatePolicyArtifactStore::new(paths.clone())
             .ensure_bootstrap(&manifest)
             .expect("bootstrap aggregate policy");
+        // v1.3：把 legacy 默认首个逻辑代码库迁移为带 record 的 LC（幂等），供
+        // `create_issue_with_primary` 以 `logical_codebase_id` 走逻辑 issue 归属。
+        let lc_id = logical
+            .migrate_legacy(PROJECT_ID)
+            .expect("migrate legacy logical codebase")
+            .expect("legacy logical codebase record")
+            .id;
 
         let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
         let test_controls = state.test_controls.clone();
@@ -436,6 +445,7 @@ impl PlanningHttpFixture {
             api_root,
             api_member_id,
             web_member_id,
+            lc_id,
             test_controls,
             blocking_index_cli: if with_initialization {
                 None
@@ -493,6 +503,7 @@ impl PlanningHttpFixture {
             &format!("/api/projects/{PROJECT_ID}/issues"),
             json!({
                 "repository_id": repository_id,
+                "logical_codebase_id": self.lc_id,
                 "title": "multi-repo issue",
                 "description": "created through multi-repo entrypoint"
             }),
@@ -670,6 +681,7 @@ impl LegacyPlanningHttpFixture {
             .create(CreateProductIssueInput {
                 project_id: project.id,
                 repo_id: Some(repository.id),
+                logical_codebase_id: None,
                 title: "legacy planning issue".to_string(),
                 description: None,
                 change_id: None,

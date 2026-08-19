@@ -75,6 +75,7 @@ impl LegacySingleRepositoryFixture {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some(LEGACY_REPOSITORY_ID.to_string()),
+                logical_codebase_id: None,
                 title: "legacy issue".to_string(),
                 description: Some("stored before logical codebase migration".to_string()),
                 change_id: Some("legacy-change".to_string()),

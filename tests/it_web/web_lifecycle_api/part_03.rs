@@ -35,6 +35,7 @@ async fn create_logical_prepare_fixture(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓聚合 WorkItemPlan".to_string(),
             description: Some("跨仓库聚合计划".to_string()),
             change_id: None,
@@ -202,6 +203,7 @@ async fn create_logical_confirm_fixture_with_spec_path(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓 confirm 加载失败".to_string(),
             description: None,
             change_id: None,

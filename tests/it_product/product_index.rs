@@ -117,6 +117,7 @@ fn creates_project_repository_issue_and_runtime_binding() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,
@@ -180,6 +181,7 @@ fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,

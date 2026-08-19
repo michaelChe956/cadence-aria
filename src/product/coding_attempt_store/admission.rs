@@ -347,6 +347,13 @@ impl CodingAttemptStore {
 
         let routing =
             RepositoryRouting::load_for_issue(&self.paths, &attempt.project_id, &attempt.issue_id)?;
+        // v1.3：policy 读取与 routing 同一 lc_id 子树（逻辑 issue 的 target snapshot
+        // 政策必须来自其唯一归属的代码库，不跨 LC）。
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+        )?;
         let snapshot_digest = match (routing, attempt.target_snapshot.as_ref()) {
             (RepositoryRouting::Legacy { .. }, None) => legacy_snapshot_digest(&attempt),
             (RepositoryRouting::Logical { .. }, None) => {
@@ -358,11 +365,13 @@ impl CodingAttemptStore {
                 validate_snapshot_fields(&self.paths, &attempt).map_err(|_| {
                     ProductStoreError::Io(TARGET_SNAPSHOT_IDENTITY_DRIFTED.to_string())
                 })?;
-                let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
-                    .get(&attempt.project_id)?
-                    .ok_or_else(|| {
-                        ProductStoreError::Io(TARGET_SNAPSHOT_POLICY_DRIFTED.to_string())
-                    })?;
+                let policy_store = match lc_id.as_deref() {
+                    Some(lc_id) => AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id),
+                    None => AggregatePolicyArtifactStore::new(self.paths.clone()),
+                };
+                let policy = policy_store.get(&attempt.project_id)?.ok_or_else(|| {
+                    ProductStoreError::Io(TARGET_SNAPSHOT_POLICY_DRIFTED.to_string())
+                })?;
                 if policy.digest != snapshot.policy_digest {
                     return Err(ProductStoreError::Io(
                         TARGET_SNAPSHOT_POLICY_DRIFTED.to_string(),

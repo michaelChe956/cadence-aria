@@ -421,6 +421,7 @@ impl LogicalCodebaseStore {
             root.join("preflights"),
             root.join("registration-batches"),
             root.join("pointer-publications"),
+            root.join("selections"),
         ] {
             std::fs::create_dir_all(&directory).map_err(|error| {
                 ProductStoreError::Io(format!("create {}: {error}", directory.display()))
@@ -893,7 +894,7 @@ impl LogicalCodebaseStore {
     }
 }
 
-fn legacy_logical_codebase_id(project_id: &str) -> String {
+pub(crate) fn legacy_logical_codebase_id(project_id: &str) -> String {
     let digest = format!("{:x}", Sha256::digest(project_id.as_bytes()));
     format!("logical_codebase_{}", &digest[..32])
 }

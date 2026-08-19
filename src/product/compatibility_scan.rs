@@ -65,6 +65,7 @@ pub fn rebuild_index_from_runtime(
                 issue_store.create(CreateProductIssueInput {
                     project_id: project.id.clone(),
                     repo_id: Some(repository.id.clone()),
+                    logical_codebase_id: None,
                     title: runtime_task.title.clone(),
                     description: None,
                     change_id: Some(runtime_task.change_id.clone()),

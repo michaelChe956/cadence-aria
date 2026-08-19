@@ -294,6 +294,7 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Logical plan validation".to_string(),
             description: None,
             change_id: None,

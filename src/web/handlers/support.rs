@@ -182,10 +182,12 @@ pub(crate) fn find_repository(
     project_id: &str,
     repository_id: &str,
 ) -> ApiResult<RepositoryRecord> {
-    let project = ProjectStore::new(app_paths.clone())
+    // v1.3：单仓代码库路径不再按 project 判定 feature（for_project 过渡语义已移除），
+    // 直接以禁用逻辑身份的 RepositoryStore 读 repos.json，绝不触碰 LC store。
+    let _project = ProjectStore::new(app_paths.clone())
         .get(project_id)
         .map_err(product_store_api_error)?;
-    RepositoryStore::for_project(app_paths.clone(), &project)
+    RepositoryStore::new(app_paths.clone())
         .list(project_id)
         .map_err(product_store_api_error)?
         .into_iter()

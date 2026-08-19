@@ -60,6 +60,7 @@ pub(super) fn create_large_workspace_fixture(
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
         repo_id: Some(repository.id.clone()),
+        logical_codebase_id: None,
         title: "Large Workspace Memory Issue".to_string(),
         description: Some("验证大型 workspace 的按需内容加载".to_string()),
         change_id: None,
@@ -299,6 +300,7 @@ fn create_coding_role_run_fixture(
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
         repo_id: Some(repository.id.clone()),
+        logical_codebase_id: None,
         title: "Coding Role Run Issue".to_string(),
         description: Some("Issue for role run history E2E".to_string()),
         change_id: None,

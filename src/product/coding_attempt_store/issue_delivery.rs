@@ -195,6 +195,7 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: None,
                 title: "issue".to_string(),
                 description: None,
                 change_id: None,

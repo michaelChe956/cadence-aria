@@ -869,6 +869,7 @@ mod tests {
                 id: "issue_0001".to_string(),
                 project_id: "project_0001".to_string(),
                 repo_id: Some(self.repository.id.clone()),
+                logical_codebase_id: None,
                 title: "referenced".to_string(),
                 description: None,
                 change_id: "referenced".to_string(),

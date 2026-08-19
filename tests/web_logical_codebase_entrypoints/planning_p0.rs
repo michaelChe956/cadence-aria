@@ -331,14 +331,37 @@ impl P0HttpFixture {
             .to_string()
     }
 
+    async fn logical_codebase_id(&self, project_id: &str) -> String {
+        let (status, codebases) = request(
+            &self.app,
+            Method::GET,
+            &format!("/api/projects/{project_id}/codebases"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "list codebases: {codebases}");
+        codebases["codebases"]
+            .as_array()
+            .and_then(|codebases| {
+                codebases
+                    .iter()
+                    .find(|codebase| codebase["kind"] == "logical")
+            })
+            .and_then(|codebase| codebase["logical_codebase_id"].as_str())
+            .expect("registered logical codebase id")
+            .to_string()
+    }
+
     async fn create_issue_with_primary(&self, project_id: &str) -> serde_json::Value {
         let repository_id = self.primary_repository_id(project_id).await;
+        let logical_codebase_id = self.logical_codebase_id(project_id).await;
         let (status, issue) = request(
             &self.app,
             Method::POST,
             &format!("/api/projects/{project_id}/issues"),
             json!({
                 "repository_id": repository_id,
+                "logical_codebase_id": logical_codebase_id,
                 "title": "P0 aggregate planning issue",
                 "description": "selection must be written by the HTTP issue endpoint"
             }),

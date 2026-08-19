@@ -155,6 +155,7 @@ async fn pointer_publication_scenario_f_logical_context_injects_authority_refere
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,

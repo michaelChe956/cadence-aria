@@ -453,6 +453,9 @@ pub struct CreateProductIssueRequest {
     pub description: Option<String>,
     pub change_id: Option<String>,
     pub repository_id: Option<String>,
+    /// v1.3：逻辑代码库归属；Some 时创建逻辑 issue（repository_id 须为其 active primary）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -310,6 +310,7 @@ async fn fifty_member_planning_query_returns_all_unique_member_ids_and_aliases()
         .create(cadence_aria::product::issue_store::CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "50 member planning query".to_string(),
             description: None,
             change_id: None,

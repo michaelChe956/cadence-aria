@@ -12,6 +12,7 @@ use crate::product::models::{IssuePhase, IssueRecord, IssueStatus};
 pub struct CreateProductIssueInput {
     pub project_id: String,
     pub repo_id: Option<String>,
+    pub logical_codebase_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
@@ -21,6 +22,7 @@ pub struct CreateProductIssueInput {
 pub struct CreateProductIssueWithRepositoryInput {
     pub project_id: String,
     pub repo_id: String,
+    pub logical_codebase_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
@@ -104,6 +106,9 @@ impl IssueStore {
         if let Some(repo_id) = input.repo_id.as_deref() {
             validate_relative_id(repo_id)?;
         }
+        if let Some(lc_id) = input.logical_codebase_id.as_deref() {
+            validate_relative_id(lc_id)?;
+        }
         let issues_root = self.paths.project_root(&input.project_id).join("issues");
         let existing_len = count_entries(&issues_root)?;
         let id = next_sequential_id("issue", existing_len);
@@ -120,6 +125,7 @@ impl IssueStore {
             id: id.clone(),
             project_id: input.project_id,
             repo_id: input.repo_id,
+            logical_codebase_id: input.logical_codebase_id,
             title: input.title,
             description: input.description,
             change_id,
@@ -141,6 +147,7 @@ impl IssueStore {
         self.create(CreateProductIssueInput {
             project_id: input.project_id,
             repo_id: Some(input.repo_id),
+            logical_codebase_id: input.logical_codebase_id,
             title: input.title,
             description: input.description,
             change_id: input.change_id,
@@ -213,6 +220,7 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: None,
                 title: "issue".to_string(),
                 description: None,
                 change_id: None,

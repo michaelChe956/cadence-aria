@@ -125,7 +125,12 @@ fn handle_evidence_query_with_runner(
         .target_snapshot
         .as_ref()
         .ok_or(EvidenceError::NotAvailable)?;
-    let logical = LogicalCodebaseStore::new(paths.clone());
+    // v1.3：按 issue 所属代码库把 manifest/member/index 全部解析到 lc_id 子树。
+    let lc_id = attempt_logical_codebase_id(paths, &attempt)?;
+    let logical = match lc_id.as_deref() {
+        Some(lc_id) => LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
+        None => LogicalCodebaseStore::new(paths.clone()),
+    };
     let target_member_dir = resolve_target_member_dir(&logical, &attempt, snapshot)?;
 
     // ③ ACL：manifest 成员集合 + 成员目录名（排除本仓/非成员）。
@@ -160,7 +165,7 @@ fn handle_evidence_query_with_runner(
     );
 
     // ④ 快照钉住：首查写 pin，后续读钉住 record；stale 两方向判定。
-    let pinned = load_or_pin_index(paths, &attempt, &manifest)?;
+    let pinned = load_or_pin_index(paths, &attempt, &manifest, lc_id.as_deref())?;
     let index_stale = is_index_stale(snapshot, &pinned);
 
     // ⑤ 查询 + 渲染 + 单次 12k 截断 + 累计配额（Exhausted→evidence_budget_exhausted/429）。
@@ -304,6 +309,7 @@ fn load_or_pin_index(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
     manifest: &LogicalCodebaseManifest,
+    lc_id: Option<&str>,
 ) -> Result<AggregateIndexRecord, EvidenceError> {
     let pin_path = attempt_pin_path(paths, attempt);
     if pin_path.exists() {
@@ -311,7 +317,7 @@ fn load_or_pin_index(
             read_json(&pin_path).map_err(|error| EvidenceError::Io {
                 message: format!("read evidence index pin {}: {error}", pin_path.display()),
             })?;
-        return load_pinned_index(paths, attempt, &pin.pinned_aggregate_index_id);
+        return load_pinned_index(paths, attempt, &pin.pinned_aggregate_index_id, lc_id);
     }
 
     let pinned_id =
@@ -325,7 +331,7 @@ fn load_or_pin_index(
                     attempt.project_id
                 ),
             })?;
-    let record = load_pinned_index(paths, attempt, &pinned_id)?;
+    let record = load_pinned_index(paths, attempt, &pinned_id, lc_id)?;
     let pin = EvidenceIndexPinRecord {
         pinned_aggregate_index_id: pinned_id,
         pinned_at: Utc::now().to_rfc3339(),
@@ -340,14 +346,31 @@ fn load_pinned_index(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
     pinned_id: &str,
+    lc_id: Option<&str>,
 ) -> Result<AggregateIndexRecord, EvidenceError> {
-    let store = AggregateIndexStore::new(paths.clone());
+    let store = match lc_id {
+        Some(lc_id) => AggregateIndexStore::for_lc(paths.clone(), lc_id),
+        None => AggregateIndexStore::new(paths.clone()),
+    };
     store
         .get(&attempt.project_id, pinned_id)?
         .ok_or_else(|| EvidenceError::QueryFailed {
             code: "evidence_index_unavailable",
             message: format!("pinned aggregate index {pinned_id} was not found"),
         })
+}
+
+/// 从 attempt 反查 issue 唯一归属的 lc_id（v1.3）；issue 不存在/单仓返回 None。
+fn attempt_logical_codebase_id(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<String>, EvidenceError> {
+    crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        paths,
+        &attempt.project_id,
+        &attempt.issue_id,
+    )
+    .map_err(map_store_error)
 }
 
 /// stale 判定：attempt 冻结的 target revision / membership_revision 与钉住 record

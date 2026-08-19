@@ -123,6 +123,19 @@ impl ProductAppPaths {
             .join("codebase-selection.json")
     }
 
+    /// v1.3：逻辑代码库归属的 issue selection 键含 lc_id，落在 LC 子树。
+    pub fn lc_codebase_selection_path(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+        issue_id: &str,
+    ) -> PathBuf {
+        self.logical_codebase_record_root(project_id, logical_codebase_id)
+            .join("selections")
+            .join(issue_id)
+            .join("codebase-selection.json")
+    }
+
     pub fn planning_context_snapshot_path(&self, project_id: &str, issue_id: &str) -> PathBuf {
         self.issue_root(project_id, issue_id)
             .join("planning-context-snapshot.json")

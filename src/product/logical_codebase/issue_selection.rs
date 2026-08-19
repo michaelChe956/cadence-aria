@@ -22,6 +22,9 @@ pub struct IssueCodebaseSelection {
     pub schema_version: u16,
     pub project_id: String,
     pub issue_id: String,
+    /// 归属的逻辑代码库 lc_id（v1.3）：None 表示默认首个逻辑代码库（legacy）或旧文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_id: Option<String>,
     pub selection_policy: SelectionPolicy,
     #[serde(default)]
     pub included_repository_ids: Vec<LogicalRepositoryId>,
@@ -84,6 +87,7 @@ impl IssueCodebaseSelection {
             schema_version: 1,
             project_id: project_id.into(),
             issue_id: issue_id.into(),
+            logical_codebase_id: None,
             selection_policy: policy,
             included_repository_ids: included,
             excluded_repository_ids: excluded,
@@ -93,6 +97,12 @@ impl IssueCodebaseSelection {
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    /// 标记本 selection 归属的逻辑代码库 lc_id（v1.3）。
+    pub fn for_logical_codebase(mut self, logical_codebase_id: impl Into<String>) -> Self {
+        self.logical_codebase_id = Some(logical_codebase_id.into());
+        self
     }
 
     /// 校验可持久化 selection；AllMembers 的解析语义保持由
@@ -130,6 +140,7 @@ impl IssueCodebaseSelection {
 
 pub struct IssueCodebaseSelectionStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 /// Loads an issue selection through its authoritative store, including legacy
@@ -163,6 +174,7 @@ impl LegacyIssueCodebaseSelection {
             schema_version: 1,
             project_id: project_id.to_string(),
             issue_id: issue_id.to_string(),
+            logical_codebase_id: None,
             selection_policy,
             included_repository_ids: self.included,
             excluded_repository_ids: Vec::new(),
@@ -177,7 +189,42 @@ impl LegacyIssueCodebaseSelection {
 
 impl IssueCodebaseSelectionStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes every selection read/write to one logical codebase subtree.
+    /// `None`/legacy lc_id keeps the legacy issue-root layout unchanged.
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
+    }
+
+    /// selection 落盘路径（v1.3）：逻辑代码库归属时键含 lc_id（
+    /// `logical-codebases/{lc_id}/selections/{issue_id}.json`）；默认首个逻辑代码库
+    /// 与旧文件继续使用 issue 根 `codebase-selection.json`。
+    fn selection_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<std::path::PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        match &self.lc_id {
+            Some(lc_id)
+                if *lc_id
+                    != crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        project_id,
+                    ) =>
+            {
+                validate_relative_id(lc_id)?;
+                Ok(self
+                    .paths
+                    .lc_codebase_selection_path(project_id, lc_id, issue_id))
+            }
+            _ => Ok(self.paths.codebase_selection_path(project_id, issue_id)),
+        }
     }
 
     pub fn save(&self, selection: &IssueCodebaseSelection) -> Result<(), ProductStoreError> {
@@ -185,9 +232,7 @@ impl IssueCodebaseSelectionStore {
         validate_relative_id(&selection.project_id)?;
         validate_relative_id(&selection.issue_id)?;
         write_json(
-            &self
-                .paths
-                .codebase_selection_path(&selection.project_id, &selection.issue_id),
+            &self.selection_path(&selection.project_id, &selection.issue_id)?,
             selection,
         )
     }
@@ -199,7 +244,7 @@ impl IssueCodebaseSelectionStore {
     ) -> Result<Option<IssueCodebaseSelection>, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
-        let path = self.paths.codebase_selection_path(project_id, issue_id);
+        let path = self.selection_path(project_id, issue_id)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -401,6 +446,48 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = IssueCodebaseSelectionStore::new(ProductAppPaths::new(temp.path()));
         assert!(store.load("project_0001", "issue_0001").unwrap().is_none());
+    }
+
+    #[test]
+    fn lc_scoped_store_saves_selection_keyed_by_lc_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = IssueCodebaseSelectionStore::for_lc(paths.clone(), "logical_codebase_0001");
+        let selection = IssueCodebaseSelection::all_members("project_0001", "issue_0001", None)
+            .for_logical_codebase("logical_codebase_0001");
+        store.save(&selection).unwrap();
+
+        // 键含 lc_id：落在 logical-codebases/{lc_id}/selections/{issue_id}/ 子树。
+        let expected =
+            paths.lc_codebase_selection_path("project_0001", "logical_codebase_0001", "issue_0001");
+        assert!(
+            expected.is_file(),
+            "selection must be keyed by lc_id: {expected:?}"
+        );
+        assert!(
+            !paths
+                .codebase_selection_path("project_0001", "issue_0001")
+                .exists()
+        );
+
+        let loaded = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert_eq!(
+            loaded.logical_codebase_id.as_deref(),
+            Some("logical_codebase_0001")
+        );
+        assert_eq!(loaded.selection_policy, SelectionPolicy::AllMembers);
+    }
+
+    #[test]
+    fn unscoped_store_keeps_legacy_issue_root_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = IssueCodebaseSelectionStore::new(paths.clone());
+        let selection = IssueCodebaseSelection::all_members("project_0001", "issue_0001", None);
+        store.save(&selection).unwrap();
+
+        let expected = paths.codebase_selection_path("project_0001", "issue_0001");
+        assert!(expected.is_file(), "legacy layout preserved: {expected:?}");
     }
 
     #[test]

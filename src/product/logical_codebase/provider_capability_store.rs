@@ -163,11 +163,20 @@ const MANAGED_CAPABILITY_SNAPSHOT_REF: &str = "cap_managed_snapshot";
 #[derive(Debug, Clone)]
 pub struct ProviderCapabilityStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl ProviderCapabilityStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes capability reads/writes to one logical codebase subtree（v1.3）。
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
     }
 
     /// 读取指定 provider 的 capability 记录;文件或记录不存在返回 `Ok(None)`。
@@ -237,10 +246,10 @@ impl ProviderCapabilityStore {
 
     fn capabilities_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
-        Ok(self
-            .paths
-            .logical_codebase_root(project_id)
-            .join("capabilities.json"))
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join("capabilities.json"),
+        )
     }
 }
 

@@ -240,52 +240,80 @@ pub async fn create_product_issue(
     Path(project_id): Path<String>,
     Json(request): Json<CreateProductIssueRequest>,
 ) -> ApiResult<Json<ProductIssueDto>> {
-    let repository_id = request
-        .repository_id
-        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
     let app_paths = product_app_paths(&state);
     ProjectStore::new(app_paths.clone())
         .get(&project_id)
         .map_err(product_store_api_error)?;
 
-    let has_logical_codebase_storage = LogicalCodebaseStore::new(app_paths.clone())
-        .has_any_storage(&project_id)
-        .map_err(product_store_api_error)?;
-    if !has_logical_codebase_storage {
-        // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json。
-        let _repository = find_repository(&app_paths, &project_id, &repository_id)?;
-        let store = IssueStore::new(app_paths);
-        let issue = store
-            .create_with_repository(CreateProductIssueWithRepositoryInput {
-                project_id,
-                repo_id: repository_id,
-                title: request.title,
-                description: request.description,
-                change_id: request.change_id,
-            })
-            .map_err(product_store_api_error)?;
-        return Ok(Json(product_issue_dto(issue, None)));
-    }
+    let repository_id = request
+        .repository_id
+        .as_deref()
+        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
 
-    validate_multi_repo_issue_primary(&app_paths, &project_id, &repository_id)?;
+    match request.logical_codebase_id.as_deref() {
+        Some(logical_codebase_id) => create_logical_codebase_issue(
+            &state,
+            &app_paths,
+            &project_id,
+            logical_codebase_id,
+            repository_id,
+            &request,
+        ),
+        None => {
+            // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json，
+            // 也绝不触碰 LC store（for_project 过渡语义已移除）。
+            let _repository = find_repository(&app_paths, &project_id, repository_id)?;
+            let store = IssueStore::new(app_paths);
+            let issue = store
+                .create_with_repository(CreateProductIssueWithRepositoryInput {
+                    project_id,
+                    repo_id: repository_id.to_string(),
+                    logical_codebase_id: None,
+                    title: request.title,
+                    description: request.description,
+                    change_id: request.change_id,
+                })
+                .map_err(product_store_api_error)?;
+            Ok(Json(product_issue_dto(issue, None)))
+        }
+    }
+}
+
+/// 逻辑代码库 issue（v1.3）：guard LC 存在（404）→ primary 校验（须属该 LC active
+/// member）→ 建 issue 并持久化归属 → 写该 LC all_members selection（键含 lc_id）。
+/// D4 补偿事务：selection 写失败删除刚建 issue → 422；删除亦失败记 orphan → 500。
+fn create_logical_codebase_issue(
+    state: &WebAppState,
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    repository_id: &str,
+    request: &CreateProductIssueRequest,
+) -> ApiResult<Json<ProductIssueDto>> {
+    require_logical_codebase(app_paths, project_id, logical_codebase_id)?;
+    validate_logical_codebase_primary(app_paths, project_id, logical_codebase_id, repository_id)?;
+
     let store = IssueStore::new(app_paths.clone());
     let issue = store
         .create_with_repository(CreateProductIssueWithRepositoryInput {
-            project_id: project_id.clone(),
-            repo_id: repository_id,
-            title: request.title,
-            description: request.description,
-            change_id: request.change_id,
+            project_id: project_id.to_string(),
+            repo_id: repository_id.to_string(),
+            logical_codebase_id: Some(logical_codebase_id.to_string()),
+            title: request.title.clone(),
+            description: request.description.clone(),
+            change_id: request.change_id.clone(),
         })
         .map_err(product_store_api_error)?;
-    let selection = IssueCodebaseSelection::all_members(&project_id, &issue.id, None);
+
+    let selection = IssueCodebaseSelection::all_members(project_id, &issue.id, None)
+        .for_logical_codebase(logical_codebase_id);
     let selection_result = state.test_controls.save_issue_selection(|| {
-        IssueCodebaseSelectionStore::new(app_paths.clone()).save(&selection)
+        IssueCodebaseSelectionStore::for_lc(app_paths.clone(), logical_codebase_id).save(&selection)
     });
     if let Err(selection_error) = selection_result {
         let delete_result = state
             .test_controls
-            .delete_issue(|| store.delete(&project_id, &issue.id));
+            .delete_issue(|| store.delete(project_id, &issue.id));
         return match delete_result {
             Ok(()) => Err(issue_selection_write_failed_api_error()),
             Err(delete_error) => {
@@ -308,21 +336,25 @@ pub async fn create_product_issue(
     Ok(Json(product_issue_dto(issue, None)))
 }
 
-/// 多仓创建的 primary 必须来自 manifest 中的 active member，且预校验必须发生在
-/// IssueStore::create_with_repository 之前，避免留下没有 selection 的 issue。
-fn validate_multi_repo_issue_primary(
+/// 逻辑 issue 的 primary 校验：repository_id 必须来自该 LC manifest 的 active member。
+/// 预校验发生在 IssueStore::create_with_repository 之前，避免留下没有 selection 的 issue。
+fn validate_logical_codebase_primary(
     app_paths: &crate::product::app_paths::ProductAppPaths,
     project_id: &str,
+    logical_codebase_id: &str,
     repository_id: &str,
 ) -> ApiResult<()> {
-    let authority = LogicalCodebaseStore::new(app_paths.clone());
+    // 与 routing/resolver 同一 scoping 机制（for_lc）：legacy 默认首个 LC 回退
+    // project 级路径，非 legacy LC 落在 logical-codebases/{lc_id}/ 子树，保证
+    // primary 校验读到的 manifest/member 与后续规划解析完全一致。
+    let authority = LogicalCodebaseStore::for_lc(app_paths.clone(), logical_codebase_id);
     let manifest = authority
         .load_manifest(project_id)
         .map_err(product_store_api_error)?
         .ok_or_else(|| {
             product_store_api_error(ProductStoreError::NotFound {
                 kind: "logical_codebase_manifest",
-                id: project_id.to_string(),
+                id: logical_codebase_id.to_string(),
             })
         })?;
     let active_members = authority

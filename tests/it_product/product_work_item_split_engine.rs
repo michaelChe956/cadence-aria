@@ -300,6 +300,7 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "登录会话过期".to_string(),
             description: Some("描述".to_string()),
             change_id: None,

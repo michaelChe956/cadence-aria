@@ -352,15 +352,18 @@ fn validate_logical_evaluation_selection(
             "issue codebase selection has been invalidated",
         ));
     }
-    let active_members: std::collections::BTreeSet<_> =
-        crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
-            .list_members(project_id)?
-            .into_iter()
-            .filter(|member| {
-                member.status == crate::product::logical_codebase::MemberStatus::Active
-            })
-            .map(|member| member.logical_repository_id)
-            .collect();
+    let logical = match selection.logical_codebase_id.as_deref() {
+        Some(lc_id) => {
+            crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), lc_id)
+        }
+        None => crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone()),
+    };
+    let active_members: std::collections::BTreeSet<_> = logical
+        .list_members(project_id)?
+        .into_iter()
+        .filter(|member| member.status == crate::product::logical_codebase::MemberStatus::Active)
+        .map(|member| member.logical_repository_id)
+        .collect();
     if manifest
         .member_ids
         .iter()
@@ -665,6 +668,7 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: None,
                 title: "评估上下文 fail-closed".to_string(),
                 description: None,
                 change_id: None,

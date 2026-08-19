@@ -111,6 +111,12 @@ impl StoreBackedProviderCapabilitySource {
             project_id,
         }
     }
+
+    /// v1.3：接受已按 lc_id 作用域的 `ProviderCapabilityStore`，使 gateway 的
+    /// capability 读取落在 issue 所属代码库子树。
+    pub fn with_store(store: ProviderCapabilityStore, project_id: String) -> Self {
+        Self { store, project_id }
+    }
 }
 
 impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {

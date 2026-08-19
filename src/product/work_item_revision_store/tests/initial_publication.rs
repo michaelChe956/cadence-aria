@@ -639,6 +639,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Runtime Reader Issue".to_string(),
             description: None,
             change_id: None,

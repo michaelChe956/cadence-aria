@@ -31,17 +31,17 @@ pub struct RepositoryContextResolution {
 }
 
 /// 从 manifest + issue selection 解析参与仓库集合与成员 inventory 摘要。
+///
+/// v1.3：按 issue 唯一归属的代码库（`IssueRecord.logical_codebase_id`）把
+/// manifest/member/checkout/selection 全部解析到 lc_id 子树；无 lc_id 的旧 issue
+/// 回退 project 级路径（默认首个逻辑代码库）。
 pub struct PlanningContextSetResolver {
-    logical: LogicalCodebaseStore,
-    selections: IssueCodebaseSelectionStore,
+    paths: ProductAppPaths,
 }
 
 impl PlanningContextSetResolver {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self {
-            logical: LogicalCodebaseStore::new(paths.clone()),
-            selections: IssueCodebaseSelectionStore::new(paths),
-        }
+        Self { paths }
     }
 
     pub fn resolve(
@@ -49,14 +49,29 @@ impl PlanningContextSetResolver {
         project_id: &str,
         issue_id: &str,
     ) -> Result<RepositoryContextResolution, ProductStoreError> {
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.paths,
+            project_id,
+            issue_id,
+        )?;
+        let (logical, selections) = match lc_id.as_deref() {
+            Some(lc_id) => (
+                LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
+                IssueCodebaseSelectionStore::for_lc(self.paths.clone(), lc_id),
+            ),
+            None => (
+                LogicalCodebaseStore::new(self.paths.clone()),
+                IssueCodebaseSelectionStore::new(self.paths.clone()),
+            ),
+        };
         let manifest =
-            self.logical
+            logical
                 .load_manifest(project_id)?
                 .ok_or_else(|| ProductStoreError::NotFound {
                     kind: "logical_codebase_manifest",
                     id: project_id.to_string(),
                 })?;
-        let listed_members = self.logical.list_members(project_id)?;
+        let listed_members = logical.list_members(project_id)?;
         // REQ-PLN-02：active 集合从成员记录状态推导（apply_delete_tombstone 只置
         // MemberStatus::Tombstoned、不改 manifest.member_ids）；有效成员 =
         // manifest.member_ids ∩ active_member_ids（manifest 外的 active member 不算
@@ -72,7 +87,7 @@ impl PlanningContextSetResolver {
             .copied()
             .filter(|id| active_set.contains(id))
             .collect();
-        let resolution = self.selections.resolve_effective_members(
+        let resolution = selections.resolve_effective_members(
             project_id,
             issue_id,
             &effective_active_member_ids,
@@ -91,8 +106,7 @@ impl PlanningContextSetResolver {
             .filter(|id| !active_set.contains(id))
             .collect();
         if !stale_manifest_members.is_empty() && resolution.selection.invalidation.is_none() {
-            self.selections
-                .mark_invalidated(project_id, issue_id, "member_removed")?;
+            selections.mark_invalidated(project_id, issue_id, "member_removed")?;
         }
         // 合并 selection 失效成员与 manifest 层面失效成员，供 snapshot 失效传播。
         let mut invalid_member_ids = resolution.invalid_member_ids;
@@ -101,7 +115,7 @@ impl PlanningContextSetResolver {
                 invalid_member_ids.push(id);
             }
         }
-        let checkouts = self.logical.list_checkouts(project_id)?;
+        let checkouts = logical.list_checkouts(project_id)?;
         let paths_by_member =
             member_root_relative_paths(&manifest.provider_context_root, &checkouts);
 

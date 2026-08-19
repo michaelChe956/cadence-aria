@@ -523,6 +523,7 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Rebuild planning".to_string(),
             description: None,
             change_id: None,

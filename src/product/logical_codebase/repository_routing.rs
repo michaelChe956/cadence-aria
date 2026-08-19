@@ -58,6 +58,39 @@ pub enum RepositoryRouting {
     },
 }
 
+/// 解析 issue 唯一归属的代码库（v1.3）：返回 issue 记录里持久化的
+/// `logical_codebase_id`（Some=逻辑代码库，None=单仓或旧数据）。issue 不存在时
+/// 返回 None（路由交由 manifest/selection 存在性继续判定，不静默伪造）。
+pub fn resolve_issue_logical_codebase_id(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> Result<Option<String>, ProductStoreError> {
+    match crate::product::issue_store::IssueStore::new(app_paths.clone()).get(project_id, issue_id)
+    {
+        Ok(issue) => Ok(issue.logical_codebase_id),
+        Err(ProductStoreError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// 据 lc_id 构造 manifest/selection 的权威 store 对；None 保持旧 project 级路径。
+fn issue_codebase_stores(
+    app_paths: &ProductAppPaths,
+    lc_id: Option<&str>,
+) -> (LogicalCodebaseStore, IssueCodebaseSelectionStore) {
+    match lc_id {
+        Some(lc_id) => (
+            LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id),
+            IssueCodebaseSelectionStore::for_lc(app_paths.clone(), lc_id),
+        ),
+        None => (
+            LogicalCodebaseStore::new(app_paths.clone()),
+            IssueCodebaseSelectionStore::new(app_paths.clone()),
+        ),
+    }
+}
+
 impl RepositoryRouting {
     /// 纯判定，不加载 store（便于单测）；加载在 `load_for_issue` 中完成。
     pub fn classify(
@@ -83,15 +116,18 @@ impl RepositoryRouting {
         }
     }
 
-    /// 加载辅助（B6）：经 store 加载 manifest + selection 后交 `classify`。
+    /// 加载辅助（B6）：按 issue 所属 codebase（v1.3）经 store 加载 manifest + selection
+    /// 后交 `classify`。逻辑 issue 的 manifest/selection 均取 lc_id 子树；单仓 issue
+    /// 与旧数据回退 project 级路径。
     pub fn load_for_issue(
         app_paths: &ProductAppPaths,
         project_id: &str,
         issue_id: &str,
     ) -> Result<Self, ProductStoreError> {
-        let manifest = LogicalCodebaseStore::new(app_paths.clone()).load_manifest(project_id)?;
-        let selection =
-            IssueCodebaseSelectionStore::new(app_paths.clone()).load(project_id, issue_id)?;
+        let lc_id = resolve_issue_logical_codebase_id(app_paths, project_id, issue_id)?;
+        let (logical, selections) = issue_codebase_stores(app_paths, lc_id.as_deref());
+        let manifest = logical.load_manifest(project_id)?;
+        let selection = selections.load(project_id, issue_id)?;
         Ok(Self::classify(manifest, selection))
     }
 }
@@ -146,6 +182,74 @@ mod tests {
                 assert_eq!(code, RepositoryRoutingErrorCode::OrphanedSelection)
             }
             _ => panic!("(None, Some) must fail-closed"),
+        }
+    }
+
+    #[test]
+    fn resolve_issue_logical_codebase_id_reads_persisted_attribution() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let store = crate::product::issue_store::IssueStore::new(paths.clone());
+        let issue = store
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: Some("logical_codebase_0001".to_string()),
+                title: "logical issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let lc_id = resolve_issue_logical_codebase_id(&paths, "project_0001", &issue.id).unwrap();
+        assert_eq!(lc_id.as_deref(), Some("logical_codebase_0001"));
+    }
+
+    #[test]
+    fn load_for_issue_resolves_manifest_and_selection_from_lc_subtree() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let lc_id = "logical_codebase_0001";
+        // 建 issue 归属 lc_id。
+        let store = crate::product::issue_store::IssueStore::new(paths.clone());
+        let issue = store
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: Some(lc_id.to_string()),
+                title: "logical issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        // 在 lc 子树写 manifest + selection。
+        let logical = LogicalCodebaseStore::for_lc(paths.clone(), lc_id);
+        logical
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new(
+                    "project_0001",
+                    std::path::PathBuf::from("/tmp/logical-codebase"),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+        IssueCodebaseSelectionStore::for_lc(paths.clone(), lc_id)
+            .save(
+                &IssueCodebaseSelection::all_members("project_0001", &issue.id, None)
+                    .for_logical_codebase(lc_id),
+            )
+            .unwrap();
+
+        let routing = RepositoryRouting::load_for_issue(&paths, "project_0001", &issue.id).unwrap();
+        match routing {
+            RepositoryRouting::Logical {
+                manifest,
+                selection,
+            } => {
+                assert_eq!(manifest.project_id, "project_0001");
+                assert_eq!(selection.logical_codebase_id.as_deref(), Some(lc_id));
+            }
+            _ => panic!("must resolve Logical from lc subtree"),
         }
     }
 }

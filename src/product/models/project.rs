@@ -134,6 +134,9 @@ pub struct IssueRecord {
     pub id: String,
     pub project_id: String,
     pub repo_id: Option<String>,
+    /// Issue 唯一归属的代码库（v1.3）：Some 表示逻辑代码库 lc_id；None 表示单仓代码库。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: String,

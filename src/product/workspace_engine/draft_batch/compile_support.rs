@@ -47,8 +47,23 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     plan: &IssueWorkItemPlan,
 ) -> Result<Option<std::collections::BTreeMap<LogicalRepositoryId, String>>, String> {
     let paths = lifecycle.app_paths();
-    let logical_store = LogicalCodebaseStore::new(paths.clone());
-    let selection_store = IssueCodebaseSelectionStore::new(paths.clone());
+    // v1.3：按 issue 唯一归属的代码库把 manifest/selection/member 全部解析到 lc_id 子树。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        &paths,
+        &plan.project_id,
+        &plan.issue_id,
+    )
+    .map_err(|error| format!("resolve issue logical codebase failed: {error}"))?;
+    let (logical_store, selection_store) = match lc_id.as_deref() {
+        Some(lc_id) => (
+            LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
+            IssueCodebaseSelectionStore::for_lc(paths.clone(), lc_id),
+        ),
+        None => (
+            LogicalCodebaseStore::new(paths.clone()),
+            IssueCodebaseSelectionStore::new(paths.clone()),
+        ),
+    };
     let manifest = logical_store
         .load_manifest(&plan.project_id)
         .map_err(|error| format!("load logical codebase manifest failed: {error}"))?;

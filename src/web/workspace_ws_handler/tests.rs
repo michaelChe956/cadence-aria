@@ -410,6 +410,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Provider guidance refresh".to_string(),
             description: Some("旧 context 不能把 Codex 交互纪律注入 Claude Code run".to_string()),
             change_id: None,
@@ -540,6 +541,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Provider guidance select refresh".to_string(),
             description: Some(
                 "prepare context should reflect selected author provider".to_string(),
@@ -674,6 +676,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Pi permission bypass".to_string(),
             description: Some("stale Supervised mode must not reach Pi".to_string()),
             change_id: None,

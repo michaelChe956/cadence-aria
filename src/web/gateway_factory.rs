@@ -47,18 +47,40 @@ impl LogicalCodebaseGatewayFactory {
 
     /// 为指定 project 构造 gateway:ensure_bootstrap(policy + capability) 后
     /// `with_audit` 组装。缺失 manifest 时 fail-closed 为 `PolicyMissing`。
+    /// 兼容别名：等价 `build_for_lc(project_id, None)`（默认首个逻辑代码库/project 级路径）。
     pub fn build(
         &self,
         project_id: &str,
     ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
-        let manifest = LogicalCodebaseStore::new(self.paths.clone())
+        self.build_for_lc(project_id, None)
+    }
+
+    /// v1.3：按 issue 所属代码库构造 gateway——lc_id Some 时 policy/capability/
+    /// manifest 全部解析到 `logical-codebases/{lc_id}/` 子树；None 回退 project 级路径。
+    pub fn build_for_lc(
+        &self,
+        project_id: &str,
+        lc_id: Option<&str>,
+    ) -> Result<LogicalCodebaseProviderGateway, ProviderGatewayError> {
+        let logical = match lc_id {
+            Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
+            None => LogicalCodebaseStore::new(self.paths.clone()),
+        };
+        let manifest = logical
             .load_manifest(project_id)?
             .ok_or_else(|| ProviderGatewayError::PolicyMissing(project_id.to_string()))?;
 
-        let policies = AggregatePolicyArtifactStore::new(self.paths.clone());
+        let policies = match lc_id {
+            Some(lc_id) => AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id),
+            None => AggregatePolicyArtifactStore::new(self.paths.clone()),
+        };
         policies.ensure_bootstrap(&manifest)?;
 
-        ProviderCapabilityStore::new(self.paths.clone()).ensure_bootstrap(project_id)?;
+        let capabilities = match lc_id {
+            Some(lc_id) => ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
+            None => ProviderCapabilityStore::new(self.paths.clone()),
+        };
+        capabilities.ensure_bootstrap(project_id)?;
 
         // 权威根 = manifest.provider_context_root(聚合根 cwd)。若为相对路径,
         // 构造时 canonicalize;失败回退原值(生产 manifest 应已指向存在目录)。
@@ -67,8 +89,8 @@ impl LogicalCodebaseGatewayFactory {
 
         Ok(LogicalCodebaseProviderGateway::with_audit(
             policies,
-            Arc::new(StoreBackedProviderCapabilitySource::new(
-                self.paths.clone(),
+            Arc::new(StoreBackedProviderCapabilitySource::with_store(
+                capabilities,
                 project_id.to_string(),
             )),
             Arc::new(ProductionPolicyTargetResolver::new(self.paths.clone())),

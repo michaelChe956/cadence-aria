@@ -640,7 +640,6 @@ fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() 
     )
     .expect("evaluation context json");
     let units = context["units"].as_array().expect("unit contexts");
-
     assert_eq!(units.len(), 3);
     for unit in units {
         let unit = unit.as_object().expect("unit context object");
@@ -953,6 +952,7 @@ fn running_attempt_with_worktree() -> (
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "issue".to_string(),
             description: None,
             change_id: None,
@@ -1062,6 +1062,7 @@ fn delivery_fixture() -> (tempfile::TempDir, CodingAttemptStore, CodingWorkspace
         .create(CreateProductIssueInput {
             project_id: DELIVERY_PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "issue".to_string(),
             description: None,
             change_id: None,

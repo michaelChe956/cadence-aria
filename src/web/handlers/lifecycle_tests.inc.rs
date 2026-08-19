@@ -38,6 +38,7 @@
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some(REPOSITORY_ID.to_string()),
+                logical_codebase_id: None,
                 title: "分组视图测试".to_string(),
                 description: None,
                 change_id: None,

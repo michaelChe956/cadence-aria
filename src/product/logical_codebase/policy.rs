@@ -325,11 +325,20 @@ fn canonical_root(path: &Path) -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct AggregatePolicyArtifactStore {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl AggregatePolicyArtifactStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// Scopes policy reads/writes to one logical codebase subtree（v1.3）。
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
     }
 
     /// 读取当前 persisted artifact;不存在返回 `Ok(None)`。
@@ -391,7 +400,10 @@ impl AggregatePolicyArtifactStore {
 
     fn artifact_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
-        Ok(self.paths.aggregate_policy_artifact_path(project_id))
+        Ok(
+            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
+                .join("aggregate-policy.json"),
+        )
     }
 }
 

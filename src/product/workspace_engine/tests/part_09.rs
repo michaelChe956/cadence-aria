@@ -409,6 +409,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             id: issue_id.to_string(),
             project_id: project_id.to_string(),
             repo_id: Some(repository.id),
+            logical_codebase_id: None,
             title: "Workspace Engine Fixture Issue".to_string(),
             description: Some("RuntimeBinding Final Compile fixture".to_string()),
             change_id: "workspace_engine_fixture".to_string(),

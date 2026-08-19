@@ -181,6 +181,7 @@ async fn build_delivery_fixture(
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(repository_ids[0].clone()),
+            logical_codebase_id: None,
             title: "交付状态聚合验收".to_string(),
             description: None,
             change_id: None,

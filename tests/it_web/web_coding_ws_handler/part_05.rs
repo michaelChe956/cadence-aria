@@ -14,6 +14,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "coding ws internal review issue".to_string(),
             description: None,
             change_id: None,
@@ -101,6 +102,7 @@ fn app_with_code_review_rework_attempt(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "coding ws code review rework issue".to_string(),
             description: None,
             change_id: None,

@@ -576,6 +576,7 @@ fn app_with_full_chain_attempt_and_provider(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "coding ws full chain issue".to_string(),
             description: None,
             change_id: None,

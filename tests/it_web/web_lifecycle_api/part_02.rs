@@ -739,6 +739,7 @@ async fn logical_issue_lifecycle_does_not_require_repo_id() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓聚合 Issue".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
@@ -789,6 +790,7 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
@@ -872,6 +874,7 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓聚合 Design".to_string(),
             description: Some("跨 api 仓库的聚合设计".to_string()),
             change_id: None,
@@ -981,6 +984,7 @@ async fn create_logical_confirm_fixture(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
+            logical_codebase_id: None,
             title: "多仓聚合 confirm".to_string(),
             description: None,
             change_id: None,
@@ -1139,6 +1143,7 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "单仓 Story confirm".to_string(),
             description: None,
             change_id: None,

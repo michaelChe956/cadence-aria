@@ -163,7 +163,6 @@ impl PlanningIndexFreshness for AggregateIndexFreshnessService {
 
 pub struct PlanningContextResolver {
     paths: ProductAppPaths,
-    logical: LogicalCodebaseStore,
     sets: PlanningContextSetResolver,
     snapshots: PlanningContextSnapshotStore,
     freshness: Arc<dyn PlanningIndexFreshness>,
@@ -218,7 +217,6 @@ impl PlanningContextResolver {
         freshness: Arc<dyn PlanningIndexFreshness>,
     ) -> Self {
         Self {
-            logical: LogicalCodebaseStore::new(paths.clone()),
             sets: PlanningContextSetResolver::new(paths.clone()),
             snapshots: PlanningContextSnapshotStore::new(paths.clone()),
             paths,
@@ -229,14 +227,22 @@ impl PlanningContextResolver {
     /// 构建 `ResolvedPlanningContext`。流程：解析参与仓库集合 → fail-closed 拒绝空有效
     /// 成员（REQ-PLN-07）→ 读 active 索引 + 政策 artifact（缺失即 blocker）→ 渲染紧凑
     /// inventory → 组装并持久化快照 → 返回唯一上下文。`cwd` 来自 manifest 的
-    /// `provider_context_root`。
+    /// `provider_context_root`。v1.3：manifest/selection/index/policy 均按 issue 所属
+    /// codebase 的 lc_id 子树解析。
     pub async fn build_with_fresh_index(
         &self,
         project_id: &str,
         issue_id: &str,
         targets: &[LogicalRepositoryId],
     ) -> Result<ResolvedPlanningContext, ProductStoreError> {
-        let warning = self.refresh_index_for_read(project_id).await?;
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.paths,
+            project_id,
+            issue_id,
+        )?;
+        let warning = self
+            .refresh_index_for_read(project_id, lc_id.as_deref())
+            .await?;
         let mut resolved = self.resolve_context(project_id, issue_id, targets)?;
         if let Some(warning) = warning {
             resolved.inventory_injection.rendered.push('\n');
@@ -252,8 +258,26 @@ impl PlanningContextResolver {
     async fn refresh_index_for_read(
         &self,
         project_id: &str,
+        lc_id: Option<&str>,
     ) -> Result<Option<String>, ProductStoreError> {
-        let freshness = Arc::clone(&self.freshness);
+        let freshness = match lc_id {
+            Some(lc_id) => {
+                let operation = AggregateIndexOperation::new(
+                    self.paths.clone(),
+                    CodeGraphCli::new(
+                        Arc::new(
+                            crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner,
+                        ),
+                        "codegraph".to_string(),
+                    ),
+                    CodeGraphExcludeGenerator,
+                )
+                .for_lc(lc_id);
+                Arc::new(AggregateIndexFreshnessService::new(operation))
+                    as Arc<dyn PlanningIndexFreshness>
+            }
+            None => Arc::clone(&self.freshness),
+        };
         let project_id = project_id.to_string();
         tokio::task::spawn_blocking(move || {
             let assessment = freshness.assess(&project_id).map_err(map_index_error)?;
@@ -292,7 +316,14 @@ impl PlanningContextResolver {
         project_id: &str,
         issue_id: &str,
     ) -> Result<ResumeDecision, ProductStoreError> {
-        let warning = self.refresh_index_for_read(project_id).await?;
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.paths,
+            project_id,
+            issue_id,
+        )?;
+        let warning = self
+            .refresh_index_for_read(project_id, lc_id.as_deref())
+            .await?;
         self.resume_after_freshness(project_id, issue_id, warning)
     }
 
@@ -368,6 +399,24 @@ impl PlanningContextResolver {
         issue_id: &str,
         targets: &[LogicalRepositoryId],
     ) -> Result<ResolvedPlanningContext, ProductStoreError> {
+        // v1.3：按 issue 唯一归属的代码库把 index/policy/manifest 全部解析到 lc_id 子树。
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.paths,
+            project_id,
+            issue_id,
+        )?;
+        let (logical, index_store, policy_store) = match lc_id.as_deref() {
+            Some(lc_id) => (
+                LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
+                AggregateIndexStore::for_lc(self.paths.clone(), lc_id),
+                AggregatePolicyArtifactStore::for_lc(self.paths.clone(), lc_id),
+            ),
+            None => (
+                LogicalCodebaseStore::new(self.paths.clone()),
+                AggregateIndexStore::new(self.paths.clone()),
+                AggregatePolicyArtifactStore::new(self.paths.clone()),
+            ),
+        };
         let resolution = self.sets.resolve(project_id, issue_id)?;
         if resolution.set.is_empty() {
             return Err(ProductStoreError::InvalidRecord {
@@ -378,10 +427,10 @@ impl PlanningContextResolver {
             });
         }
 
-        let index = AggregateIndexStore::new(self.paths.clone())
+        let index = index_store
             .active_required(project_id)
             .map_err(map_index_error)?;
-        let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
+        let policy = policy_store
             .get(project_id)?
             .ok_or_else(|| ProductStoreError::NotFound {
                 kind: "aggregate_policy_artifact",
@@ -390,7 +439,7 @@ impl PlanningContextResolver {
 
         // cwd 来自 manifest 的 provider_context_root（聚合根），不硬编码。
         let manifest =
-            self.logical
+            logical
                 .load_manifest(project_id)?
                 .ok_or_else(|| ProductStoreError::NotFound {
                     kind: "logical_codebase_manifest",

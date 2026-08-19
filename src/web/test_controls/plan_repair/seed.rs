@@ -108,6 +108,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             id: ISSUE_ID.to_string(),
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "Plan Repair fixture issue".to_string(),
             description: None,
             change_id: "plan-repair-fixture".to_string(),

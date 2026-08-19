@@ -23,6 +23,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id),
+            logical_codebase_id: None,
             title: "plan repair fixture".to_string(),
             description: None,
             change_id: None,
