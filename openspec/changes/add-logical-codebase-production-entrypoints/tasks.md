@@ -47,7 +47,7 @@
 - [x] R2 统一 codebases 列表端点（混合单仓/逻辑）+ LC CRUD（POST 创建/GET 详情/DELETE 软删零 git 副作用）
 - [x] R3 登记端点换形 /logical-codebases/{lc_id}/ + guard 改 require_logical_codebase（404 logical_codebase_not_found）
 - [x] R4 初始化/索引端点换形 + 母 change 旧端点（members/pointer/initializations）保留默认首 LC 兼容别名
-- [ ] R5 routing/resolver/gateway/selection 按 issue 所属 codebase 解析（补偿事务按 LC；issue 增加 logical_codebase_id 归属；单仓 issue 零变化）
+- [x] R5 routing/resolver/gateway/selection 按 issue 所属 codebase 解析（补偿事务按 LC；issue 增加 logical_codebase_id 归属；单仓 issue 零变化）
 - [ ] R6 废除多仓 project 防护语义（legacy_repository_endpoint_on_multi_repo 不再产出）+ 单仓端点全回归
 - [ ] R7 前端：代码库混合列表 + 添加代码库弹窗模式单选（单仓→既有流程/多仓→建 LC→登记向导 auto_discover）
 - [ ] R8 前端：逻辑代码库页按 LC 分区（初始化/索引/指针）+ issue 创建代码库选择 + 恢复创建 project 弹窗（撤 UX 2.1 单选）
