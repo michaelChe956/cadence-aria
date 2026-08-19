@@ -104,10 +104,10 @@ export function SpecGenerationSettings({
           </div>
         </div>
       </fieldset>
-      <div className="mt-3 min-h-5 text-xs" aria-live="polite">
-        {saving ? <p className="text-[var(--aria-ink-muted)]">正在保存…</p> : null}
-        {error ? <p role="alert" className="text-[var(--aria-danger)]">{error}</p> : null}
-      </div>
+      {/* 乐观更新下保存反馈无意义且会引起视觉闪动，仅在失败时提示错误。 */}
+      {error ? (
+        <p role="alert" className="mt-3 min-h-0 text-xs text-[var(--aria-danger)]">{error}</p>
+      ) : null}
     </section>
   );
 }

@@ -213,7 +213,8 @@ describe("IssueLifecycleWorkbench 群聊模式入口", () => {
 
     expect(screen.getByRole("radio", { name: "群聊模式" })).not.toBeDisabled();
     expect(screen.getByRole("radio", { name: "流水线模式" })).toBeDisabled();
-    expect(screen.getByText("正在保存…")).toBeInTheDocument();
+    // 乐观更新下不展示「正在保存」提示，避免视觉闪动。
+    expect(screen.queryByText("正在保存…")).not.toBeInTheDocument();
 
     resolveSave("group_chat");
     await waitFor(() => expect(screen.queryByText("正在保存…")).not.toBeInTheDocument());
