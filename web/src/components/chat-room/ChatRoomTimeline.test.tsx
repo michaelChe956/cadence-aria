@@ -106,6 +106,25 @@ describe("ChatRoomTimeline", () => {
     expect(asFragment()).toMatchSnapshot();
   });
 
+  it("为时间线卡片与行内事件提供可收缩和断词约束", () => {
+    render(<ChatRoomTimeline timeline={timeline} roles={roles} />);
+
+    expect(screen.getByTestId("chat-room-timeline")).toHaveClass("min-w-0");
+    expect(screen.getByTestId("room-user-message")).toHaveClass("min-w-0");
+    expect(screen.getByTestId("room-user-message").querySelector("article")).toHaveClass(
+      "min-w-0",
+    );
+    expect(screen.getByTestId("room-agent-message-role-frontend")).toHaveClass("min-w-0");
+    expect(
+      screen.getByTestId("room-agent-message-role-frontend").querySelector("article"),
+    ).toHaveClass("min-w-0");
+    expect(screen.getByTestId("room-held-event")).toHaveClass("min-w-0");
+    expect(screen.getByTestId("room-held-event").querySelector("span")).toHaveClass(
+      "min-w-0",
+      "break-words",
+    );
+  });
+
   it("随着 TurnDelta 累积追加流式角色消息，并在落盘全文一致后收敛", () => {
     const { rerender } = render(
       <ChatRoomTimeline
@@ -165,6 +184,8 @@ describe("ChatRoomTimeline", () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
     render(<MentionInput roles={roles} onSubmit={onSubmit} />);
+
+    expect(screen.getByTestId("group-chat-mention-input")).toHaveClass("shrink-0");
 
     await user.type(screen.getByRole("textbox", { name: "群聊消息" }), "请 @前");
 

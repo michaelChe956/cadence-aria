@@ -27,7 +27,7 @@ export function ChatRoomTimeline({
   roles,
   turns = {},
 }: ChatRoomTimelineProps) {
-  const endRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const events = useMemo(
     () => [...timeline].sort((left, right) => left.seq - right.seq),
     [timeline],
@@ -42,15 +42,17 @@ export function ChatRoomTimeline({
   );
 
   useEffect(() => {
-    if (typeof endRef.current?.scrollIntoView === "function") {
-      endRef.current.scrollIntoView({ behavior: "auto", block: "end" });
+    const scrollContainer = scrollContainerRef.current;
+    if (scrollContainer) {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
     }
   }, [rows, streamedTurns]);
 
   return (
     <div
+      ref={scrollContainerRef}
       data-testid="chat-room-timeline"
-      className="min-h-0 flex-1 overflow-auto px-3 py-4"
+      className="min-h-0 min-w-0 flex-1 overflow-auto px-3 py-4"
     >
       {events.length === 0 && streamedTurns.length === 0 ? (
         <div className="flex min-h-full items-center justify-center text-sm text-[var(--aria-ink-muted)]">
@@ -78,7 +80,7 @@ export function ChatRoomTimeline({
               roles={roles}
             />
           ))}
-          <div ref={endRef} />
+          <div />
         </div>
       )}
     </div>

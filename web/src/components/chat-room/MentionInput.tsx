@@ -79,7 +79,7 @@ export function MentionInput({
     <form
       data-testid="group-chat-mention-input"
       onSubmit={handleSubmit}
-      className="border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3"
+      className="shrink-0 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3"
     >
       <div className="relative">
         <textarea

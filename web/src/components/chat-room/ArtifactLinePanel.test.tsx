@@ -94,6 +94,19 @@ function renderPanel(
 }
 
 describe("ArtifactLinePanel", () => {
+  it("在窄屏限制高度并由面板自身滚动", () => {
+    renderPanel();
+
+    expect(screen.getByTestId("artifact-line-panel")).toHaveClass(
+      "min-h-0",
+      "max-h-[50vh]",
+      "overflow-y-auto",
+      "lg:max-h-none",
+      "lg:w-80",
+      "lg:shrink-0",
+    );
+  });
+
   beforeEach(() => {
     vi.mocked(finalizeGroupChat).mockReset();
   });

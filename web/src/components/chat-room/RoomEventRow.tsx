@@ -19,8 +19,8 @@ export function RoomEventRow({ event, roles }: RoomEventRowProps) {
   switch (event.type) {
     case "user_message":
       return (
-        <div className="flex justify-end" data-testid="room-user-message">
-          <article className="max-w-3xl rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm shadow-sm">
+        <div className="flex min-w-0 justify-end" data-testid="room-user-message">
+          <article className="min-w-0 max-w-3xl rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm shadow-sm">
             <div className="text-xs font-semibold text-gray-600">用户</div>
             <div className="mt-2 whitespace-pre-wrap break-words text-[var(--aria-ink)]">
               {event.text}
@@ -137,8 +137,8 @@ function AgentMessageCard({
   testId: string;
 }) {
   return (
-    <div className="flex justify-start" data-testid={testId}>
-      <article className="w-full max-w-3xl rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm shadow-sm">
+    <div className="flex min-w-0 justify-start" data-testid={testId}>
+      <article className="min-w-0 w-full max-w-3xl rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm shadow-sm">
         <div className="flex min-w-0 items-center gap-2">
           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-700">
             <UserRound aria-hidden="true" className="h-3.5 w-3.5" />
@@ -150,11 +150,11 @@ function AgentMessageCard({
             <span className="text-xs text-[var(--aria-ink-muted)]">正在回复…</span>
           ) : null}
         </div>
-        <div className="mt-2 space-y-3">
+        <div className="mt-2 min-w-0 space-y-3">
           {messages.map((message, index) => (
             <div
               key={`${index}:${message.content}`}
-              className={index > 0 ? "border-t border-blue-100 pt-3" : ""}
+              className={index > 0 ? "min-w-0 border-t border-blue-100 pt-3" : "min-w-0"}
             >
               {message.content ? (
                 <MarkdownContent content={message.content} />
@@ -186,10 +186,10 @@ function InlineRoomEvent({
   return (
     <div
       data-testid={testId}
-      className="flex items-center justify-center gap-2 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-center text-xs text-[var(--aria-ink-muted)]"
+      className="flex min-w-0 items-center justify-center gap-2 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-center text-xs text-[var(--aria-ink-muted)]"
     >
       <Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]" />
-      <span>{children}</span>
+      <span className="min-w-0 break-words">{children}</span>
     </div>
   );
 }

@@ -106,7 +106,7 @@ export function ArtifactLinePanel({
   return (
     <aside
       data-testid="artifact-line-panel"
-      className="border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-3 lg:w-80 lg:shrink-0 lg:border-l lg:border-t-0"
+      className="min-h-0 max-h-[50vh] overflow-y-auto border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-3 lg:max-h-none lg:w-80 lg:shrink-0 lg:border-l lg:border-t-0"
     >
       <div className="mb-3 flex items-center gap-2">
         <Layers3 aria-hidden="true" className="h-4 w-4 text-[var(--aria-primary)]" />
