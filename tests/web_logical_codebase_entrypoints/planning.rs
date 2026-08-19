@@ -41,6 +41,7 @@ use cadence_aria::product::logical_codebase::{
     policy::AggregatePolicyArtifactStore,
 };
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
+use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::handlers::AggregateInitializationDependencies;
@@ -690,6 +691,72 @@ async fn generate_story_for(app: &axum::Router, issue_id: &str) -> (StatusCode, 
     .await
 }
 
+/// Minimal single-repository HTTP fixture. Its records are only initial state;
+/// each behavior under test goes through the production router.
+struct LegacyPlanningHttpFixture {
+    _workspace: TempDir,
+    app: axum::Router,
+}
+
+impl LegacyPlanningHttpFixture {
+    fn new() -> Self {
+        let workspace = tempfile::tempdir().expect("legacy planning workspace");
+        let root = workspace.path().to_path_buf();
+        let repository_root = root.join("repository");
+        fs::create_dir_all(&repository_root).expect("create legacy repository");
+        git(&repository_root, &["init", "-q"]);
+        fs::write(repository_root.join("lib.rs"), "pub fn legacy() {}\n")
+            .expect("write legacy source");
+        git(&repository_root, &["add", "lib.rs"]);
+        git(
+            &repository_root,
+            &[
+                "-c",
+                "user.name=Legacy Test",
+                "-c",
+                "user.email=legacy@example.test",
+                "commit",
+                "-qm",
+                "legacy baseline",
+            ],
+        );
+
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "legacy planning HTTP".to_string(),
+                description: None,
+                multi_repo: false,
+            })
+            .expect("create legacy project");
+        let repository = RepositoryStore::new(paths.clone())
+            .create(CreateRepositoryInput {
+                project_id: project.id.clone(),
+                name: "legacy repository".to_string(),
+                path: repository_root,
+                default_policy_preset: None,
+                default_provider_mode: Some("fake".to_string()),
+                idempotency_key: "legacy-planning-repository".to_string(),
+            })
+            .expect("create legacy repository record");
+        IssueStore::new(paths)
+            .create(CreateProductIssueInput {
+                project_id: project.id,
+                repo_id: Some(repository.id),
+                title: "legacy planning issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("create legacy issue");
+
+        let app = build_web_router(WebAppState::new(root.clone(), WebRuntime::new_fake(root)));
+        Self {
+            _workspace: workspace,
+            app,
+        }
+    }
+}
+
 /// P0 production-entrypoint fixture: after the real filesystem/Git setup every
 /// business operation goes through the web router. It deliberately does not
 /// seed registration, initialization, index, issue, selection, or lifecycle
@@ -1114,6 +1181,88 @@ async fn p0_registered_initialized_issue() -> (P0HttpFixture, String, String, Ve
 }
 
 #[tokio::test]
+async fn single_repo_aggregate_scope_is_rejected_over_http() {
+    let fixture = LegacyPlanningHttpFixture::new();
+    let aggregate_member = "00000000-0000-0000-0000-000000000001";
+
+    assert_error(
+        request(
+            &fixture.app,
+            Method::POST,
+            "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+            json!({
+                "title": "single-repository Story must reject aggregate scope",
+                "involved_repository_ids": [aggregate_member],
+                "author_provider": "fake",
+                "reviewer_provider": "codex",
+                "review_rounds": 1,
+                "superpowers_enabled": false,
+                "openspec_enabled": false
+            }),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "aggregate_scope_requires_logical_codebase",
+    );
+
+    let (status, story) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({
+            "title": "single-repository Story",
+            "author_provider": "fake",
+            "reviewer_provider": "codex",
+            "review_rounds": 1,
+            "superpowers_enabled": false,
+            "openspec_enabled": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "generate legacy Story: {story}");
+    let story_id = story["story_specs"][0]["story_spec_id"]
+        .as_str()
+        .expect("generated legacy Story id");
+    let story_session_id = story["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .expect("generated legacy Story session id");
+    let (status, confirmed_story) = request(
+        &fixture.app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{story_session_id}/confirm"),
+        json!({"confirmed_by": "single-repository scope test"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "confirm legacy Story before Design validation: {confirmed_story}"
+    );
+
+    assert_error(
+        request(
+            &fixture.app,
+            Method::POST,
+            "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+            json!({
+                "title": "single-repository Design must reject aggregate scope",
+                "story_spec_ids": [story_id],
+                "involved_repository_ids": [aggregate_member],
+                "change_order": [aggregate_member],
+                "author_provider": "fake",
+                "reviewer_provider": "codex",
+                "review_rounds": 1,
+                "superpowers_enabled": false,
+                "openspec_enabled": false
+            }),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "aggregate_scope_requires_logical_codebase",
+    );
+}
+
+#[tokio::test]
 async fn reg_init_idx_pln_p0_chain_uses_only_http_routes() {
     let (fixture, project_id, issue_id, members) = p0_registered_initialized_issue().await;
     let member_git_before = fixture
@@ -1153,6 +1302,12 @@ async fn reg_init_idx_pln_p0_chain_uses_only_http_routes() {
     assert_eq!(
         plan["work_item_plan"]["source_design_spec_ids"],
         json!([design_id])
+    );
+    assert!(
+        plan["work_item_plan"]["work_item_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "the HTTP :prepare contract intentionally stops at a Draft; per-target splitting is a later workspace compile concern: {plan}"
     );
     assert_eq!(
         member_git_before,
