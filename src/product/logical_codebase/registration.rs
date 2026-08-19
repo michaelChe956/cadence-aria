@@ -19,9 +19,9 @@ use crate::product::id::repo_hash_for_path;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityRegistryEntry,
-    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
-    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
-    RepositorySourceIdentity, RepositoryType,
+    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseStore, LogicalRepositoryId,
+    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
+    RepositoryType,
 };
 use crate::product::repository_store::{canonicalize_repo_path, resolve_repository_source};
 
@@ -275,7 +275,6 @@ pub struct AttachOnlyRegistrationInput {
 pub struct LogicalCodebaseRegistrationCoordinator {
     paths: ProductAppPaths,
     lc_id: Option<String>,
-    feature: LogicalCodebaseFeature,
     #[cfg(test)]
     failure_after_completed_items: Arc<AtomicUsize>,
 }

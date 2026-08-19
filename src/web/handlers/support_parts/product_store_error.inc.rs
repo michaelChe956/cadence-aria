@@ -28,25 +28,6 @@ pub(crate) fn aggregate_root_api_error(
     )
 }
 
-pub(crate) fn logical_codebase_feature_disabled_api_error(project_id: &str) -> ApiError {
-    ApiError::runtime(
-        "logical_codebase_feature_disabled",
-        "logical codebase features are disabled for single-repository projects",
-        json!({ "project_id": project_id }),
-    )
-}
-
-#[allow(dead_code)] // Retained error-code mapping; R6 removes legacy production.
-pub(crate) fn legacy_repository_endpoint_on_multi_repo_api_error(
-    project_id: &str,
-) -> ApiError {
-    ApiError::runtime(
-        "legacy_repository_endpoint_on_multi_repo",
-        "legacy repository endpoint is unavailable for multi-repository projects; 请使用逻辑代码库登记端点",
-        json!({ "project_id": project_id }),
-    )
-}
-
 fn repository_routing_api_error(
     code: &'static str,
     message: &'static str,
@@ -289,10 +270,6 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "coding attempt matches multiple issues",
             json!({"attempt_id": id}),
         ),
-        ProductStoreError::Conflict {
-            kind: "logical_codebase_feature_disabled",
-            id,
-        } => logical_codebase_feature_disabled_api_error(&id),
         ProductStoreError::Conflict {
             kind: "active_coding_attempt",
             id,

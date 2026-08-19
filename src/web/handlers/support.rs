@@ -267,14 +267,6 @@ pub(crate) fn default_logical_codebase_id(
         })
 }
 
-/// Kept as a source-compatible call site during R1. R6 removes the retired
-/// project-mode protection entirely because repository mode belongs to a codebase.
-pub(crate) fn reject_legacy_repository_endpoint_on_multi_repo(
-    _project: &ProjectRecord,
-) -> ApiResult<()> {
-    Ok(())
-}
-
 pub(crate) fn provider_workspace_config(
     author_provider: Option<&str>,
     reviewer_provider: Option<&str>,

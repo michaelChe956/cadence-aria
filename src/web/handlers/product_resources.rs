@@ -2,11 +2,8 @@ use super::dto::*;
 use super::support::*;
 use super::*;
 use crate::product::logical_codebase::{
-    CodebaseMemberRecord, IssueCodebaseSelection, IssueCodebaseSelectionStore,
-    LogicalCodebaseStore, MemberStatus,
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore, MemberStatus,
 };
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 pub async fn list_workspaces(
     State(state): State<WebAppState>,
@@ -97,97 +94,18 @@ pub async fn list_repositories(
     Path(project_id): Path<String>,
 ) -> ApiResult<Json<RepositoryListResponse>> {
     let app_paths = product_app_paths(&state);
-    let project = ProjectStore::new(app_paths.clone())
+    ProjectStore::new(app_paths.clone())
         .get(&project_id)
         .map_err(product_store_api_error)?;
-    let repositories = if LogicalCodebaseStore::new(app_paths.clone())
-        .has_any_storage(&project_id)
+    // R6（v1.3 §4）：多仓 project 防护语义废除——GET /repositories 是单仓代码库
+    // CRUD，只读 repos.json，绝不投影逻辑成员（统一列表经 /codebases）。
+    let repositories = RepositoryStore::new(app_paths)
+        .list(&project_id)
         .map_err(product_store_api_error)?
-    {
-        multi_repo_repository_projection(&app_paths, &project_id)?
-    } else {
-        RepositoryStore::for_project(app_paths, &project)
-            .list(&project_id)
-            .map_err(product_store_api_error)?
-            .into_iter()
-            .map(repository_dto)
-            .collect()
-    };
+        .into_iter()
+        .map(repository_dto)
+        .collect();
     Ok(Json(RepositoryListResponse { repositories }))
-}
-
-/// Multi-repo 的 legacy 列表是一个只读兼容投影：成员 authority（manifest + active
-/// member record）是唯一输入，绝不读取或暴露 legacy `repos.json` 写通道。
-fn multi_repo_repository_projection(
-    app_paths: &crate::product::app_paths::ProductAppPaths,
-    project_id: &str,
-) -> ApiResult<Vec<RepositoryDto>> {
-    let authority = LogicalCodebaseStore::new(app_paths.clone());
-    let Some(manifest) = authority
-        .load_manifest(project_id)
-        .map_err(product_store_api_error)?
-    else {
-        return Ok(Vec::new());
-    };
-    let members = authority
-        .list_members(project_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .map(|member| (member.logical_repository_id, member))
-        .collect::<BTreeMap<_, _>>();
-
-    manifest
-        .member_ids
-        .into_iter()
-        .filter_map(|member_id| members.get(&member_id))
-        .filter(|member| member.status == MemberStatus::Active)
-        .map(|member| repository_member_projection(&authority, project_id, member))
-        .collect()
-}
-
-fn repository_member_projection(
-    authority: &LogicalCodebaseStore,
-    project_id: &str,
-    member: &CodebaseMemberRecord,
-) -> ApiResult<RepositoryDto> {
-    let primary_checkout_id = member.checkout_ids.first().copied();
-    let path = match primary_checkout_id {
-        Some(checkout_id) => {
-            authority
-                .load_checkout(project_id, checkout_id)
-                .map_err(product_store_api_error)?
-                .ok_or_else(|| {
-                    ApiError::runtime(
-                        "repository_routing_inconsistent",
-                        "repository routing authority is inconsistent",
-                        serde_json::json!({ "checkout_id": checkout_id.0 }),
-                    )
-                })?
-                .canonical_path
-        }
-        None => repository_member_path(member),
-    };
-    Ok(RepositoryDto {
-        repository_id: member.physical_repository_id.clone(),
-        project_id: project_id.to_string(),
-        name: member.alias.clone(),
-        path: path.to_string_lossy().into_owned(),
-        repo_hash: member.source_identity.first_seen_path_hash.clone(),
-        runtime_root: path.join(".aria/runtime").to_string_lossy().into_owned(),
-        default_policy_preset: "manual-write".to_string(),
-        default_provider_mode: "fake".to_string(),
-        created_at: member.created_at.clone(),
-        updated_at: member.updated_at.clone(),
-    })
-}
-
-fn repository_member_path(member: &CodebaseMemberRecord) -> PathBuf {
-    member
-        .source_identity
-        .canonical_git_dir
-        .parent()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| member.source_identity.canonical_git_dir.clone())
 }
 
 pub async fn delete_repository(
@@ -196,10 +114,9 @@ pub async fn delete_repository(
     Path((project_id, repository_id)): Path<(String, String)>,
 ) -> ApiResult<Json<RepositoryDeletionReceipt>> {
     let app_paths = product_app_paths(&state);
-    let project = ProjectStore::new(app_paths.clone())
+    ProjectStore::new(app_paths.clone())
         .get(&project_id)
         .map_err(product_store_api_error)?;
-    reject_legacy_repository_endpoint_on_multi_repo(&project)?;
     let operation_id = headers
         .get("Idempotency-Key")
         .and_then(|value| value.to_str().ok())
@@ -207,7 +124,8 @@ pub async fn delete_repository(
         .ok_or_else(|| {
             ApiError::validation("idempotency_key_required", "Idempotency-Key is required")
         })?;
-    RepositoryStore::for_project(app_paths, &project)
+    // R6：纯单仓删除语义（repos.json + 删除回执），不按 project 判定逻辑 feature。
+    RepositoryStore::new(app_paths)
         .delete(
             &project_id,
             &repository_id,

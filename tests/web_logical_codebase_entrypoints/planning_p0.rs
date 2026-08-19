@@ -311,24 +311,33 @@ impl P0HttpFixture {
     }
 
     async fn primary_repository_id(&self, project_id: &str) -> String {
-        let (status, repositories) = request(
-            &self.app,
-            Method::GET,
-            &format!("/api/projects/{project_id}/repositories"),
-            json!({}),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "list logical repositories: {repositories}"
-        );
-        repositories["repositories"]
-            .as_array()
-            .and_then(|repositories| repositories.first())
-            .and_then(|repository| repository["repository_id"].as_str())
-            .expect("registered primary repository id")
-            .to_string()
+        // R6：GET /repositories 不再投影逻辑成员，改从成员权威记录直接读取
+        // 首个 active 成员的 physical_repository_id（primary 校验接受的任意
+        // active 成员）。
+        let members_root = self
+            .root
+            .join(".aria/projects")
+            .join(project_id)
+            .join("logical-codebase/members");
+        let mut physical_ids = fs::read_dir(&members_root)
+            .expect("registered member records")
+            .map(|entry| entry.expect("member entry").path())
+            .map(|path| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).expect("read member record"))
+                        .expect("decode member record");
+                value
+            })
+            .filter(|member| member["status"] == "active")
+            .filter_map(|member| {
+                member["physical_repository_id"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        physical_ids.sort();
+        assert!(!physical_ids.is_empty(), "registered physical ids");
+        physical_ids.remove(0)
     }
 
     async fn logical_codebase_id(&self, project_id: &str) -> String {

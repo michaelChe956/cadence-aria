@@ -89,6 +89,22 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
         }],
     )
     .unwrap();
+    write_json(
+        &paths.project_root("project_0001").join("repos.json"),
+        &vec![serde_json::json!({
+            "id": "repository_single".to_string(),
+            "project_id": "project_0001".to_string(),
+            "name": "single".to_string(),
+            "path": root.path().join("single"),
+            "repo_hash": "single-hash".to_string(),
+            "runtime_root": root.path().join("single/.aria/runtime"),
+            "default_policy_preset": "manual-write".to_string(),
+            "default_provider_mode": "fake".to_string(),
+            "created_at": "2026-08-18T00:00:00Z".to_string(),
+            "updated_at": "2026-08-18T00:00:00Z".to_string(),
+        })],
+    )
+    .unwrap();
 
     let state = WebAppState::new(
         root.path().to_path_buf(),
@@ -96,7 +112,8 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
     );
     let app = build_web_router(state);
 
-    // 有逻辑代码库存储的 project 仍按多仓投影列出成员（R1 过渡语义）。
+    // R6（v1.3 §4）：多仓 project 防护语义废除——GET /repositories 只列 repos.json
+    // 单仓条目，逻辑成员不投影进来（成员经统一 /codebases 与成员端点呈现）。
     let (status, body) = request(
         &app,
         Method::GET,
@@ -105,7 +122,9 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["repositories"][0]["name"], "api");
+    let entries = body["repositories"].as_array().expect("repositories");
+    assert_eq!(entries.len(), 1, "plain repos.json listing: {body}");
+    assert_eq!(entries[0]["name"], "single");
 
     for (method, uri, body) in [
         (

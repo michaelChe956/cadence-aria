@@ -12,7 +12,7 @@ mod tests {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
     use crate::product::logical_codebase::{
-        LogicalCodebaseFeature, LogicalCodebaseManifest, LogicalCodebaseStore,
+        LogicalCodebaseManifest, LogicalCodebaseStore,
     };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
 
@@ -759,10 +759,7 @@ mod tests {
             dirty_git,
             missing,
             outside,
-            coordinator: LogicalCodebaseRegistrationCoordinator::new(
-                paths,
-                LogicalCodebaseFeature::enabled(),
-            ),
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(paths),
         }
     }
 
@@ -789,10 +786,7 @@ mod tests {
                 canonical_path: fs::canonicalize(&root_path).unwrap(),
             },
             linked,
-            coordinator: LogicalCodebaseRegistrationCoordinator::new(
-                paths,
-                LogicalCodebaseFeature::enabled(),
-            ),
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(paths),
         }
     }
 
@@ -819,10 +813,7 @@ mod tests {
                 canonical_path: fs::canonicalize(root_path).unwrap(),
             },
             repositories,
-            coordinator: LogicalCodebaseRegistrationCoordinator::new(
-                paths,
-                LogicalCodebaseFeature::enabled(),
-            ),
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(paths),
         }
     }
 
@@ -847,10 +838,7 @@ mod tests {
             },
             first,
             second,
-            coordinator: LogicalCodebaseRegistrationCoordinator::new(
-                paths,
-                LogicalCodebaseFeature::enabled(),
-            ),
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(paths),
         }
     }
 
@@ -903,10 +891,7 @@ mod tests {
         AttachFixture {
             _root: root,
             paths: paths.clone(),
-            coordinator: LogicalCodebaseRegistrationCoordinator::new(
-                paths,
-                LogicalCodebaseFeature::enabled(),
-            ),
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(paths),
             git_root,
             head_before,
             branch_before,

@@ -151,8 +151,6 @@ impl IntoResponse for ApiError {
             | "repository_initialization_in_progress"
             | "shared_worktree_dirty_manual_gate"
             | "coding_workspace_exists"
-            | "legacy_repository_endpoint_on_multi_repo"
-            | "logical_codebase_feature_disabled"
             | "aggregate_root_ownership_conflict" => StatusCode::CONFLICT,
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
@@ -495,11 +493,6 @@ mod tests {
                 "cross_target_store_failure",
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
-            (
-                "legacy_repository_endpoint_on_multi_repo",
-                StatusCode::CONFLICT,
-            ),
-            ("logical_codebase_feature_disabled", StatusCode::CONFLICT),
         ];
 
         for (code, expected_status) in cases {

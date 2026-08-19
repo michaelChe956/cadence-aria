@@ -147,6 +147,159 @@ async fn project_creation_has_no_repository_mode_and_legacy_repository_mutations
 }
 
 #[tokio::test]
+async fn mixed_project_single_repo_endpoints_stay_plain_crud() {
+    // R6（v1.3 §4）：单仓端点是单仓代码库 CRUD，与 project 是否存在逻辑代码库
+    // 无关（多仓 project 防护语义废除）。混合 project 的 GET/POST/DELETE
+    // /repositories 与 GET /repository-initializations 只读写 repos.json 与
+    // 初始化操作存储，绝不投影逻辑成员、不触发 identity 迁移 bootstrap。
+    let root = tempdir().expect("root");
+    let repository_root = git_repo();
+    let state = WebAppState::with_events(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        EventHub::new(),
+    );
+    let app = build_web_router(state);
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Mixed","description":null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 新式逻辑代码库（仅 record.json 子树，无 legacy manifest）。
+    let aggregate_root = tempdir().expect("aggregate root");
+    let (status, logical) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/logical-codebases",
+        json!({"name":"LC","aggregate_root":aggregate_root.path()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{logical}");
+
+    // 预置一条既有单仓记录。
+    let paths = cadence_aria::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    let repos_path = paths.project_root("project_0001").join("repos.json");
+    cadence_aria::product::json_store::write_json(
+        &repos_path,
+        &vec![serde_json::json!({
+            "id": "repository_0001",
+            "project_id": "project_0001",
+            "name": "seeded",
+            "path": root.path().join("seeded"),
+            "repo_hash": "seeded-hash",
+            "runtime_root": root.path().join("seeded/.aria/runtime"),
+            "default_policy_preset": "manual-write",
+            "default_provider_mode": "fake",
+            "created_at": "2026-08-19T00:00:00Z",
+            "updated_at": "2026-08-19T00:00:00Z",
+        })],
+    )
+    .expect("seed repos.json");
+
+    // GET：只列 repos.json 单仓条目；逻辑成员不投影进来。
+    let (status, repositories) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/repositories",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repositories}");
+    let entries = repositories["repositories"]
+        .as_array()
+        .expect("repositories array");
+    assert_eq!(entries.len(), 1, "plain repos.json listing: {repositories}");
+    assert_eq!(entries[0]["repository_id"], "repository_0001");
+
+    // POST：普通单仓登记流程照常可用。
+    let (status, accepted) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Second","path":repository_root.path()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"]
+        .as_str()
+        .expect("operation id")
+        .to_string();
+
+    // GET 初始化操作：行为不变，轮询至终态。
+    let mut operation = serde_json::Value::Null;
+    for _ in 0..200 {
+        let (status, body) = request_json(
+            app.clone(),
+            Method::GET,
+            &format!("/api/projects/project_0001/repository-initializations/{operation_id}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        operation = body;
+        if matches!(operation["status"].as_str(), Some("completed" | "failed")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        operation["status"], "completed",
+        "single-repo initialization must complete: {operation}"
+    );
+
+    let (status, repositories) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/repositories",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = repositories["repositories"]
+        .as_array()
+        .expect("repositories array");
+    assert_eq!(
+        entries.len(),
+        2,
+        "seeded + newly registered: {repositories}"
+    );
+
+    // 单仓登记绝不 bootstrap legacy 逻辑代码库 authority，也不改写既有记录。
+    assert!(
+        !paths
+            .logical_codebase_root("project_0001")
+            .join("manifest.json")
+            .exists()
+    );
+
+    // DELETE：普通单仓删除（legacy_delete=true），不动 LC 子树。
+    let (status, receipt) =
+        delete_repository_with_idempotency_key(app.clone(), "project_0001", "repository_0001")
+            .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["legacy_delete"], true);
+
+    let (status, repositories) = request_json(
+        app,
+        Method::GET,
+        "/api/projects/project_0001/repositories",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = repositories["repositories"]
+        .as_array()
+        .expect("repositories array");
+    assert_eq!(entries.len(), 1, "only the newly registered entry remains");
+    assert_eq!(entries[0]["repository_id"], "repository_0002");
+}
+
+#[tokio::test]
 async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
     let root = tempdir().expect("root");
     let repo_a = git_repo();

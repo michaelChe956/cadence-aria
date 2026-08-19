@@ -1,9 +1,11 @@
 impl LogicalCodebaseRegistrationCoordinator {
-    pub fn new(paths: ProductAppPaths, feature: LogicalCodebaseFeature) -> Self {
+    /// R6：多仓 project 防护语义废除——登记链不再携带 project 级 feature 开关
+    /// （`logical_codebase_feature_disabled` 不再产出）；可达性由路由层
+    /// `require_logical_codebase` 的 404 语义约束。
+    pub fn new(paths: ProductAppPaths) -> Self {
         Self {
             paths,
             lc_id: None,
-            feature,
             #[cfg(test)]
             failure_after_completed_items: Arc::new(AtomicUsize::new(usize::MAX)),
         }
@@ -17,7 +19,6 @@ impl LogicalCodebaseRegistrationCoordinator {
         Self {
             paths,
             lc_id: Some(lc_id.into()),
-            feature: LogicalCodebaseFeature::enabled(),
             #[cfg(test)]
             failure_after_completed_items: Arc::new(AtomicUsize::new(usize::MAX)),
         }
@@ -45,12 +46,6 @@ impl LogicalCodebaseRegistrationCoordinator {
         input: ConfirmedRegistrationBatchInput,
     ) -> Result<RegistrationBatchRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
-        if !self.feature.is_enabled() {
-            return Err(ProductStoreError::Conflict {
-                kind: "logical_codebase_feature_disabled",
-                id: input.project_id,
-            });
-        }
         if input.candidates.is_empty() {
             return Err(ProductStoreError::InvalidRecord {
                 kind: "registration_batch",
@@ -621,12 +616,6 @@ impl LogicalCodebaseRegistrationCoordinator {
     ) -> Result<CodebaseMemberRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.idempotency_key)?;
-        if !self.feature.is_enabled() {
-            return Err(ProductStoreError::Conflict {
-                kind: "logical_codebase_feature_disabled",
-                id: input.project_id,
-            });
-        }
         self.attach_member_inner(input)
     }
 
