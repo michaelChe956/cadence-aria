@@ -6,7 +6,7 @@
 
 ## 2. 前端模式单选与向导自动发现
 
-- [ ] 2.1 CreateProjectDialog checkbox→单选（单仓库默认/多仓库），提交 multi_repo 对应值；单测断言两态
+- [x] 2.1 CreateProjectDialog checkbox→单选（单仓库默认/多仓库），提交 multi_repo 对应值；单测断言两态
 - [ ] 2.2 登记向导自动发现：根确认→自动 auto_discover 预检（loading）→候选勾选列表（eligible 默认勾选/needs_attention 显式勾选/其余不勾选）→提交仅含勾选项；空结果兜底手填；vitest + tsc
 
 ## 3. 门禁
