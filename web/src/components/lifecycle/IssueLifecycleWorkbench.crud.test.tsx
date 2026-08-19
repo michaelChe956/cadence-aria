@@ -162,6 +162,32 @@ function repositoryOperationFetch({
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    if (
+      requestUrl === "/api/projects/project_0001/codebases" &&
+      init?.method !== "POST"
+    ) {
+      if (completed) {
+        return new Response(
+          JSON.stringify({
+            codebases: [
+              {
+                id: repository.repository_id,
+                name: repository.name,
+                kind: "single_repo",
+                repository_id: repository.repository_id,
+                logical_codebase_id: null,
+                member_count: null,
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ codebases: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     return baseFetch(input, init);
   });
 }
@@ -242,6 +268,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await vi.runAllTimersAsync();
     });
     fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续添加单仓库" }));
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
     fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
       target: { value: "New Repo" },
@@ -322,6 +349,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await vi.runAllTimersAsync();
     });
     fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续添加单仓库" }));
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
     fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
       target: { value: "New Repo" },

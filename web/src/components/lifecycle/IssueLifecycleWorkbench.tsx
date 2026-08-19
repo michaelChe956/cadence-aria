@@ -32,6 +32,7 @@ import {
   startAggregateInitialization,
 } from "../../api/aggregate-initialization";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
+import { listCodebases } from "../../api/codebases";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import {
   createPointerPublication,
@@ -41,6 +42,8 @@ import {
 } from "../../api/pointer-publication";
 import type {
   AggregateIndexActiveResponse,
+  CodebaseSummaryDto,
+  LogicalCodebaseDto,
   AggregateInitializationOperationSnapshot,
   CodingAttemptAddress,
   IssueLifecycleResponse,
@@ -62,6 +65,7 @@ import {
   CreateProjectDialog,
   type CreateProjectPayload,
 } from "./CreateProjectDialog";
+import { AddCodebaseDialog } from "./AddCodebaseDialog";
 import { CreateRepositoryDialog } from "./CreateRepositoryDialog";
 import {
   CreateLifecycleIssueDialog,
@@ -119,6 +123,7 @@ export function IssueLifecycleWorkbench({
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [codebases, setCodebases] = useState<CodebaseSummaryDto[]>([]);
   const [lifecycles, setLifecycles] = useState<IssueLifecycleResponse[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
@@ -130,6 +135,10 @@ export function IssueLifecycleWorkbench({
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [registrationDialogOpen, setRegistrationDialogOpen] = useState(false);
+  const [registrationWizardLcId, setRegistrationWizardLcId] = useState<
+    string | null
+  >(null);
+  const [addCodebaseDialogOpen, setAddCodebaseDialogOpen] = useState(false);
   const [pendingWorkItemPlanLaunch, setPendingWorkItemPlanLaunch] =
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
@@ -209,6 +218,7 @@ export function IssueLifecycleWorkbench({
 
       if (!projectId) {
         setRepositories([]);
+        setCodebases([]);
         setLifecycles([]);
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
@@ -221,11 +231,13 @@ export function IssueLifecycleWorkbench({
 
       const [
         repositoryResponse,
+        codebaseResponse,
         issueResponse,
         publicationResponse,
         membersResponse,
       ] = await Promise.all([
         listRepositories(projectId),
+        listCodebases(projectId),
         listProductIssues(projectId),
         listPointerPublications(projectId),
         listLogicalCodebaseMembers(projectId),
@@ -250,6 +262,7 @@ export function IssueLifecycleWorkbench({
       }
 
       setRepositories(repositoryResponse.repositories ?? []);
+      setCodebases(codebaseResponse.codebases ?? []);
       setLifecycles(lifecycleResponses);
       setPointerPublications(publicationResponse ?? []);
       setLogicalCodebaseMembers(membersResponse.members ?? []);
@@ -310,6 +323,13 @@ export function IssueLifecycleWorkbench({
     () => findCardInColumns(allColumns, drawerFocusedEntityKey),
     [allColumns, drawerFocusedEntityKey],
   );
+  const logicalCodebases = codebases.filter(
+    (codebase) => codebase.kind === "logical",
+  );
+  const activeLogicalCodebaseId =
+    registrationWizardLcId ??
+    logicalCodebases[0]?.logical_codebase_id ??
+    null;
   const selectedProject = projects.find(
     (project) => project.project_id === selectedProjectId,
   );
@@ -570,6 +590,22 @@ export function IssueLifecycleWorkbench({
     });
     setDialogOpen(false);
     await refresh();
+  }
+
+  function handleChooseSingleCodebase() {
+    setAddCodebaseDialogOpen(false);
+    setRepositoryDialogOpen(true);
+  }
+
+  async function handleCreatedLogicalCodebase(
+    codebase: LogicalCodebaseDto,
+  ) {
+    setAddCodebaseDialogOpen(false);
+    setRegistrationWizardLcId(codebase.id);
+    setRegistrationDialogOpen(true);
+    if (selectedProjectId) {
+      await refresh(selectedProjectId);
+    }
   }
 
   async function handleCreateProject(payload: CreateProjectPayload) {
@@ -975,13 +1011,14 @@ export function IssueLifecycleWorkbench({
       <div className="grid min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]">
         <ProjectSidebar
           projects={projects}
+          codebases={codebases}
           repositories={repositories}
           selectedProjectId={selectedProjectId}
           issueCount={issueCount}
           busy={busy}
           onSelectProject={(projectId) => void handleSelectProject(projectId)}
           onCreateProject={() => setProjectDialogOpen(true)}
-          onCreateRepository={() => setRepositoryDialogOpen(true)}
+          onAddCodebase={() => setAddCodebaseDialogOpen(true)}
           onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
           onDeleteRepository={(repositoryId) =>
             void handleDeleteRepository(repositoryId)
@@ -1015,8 +1052,9 @@ export function IssueLifecycleWorkbench({
                     <h2 className="text-sm font-semibold text-[var(--aria-ink)]">逻辑代码库</h2>
                     <button
                       type="button"
+                      disabled={logicalCodebases.length === 0}
                       onClick={() => setRegistrationDialogOpen(true)}
-                      className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white"
+                      className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
                     >
                       登记成员
                     </button>
@@ -1136,11 +1174,27 @@ export function IssueLifecycleWorkbench({
           onClose={() => setProjectDialogOpen(false)}
         />
       ) : null}
-      {registrationDialogOpen && selectedProjectId ? (
+      {addCodebaseDialogOpen && selectedProjectId ? (
+        <AddCodebaseDialog
+          projectId={selectedProjectId}
+          onChooseSingle={handleChooseSingleCodebase}
+          onCreatedLogical={(codebase) =>
+            void handleCreatedLogicalCodebase(codebase)
+          }
+          onClose={() => setAddCodebaseDialogOpen(false)}
+        />
+      ) : null}
+      {registrationDialogOpen &&
+      selectedProjectId &&
+      activeLogicalCodebaseId ? (
         <LogicalCodebaseRegistrationWizard
           projectId={selectedProjectId}
+          logicalCodebaseId={activeLogicalCodebaseId}
           onCompleted={() => refresh(selectedProjectId)}
-          onClose={() => setRegistrationDialogOpen(false)}
+          onClose={() => {
+            setRegistrationDialogOpen(false);
+            setRegistrationWizardLcId(null);
+          }}
         />
       ) : null}
       {repositoryDialogOpen ? (

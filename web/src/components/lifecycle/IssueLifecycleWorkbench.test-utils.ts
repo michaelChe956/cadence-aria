@@ -62,6 +62,11 @@ export function lifecycleFetch(options?: {
   registrationSubmit?: RegistrationBatchDto;
   registrationResume?: RegistrationBatchDto;
   registrationCancel?: RegistrationBatchDto;
+  logicalCodebases?: Array<{
+    id: string;
+    name: string;
+    member_count?: number;
+  }>;
   logicalCodebaseMembers?: Array<{
     logical_repository_id: string;
     alias: string;
@@ -812,8 +817,48 @@ export function lifecycleFetch(options?: {
         coding_attempts: data.coding_attempts,
       });
     }
+    const codebasesMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/codebases$/,
+    );
+    if (codebasesMatch) {
+      const projectId = codebasesMatch[1];
+      const codebases = [
+        ...(repositoriesByProject.get(projectId) ?? []).map((repository) => ({
+          id: repository.repository_id,
+          name: repository.name,
+          kind: "single_repo",
+          repository_id: repository.repository_id,
+          logical_codebase_id: null,
+          member_count: null,
+        })),
+        ...(options?.logicalCodebases ?? []).map((codebase) => ({
+          id: codebase.id,
+          name: codebase.name,
+          kind: "logical",
+          repository_id: null,
+          logical_codebase_id: codebase.id,
+          member_count: codebase.member_count ?? 0,
+        })),
+      ];
+      return jsonResponse({ codebases });
+    }
+    const logicalCodebaseCreateMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases$/,
+    );
+    if (logicalCodebaseCreateMatch && init?.method === "POST") {
+      const payload = JSON.parse(String(init.body)) as {
+        name: string;
+        aggregate_root: string;
+      };
+      return jsonResponse({
+        id: "lc_0001",
+        name: payload.name,
+        aggregate_root: payload.aggregate_root,
+        created_at: "2026-08-19T00:00:00Z",
+      });
+    }
     const registrationPreflightMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/registrations\/preflight$/,
+      /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations\/preflight$/,
     );
     if (registrationPreflightMatch && init?.method === "POST") {
       return jsonResponse(
@@ -825,7 +870,7 @@ export function lifecycleFetch(options?: {
       );
     }
     const registrationActionMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/registrations\/([^/]+)(?:\/(resume|cancel))?$/,
+      /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations\/([^/]+)(?:\/(resume|cancel))?$/,
     );
     if (registrationActionMatch) {
       const action = registrationActionMatch[3];
@@ -838,7 +883,7 @@ export function lifecycleFetch(options?: {
       return jsonResponse(options?.registrationSubmit ?? {});
     }
     const registrationSubmitMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/logical-codebase\/registrations$/,
+      /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations$/,
     );
     if (registrationSubmitMatch && init?.method === "POST") {
       return jsonResponse(options?.registrationSubmit ?? {});

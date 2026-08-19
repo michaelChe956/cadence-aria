@@ -489,7 +489,14 @@ describe("IssueLifecycleWorkbench base workflow", () => {
       status: "completed",
       items: [{ path: "/root/api", status: "completed", failure_reason: null }],
     };
-    vi.stubGlobal("fetch", lifecycleFetch({ registrationPreflight: preflight, registrationSubmit: batch }));
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        logicalCodebases: [{ id: "lc_0001", name: "monorepo" }],
+        registrationPreflight: preflight,
+        registrationSubmit: batch,
+      }),
+    );
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);

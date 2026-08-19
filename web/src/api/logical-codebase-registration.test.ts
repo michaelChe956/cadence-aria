@@ -36,25 +36,26 @@ describe("logical codebase registration api", () => {
       }),
     );
 
-    await preflightLogicalCodebaseRegistration(projectId, {
+    const lcId = "lc/0001";
+    await preflightLogicalCodebaseRegistration(projectId, lcId, {
       aggregate_root: "/root",
       candidate_paths: ["/root/api"],
     });
-    await submitLogicalCodebaseRegistration(projectId, {
+    await submitLogicalCodebaseRegistration(projectId, lcId, {
       aggregate_root: "/root",
       preflight_id: "preflight/0001",
       confirmed_paths: ["/root/api"],
     });
-    await getLogicalCodebaseRegistration(projectId, "batch/0001");
-    await resumeLogicalCodebaseRegistration(projectId, "batch/0001");
-    await cancelLogicalCodebaseRegistration(projectId, "batch/0001");
+    await getLogicalCodebaseRegistration(projectId, lcId, "batch/0001");
+    await resumeLogicalCodebaseRegistration(projectId, lcId, "batch/0001");
+    await cancelLogicalCodebaseRegistration(projectId, lcId, "batch/0001");
 
     expect(calls.map(({ input }) => input)).toEqual([
-      "/api/projects/project%2Fwith%20space/logical-codebase/registrations/preflight",
-      "/api/projects/project%2Fwith%20space/logical-codebase/registrations",
-      "/api/projects/project%2Fwith%20space/logical-codebase/registrations/batch%2F0001",
-      "/api/projects/project%2Fwith%20space/logical-codebase/registrations/batch%2F0001/resume",
-      "/api/projects/project%2Fwith%20space/logical-codebase/registrations/batch%2F0001/cancel",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc%2F0001/registrations/preflight",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc%2F0001/registrations",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc%2F0001/registrations/batch%2F0001",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc%2F0001/registrations/batch%2F0001/resume",
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc%2F0001/registrations/batch%2F0001/cancel",
     ]);
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(
@@ -80,7 +81,7 @@ describe("logical codebase registration api", () => {
     );
 
     await expect(
-      preflightLogicalCodebaseRegistration("project_0001", {
+      preflightLogicalCodebaseRegistration("project_0001", "lc_0001", {
         aggregate_root: "/root",
         candidate_paths: [],
       }),

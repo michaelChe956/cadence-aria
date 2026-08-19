@@ -30,10 +30,12 @@ function displayReason(item: RegistrationPreflightItemDto): string {
 
 export function LogicalCodebaseRegistrationWizard({
   projectId,
+  logicalCodebaseId,
   onCompleted,
   onClose,
 }: {
   projectId: string;
+  logicalCodebaseId: string;
   onCompleted: () => Promise<void> | void;
   onClose: () => void;
 }) {
@@ -77,7 +79,7 @@ export function LogicalCodebaseRegistrationWizard({
     setError(null);
     setBatch(null);
     try {
-      const result = await preflightLogicalCodebaseRegistration(projectId, {
+      const result = await preflightLogicalCodebaseRegistration(projectId, logicalCodebaseId, {
         aggregate_root: root,
         candidate_paths: manualMode ? paths : [],
         auto_discover: !manualMode,
@@ -112,7 +114,7 @@ export function LogicalCodebaseRegistrationWizard({
     setBusyAction("submit");
     setError(null);
     try {
-      const result = await submitLogicalCodebaseRegistration(projectId, {
+      const result = await submitLogicalCodebaseRegistration(projectId, logicalCodebaseId, {
         aggregate_root: aggregateRoot.trim(),
         preflight_id: preflight.preflight_id,
         confirmed_paths: confirmedPaths,
@@ -135,7 +137,7 @@ export function LogicalCodebaseRegistrationWizard({
     setBusyAction("resume");
     setError(null);
     try {
-      const result = await resumeLogicalCodebaseRegistration(projectId, batch.batch_id);
+      const result = await resumeLogicalCodebaseRegistration(projectId, logicalCodebaseId, batch.batch_id);
       setBatch(result);
       if (result.status === "completed") {
         await onCompleted();

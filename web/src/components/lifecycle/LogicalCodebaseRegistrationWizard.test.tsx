@@ -39,7 +39,7 @@ describe("LogicalCodebaseRegistrationWizard", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const onCompleted = vi.fn();
-    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" onCompleted={onCompleted} onClose={vi.fn()} />);
+    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" logicalCodebaseId="lc_0001" onCompleted={onCompleted} onClose={vi.fn()} />);
 
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
     await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
@@ -59,7 +59,7 @@ describe("LogicalCodebaseRegistrationWizard", () => {
     await user.click(screen.getByRole("button", { name: "提交登记" }));
 
     const submitCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/logical-codebase/registrations"),
+      String(input).endsWith("/logical-codebases/lc_0001/registrations"),
     );
     expect(JSON.parse(String(submitCall?.[1]?.body))).toMatchObject({
       confirmed_paths: ["/root/web"],
@@ -82,14 +82,14 @@ describe("LogicalCodebaseRegistrationWizard", () => {
     const fetchMock = registrationFetch();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" onCompleted={vi.fn()} onClose={vi.fn()} />);
+    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" logicalCodebaseId="lc_0001" onCompleted={vi.fn()} onClose={vi.fn()} />);
 
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
     await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
     await user.click(screen.getByRole("button", { name: "提交登记" }));
 
     const submitCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/logical-codebase/registrations"),
+      String(input).endsWith("/logical-codebases/lc_0001/registrations"),
     );
     expect(JSON.parse(String(submitCall?.[1]?.body))).toMatchObject({
       confirmed_paths: ["/root/api"],
@@ -102,7 +102,7 @@ describe("LogicalCodebaseRegistrationWizard", () => {
       vi.fn(async () => jsonResponse({ code: "aggregate_root_missing", message: "聚合根不存在" }, 422)),
     );
     const user = userEvent.setup();
-    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" onCompleted={vi.fn()} onClose={vi.fn()} />);
+    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" logicalCodebaseId="lc_0001" onCompleted={vi.fn()} onClose={vi.fn()} />);
 
     await user.type(screen.getByLabelText("聚合根目录"), "/missing");
     await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
@@ -116,7 +116,7 @@ describe("LogicalCodebaseRegistrationWizard", () => {
     const fetchMock = registrationFetch([]);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" onCompleted={vi.fn()} onClose={vi.fn()} />);
+    render(<LogicalCodebaseRegistrationWizard projectId="project_0001" logicalCodebaseId="lc_0001" onCompleted={vi.fn()} onClose={vi.fn()} />);
 
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
     await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));

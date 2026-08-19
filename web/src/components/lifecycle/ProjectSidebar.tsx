@@ -1,26 +1,28 @@
 import { FolderKanban, GitBranch, Plus, Trash2 } from "lucide-react";
-import type { Project, Repository } from "../../api/types";
+import type { CodebaseSummaryDto, Project, Repository } from "../../api/types";
 
 export function ProjectSidebar({
   projects,
+  codebases,
   repositories,
   selectedProjectId,
   issueCount,
   busy,
   onSelectProject,
   onCreateProject,
-  onCreateRepository,
+  onAddCodebase,
   onDeleteProject,
   onDeleteRepository,
 }: {
   projects: Project[];
+  codebases: CodebaseSummaryDto[];
   repositories: Repository[];
   selectedProjectId: string | null;
   issueCount: number;
   busy: boolean;
   onSelectProject: (projectId: string) => void;
   onCreateProject: () => void;
-  onCreateRepository: () => void;
+  onAddCodebase: () => void;
   onDeleteProject: (projectId: string) => void;
   onDeleteRepository: (repositoryId: string) => void;
 }) {
@@ -107,50 +109,75 @@ export function ProjectSidebar({
               <h3 className="truncate text-sm font-semibold text-[var(--aria-ink)]">代码库</h3>
             </div>
             <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-              {repositories.length}
+              {codebases.length}
             </span>
           </div>
           <button
             type="button"
             disabled={!selectedProjectId}
-            onClick={onCreateRepository}
+            onClick={onAddCodebase}
             className="mb-3 inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 text-xs font-semibold text-[var(--aria-ink)] disabled:text-[var(--aria-ink-muted)]"
           >
             <Plus className="mr-1 h-4 w-4" />
             添加代码库
           </button>
           {selectedProjectId ? (
-            repositories.length === 0 ? (
+            codebases.length === 0 ? (
               <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs text-[var(--aria-ink-muted)]">
                 <p className="font-semibold text-[var(--aria-ink)]">还没有代码库</p>
                 <p className="mt-1">先添加代码库，Issue 才能绑定代码上下文。</p>
               </div>
             ) : (
               <ul className="space-y-2">
-                {repositories.map((repository) => (
-                  <li
-                    key={repository.repository_id}
-                    className="flex items-start gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-semibold text-[var(--aria-ink)]">
-                        {repository.name}
-                      </p>
-                      <p className="mt-1 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
-                        {repository.path}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      aria-label={`删除代码库 ${repository.name}`}
-                      disabled={busy}
-                      onClick={() => onDeleteRepository(repository.repository_id)}
-                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-danger)] hover:text-[var(--aria-danger)] disabled:opacity-60"
+                {codebases.map((codebase) => {
+                  const repository = repositories.find(
+                    (candidate) =>
+                      candidate.repository_id === codebase.repository_id,
+                  );
+                  return (
+                    <li
+                      key={codebase.id}
+                      data-testid="codebase-list-item"
+                      className="flex items-start gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </li>
-                ))}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            data-testid={`codebase-kind-${codebase.name}`}
+                            className={
+                              codebase.kind === "logical"
+                                ? "rounded border border-[var(--aria-primary)] px-1 py-0.5 font-mono text-[10px] font-semibold text-[var(--aria-primary)]"
+                                : "rounded border border-[var(--aria-line)] px-1 py-0.5 font-mono text-[10px] text-[var(--aria-ink-muted)]"
+                            }
+                          >
+                            {codebase.kind === "logical" ? "逻辑" : "单仓"}
+                          </span>
+                          <p className="truncate text-xs font-semibold text-[var(--aria-ink)]">
+                            {codebase.name}
+                          </p>
+                        </div>
+                        <p className="mt-1 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                          {codebase.kind === "logical"
+                            ? `成员：${codebase.member_count ?? 0}`
+                            : (repository?.path ?? "")}
+                        </p>
+                      </div>
+                      {codebase.kind === "single_repo" && codebase.repository_id ? (
+                        <button
+                          type="button"
+                          aria-label={`删除代码库 ${codebase.name}`}
+                          disabled={busy}
+                          onClick={() =>
+                            onDeleteRepository(codebase.repository_id ?? "")
+                          }
+                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-danger)] hover:text-[var(--aria-danger)] disabled:opacity-60"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             )
           ) : (
