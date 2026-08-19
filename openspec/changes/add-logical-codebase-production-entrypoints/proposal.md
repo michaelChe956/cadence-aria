@@ -33,3 +33,13 @@
 - 兼容：单仓 project 行为零变化（默认 disabled 不变；旧 JSON multi_repo serde default=false）。
 - 侵入面：约 16-17 处生产 `RepositoryStore::new`、约 27 处 `CreateProjectInput` 构造点（Plan 中独立 task 逐点核对）。
 - 完成定义：it_web 经真实 HTTP 复现 REG-01/INIT-01/IDX-01/PLN-01（含 change_order blocker）。
+
+## 修正（2026-08-19，v1.3 概念模型修正）
+
+人工测试发现概念错误：仓库模式是代码库属性而非 project 属性。修正：删除 ProjectRecord.multi_repo，引入代码库实体（单仓代码库/逻辑代码库同级并存，一个 project 多个逻辑代码库零耦合）；逻辑专属端点换形至 /logical-codebases/{lc_id}/（旧端点保留默认 LC 别名）；issue 唯一归属一个代码库；废除多仓 project 防护语义；创建 project 弹窗恢复原样。详见 cadence/designs/2026-08-19_方案设计_代码库级模式修正_v1.3.md。
+
+### New Capabilities（修正后）
+
+- `codebase-kinds`：代码库实体与两种同级形式（单仓/逻辑）、统一列表、LC CRUD、issue 唯一归属。
+
+（原 multi-repo-project-mode 能力作废，由 codebase-kinds 替代。）

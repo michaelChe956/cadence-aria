@@ -1,5 +1,7 @@
 # Design: add-logical-codebase-production-entrypoints
 
+> ⚠️ 概念模型修正（2026-08-19）：v1.2 的 project 级 opt-in 已被 v1.3 代码库级模式替代，权威设计见 `cadence/designs/2026-08-19_方案设计_代码库级模式修正_v1.3.md`（实体模型/路由换形/issue 归属/兼容迁移）。以下 D1-D8 中，D1（project opt-in）作废，D6 中 legacy 防护语义作废；其余决策键从 project 换成 logical_codebase_id 后继续有效。
+
 > 完整设计见 `cadence/designs/2026-08-18_方案设计_多仓库生产入口补齐_v1.2.md`（经 v1.0 terra 审核 7B/14M/5m 与 v1.1 reviewer 审阅 2B/6M/9m 两轮迭代后用户批准）。本文件为契约内摘要。
 
 ## 核心决策（D1-D8）

@@ -39,3 +39,17 @@
 
 - [x] 6.1 前端聚合初始化卡片（触发/步骤进度轮询/取消，loading）+ CreateProjectDialog 多仓库模式勾选 + 前端测试补齐
 - [x] 6.2 全门禁：cargo fmt/clippy -D warnings/lib/it_web 全量、前端 vitest/tsc、openspec validate --specs 26/26 + 本 change 通过；人工测试矩阵 P0 主线冒烟（REG-01→INIT-01→IDX-01→PLN-01/02/03，/tmp/test-demo）
+
+
+## 7. 代码库级模式修正（v1.3 Rework，2026-08-19 追加）
+
+- [ ] R1 模型与存储：LogicalCodebaseRecord/store + logical-codebases/{lc_id}/ 子树；删除 ProjectRecord.multi_repo（旧数据兼容忽略）；迁移工具（旧 logical-codebase/ → 首 LC）
+- [ ] R2 统一 codebases 列表端点（混合单仓/逻辑）+ LC CRUD（POST 创建/GET 详情/DELETE 软删零 git 副作用）
+- [ ] R3 登记端点换形 /logical-codebases/{lc_id}/ + guard 改 require_logical_codebase（404 logical_codebase_not_found）
+- [ ] R4 初始化/索引端点换形 + 母 change 旧端点（members/pointer/initializations）保留默认首 LC 兼容别名
+- [ ] R5 routing/resolver/gateway/selection 按 issue 所属 codebase 解析（补偿事务按 LC；issue 增加 logical_codebase_id 归属；单仓 issue 零变化）
+- [ ] R6 废除多仓 project 防护语义（legacy_repository_endpoint_on_multi_repo 不再产出）+ 单仓端点全回归
+- [ ] R7 前端：代码库混合列表 + 添加代码库弹窗模式单选（单仓→既有流程/多仓→建 LC→登记向导 auto_discover）
+- [ ] R8 前端：逻辑代码库页按 LC 分区（初始化/索引/指针）+ issue 创建代码库选择 + 恢复创建 project 弹窗（撤 UX 2.1 单选）
+- [ ] R9 P0 e2e 更新为新寻址全链（建 LC→登记→初始化→索引→逻辑 issue→Story/Design→Draft）+ 单仓回归
+- [ ] R10 全门禁 + 验收记录更新
