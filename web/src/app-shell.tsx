@@ -73,7 +73,7 @@ export function AppShell({
             aria-label="设置"
             aria-expanded={settingsOpen}
             title="设置"
-            className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0"
+            className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-sm font-semibold text-[var(--aria-ink)] shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0"
           >
             <Settings aria-hidden="true" className="h-4 w-4" />
             <span className="hidden sm:inline">设置</span>
