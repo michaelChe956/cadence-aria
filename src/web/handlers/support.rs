@@ -243,8 +243,12 @@ pub(crate) fn require_logical_codebase(
 }
 
 /// Legacy `/logical-codebase/*` endpoints alias the project's default first
-/// logical codebase (v1.2 migration artifact, deterministic id order). With no
-/// logical codebase at all the alias has no referent and returns the same 404.
+/// logical codebase. The alias is pinned to the v1.2 migration logical
+/// codebase whenever its record exists (its id is deterministic), so newly
+/// created logical codebases whose uuid ids sort lexicographically earlier
+/// cannot steal the alias from old clients. Otherwise it falls back to the
+/// deterministic first record by id order. With no logical codebase at all
+/// the alias has no referent and returns the same 404.
 pub(crate) fn default_logical_codebase_id(
     paths: &ProductAppPaths,
     project_id: &str,
@@ -252,7 +256,16 @@ pub(crate) fn default_logical_codebase_id(
     ProjectStore::new(paths.clone())
         .get(project_id)
         .map_err(product_store_api_error)?;
-    LogicalCodebaseStore::new(paths.clone())
+    let store = LogicalCodebaseStore::new(paths.clone());
+    let legacy_id = crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
+    if store
+        .get(project_id, &legacy_id)
+        .map_err(product_store_api_error)?
+        .is_some()
+    {
+        return Ok(legacy_id);
+    }
+    store
         .list(project_id)
         .map_err(product_store_api_error)?
         .into_iter()

@@ -2,8 +2,8 @@ use axum::http::{Method, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::json_store::write_json;
 use cadence_aria::product::logical_codebase::{
-    CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
-    MemberStatus, RepositorySourceIdentity, RepositoryType,
+    CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseRecord, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositorySourceIdentity, RepositoryType,
 };
 use cadence_aria::product::models::RepositoryRecord;
 use cadence_aria::product::project_store::ProjectStore;
@@ -287,5 +287,102 @@ async fn migrated_project_delete_repository_removes_only_projection_entry() {
             .as_array()
             .is_some_and(|entries| entries.iter().any(|entry| entry["kind"] == "logical")),
         "logical entry must survive the projection delete: {codebases}"
+    );
+}
+
+/// 最终复审 fix（Important-1）：legacy `/logical-codebase/*` 别名必须钉住
+/// v1.2 迁移 LC，即使并存的新建 LC id 字典序更小也不能抢占别名。
+#[tokio::test]
+async fn legacy_alias_pins_migration_lc_over_lexicographically_smaller_new_lc() {
+    let root = tempdir().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let projects = ProjectStore::new(paths.clone());
+    projects
+        .create(cadence_aria::product::project_store::CreateProjectInput {
+            name: "aliaspin".into(),
+            description: None,
+        })
+        .unwrap();
+
+    // v1.2 迁移形态：legacy 根 manifest + 成员；首次读取即迁移为
+    // logical_codebase_<sha256 前缀> 记录。
+    let logical = LogicalCodebaseStore::new(paths.clone());
+    let legacy_member_id = LogicalRepositoryId(Uuid::new_v4());
+    logical
+        .save_manifest(
+            "project_0001",
+            &LogicalCodebaseManifest::new(
+                "project_0001",
+                root.path().join("legacy-root"),
+                vec![legacy_member_id],
+            ),
+        )
+        .unwrap();
+    logical
+        .save_member("project_0001", &member(legacy_member_id, "legacy-api"))
+        .unwrap();
+    let migrated = logical
+        .list("project_0001")
+        .unwrap()
+        .into_iter()
+        .find(|record| record.id != "logical_codebase_00000000000000000000000000000000")
+        .expect("migrated legacy record");
+
+    // 并存的新建 LC：id 字典序严格小于迁移 LC id。
+    let smaller_id = "logical_codebase_00000000000000000000000000000000";
+    assert!(
+        smaller_id < migrated.id.as_str(),
+        "crafted id must sort before the migration id"
+    );
+    write_json(
+        &logical.record_path("project_0001", smaller_id).unwrap(),
+        &LogicalCodebaseRecord {
+            id: smaller_id.to_string(),
+            name: "new-lc".to_string(),
+            aggregate_root: root.path().join("new-root"),
+            created_at: "2026-08-19T00:00:00Z".to_string(),
+        },
+    )
+    .unwrap();
+    let scoped = LogicalCodebaseStore::for_lc(paths.clone(), smaller_id);
+    let new_member_id = LogicalRepositoryId(Uuid::new_v4());
+    scoped
+        .save_manifest(
+            "project_0001",
+            &LogicalCodebaseManifest::new(
+                "project_0001",
+                root.path().join("new-root"),
+                vec![new_member_id],
+            ),
+        )
+        .unwrap();
+    scoped
+        .save_member("project_0001", &member(new_member_id, "new-api"))
+        .unwrap();
+
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    // 别名端点必须命中迁移 LC 的成员，而不是字典序更小的新建 LC。
+    let (status, body) = request(
+        &app,
+        Method::GET,
+        "/api/projects/project_0001/logical-codebase/members",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let aliases: Vec<&str> = body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|entry| entry["alias"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        aliases,
+        vec!["legacy-api"],
+        "alias must pin the migrated LC"
     );
 }
