@@ -59,6 +59,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
         operation_id: &str,
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
+        lc_id: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         let Some(factory) = self.factory.as_ref() else {
@@ -68,7 +69,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 retryable: false,
             });
         };
-        let gateway = factory.build(project_id).map_err(|error| {
+        let gateway = factory.build_for_lc(project_id, lc_id).map_err(|error| {
             AggregateInitializationError::ProviderTurn {
                 step,
                 reason: format!("logical codebase gateway factory build failed: {error}"),
@@ -79,7 +80,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
             Arc::new(gateway),
             "cap_managed_snapshot",
         )
-        .run_turn(project_id, operation_id, step, preflight, cancellation)
+        .run_turn(project_id, operation_id, step, preflight, lc_id, cancellation)
         .await
     }
 }

@@ -14,16 +14,18 @@ use cadence_aria::product::issue_store::IssueStore;
 use cadence_aria::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelectionStore,
     LogicalCodebaseCreateInput, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
-    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
-    RepositoryType,
+    MemberStatus, ProviderGatewayError, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
     aggregate_index::{
         AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
         AggregateIndexStore,
     },
     policy::AggregatePolicyArtifactStore,
+    resolve_issue_logical_codebase_id,
 };
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::web::app::build_web_router;
+use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::json;
@@ -41,6 +43,7 @@ struct IssueAttributionFixture {
     lc_a: String,
     lc_b: String,
     app: axum::Router,
+    factory: std::sync::Arc<LogicalCodebaseGatewayFactory>,
 }
 
 fn seed_logical_codebase(paths: &ProductAppPaths, name: &str, aggregate_root: PathBuf) -> String {
@@ -172,12 +175,17 @@ impl IssueAttributionFixture {
         let lc_a = seed_logical_codebase(&paths, "svc-a", root.join("aggregate-a"));
         let lc_b = seed_logical_codebase(&paths, "svc-b", root.join("aggregate-b"));
         let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
+        let factory = state
+            .gateway_factory()
+            .expect("gateway factory installed by default")
+            .clone();
         Self {
             _workspace: workspace,
             paths,
             lc_a,
             lc_b,
             app: build_web_router(state),
+            factory,
         }
     }
 
@@ -398,4 +406,34 @@ async fn mixed_project_two_codebases_issues_do_not_cross_interfere() {
         !content_b.contains("svc-a"),
         "cross-LC leak in B: {content_b}"
     );
+}
+
+#[tokio::test]
+async fn non_default_lc_issue_gateway_resolves_lc_scoped_policy() {
+    let fixture = IssueAttributionFixture::new();
+
+    // 非默认 LC（lc_b）issue 的归属反查必须得到该 lc_id（WS 会话 gateway 的输入）。
+    let (status, issue) = fixture
+        .create_issue(&fixture.lc_b, "repository_svc-b")
+        .await;
+    assert_eq!(status, StatusCode::OK, "create issue in LC B: {issue}");
+    let issue_id = issue["issue_id"].as_str().expect("issue id").to_string();
+    let resolved = resolve_issue_logical_codebase_id(&fixture.paths, PROJECT_ID, &issue_id)
+        .expect("resolve issue lc")
+        .expect("logical issue must resolve to an lc");
+    assert_eq!(resolved, fixture.lc_b);
+
+    // gateway 按该 lc_id 构建成功（policy/capability 解析到 lc_b 子树）；
+    // project 级默认首 LC（legacy None）路径无 manifest → PolicyMissing，证明不串扰。
+    let gateway = fixture
+        .factory
+        .build_for_lc(PROJECT_ID, Some(&fixture.lc_b))
+        .expect("gateway for non-default lc");
+    drop(gateway);
+
+    let legacy = fixture.factory.build_for_lc(PROJECT_ID, None);
+    assert!(matches!(
+        legacy,
+        Err(ProviderGatewayError::PolicyMissing(ref id)) if id == PROJECT_ID
+    ));
 }

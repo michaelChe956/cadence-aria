@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::logical_codebase::{
     PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode, ResumeDecision,
+    resolve_issue_logical_codebase_id,
 };
 
 pub async fn workspace_ws(
@@ -193,19 +194,37 @@ pub(crate) async fn handle_workspace_socket(
     let mut engine_workspace =
         WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, engine_tx, session);
     if is_logical_session {
-        let gateway = match state.gateway_factory() {
-            Some(factory) => match factory.build(&session_record.project_id) {
-                Ok(gateway) => gateway,
-                Err(error) => {
-                    let err = WsOutMessage::Error {
-                        message: format!("logical gateway build failed: {error}"),
-                    };
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = ws_sender.send(Message::Text(json.into())).await;
-                    }
-                    return;
+        let lc_id = match resolve_issue_logical_codebase_id(
+            &app_paths,
+            &session_record.project_id,
+            &session_record.issue_id,
+        ) {
+            Ok(lc_id) => lc_id,
+            Err(error) => {
+                let err = WsOutMessage::Error {
+                    message: format!("logical codebase resolution failed: {error}"),
+                };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    let _ = ws_sender.send(Message::Text(json.into())).await;
                 }
-            },
+                return;
+            }
+        };
+        let gateway = match state.gateway_factory() {
+            Some(factory) => {
+                match factory.build_for_lc(&session_record.project_id, lc_id.as_deref()) {
+                    Ok(gateway) => gateway,
+                    Err(error) => {
+                        let err = WsOutMessage::Error {
+                            message: format!("logical gateway build failed: {error}"),
+                        };
+                        if let Ok(json) = serde_json::to_string(&err) {
+                            let _ = ws_sender.send(Message::Text(json.into())).await;
+                        }
+                        return;
+                    }
+                }
+            }
             None => {
                 let err = WsOutMessage::Error {
                     message: "logical gateway factory unavailable".to_string(),

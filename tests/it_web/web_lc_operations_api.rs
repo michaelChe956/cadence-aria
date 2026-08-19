@@ -104,6 +104,7 @@ impl AggregateProviderTurnDriver for NoopProvider {
         _operation_id: &str,
         _step: AggregateInitializationStepKind,
         _preflight: &AggregatePreflightSnapshot,
+        _lc_id: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         if cancellation.is_cancelled() {

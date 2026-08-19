@@ -49,6 +49,7 @@ mod tests {
             _operation_id: &str,
             step: AggregateInitializationStepKind,
             _preflight: &AggregatePreflightSnapshot,
+            _lc_id: Option<&str>,
             _cancellation: CancellationToken,
         ) -> Result<String, AggregateInitializationError> {
             self.calls.lock().unwrap().push(step.as_str().to_string());
@@ -262,6 +263,7 @@ mod tests {
                 _operation_id: &str,
                 step: AggregateInitializationStepKind,
                 _preflight: &AggregatePreflightSnapshot,
+                _lc_id: Option<&str>,
                 _cancellation: CancellationToken,
             ) -> Result<String, AggregateInitializationError> {
                 if step == AggregateInitializationStepKind::RuleAndMcpConfig {
@@ -379,6 +381,7 @@ mod tests {
                 _operation_id: &str,
                 _step: AggregateInitializationStepKind,
                 _preflight: &AggregatePreflightSnapshot,
+                _lc_id: Option<&str>,
                 _cancellation: CancellationToken,
             ) -> Result<String, AggregateInitializationError> {
                 let mut count = self.count.lock().unwrap();

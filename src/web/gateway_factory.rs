@@ -269,6 +269,54 @@ mod tests {
     }
 
     #[test]
+    fn build_for_lc_scopes_policy_and_capability_to_lc_subtree() {
+        let (_root, paths, factory) = factory_fixture();
+        let lc_id = "lc_second";
+
+        // 仅在 lc 子树注册 manifest（不写 project 级 legacy 路径）。
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", paths.root().to_path_buf(), vec![]);
+        LogicalCodebaseStore::for_lc(paths.clone(), lc_id)
+            .save_manifest("project_0001", &manifest)
+            .expect("save lc manifest");
+
+        // 按 lc_id 构建成功（policy/capability 解析到 lc 子树）。
+        let gateway = factory
+            .build_for_lc("project_0001", Some(lc_id))
+            .expect("build lc gateway");
+
+        // legacy（None）路径无 manifest → PolicyMissing，证明未串扰到 project 级。
+        let legacy = factory.build_for_lc("project_0001", None);
+        assert!(matches!(
+            legacy,
+            Err(ProviderGatewayError::PolicyMissing(ref id)) if id == "project_0001"
+        ));
+
+        // policy/capability 落盘在 lc 子树，而非 legacy project 级。
+        let lc_root = paths.logical_codebases_root("project_0001").join(lc_id);
+        assert!(lc_root.join("manifest.json").is_file());
+        assert!(lc_root.join("aggregate-policy.json").is_file());
+        assert!(lc_root.join("capabilities.json").is_file());
+        let legacy_root = paths.logical_codebase_root("project_0001");
+        assert!(!legacy_root.join("manifest.json").exists());
+        assert!(!legacy_root.join("aggregate-policy.json").exists());
+        assert!(!legacy_root.join("capabilities.json").exists());
+
+        // gateway 可用：validate 通过并回读 lc 子树 policy revision。
+        let aggregate_root = paths.root().join("aggregate");
+        std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+        let request = SessionLaunchRequest::planning(
+            "project_0001",
+            ProviderRef::claude_code("cap_managed_snapshot"),
+            PolicyTarget::aggregate_root(aggregate_root),
+            vec![paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        let validated = gateway.validate(request).unwrap();
+        assert_eq!(validated.envelope().policy_revision, 1);
+    }
+
+    #[test]
     fn web_app_state_installs_factory_and_supports_injection() {
         let root = tempdir().expect("root");
         let state = crate::web::state::WebAppState::new(

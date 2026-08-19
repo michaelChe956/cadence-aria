@@ -86,6 +86,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
         _operation_id: &str,
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
+        _lc_id: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError> {
         use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;

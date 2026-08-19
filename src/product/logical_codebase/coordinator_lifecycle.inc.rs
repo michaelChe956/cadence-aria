@@ -387,6 +387,7 @@ impl AggregateInitializationCoordinator {
                 operation_id,
                 step,
                 preflight,
+                self.lc_id.as_deref(),
                 cancellation_token,
             )
             .await

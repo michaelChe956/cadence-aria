@@ -3,11 +3,13 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::product::logical_codebase::resolve_issue_logical_codebase_id;
 use crate::web::coding_ws_handler::{CodingWsOutMessage, emit_current_session_state};
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
@@ -121,9 +123,27 @@ async fn run_coding_runner_task_body(
     .with_cancellation(cancellation.clone());
     if attempt.target_snapshot.is_some()
         && let Some(factory) = state.gateway_factory()
-        && let Ok(gateway) = factory.build(&attempt.project_id)
     {
-        engine = engine.with_logical_provider_gateway(Arc::new(gateway));
+        let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+        let resolved =
+            resolve_issue_logical_codebase_id(&app_paths, &attempt.project_id, &attempt.issue_id);
+        let gateway = match resolved {
+            Ok(lc_id) => factory
+                .build_for_lc(&attempt.project_id, lc_id.as_deref())
+                .ok(),
+            Err(error) => {
+                tracing::warn!(
+                    project_id = attempt.project_id.as_str(),
+                    issue_id = attempt.issue_id.as_str(),
+                    %error,
+                    "coding runner: failed to resolve issue logical codebase; skipping gateway injection"
+                );
+                None
+            }
+        };
+        if let Some(gateway) = gateway {
+            engine = engine.with_logical_provider_gateway(Arc::new(gateway));
+        }
     }
     let result = execute_start_coding_flow(
         &state,

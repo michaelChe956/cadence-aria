@@ -211,6 +211,7 @@ pub trait AggregateProviderTurnDriver: Send + Sync {
         operation_id: &str,
         step: AggregateInitializationStepKind,
         preflight: &AggregatePreflightSnapshot,
+        lc_id: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<String, AggregateInitializationError>;
 }
