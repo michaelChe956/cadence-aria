@@ -91,18 +91,39 @@ export function CreateProjectDialog({
               className="mt-1 block min-h-20 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
-          <label className="flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
-            <input
-              type="checkbox"
-              checked={multiRepo}
-              onChange={(event) => {
-                setMultiRepo(event.target.checked);
-                setError(null);
-              }}
-              className="h-4 w-4 rounded border-[var(--aria-line)]"
-            />
-            启用多仓库模式
-          </label>
+          <fieldset className="space-y-1">
+            <legend className="text-sm font-semibold text-[var(--aria-ink)]">
+              仓库模式
+            </legend>
+            <label className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]">
+              <input
+                type="radio"
+                name="repo-mode"
+                value="single"
+                checked={!multiRepo}
+                onChange={() => {
+                  setMultiRepo(false);
+                  setError(null);
+                }}
+                className="h-4 w-4"
+              />
+              单仓库（默认）
+            </label>
+            <label className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]">
+              <input
+                type="radio"
+                name="repo-mode"
+                value="multi"
+                checked={multiRepo}
+                onChange={() => {
+                  setMultiRepo(true);
+                  setError(null);
+                }}
+                className="h-4 w-4"
+              />
+              多仓库
+            </label>
+          </fieldset>
           {error ? (
             <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
               {error}

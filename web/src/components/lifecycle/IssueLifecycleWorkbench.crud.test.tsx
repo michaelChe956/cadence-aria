@@ -639,7 +639,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     fireEvent.change(within(dialog).getByLabelText("Project 名称"), {
       target: { value: "Multi Repo" },
     });
-    fireEvent.click(within(dialog).getByLabelText("启用多仓库模式"));
+    fireEvent.click(within(dialog).getByRole("radio", { name: "多仓库" }));
     fireEvent.submit(dialog);
     await flushAsyncWork();
     await act(async () => {
@@ -736,7 +736,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     fireEvent.change(within(dialog).getByLabelText("Project 名称"), {
       target: { value: "Multi Repo" },
     });
-    fireEvent.click(within(dialog).getByLabelText("启用多仓库模式"));
+    fireEvent.click(within(dialog).getByRole("radio", { name: "多仓库" }));
     fireEvent.submit(dialog);
     await flushAsyncWork();
     await act(async () => {
@@ -794,8 +794,8 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     await user.click(screen.getByRole("button", { name: "新建 Project" }));
     const dialog = screen.getByRole("dialog", { name: "新建 Project" });
     expect(
-      within(dialog).getByLabelText("启用多仓库模式"),
-    ).not.toBeChecked();
+      within(dialog).getByRole("radio", { name: "单仓库（默认）" }),
+    ).toBeChecked();
     await user.click(
       within(dialog).getByRole("button", { name: "取消" }),
     );
