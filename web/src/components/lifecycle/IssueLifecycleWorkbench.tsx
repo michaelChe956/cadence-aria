@@ -1,4 +1,3 @@
-import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiRequestError,
@@ -70,6 +69,7 @@ import {
 } from "./CreateLifecycleIssueDialog";
 import { AggregateIndexCard } from "./AggregateIndexCard";
 import { AggregateInitializationCard } from "./AggregateInitializationCard";
+import { IssueLifecycleWorkbenchHeader } from "./IssueLifecycleWorkbenchHeader";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
 import { PointerPublicationPanel } from "./PointerPublicationPanel";
 import { ProjectSidebar } from "./ProjectSidebar";
@@ -1002,44 +1002,14 @@ export function IssueLifecycleWorkbench({
           }
           alert={error}
           header={
-            <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0">
-                <h1 className="truncate text-base font-semibold text-[var(--aria-ink)]">
-                  Issue 生命周期工作台
-                </h1>
-                <p className="truncate text-xs text-[var(--aria-ink-muted)]">
-                  {selectedProject?.name ?? "未选择 Project"}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {focusedIssueId ? (
-                  <button
-                    type="button"
-                    onClick={() => setFocusedIssueId(null)}
-                    className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] px-3 text-xs font-semibold text-[var(--aria-ink)]"
-                  >
-                    显示全部
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  aria-label="刷新"
-                  onClick={() => void refresh()}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)]"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  disabled={!selectedProjectId || repositories.length === 0}
-                  onClick={() => setDialogOpen(true)}
-                  className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
-                >
-                  <Plus className="mr-1 h-4 w-4" />
-                  新建 Issue
-                </button>
-              </div>
-            </div>
+            <IssueLifecycleWorkbenchHeader
+              projectName={selectedProject?.name}
+              focusedIssueId={focusedIssueId}
+              canCreateIssue={Boolean(selectedProjectId) && repositories.length > 0}
+              onShowAll={() => setFocusedIssueId(null)}
+              onRefresh={() => void refresh()}
+              onCreateIssue={() => setDialogOpen(true)}
+            />
           }
           main={
             <div className="space-y-3">

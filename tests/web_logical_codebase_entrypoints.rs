@@ -49,5 +49,7 @@ mod guards;
 mod initialization;
 #[path = "web_logical_codebase_entrypoints/planning.rs"]
 mod planning;
+#[path = "web_logical_codebase_entrypoints/planning_p0.rs"]
+mod planning_p0;
 #[path = "web_logical_codebase_entrypoints/registration.rs"]
 mod registration;
