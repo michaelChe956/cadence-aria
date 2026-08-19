@@ -79,6 +79,9 @@ impl IntoResponse for ApiError {
                 StatusCode::NOT_FOUND
             }
             "repository_routing_target_missing"
+            | "involved_repository_not_effective"
+            | "change_order_repository_not_involved"
+            | "change_order_duplicate_repository"
             | "mixed_target_group_rejected"
             | "target_snapshot_missing_for_logical"
             | "aggregate_index_unavailable"
@@ -127,8 +130,11 @@ impl IntoResponse for ApiError {
             | "repository_path_invalid"
             | "repository_not_git"
             | "work_item_split_invalid"
+            | "story_spec_not_confirmed"
+            | "design_spec_not_confirmed"
             | "involved_repositories_undetermined"
             | "change_order_required_for_logical_codebase"
+            | "aggregate_scope_requires_logical_codebase"
             | "target_not_in_selection" => StatusCode::BAD_REQUEST,
             "aggregate_root_is_git"
             | "aggregate_root_missing"

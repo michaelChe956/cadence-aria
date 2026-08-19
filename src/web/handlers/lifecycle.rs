@@ -411,6 +411,10 @@ pub async fn generate_story_specs(
         .map_err(product_store_api_error)?;
     let (repository_id, aggregate_codebase) = match routing {
         RepositoryRouting::Legacy { .. } => {
+            reject_aggregate_scope_on_legacy_project(
+                request.involved_repository_ids.is_some(),
+                false,
+            )?;
             let repository_id = issue.repo_id.clone().ok_or_else(|| {
                 ApiError::validation("repository_required", "repository_id is required")
             })?;
@@ -418,15 +422,23 @@ pub async fn generate_story_specs(
             (repository_id, None)
         }
         RepositoryRouting::Logical { manifest, .. } => {
-            // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
+            // Omission remains the existing AI-undetermined draft behavior. When
+            // a fake/gateway test supplies targets, validate them against the
+            // fresh authoritative selection before persisting the spec.
             let resolved = PlanningContextResolver::new(app_paths.clone())
                 .build_with_fresh_index(&project_id, &issue_id, &[])
                 .await
                 .map_err(product_store_api_error)?;
+            let involved_repository_ids = request.involved_repository_ids.unwrap_or_default();
+            validate_requested_aggregate_scope(
+                &resolved.snapshot.effective_member_ids,
+                &involved_repository_ids,
+                &[],
+            )?;
             let scope = AggregateStorySpecScope {
                 logical_codebase_ref: manifest.logical_codebase_id,
                 effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
-                involved_repository_ids: Vec::new(),
+                involved_repository_ids,
                 focus_repository_id: None,
             };
             (String::new(), Some(scope))
@@ -493,17 +505,30 @@ pub async fn generate_design_specs(
     let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let aggregate_codebase = match routing {
-        RepositoryRouting::Legacy { .. } => None,
+        RepositoryRouting::Legacy { .. } => {
+            reject_aggregate_scope_on_legacy_project(
+                request.involved_repository_ids.is_some(),
+                request.change_order.is_some(),
+            )?;
+            None
+        }
         RepositoryRouting::Logical { manifest, .. } => {
             let resolved = PlanningContextResolver::new(app_paths.clone())
                 .build_with_fresh_index(&project_id, &issue_id, &[])
                 .await
                 .map_err(product_store_api_error)?;
+            let involved_repository_ids = request.involved_repository_ids.unwrap_or_default();
+            let change_order = request.change_order.unwrap_or_default();
+            validate_requested_aggregate_scope(
+                &resolved.snapshot.effective_member_ids,
+                &involved_repository_ids,
+                &change_order,
+            )?;
             Some(AggregateDesignSpecScope {
                 logical_codebase_ref: manifest.logical_codebase_id,
                 effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
-                involved_repository_ids: Vec::new(),
-                change_order: Vec::new(),
+                involved_repository_ids,
+                change_order,
             })
         }
         RepositoryRouting::FailClosed { code, reason } => {
@@ -858,6 +883,54 @@ pub(crate) fn backfill_legacy_spec_versions(
         }
     }
 
+    Ok(())
+}
+
+/// Validates optional aggregate scope fields accepted by the HTTP generation
+/// endpoints. The product store repeats these invariants when persisting; doing
+/// it here keeps malformed provider/gateway output in the request validation
+/// family rather than exposing a generic store failure.
+fn validate_requested_aggregate_scope(
+    effective_member_ids: &[LogicalRepositoryId],
+    involved_repository_ids: &[LogicalRepositoryId],
+    change_order: &[LogicalRepositoryId],
+) -> ApiResult<()> {
+    for involved in involved_repository_ids {
+        if !effective_member_ids.contains(involved) {
+            return Err(ApiError::validation(
+                "involved_repository_not_effective",
+                "involved_repository_ids must be contained in the effective logical-codebase selection",
+            ));
+        }
+    }
+    for ordered in change_order {
+        if !involved_repository_ids.contains(ordered) {
+            return Err(ApiError::validation(
+                "change_order_repository_not_involved",
+                "change_order must be contained in involved_repository_ids",
+            ));
+        }
+    }
+    let unique_order = change_order.iter().collect::<BTreeSet<_>>();
+    if unique_order.len() != change_order.len() {
+        return Err(ApiError::validation(
+            "change_order_duplicate_repository",
+            "change_order must not contain a repository more than once",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_aggregate_scope_on_legacy_project(
+    has_involved_repository_ids: bool,
+    has_change_order: bool,
+) -> ApiResult<()> {
+    if has_involved_repository_ids || has_change_order {
+        return Err(ApiError::validation(
+            "aggregate_scope_requires_logical_codebase",
+            "aggregate scope fields are only supported for multi-repository logical codebases",
+        ));
+    }
     Ok(())
 }
 

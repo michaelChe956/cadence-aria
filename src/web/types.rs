@@ -628,6 +628,11 @@ pub struct CodingAttemptSnapshotResponse {
 #[serde(rename_all = "snake_case")]
 pub struct GenerateStorySpecsRequest {
     pub title: String,
+    /// Optional logical-codebase scope emitted by a provider/gateway. Omission
+    /// preserves the existing draft behavior where involved targets are not yet
+    /// determined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub involved_repository_ids: Option<Vec<LogicalRepositoryId>>,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
@@ -647,6 +652,12 @@ pub struct GenerateStorySpecsResponse {
 pub struct GenerateDesignSpecsRequest {
     pub title: String,
     pub story_spec_ids: Vec<String>,
+    /// Optional logical-codebase targets emitted by a provider/gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub involved_repository_ids: Option<Vec<LogicalRepositoryId>>,
+    /// Optional execution order for the supplied logical-codebase targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_order: Option<Vec<LogicalRepositoryId>>,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
