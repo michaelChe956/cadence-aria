@@ -11,4 +11,4 @@
 
 ## 3. 门禁
 
-- [ ] 3.1 全门禁（fmt/clippy/check/定向+全量测试/it_core/前端/tsc/openspec validate 两 change）
+- [x] 3.1 全门禁（fmt/clippy/check/定向+全量测试/it_core/前端/tsc/openspec validate 两 change）
