@@ -495,7 +495,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     render(<IssueLifecycleWorkbench />);
     await user.click(await screen.findByRole("button", { name: "登记成员" }));
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
-    await user.click(screen.getByRole("button", { name: "执行预检" }));
+    await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
     await user.click(await screen.findByRole("button", { name: "提交登记" }));
 
     expect(await screen.findByText("completed")).toBeInTheDocument();

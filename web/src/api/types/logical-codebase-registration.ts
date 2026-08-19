@@ -2,6 +2,7 @@
 export type RegistrationPreflightRequest = {
   aggregate_root: string;
   candidate_paths: string[];
+  auto_discover?: boolean;
 };
 
 export type RegistrationPreflightItemDto = {

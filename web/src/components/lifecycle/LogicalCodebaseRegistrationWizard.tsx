@@ -40,9 +40,8 @@ export function LogicalCodebaseRegistrationWizard({
   const [aggregateRoot, setAggregateRoot] = useState("");
   const [candidatePaths, setCandidatePaths] = useState("");
   const [preflight, setPreflight] = useState<RegistrationPreflightResponse | null>(null);
-  const [confirmedAttentionPaths, setConfirmedAttentionPaths] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [manualMode, setManualMode] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
   const [batch, setBatch] = useState<RegistrationBatchDto | null>(null);
   const [busyAction, setBusyAction] = useState<"preflight" | "submit" | "resume" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,11 +56,13 @@ export function LogicalCodebaseRegistrationWizard({
     return preflight.items
       .filter(
         (item) =>
-          item.class === "eligible" ||
-          (item.class === "needs_attention" && confirmedAttentionPaths.has(item.path)),
+          (item.class === "eligible" || item.class === "needs_attention") &&
+          selectedPaths.has(item.path),
       )
       .map((item) => item.path);
-  }, [confirmedAttentionPaths, preflight]);
+  }, [preflight, selectedPaths]);
+
+  const candidateItems = preflight?.items ?? [];
 
   async function handlePreflight(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -78,28 +79,31 @@ export function LogicalCodebaseRegistrationWizard({
     try {
       const result = await preflightLogicalCodebaseRegistration(projectId, {
         aggregate_root: root,
-        candidate_paths: paths,
+        candidate_paths: manualMode ? paths : [],
+        auto_discover: !manualMode,
       });
       setPreflight(result);
-      setConfirmedAttentionPaths(new Set());
+      setSelectedPaths(
+        new Set(result.items.filter((item) => item.class === "eligible").map((item) => item.path)),
+      );
     } catch (reason) {
       setError(formatError(reason, "预检失败"));
+      if (!manualMode) setManualMode(true);
     } finally {
       busyRef.current = false;
       setBusyAction(null);
     }
   }
 
+  function handleManualPreflight() {
+    setManualMode(true);
+    setPreflight(null);
+    setSelectedPaths(new Set());
+    setError(null);
+  }
+
   async function handleSubmit() {
     if (busyRef.current || !preflight) return;
-    if (
-      preflight.items.some(
-        (item) => item.class === "needs_attention" && !confirmedAttentionPaths.has(item.path),
-      )
-    ) {
-      setError("请确认需要关注的成员后再提交登记");
-      return;
-    }
     if (confirmedPaths.length === 0) {
       setError("没有可提交的成员");
       return;
@@ -178,25 +182,39 @@ export function LogicalCodebaseRegistrationWizard({
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
             />
           </label>
-          <label className="block text-sm font-semibold text-[var(--aria-ink)]">
-            候选成员路径
-            <textarea
-              aria-label="候选成员路径"
-              value={candidatePaths}
-              onChange={(event) => setCandidatePaths(event.target.value)}
-              disabled={Boolean(busyAction) || Boolean(preflight)}
-              placeholder="每行一个路径（可选）"
-              className="mt-1 block min-h-20 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 font-mono text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
-            />
-          </label>
+          {manualMode ? (
+            <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+              候选成员路径
+              <textarea
+                aria-label="候选成员路径"
+                value={candidatePaths}
+                onChange={(event) => setCandidatePaths(event.target.value)}
+                disabled={Boolean(busyAction) || Boolean(preflight)}
+                placeholder="每行一个路径（可选）"
+                className="mt-1 block min-h-20 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 font-mono text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
+              />
+            </label>
+          ) : null}
           {!preflight ? (
-            <button
-              type="submit"
-              disabled={Boolean(busyAction)}
-              className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-            >
-              {busyAction === "preflight" ? "预检中…" : "执行预检"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="submit"
+                disabled={Boolean(busyAction)}
+                className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {busyAction === "preflight" ? "预检中…" : manualMode ? "执行手工预检" : "确认聚合根并自动发现"}
+              </button>
+              {!manualMode ? (
+                <button
+                  type="button"
+                  onClick={handleManualPreflight}
+                  disabled={Boolean(busyAction)}
+                  className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)] disabled:opacity-60"
+                >
+                  改为手工预检
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </form>
 
@@ -209,13 +227,28 @@ export function LogicalCodebaseRegistrationWizard({
                 disabled={Boolean(busyAction) || Boolean(batch)}
                 onClick={() => {
                   setPreflight(null);
-                  setConfirmedAttentionPaths(new Set());
+                  setSelectedPaths(new Set());
+                  setManualMode(false);
+                  setError(null);
                 }}
                 className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:opacity-60"
               >
                 重新预检
               </button>
             </div>
+            {candidateItems.length === 0 && !manualMode ? (
+              <div className="rounded-md border border-dashed border-[var(--aria-line)] p-3 text-sm text-[var(--aria-ink-muted)]">
+                <p>未发现候选成员，可改为手工预检</p>
+                <button
+                  type="button"
+                  onClick={handleManualPreflight}
+                  disabled={Boolean(busyAction) || Boolean(batch)}
+                  className="mt-2 rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink)] disabled:opacity-60"
+                >
+                  切换手工预检
+                </button>
+              </div>
+            ) : null}
             <div className="space-y-2">
               {PREFLIGHT_CLASSES.map((classification) => {
                 const items = preflight.items.filter((item) => item.class === classification);
@@ -225,32 +258,46 @@ export function LogicalCodebaseRegistrationWizard({
                     aria-label={`分类 ${classification}`}
                     className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
                   >
-                    <h4 className="text-xs font-semibold text-[var(--aria-ink)]">{classification}</h4>
+                    <h4 className="text-xs font-semibold text-[var(--aria-ink)]">
+                      <span className="rounded border border-[var(--aria-line)] bg-white px-1.5 py-0.5">
+                        {classification}
+                      </span>
+                    </h4>
                     {items.length > 0 ? (
                       <ul className="mt-1 space-y-1">
                         {items.map((item) => (
                           <li key={item.path} className="text-xs text-[var(--aria-ink-muted)]">
-                            {item.class === "needs_attention" ? (
-                              <label className="inline-flex items-center gap-2">
-                                <input
-                                  type="checkbox"
-                                  aria-label={`确认 ${item.path}${displayReason(item)}`}
-                                  checked={confirmedAttentionPaths.has(item.path)}
-                                  disabled={Boolean(busyAction) || Boolean(batch)}
-                                  onChange={(event) => {
-                                    setConfirmedAttentionPaths((current) => {
-                                      const next = new Set(current);
-                                      if (event.target.checked) next.add(item.path);
-                                      else next.delete(item.path);
-                                      return next;
-                                    });
-                                  }}
-                                />
-                                确认 {item.path}{displayReason(item)}
-                              </label>
-                            ) : (
-                              <span>{item.path}{displayReason(item)}</span>
-                            )}
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                aria-label={
+                                  item.class === "needs_attention"
+                                    ? `确认 ${item.path}${displayReason(item)}`
+                                    : item.class === "eligible"
+                                      ? `选择 ${item.path}${displayReason(item)}（eligible）`
+                                      : `不可登记 ${item.path}${displayReason(item)}`
+                                }
+                                checked={selectedPaths.has(item.path)}
+                                disabled={
+                                  Boolean(busyAction) ||
+                                  Boolean(batch) ||
+                                  (item.class !== "eligible" && item.class !== "needs_attention")
+                                }
+                                onChange={(event) => {
+                                  setSelectedPaths((current) => {
+                                    const next = new Set(current);
+                                    if (event.target.checked) next.add(item.path);
+                                    else next.delete(item.path);
+                                    return next;
+                                  });
+                                }}
+                              />
+                              {item.class === "needs_attention"
+                                ? "确认"
+                                : item.class === "eligible"
+                                  ? "选择"
+                                  : "不可登记"} {item.path}{displayReason(item)}
+                            </label>
                           </li>
                         ))}
                       </ul>
