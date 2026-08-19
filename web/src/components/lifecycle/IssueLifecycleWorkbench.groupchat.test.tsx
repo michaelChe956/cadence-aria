@@ -165,22 +165,22 @@ describe("IssueLifecycleWorkbench 群聊模式入口", () => {
     );
   });
 
-  it("设置开关读取并写入 Spec 生成模式", async () => {
-    vi.mocked(getSpecGenerationMode).mockResolvedValue("pipeline");
+  it("设置开关写入 Spec 生成模式（受控 + 乐观更新）", async () => {
     vi.mocked(setSpecGenerationMode).mockResolvedValue("group_chat");
     const user = userEvent.setup();
     const onModeChange = vi.fn();
 
-    render(<SpecGenerationSettings onModeChange={onModeChange} />);
-
-    await waitFor(() =>
-      expect(screen.getByRole("radio", { name: "流水线模式" })).toBeChecked(),
+    render(
+      <SpecGenerationSettings mode="pipeline" onModeChange={onModeChange} />,
     );
+
+    expect(screen.getByRole("radio", { name: "流水线模式" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "群聊模式" }));
 
+    // 乐观更新：点击后立即回调，不等保存请求。
+    expect(onModeChange).toHaveBeenCalledWith("group_chat");
     await waitFor(() =>
       expect(setSpecGenerationMode).toHaveBeenCalledWith("group_chat"),
     );
-    expect(onModeChange).toHaveBeenCalledWith("group_chat");
   });
 });

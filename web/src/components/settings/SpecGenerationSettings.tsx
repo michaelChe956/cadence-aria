@@ -1,59 +1,59 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
-  getSpecGenerationMode,
   setSpecGenerationMode,
   type SpecGenerationMode,
 } from "../../api/groupChat";
 
+/** 本地缓存键：与 AppShell 共享，保证首屏不闪。 */
+export const SPEC_GENERATION_MODE_CACHE_KEY = "aria:spec-generation-mode";
+
+export function readCachedSpecGenerationMode(): SpecGenerationMode {
+  try {
+    const cached = window.localStorage.getItem(SPEC_GENERATION_MODE_CACHE_KEY);
+    if (cached === "group_chat" || cached === "pipeline") {
+      return cached;
+    }
+  } catch {
+    // localStorage 不可用时静默回退默认值。
+  }
+  return "pipeline";
+}
+
+export function writeCachedSpecGenerationMode(mode: SpecGenerationMode) {
+  try {
+    window.localStorage.setItem(SPEC_GENERATION_MODE_CACHE_KEY, mode);
+  } catch {
+    // 忽略写入失败：仅影响下次首屏闪动，不影响正确性。
+  }
+}
+
 export function SpecGenerationSettings({
+  mode,
   onModeChange,
 }: {
+  /** 由 AppShell 受控传入，面板自身不再发读取请求。 */
+  mode: SpecGenerationMode;
   onModeChange?: (mode: SpecGenerationMode) => void;
 }) {
-  const [mode, setMode] = useState<SpecGenerationMode>("pipeline");
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    getSpecGenerationMode()
-      .then((currentMode) => {
-        if (!cancelled) {
-          setMode(currentMode);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : "读取 Spec 生成模式失败");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   async function handleChange(nextMode: SpecGenerationMode) {
     if (nextMode === mode || saving) {
       return;
     }
-    const previousMode = mode;
-    setMode(nextMode);
     setSaving(true);
     setError(null);
+    // 乐观更新：先切换 UI 与本地缓存，失败时回滚。
+    onModeChange?.(nextMode);
+    writeCachedSpecGenerationMode(nextMode);
     try {
       const savedMode = await setSpecGenerationMode(nextMode);
-      setMode(savedMode);
       onModeChange?.(savedMode);
+      writeCachedSpecGenerationMode(savedMode);
     } catch (reason) {
-      setMode(previousMode);
+      onModeChange?.(mode);
+      writeCachedSpecGenerationMode(mode);
       setError(reason instanceof Error ? reason.message : "保存 Spec 生成模式失败");
     } finally {
       setSaving(false);
@@ -71,7 +71,7 @@ export function SpecGenerationSettings({
           选择新建 Spec 时使用流水线或群聊工作台。
         </p>
       </div>
-      <fieldset className="mt-4 grid gap-2 sm:grid-cols-2" disabled={loading || saving}>
+      <fieldset className="mt-4 grid gap-2 sm:grid-cols-2" disabled={saving}>
         <legend className="sr-only">Spec 生成模式</legend>
         <div className="flex items-start gap-2 rounded-md border border-[var(--aria-line)] p-3 text-sm">
           <input
@@ -102,7 +102,6 @@ export function SpecGenerationSettings({
           </div>
         </div>
       </fieldset>
-      {loading ? <p className="mt-3 text-xs text-[var(--aria-ink-muted)]">正在读取设置…</p> : null}
       {saving ? <p className="mt-3 text-xs text-[var(--aria-ink-muted)]">正在保存…</p> : null}
       {error ? <p role="alert" className="mt-3 text-xs text-[var(--aria-danger)]">{error}</p> : null}
     </section>

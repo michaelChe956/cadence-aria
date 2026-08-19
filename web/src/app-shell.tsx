@@ -5,7 +5,11 @@ import {
 } from "./api/groupChat";
 import type { CodingAttemptAddress } from "./api/types";
 import { IssueLifecycleWorkbench } from "./components/lifecycle/IssueLifecycleWorkbench";
-import { SpecGenerationSettings } from "./components/settings/SpecGenerationSettings";
+import {
+  SpecGenerationSettings,
+  readCachedSpecGenerationMode,
+  writeCachedSpecGenerationMode,
+} from "./components/settings/SpecGenerationSettings";
 import { WhatsNewDialog } from "./components/whats-new/WhatsNewDialog";
 import { useWhatsNew } from "./whats-new/useWhatsNew";
 
@@ -24,8 +28,9 @@ export function AppShell({
 }) {
   const whatsNew = useWhatsNew();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 首屏用 localStorage 缓存同步初始化，避免异步读取返回前后看板整体切换造成的闪动。
   const [specGenerationMode, setSpecGenerationMode] =
-    useState<SpecGenerationMode>("pipeline");
+    useState<SpecGenerationMode>(() => readCachedSpecGenerationMode());
 
   useEffect(() => {
     let cancelled = false;
@@ -33,10 +38,11 @@ export function AppShell({
       .then((mode) => {
         if (!cancelled) {
           setSpecGenerationMode(mode);
+          writeCachedSpecGenerationMode(mode);
         }
       })
       .catch(() => {
-        // 设置读取失败时保留流水线默认值，避免阻塞看板。
+        // 设置读取失败时保留本地缓存值，避免阻塞看板。
       });
     return () => {
       cancelled = true;
@@ -76,6 +82,7 @@ export function AppShell({
         {settingsOpen ? (
           <div className="absolute bottom-full right-0 mb-2 w-[min(30rem,calc(100vw-2rem))]">
             <SpecGenerationSettings
+              mode={specGenerationMode}
               onModeChange={setSpecGenerationMode}
             />
           </div>
