@@ -2,7 +2,7 @@
 
 ## 1. 后端 auto_discover
 
-- [ ] 1.1 RegistrationPreflightRequest + auto_discover（serde default=false）；handler true 分支扫描聚合根直接子目录发现 git 仓作为候选（含 .git 文件的 linked worktree），分类与快照沿用既有链路；发现为空→空 items；it_web：auto_discover 分类用例 + 兼容回归 + TDD 先红后绿
+- [x] 1.1 RegistrationPreflightRequest + auto_discover（serde default=false）；handler true 分支扫描聚合根直接子目录发现 git 仓作为候选（含 .git 文件的 linked worktree），分类与快照沿用既有链路；发现为空→空 items；it_web：auto_discover 分类用例 + 兼容回归 + TDD 先红后绿
 
 ## 2. 前端模式单选与向导自动发现
 
