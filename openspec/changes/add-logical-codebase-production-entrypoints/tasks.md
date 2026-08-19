@@ -38,4 +38,4 @@
 ## 6. 前端收尾与全门禁
 
 - [x] 6.1 前端聚合初始化卡片（触发/步骤进度轮询/取消，loading）+ CreateProjectDialog 多仓库模式勾选 + 前端测试补齐
-- [ ] 6.2 全门禁：cargo fmt/clippy -D warnings/lib/it_web 全量、前端 vitest/tsc、openspec validate --specs 26/26 + 本 change 通过；人工测试矩阵 P0 主线冒烟（REG-01→INIT-01→IDX-01→PLN-01/02/03，/tmp/test-demo）
+- [x] 6.2 全门禁：cargo fmt/clippy -D warnings/lib/it_web 全量、前端 vitest/tsc、openspec validate --specs 26/26 + 本 change 通过；人工测试矩阵 P0 主线冒烟（REG-01→INIT-01→IDX-01→PLN-01/02/03，/tmp/test-demo）
