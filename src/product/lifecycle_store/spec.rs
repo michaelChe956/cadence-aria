@@ -211,9 +211,9 @@ impl LifecycleStore {
         let now = Utc::now().to_rfc3339();
 
         // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
-        // 仓库 → blocker，不回落 issue.repo_id（REQ-PLN-08）。change_order 缺失不强制
-        // blocker，但若给出则全部 id 必须 ∈ involved 且不重复。传统单仓 issue
-        // （scope = None）聚合字段保持空/None。
+        // 仓库 → blocker，不回落 issue.repo_id（REQ-PLN-08）。Draft 时 change_order 可为空；
+        // Confirmed 时 involved > 1 的 Design 必须提供。若给出则全部 id 必须 ∈ involved 且
+        // 不重复。传统单仓 issue（scope = None）聚合字段保持空/None。
         let (logical_codebase_ref, involved_repository_ids, change_order) =
             match &input.aggregate_codebase {
                 Some(scope) => {

@@ -131,8 +131,9 @@ pub struct DesignSpecRecord {
     /// AI 明确声明的涉及仓库（聚合视野，必须 ⊆ effective_member_ids）。
     #[serde(default)]
     pub involved_repository_ids: Vec<LogicalRepositoryId>,
-    /// AI 显式给出的改动顺序图（执行顺序，非服务调用图，REQ-TGT-04）。缺失不强制
-    /// blocker；WorkItem 编译时若 Design 有 change_order 则作为 depends_on 依据（Task 9）。
+    /// AI 显式给出的改动顺序图（执行顺序，非服务调用图，REQ-TGT-04）。Draft 可暂时
+    /// 为空；Confirmed 时逻辑代码库多仓 Design（involved > 1）必须提供。WorkItem 编译时
+    /// 若 Design 有 change_order 则作为 depends_on 依据（Task 9）。
     #[serde(default)]
     pub change_order: Vec<LogicalRepositoryId>,
     pub current_version: Option<u32>,
