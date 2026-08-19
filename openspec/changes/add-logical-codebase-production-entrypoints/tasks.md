@@ -31,7 +31,7 @@
 
 ## 5. issue selection 与规划解锁
 
-- [ ] 5.1 create_product_issue 多仓分支补偿事务（预校验→建 issue→save all_members→失败删 issue 422 issue_selection_write_failed / 删失败 orphan 告警 500）；repository_id=primary 须属 active member（lib 单测 + it_web）
+- [x] 5.1 create_product_issue 多仓分支补偿事务（预校验→建 issue→save all_members→失败删 issue 422 issue_selection_write_failed / 删失败 orphan 告警 500）；repository_id=primary 须属 active member（lib 单测 + it_web）
 - [ ] 5.2 DesignSpecRecord change_order 注释修正与 blocker 校验落点（缺 change_order→blocker change_order_required_for_logical_codebase，不进 compile）
 - [ ] 5.3 it_web 端到端：多仓 project→登记→初始化→索引→建 issue→Story/Design/WorkItemPlan 全链真实 HTTP（含 change_order blocker 用例）——本变更完成定义
 
