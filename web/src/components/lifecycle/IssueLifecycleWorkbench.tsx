@@ -269,6 +269,7 @@ export function IssueLifecycleWorkbench({
       );
       if (projectChanged) {
         setSelectedCardKey(null);
+        setSelectedLogicalCodebaseId(null);
         setAggregateInitialization(null);
       }
     } catch (reason) {
@@ -360,7 +361,10 @@ export function IssueLifecycleWorkbench({
     latestCompletedPointerPublication !== null &&
     logicalCodebaseMembers.length > latestCompletedPointerPublication.entries.length;
   // R8：按选中 LC 拉取成员/指针发布/聚合索引（多 LC 并存时面板数据随选中态切换）。
+  // I1：LC/Project 切换时同步重置 aggregateInitialization，避免残留上一 LC 的 operation
+  // （其轮询会带着陈旧 operation_id 打到新 LC 路径上）。
   useEffect(() => {
+    setAggregateInitialization(null);
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       setLogicalCodebaseMembers([]);
       setPointerPublications([]);

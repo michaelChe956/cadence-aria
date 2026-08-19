@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ApiRequestError } from "../../api/client";
 import type {
   CodebaseSummaryDto,
   LogicalCodebaseMemberDto,
   Repository,
 } from "../../api/types";
+import { errorMessage } from "./IssueLifecycleWorkbenchParts";
 
 export type CreateLifecycleIssuePayload = {
   title: string;
@@ -43,6 +45,7 @@ export function CreateLifecycleIssueDialog({
   const [primaryRepositoryId, setPrimaryRepositoryId] = useState("");
   const [members, setMembers] = useState<PrimaryMemberOption[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -55,10 +58,12 @@ export function CreateLifecycleIssueDialog({
   useEffect(() => {
     if (!selectedLogicalCodebaseId) {
       setMembers([]);
+      setMembersError(null);
       return;
     }
     let disposed = false;
     setMembersLoading(true);
+    setMembersError(null);
     listMembers(selectedLogicalCodebaseId)
       .then((items) => {
         if (!disposed) {
@@ -77,9 +82,15 @@ export function CreateLifecycleIssueDialog({
           );
         }
       })
-      .catch(() => {
+      .catch((reason: unknown) => {
         if (!disposed) {
+          // M3：成员拉取失败不静默吞，展示错误信息（复用 ApiRequestError.message 模式）。
           setMembers([]);
+          setMembersError(
+            reason instanceof ApiRequestError
+              ? reason.message
+              : errorMessage(reason, "加载逻辑代码库成员失败"),
+          );
         }
       })
       .finally(() => {
@@ -247,6 +258,11 @@ export function CreateLifecycleIssueDialog({
                 ))}
               </select>
             </label>
+          ) : null}
+          {membersError ? (
+            <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
+              成员加载失败：{membersError}
+            </p>
           ) : null}
           {repositoryError ? (
             <p className="text-sm font-semibold text-[var(--aria-danger)]">{repositoryError}</p>

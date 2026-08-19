@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 import {
+  aggregateInitializationOperation,
   installIssueLifecycleWorkbenchTestHooks,
   lifecycleFetch,
   projectRecord,
@@ -83,6 +84,61 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
         screen.queryByTestId("aggregate-initialization-card"),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("LC 切换重置 aggregateInitialization：A 启动初始化后切 B 不显示 A 的 operation", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [
+        { id: "lc_0001", name: "platform", member_count: 1 },
+        { id: "lc_0002", name: "web", member_count: 1 },
+      ],
+      logicalCodebaseMembersByLc: {
+        lc_0001: [member("lr-1", "api", "repository_1001")],
+        lc_0002: [member("lr-2", "web", "repository_1002")],
+      },
+      aggregateInitializationStart: aggregateInitializationOperation("created"),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // LC A：启动初始化，卡片显示 A 的 operation
+    await screen.findByTestId("aggregate-initialization-card");
+    await user.click(
+      screen.getByRole("button", { name: "启动聚合初始化" }),
+    );
+    expect(
+      await screen.findByTestId("aggregate-initialization-status"),
+    ).toHaveAttribute("data-status", "created");
+
+    // 切到 LC B：卡片仍可见（B 有成员），但不应显示 A 的 operation
+    await user.click(screen.getByTestId("lc-selector-web"));
+    await waitFor(() =>
+      expect(screen.getByTestId("lc-selector-web")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("aggregate-initialization-status"),
+      ).not.toBeInTheDocument(),
+    );
+    // 也不应对 B 轮询 A 的 operation_id
+    expect(
+      calls.some((call) =>
+        call.includes("/logical-codebases/lc_0002/initializations/")),
+    ).toBe(false);
   });
 
   it("登记成员对选中 LC 打开向导（不再固定取首个）", async () => {

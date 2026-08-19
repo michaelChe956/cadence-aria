@@ -162,4 +162,31 @@ describe("CreateLifecycleIssueDialog 代码库选择（R8）", () => {
     expect(await screen.findByText("请选择 Primary 成员")).toBeInTheDocument();
     expect(onCreate).not.toHaveBeenCalled();
   });
+
+  it("M3：listMembers 失败时展示错误提示而非静默清空成员", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const listMembers = vi
+      .fn()
+      .mockRejectedValue(new Error("logical codebase members unavailable"));
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        repositories={[repositoryRecord()]}
+        codebases={[logicalCodebase()]}
+        listMembers={listMembers}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc:lc_0001");
+
+    expect(
+      await screen.findByText(
+        "成员加载失败：logical codebase members unavailable",
+      ),
+    ).toBeInTheDocument();
+    expect(listMembers).toHaveBeenCalledWith("lc_0001");
+  });
 });
