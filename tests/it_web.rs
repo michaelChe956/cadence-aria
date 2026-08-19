@@ -118,6 +118,8 @@ mod provider_gateway_envelope;
 mod web_api_handlers;
 #[path = "it_web/web_cli.rs"]
 mod web_cli;
+#[path = "it_web/web_codebases_api.rs"]
+mod web_codebases_api;
 #[path = "it_web/web_coding_attempt_api.rs"]
 mod web_coding_attempt_api;
 #[path = "it_web/web_coding_ws_handler.rs"]

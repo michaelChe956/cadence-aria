@@ -134,6 +134,21 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             json!({"operation_id": id}),
         ),
         ProductStoreError::NotFound {
+            kind: "logical_codebase", ..
+        } => ApiError::runtime(
+            "logical_codebase_not_found",
+            "logical codebase not found",
+            json!({}),
+        ),
+        ProductStoreError::Conflict {
+            kind: "logical_codebase_name",
+            id,
+        } => ApiError::runtime(
+            "logical_codebase_name_conflict",
+            "logical codebase name already exists in this project",
+            json!({ "name": id }),
+        ),
+        ProductStoreError::NotFound {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),
         ProductStoreError::NotFound {

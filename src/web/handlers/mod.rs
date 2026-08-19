@@ -73,6 +73,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 
 mod aggregate_index;
 pub mod aggregate_initialization;
+mod codebases;
 mod coding;
 mod dto;
 mod evidence_error_mapping;
@@ -96,6 +97,9 @@ mod workspace_session;
 pub use coding::{create_coding_attempt, create_group_coding_attempt};
 #[rustfmt::skip]
 pub(crate) use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
+pub use codebases::{
+    create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
+};
 pub use evidence_query::evidence_query;
 pub use health::{health, runtime_info};
 pub use image_create::{

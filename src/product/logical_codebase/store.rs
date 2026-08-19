@@ -102,6 +102,16 @@ impl LogicalCodebaseStore {
             });
         }
         self.migrate_legacy(project_id)?;
+        if self
+            .list(project_id)?
+            .iter()
+            .any(|record| record.name == input.name)
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "logical_codebase_name",
+                id: input.name,
+            });
+        }
         let record = LogicalCodebaseRecord {
             id: format!("logical_codebase_{}", Uuid::new_v4().simple()),
             name: input.name,
@@ -120,6 +130,68 @@ impl LogicalCodebaseStore {
     ) -> Result<Option<LogicalCodebaseRecord>, ProductStoreError> {
         self.migrate_legacy(project_id)?;
         self.get_existing(project_id, logical_codebase_id)
+    }
+
+    /// R2 统一 codebases 列表与 LC 详情的 per-LC manifest 读取：优先读
+    /// `logical-codebases/{lc_id}/manifest.json`（v1.3 存储布局）；legacy 别名 LC
+    /// 回退到旧 `logical-codebase/manifest.json`（迁移时子树副本可能随后续登记过期）。
+    pub fn load_lc_manifest(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<Option<LogicalCodebaseManifest>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(logical_codebase_id)?;
+        let subtree_manifest = self
+            .paths
+            .logical_codebase_record_root(project_id, logical_codebase_id)
+            .join("manifest.json");
+        if path_exists(&subtree_manifest)? {
+            let manifest: LogicalCodebaseManifest = read_json(&subtree_manifest)?;
+            self.validate_manifest_project(project_id, &manifest)?;
+            return Ok(Some(manifest));
+        }
+        if logical_codebase_id == legacy_logical_codebase_id(project_id) {
+            return self.load_manifest(project_id);
+        }
+        Ok(None)
+    }
+
+    /// per-LC 成员读取，回退语义与 [`LogicalCodebaseStore::load_lc_manifest`] 一致。
+    /// 成员 record 暂不携带 lc_id（R3 登记端点换形后归属键落位）。
+    pub fn list_lc_members(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<Vec<CodebaseMemberRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(logical_codebase_id)?;
+        let subtree_members = self
+            .paths
+            .logical_codebase_record_root(project_id, logical_codebase_id)
+            .join("members");
+        if subtree_members.exists() {
+            let mut members = Vec::new();
+            for entry in std::fs::read_dir(&subtree_members).map_err(|error| {
+                ProductStoreError::Io(format!("read {}: {error}", subtree_members.display()))
+            })? {
+                let entry =
+                    entry.map_err(|error| ProductStoreError::Io(format!("read entry: {error}")))?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                let member: CodebaseMemberRecord = read_json(&path)?;
+                validate_member_id(member.logical_repository_id, &member)?;
+                members.push(member);
+            }
+            members.sort_by_key(|left| left.ordinal);
+            return Ok(members);
+        }
+        if logical_codebase_id == legacy_logical_codebase_id(project_id) {
+            return self.list_members(project_id);
+        }
+        Ok(Vec::new())
     }
 
     pub fn list(&self, project_id: &str) -> Result<Vec<LogicalCodebaseRecord>, ProductStoreError> {
@@ -854,266 +926,4 @@ fn validate_checkout_id(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::product::app_paths::ProductAppPaths;
-    use crate::product::logical_codebase::{
-        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId,
-        RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
-    };
-
-    #[test]
-    fn authority_store_roundtrips_manifest_member_and_checkout_by_uuid_file_name() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
-        let member_id = LogicalRepositoryId(Uuid::new_v4());
-        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
-        let manifest = LogicalCodebaseManifest::new(
-            "project_0001",
-            temp.path().to_path_buf(),
-            vec![member_id],
-        );
-
-        store.save_manifest("project_0001", &manifest).unwrap();
-        store
-            .save_member("project_0001", &member_fixture(member_id, checkout_id))
-            .unwrap();
-        store
-            .save_checkout("project_0001", &checkout_fixture(member_id, checkout_id))
-            .unwrap();
-
-        assert_eq!(
-            store
-                .load_manifest("project_0001")
-                .unwrap()
-                .unwrap()
-                .member_ids,
-            vec![member_id]
-        );
-        assert_eq!(
-            store.list_members("project_0001").unwrap()[0].logical_repository_id,
-            member_id
-        );
-        assert_eq!(
-            store.list_checkouts("project_0001").unwrap()[0].checkout_id,
-            checkout_id
-        );
-        assert!(
-            temp.path()
-                .join("projects/project_0001/logical-codebase/members")
-                .join(format!("{}.json", member_id.0))
-                .exists()
-        );
-        assert!(
-            temp.path()
-                .join("projects/project_0001/logical-codebase/checkouts")
-                .join(format!("{}.json", checkout_id.0))
-                .exists()
-        );
-    }
-
-    #[test]
-    fn changed_members_require_membership_revision_to_increase_by_one() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
-        let first_member_id = LogicalRepositoryId(Uuid::new_v4());
-        let second_member_id = LogicalRepositoryId(Uuid::new_v4());
-        let manifest = LogicalCodebaseManifest::new(
-            "project_0001",
-            temp.path().to_path_buf(),
-            vec![first_member_id],
-        );
-        store.save_manifest("project_0001", &manifest).unwrap();
-
-        let mut changed = manifest.clone();
-        changed.member_ids.push(second_member_id);
-        assert!(matches!(
-            store.save_manifest("project_0001", &changed),
-            Err(ProductStoreError::InvalidRecord {
-                kind: "logical_codebase_manifest",
-                ..
-            })
-        ));
-
-        changed.membership_revision += 1;
-        store.save_manifest("project_0001", &changed).unwrap();
-        assert_eq!(
-            store
-                .load_manifest("project_0001")
-                .unwrap()
-                .unwrap()
-                .membership_revision,
-            2
-        );
-    }
-
-    fn member_fixture(
-        logical_repository_id: LogicalRepositoryId,
-        checkout_id: RepositoryCheckoutId,
-    ) -> CodebaseMemberRecord {
-        let now = "2026-08-08T00:00:00Z".to_string();
-        CodebaseMemberRecord {
-            logical_repository_id,
-            physical_repository_id: "repository_0001".to_string(),
-            alias: "api".to_string(),
-            role: "service".to_string(),
-            ordinal: 1,
-            source_identity: RepositorySourceIdentity::from_git_parts(
-                Path::new("/workspace/api"),
-                PathBuf::from("/workspace/api/.git"),
-                Some("ssh://git@example.test/acme/api.git".to_string()),
-            ),
-            repo_type: Default::default(),
-            tech_stack: Vec::new(),
-            owner: None,
-            tags: Vec::new(),
-            default_ref: None,
-            checkout_ids: vec![checkout_id],
-            status: Default::default(),
-            created_at: now.clone(),
-            updated_at: now,
-        }
-    }
-
-    #[test]
-    fn logical_codebase_record_store_round_trips_and_soft_deletes() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
-        let record = store
-            .create(
-                "project_0001",
-                LogicalCodebaseCreateInput {
-                    name: "Platform".to_string(),
-                    aggregate_root: PathBuf::from("/workspace/platform"),
-                },
-            )
-            .unwrap();
-
-        assert_eq!(
-            store.get("project_0001", &record.id).unwrap(),
-            Some(record.clone())
-        );
-        assert_eq!(store.list("project_0001").unwrap(), vec![record.clone()]);
-        let logical_codebase_root = temp
-            .path()
-            .join("projects/project_0001/logical-codebases")
-            .join(&record.id);
-        assert!(logical_codebase_root.join("record.json").exists());
-        for path in [
-            "members",
-            "checkouts",
-            "aggregate-indexes",
-            "preflights",
-            "registration-batches",
-            "pointer-publications",
-        ] {
-            assert!(logical_codebase_root.join(path).is_dir(), "missing {path}");
-        }
-
-        store.delete_soft("project_0001", &record.id).unwrap();
-        assert!(store.list("project_0001").unwrap().is_empty());
-        assert!(
-            temp.path()
-                .join("projects/project_0001/logical-codebases")
-                .join(&record.id)
-                .join("tombstone.json")
-                .exists()
-        );
-    }
-
-    #[test]
-    fn logical_codebase_record_requires_a_name() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
-
-        assert!(matches!(
-            store.create(
-                "project_0001",
-                LogicalCodebaseCreateInput {
-                    name: " ".to_string(),
-                    aggregate_root: temp.path().to_path_buf(),
-                },
-            ),
-            Err(ProductStoreError::InvalidRecord {
-                kind: "logical_codebase_record",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn legacy_logical_codebase_migration_is_stable_and_idempotent() {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = ProductAppPaths::new(temp.path());
-        let legacy_root = paths.logical_codebase_root("project_0001");
-        std::fs::create_dir_all(legacy_root.join("members")).unwrap();
-        std::fs::write(legacy_root.join("members/keep.json"), "{\"keep\":true}").unwrap();
-        std::fs::write(
-            legacy_root.join("manifest.json"),
-            serde_json::json!({
-                "schema_version": 1,
-                "project_id": "project_0001",
-                "logical_codebase_id": uuid::Uuid::new_v4(),
-                "provider_context_root": "/workspace/platform",
-                "layout": "common_non_git_parent",
-                "membership_revision": 1,
-                "member_ids": [],
-                "created_at": "2026-08-18T00:00:00Z",
-                "updated_at": "2026-08-18T00:00:00Z"
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let store = LogicalCodebaseStore::new(paths.clone());
-        let first = store.migrate_legacy("project_0001").unwrap().unwrap();
-        let second = store.migrate_legacy("project_0001").unwrap().unwrap();
-        assert_eq!(first, second);
-        assert_eq!(store.list("project_0001").unwrap(), vec![first.clone()]);
-        assert_eq!(
-            std::fs::read_to_string(
-                paths
-                    .logical_codebases_root("project_0001")
-                    .join(&first.id)
-                    .join("members/keep.json")
-            )
-            .unwrap(),
-            "{\"keep\":true}"
-        );
-    }
-
-    #[test]
-    fn gateway_bootstrap_artifacts_do_not_count_as_logical_codebase_storage() {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = ProductAppPaths::new(temp.path());
-        let legacy_root = paths.logical_codebase_root("project_0001");
-        std::fs::create_dir_all(&legacy_root).unwrap();
-        std::fs::write(legacy_root.join("capabilities.json"), "[]").unwrap();
-        std::fs::write(legacy_root.join("aggregate-policy.json"), "{}").unwrap();
-
-        let store = LogicalCodebaseStore::new(paths.clone());
-        assert_eq!(store.migrate_legacy("project_0001").unwrap(), None);
-        assert!(!store.has_any_storage("project_0001").unwrap());
-    }
-
-    fn checkout_fixture(
-        logical_repository_id: LogicalRepositoryId,
-        checkout_id: RepositoryCheckoutId,
-    ) -> RepositoryCheckoutRecord {
-        let now = "2026-08-08T00:00:00Z".to_string();
-        RepositoryCheckoutRecord {
-            checkout_id,
-            logical_repository_id,
-            physical_repository_id: "repository_0001".to_string(),
-            kind: CheckoutKind::Main,
-            canonical_path: PathBuf::from("/workspace/api"),
-            checkout_path_hash: "sha256:checkout".to_string(),
-            git_dir_identity: "sha256:git-dir".to_string(),
-            revision: Some("abc123".to_string()),
-            availability: CheckoutAvailability::Available,
-            observed_at: now.clone(),
-            created_at: now.clone(),
-            updated_at: now,
-        }
-    }
-}
+include!("store_tests.inc.rs");

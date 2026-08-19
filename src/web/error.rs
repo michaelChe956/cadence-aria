@@ -74,7 +74,8 @@ impl IntoResponse for ApiError {
             | "task_workspace_not_found"
             | "workspace_session_not_found"
             | "registration_preflight_not_found"
-            | "registration_batch_not_found" => StatusCode::NOT_FOUND,
+            | "registration_batch_not_found"
+            | "logical_codebase_not_found" => StatusCode::NOT_FOUND,
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }
@@ -96,7 +97,8 @@ impl IntoResponse for ApiError {
             | "legacy_shared_worktree_inconsistent"
             | "repo_worktree_active"
             | "cross_target_violation_detected"
-            | "registration_batch_not_cancelable" => StatusCode::CONFLICT,
+            | "registration_batch_not_cancelable"
+            | "logical_codebase_name_conflict" => StatusCode::CONFLICT,
             "cross_target_baseline_missing" | "cross_target_store_failure" => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -135,6 +137,8 @@ impl IntoResponse for ApiError {
             | "involved_repositories_undetermined"
             | "change_order_required_for_logical_codebase"
             | "aggregate_scope_requires_logical_codebase"
+            | "logical_codebase_name_required"
+            | "aggregate_root_required"
             | "target_not_in_selection" => StatusCode::BAD_REQUEST,
             "aggregate_root_is_git"
             | "aggregate_root_missing"

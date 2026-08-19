@@ -84,6 +84,18 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_repository_initialization),
         )
         .route(
+            "/api/projects/{project_id}/codebases",
+            get(handlers::list_codebases),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases",
+            post(handlers::create_logical_codebase),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}",
+            get(handlers::get_logical_codebase).delete(handlers::delete_logical_codebase),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/initializations",
             post(handlers::create_aggregate_initialization),
         )
