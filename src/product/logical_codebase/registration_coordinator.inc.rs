@@ -663,87 +663,94 @@ impl LogicalCodebaseRegistrationCoordinator {
         let registry = IdentityRegistryStore::new(self.paths.clone());
         let project_id = input.project_id.clone();
 
-        // Admission mirrors `RepositoryStore::create_logical_repository` for
-        // the logical-authority path: a live identity under a different key is
-        // a conflict, a tombstoned source is rejected, and a replay of the
-        // same key reuses the durable member.
-        let mut member = match registry.find_by_source(&project_id, &source_identity)? {
-            Some(entry) if entry.state == IdentityRegistryState::Active => {
-                if entry.created_by_key != input.idempotency_key {
+        // The registry is project-scoped while the manifest/member writer
+        // lock (`attach_member_with_root`) is per-LC. Two codebases
+        // registering the same physical repository would otherwise
+        // read-modify-write identity-registry.json under different per-LC
+        // locks and could both allocate an identity, breaking the cross-LC
+        // duplicate-registration guard. Serialize the registry read-modify-
+        // write (and the member/checkout allocation that depends on it) on
+        // the project-scoped identity migration lock, which also serializes
+        // against the lazy identity migration executor.
+        with_exact_exclusive_lock(&self.paths.identity_migration_lock_path(&project_id), || {
+            let mut member = match registry.find_by_source(&project_id, &source_identity)? {
+                Some(entry) if entry.state == IdentityRegistryState::Active => {
+                    if entry.created_by_key != input.idempotency_key {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "repository_already_registered",
+                            id: entry.physical_repository_id,
+                        });
+                    }
+                    store
+                        .load_member(&project_id, entry.logical_repository_id)?
+                        .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                            kind: "logical_codebase_member",
+                            id: entry.logical_repository_id.0.to_string(),
+                        })?
+                }
+                Some(entry) => {
                     return Err(ProductStoreError::Conflict {
-                        kind: "repository_already_registered",
+                        kind: "repository_source_tombstoned",
                         id: entry.physical_repository_id,
                     });
                 }
-                store
-                    .load_member(&project_id, entry.logical_repository_id)?
-                    .ok_or_else(|| ProductStoreError::IdentityMismatch {
-                        kind: "logical_codebase_member",
-                        id: entry.logical_repository_id.0.to_string(),
-                    })?
-            }
-            Some(entry) => {
-                return Err(ProductStoreError::Conflict {
-                    kind: "repository_source_tombstoned",
-                    id: entry.physical_repository_id,
-                });
-            }
-            None => {
-                // Crash-window recovery: a member may exist without a registry
-                // entry. Reuse its identity instead of allocating a second one.
-                let matching = store
-                    .list_members(&project_id)?
-                    .into_iter()
-                    .filter(|member| member.source_identity == source_identity)
-                    .collect::<Vec<_>>();
-                if matching.len() > 1 {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "logical_codebase_member",
-                        id: source_identity.key_digest.clone(),
-                    });
-                }
-                match matching.into_iter().next() {
-                    Some(member) => {
-                        // Heal the crash window: the durable member exists
-                        // without a registry entry; complete the authority
-                        // records with the caller's idempotency key.
-                        let [primary_checkout_id] = member.checkout_ids.as_slice() else {
-                            return Err(ProductStoreError::IdentityMismatch {
-                                kind: "logical_codebase_member",
-                                id: member.logical_repository_id.0.to_string(),
-                            });
-                        };
-                        registry.upsert_active(
-                            &project_id,
-                            IdentityRegistryEntry::active(
-                                source_identity.clone(),
-                                member.logical_repository_id,
-                                member.physical_repository_id.clone(),
-                                *primary_checkout_id,
-                                input.idempotency_key.clone(),
-                            ),
-                        )?;
-                        member
+                None => {
+                    // Crash-window recovery: a member may exist without a registry
+                    // entry. Reuse its identity instead of allocating a second one.
+                    let matching = store
+                        .list_members(&project_id)?
+                        .into_iter()
+                        .filter(|member| member.source_identity == source_identity)
+                        .collect::<Vec<_>>();
+                    if matching.len() > 1 {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "logical_codebase_member",
+                            id: source_identity.key_digest.clone(),
+                        });
                     }
-                    None => self.allocate_and_attach_member(
-                        &store,
-                        &project_id,
-                        &input,
-                        &canonical_path,
-                        &source_identity,
-                    )?,
+                    match matching.into_iter().next() {
+                        Some(member) => {
+                            // Heal the crash window: the durable member exists
+                            // without a registry entry; complete the authority
+                            // records with the caller's idempotency key.
+                            let [primary_checkout_id] = member.checkout_ids.as_slice() else {
+                                return Err(ProductStoreError::IdentityMismatch {
+                                    kind: "logical_codebase_member",
+                                    id: member.logical_repository_id.0.to_string(),
+                                });
+                            };
+                            registry.upsert_active(
+                                &project_id,
+                                IdentityRegistryEntry::active(
+                                    source_identity.clone(),
+                                    member.logical_repository_id,
+                                    member.physical_repository_id.clone(),
+                                    *primary_checkout_id,
+                                    input.idempotency_key.clone(),
+                                ),
+                            )?;
+                            member
+                        }
+                        None => self.allocate_and_attach_member(
+                            &store,
+                            &project_id,
+                            &input,
+                            &canonical_path,
+                            &source_identity,
+                        )?,
+                    }
                 }
-            }
-        };
+            };
 
-        member.alias = input.alias;
-        member.role = input.role;
-        member.repo_type = input.repo_type;
-        member.tech_stack = input.tech_stack;
-        member.updated_at = Utc::now().to_rfc3339();
-        store.save_member(&project_id, &member)?;
-        self.ensure_manifest_membership(&store, &project_id, member.logical_repository_id)?;
-        Ok(member)
+            member.alias = input.alias;
+            member.role = input.role;
+            member.repo_type = input.repo_type;
+            member.tech_stack = input.tech_stack;
+            member.updated_at = Utc::now().to_rfc3339();
+            store.save_member(&project_id, &member)?;
+            self.ensure_manifest_membership(&store, &project_id, member.logical_repository_id)?;
+            Ok(member)
+        })
     }
 
     fn allocate_and_attach_member(

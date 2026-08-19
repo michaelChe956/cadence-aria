@@ -5,9 +5,12 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
     use crate::product::logical_codebase::{
         LogicalCodebaseFeature, LogicalCodebaseManifest, LogicalCodebaseStore,
     };
@@ -421,6 +424,68 @@ mod tests {
             git_output(&fixture.git_root, &["status", "--porcelain"]),
             fixture.status_before
         );
+    }
+
+    #[test]
+    fn cross_codebase_attach_serializes_on_project_identity_lock() {
+        let fixture = attach_fixture();
+        let paths = fixture.paths.clone();
+        // identity-registry.json is project-scoped (v1.3), so one physical
+        // repository cannot be registered in two logical codebases. The
+        // per-LC manifest writer lock cannot enforce that invariant: two
+        // codebases would hold different per-LC locks while read-modify-
+        // writing the shared registry. Assert the attach path also takes the
+        // project-scoped identity migration lock, so a second codebase waits
+        // for the first codebase's critical section to finish.
+        let lc_b = LogicalCodebaseRegistrationCoordinator::for_lc(paths.clone(), "lc-b");
+        LogicalCodebaseStore::for_lc(paths.clone(), "lc-b")
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new(
+                    "project_0001",
+                    fixture._root.path().to_path_buf(),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+
+        let lock_path = paths.identity_migration_lock_path("project_0001");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let input = AttachOnlyRegistrationInput {
+            project_id: "project_0001".into(),
+            alias: "api".into(),
+            role: "service".into(),
+            canonical_path: fixture.git_root.clone(),
+            repo_type: RepositoryType::Backend,
+            tech_stack: vec!["rust".into()],
+            idempotency_key: "lc-b:item-api".into(),
+        };
+
+        let (finished_early, worker) = with_exact_exclusive_lock(&lock_path, || {
+            let worker = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let _ = done_tx.send(lc_b.attach_member(input));
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok((
+                done_rx.recv_timeout(Duration::from_secs(1)).is_ok(),
+                worker,
+            ))
+        })
+        .unwrap();
+
+        assert!(
+            !finished_early,
+            "lc-b attach must block on the project identity lock held by another codebase"
+        );
+
+        let result = done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            result.is_ok(),
+            "lc-b attach after lock release should succeed: {result:?}"
+        );
+        worker.join().unwrap();
     }
 
     #[test]
