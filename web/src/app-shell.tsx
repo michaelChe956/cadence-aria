@@ -64,17 +64,17 @@ export function AppShell({
       >
         图片创作
       </a>
-      <div className="fixed right-4 top-4 z-40">
+      <div className="fixed bottom-4 right-32 z-40">
         <button
           type="button"
           onClick={() => setSettingsOpen((open) => !open)}
           aria-expanded={settingsOpen}
-          className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-ink)] shadow-sm"
+          className="rounded-full border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-ink)] shadow-lg"
         >
           设置
         </button>
         {settingsOpen ? (
-          <div className="absolute right-0 mt-2 w-[min(30rem,calc(100vw-2rem))]">
+          <div className="absolute bottom-full right-0 mb-2 w-[min(30rem,calc(100vw-2rem))]">
             <SpecGenerationSettings
               onModeChange={setSpecGenerationMode}
             />
