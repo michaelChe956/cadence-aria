@@ -29,13 +29,16 @@ impl InitializationOperationKind {
 
 /// Composite key for an active initialization run.
 ///
-/// Two runs are distinct unless kind, project and operation id all match,
-/// so a retry of the same operation id is still deduplicated while an
-/// unrelated concurrent run is never blocked.
+/// Two runs are distinct unless kind, project, logical codebase and operation
+/// id all match, so a retry of the same operation id within the same logical
+/// codebase is still deduplicated while an unrelated concurrent run (including
+/// the same project + operation id in a different logical codebase) is never
+/// blocked.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InitializationRunKey {
     pub kind: InitializationOperationKind,
     pub project_id: String,
+    pub lc_id: String,
     pub operation_id: String,
 }
 
@@ -44,14 +47,20 @@ impl InitializationRunKey {
         Self {
             kind: InitializationOperationKind::Repository,
             project_id: project_id.into(),
+            lc_id: REPOSITORY_FAÇADE_LC_SENTINEL.to_string(),
             operation_id: operation_id.into(),
         }
     }
 
-    pub fn aggregate(project_id: impl Into<String>, operation_id: impl Into<String>) -> Self {
+    pub fn aggregate(
+        project_id: impl Into<String>,
+        lc_id: impl Into<String>,
+        operation_id: impl Into<String>,
+    ) -> Self {
         Self {
             kind: InitializationOperationKind::Aggregate,
             project_id: project_id.into(),
+            lc_id: lc_id.into(),
             operation_id: operation_id.into(),
         }
     }
@@ -157,8 +166,9 @@ impl Drop for InitializationRunLease {
 ///
 /// Future aggregate-initialization call sites should use
 /// `InitializationRunRegistry` directly with an `InitializationRunKey::aggregate`
-/// carrying the real project id, so they are never blocked by (nor able to
-/// block) a repository run that happens to share the same operation id.
+/// carrying the real project id and logical codebase id, so they are never
+/// blocked by (nor able to block) a repository run that happens to share the
+/// same operation id.
 #[derive(Clone, Default)]
 pub struct RepositoryInitializationRunRegistry {
     active: InitializationRunRegistry,
@@ -174,11 +184,18 @@ pub struct RepositoryInitializationRunLease {
 /// run that carries a real project id.
 const REPOSITORY_FAÇADE_PROJECT_SENTINEL: &str = "__repository_initialization__";
 
+/// Stable sentinel logical codebase id used by the legacy repository façade and
+/// the `repository` key constructor. The repository flow has no logical
+/// codebase, so its in-memory keys carry this sentinel; aggregate keys always
+/// carry a real lc_id, so the two never collide on the lc_id axis.
+const REPOSITORY_FAÇADE_LC_SENTINEL: &str = "__repository_initialization_lc__";
+
 impl RepositoryInitializationRunRegistry {
     pub fn register(&self, operation_id: String) -> Option<RepositoryInitializationRunLease> {
         let key = InitializationRunKey {
             kind: InitializationOperationKind::Repository,
             project_id: REPOSITORY_FAÇADE_PROJECT_SENTINEL.to_string(),
+            lc_id: REPOSITORY_FAÇADE_LC_SENTINEL.to_string(),
             operation_id,
         };
         Some(RepositoryInitializationRunLease {
@@ -190,6 +207,7 @@ impl RepositoryInitializationRunRegistry {
         let key = InitializationRunKey {
             kind: InitializationOperationKind::Repository,
             project_id: REPOSITORY_FAÇADE_PROJECT_SENTINEL.to_string(),
+            lc_id: REPOSITORY_FAÇADE_LC_SENTINEL.to_string(),
             operation_id: operation_id.to_string(),
         };
         self.active.is_active(&key)
@@ -203,7 +221,7 @@ mod tests {
     #[test]
     fn aggregate_lease_exposes_token_cancel_and_drop_removes_registry_entry() {
         let registry = InitializationRunRegistry::default();
-        let key = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let key = InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
         let lease = registry.register(key.clone()).unwrap();
         assert!(!lease.cancellation_token().is_cancelled());
         assert!(registry.cancel(&key));
@@ -216,7 +234,7 @@ mod tests {
     #[test]
     fn stale_lease_drop_does_not_remove_replaced_run_entry() {
         let registry = InitializationRunRegistry::default();
-        let key = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let key = InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
         let lease = registry.register(key.clone()).unwrap();
 
         registry
@@ -238,7 +256,7 @@ mod tests {
     #[test]
     fn panicking_worker_drop_releases_registry_entry() {
         let registry = InitializationRunRegistry::default();
-        let key = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let key = InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
         let worker_registry = registry.clone();
         let worker_key = key.clone();
 
@@ -255,8 +273,9 @@ mod tests {
     fn same_operation_id_is_independent_across_kind_and_project() {
         let registry = InitializationRunRegistry::default();
         let repository = InitializationRunKey::repository("project_a", "operation_0001");
-        let aggregate = InitializationRunKey::aggregate("project_a", "operation_0001");
-        let other_project = InitializationRunKey::aggregate("project_b", "operation_0001");
+        let aggregate = InitializationRunKey::aggregate("project_a", "lc_0001", "operation_0001");
+        let other_project =
+            InitializationRunKey::aggregate("project_b", "lc_0002", "operation_0001");
         let _a = registry.register(repository).unwrap();
         let _b = registry.register(aggregate).unwrap();
         assert!(registry.register(other_project).is_some());
@@ -280,7 +299,8 @@ mod tests {
     fn aggregate_key_with_same_operation_id_is_not_blocked_by_repository_lease() {
         let registry = InitializationRunRegistry::default();
         let repository = InitializationRunKey::repository("project_0001", "operation_0001");
-        let aggregate = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let aggregate =
+            InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
         let _repository_lease = registry.register(repository.clone()).unwrap();
 
         // Same project + operation id but different kind must still register.
@@ -324,7 +344,34 @@ mod tests {
         let _legacy_lease = legacy.register("operation_0001".to_string()).unwrap();
         // A generalized aggregate key with the same operation id is independent
         // of the legacy repository façade's internal sentinel-keyed entry.
-        let aggregate = InitializationRunKey::aggregate("project_0001", "operation_0001");
+        let aggregate =
+            InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
         assert!(generalized.register(aggregate).is_some());
+    }
+
+    #[test]
+    fn aggregate_same_project_same_operation_id_across_lcs_must_not_crosstalk() {
+        let registry = InitializationRunRegistry::default();
+        let lc_a = InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
+        let lc_b = InitializationRunKey::aggregate("project_0001", "lc_0002", "operation_0001");
+
+        // 并发场景：同 project + 同 operation id 的两个 LC 各自注册，互不干扰。
+        let lease_a = registry.register(lc_a.clone()).unwrap();
+        let lease_b = registry.register(lc_b.clone()).unwrap();
+        assert!(registry.is_active(&lc_a));
+        assert!(registry.is_active(&lc_b));
+
+        // cancel 只命中对应 LC 的 token。
+        assert!(registry.cancel(&lc_a));
+        assert!(lease_a.cancellation_token().is_cancelled());
+        assert!(!lease_b.cancellation_token().is_cancelled());
+
+        // 顺序场景：LC A 释放后不影响 LC B 的租约，同 key 可在 LC A 重新注册。
+        drop(lease_a);
+        assert!(!registry.is_active(&lc_a));
+        assert!(registry.is_active(&lc_b));
+        assert!(registry.register(lc_a.clone()).is_some());
+        drop(lease_b);
+        assert!(!registry.is_active(&lc_b));
     }
 }

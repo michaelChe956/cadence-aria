@@ -211,6 +211,24 @@ async fn request_json(
 fn git_repo_at(path: &std::path::Path) {
     std::fs::create_dir_all(path).expect("create repo dir");
     run_git(path, &["init", "-q"]);
+    run_git(path, &["config", "user.email", "test@example.com"]);
+    run_git(path, &["config", "user.name", "Test User"]);
+}
+
+/// 为成员仓配置一个本地 bare `origin` 远端，供 pointer-publication 流水 push。
+fn add_origin_remote(repo: &std::path::Path, remote: &std::path::Path) {
+    std::fs::create_dir_all(remote).expect("create remote dir");
+    run_git(remote, &["init", "--bare", "-q"]);
+    run_git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    run_git(repo, &["push", "-q", "-u", "origin", "HEAD"]);
 }
 
 fn run_git(path: &std::path::Path, arguments: &[&str]) {
@@ -267,6 +285,11 @@ impl LcOperationsFixture {
             &member_b,
             "pub fn cross_repo_greeting() -> &'static str { \"beta\" }",
         );
+        // 为 pointer-publication 新路径用例准备可 push 的 bare origin。
+        let remote_a = root.path().join("remotes/alpha.git");
+        let remote_b = root.path().join("remotes/beta.git");
+        add_origin_remote(&member_a, &remote_a);
+        add_origin_remote(&member_b, &remote_b);
 
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let blocked_started = blocked_provider.then(|| Arc::new(Notify::new()));
@@ -629,4 +652,46 @@ async fn lc_members_new_path_and_legacy_alias_route_to_default_lc() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "logical_codebase_not_found");
+}
+
+// ---------------------------------------------------------------------------
+// 新路径：pointer-publications list/create（v1.3 §4 per-LC 寻址）。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lc_pointer_publications_new_path_list_and_create() {
+    let fixture = LcOperationsFixture::new(false, None).await;
+    let uri = format!(
+        "/api/projects/{PROJECT_ID}/logical-codebases/{}/pointer-publications",
+        fixture.lc_id
+    );
+
+    // 新路径 list：尚无发布批次 → 空数组。
+    let (status, body) = request_json(&fixture.app, Method::GET, &uri, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().expect("publications array").len(), 0);
+
+    // 新路径 create：full 批次 → 两个成员仓均推送完成。
+    let (status, publication) = request_json(
+        &fixture.app,
+        Method::POST,
+        &uri,
+        json!({ "batch_kind": "full" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{publication}");
+    assert_eq!(publication["status"], "completed_all", "{publication}");
+    let entries = publication["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 2, "{publication}");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["state"] == "review_created"),
+        "{publication}"
+    );
+
+    // 新路径 list：现在返回一个批次。
+    let (status, body) = request_json(&fixture.app, Method::GET, &uri, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().expect("publications array").len(), 1);
 }

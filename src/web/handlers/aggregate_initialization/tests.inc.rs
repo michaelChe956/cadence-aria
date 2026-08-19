@@ -211,7 +211,7 @@
             &shared_dependencies.coordinator,
             &second_dependencies.coordinator,
         ));
-        let shared_run = InitializationRunKey::aggregate("project_0001", "shared-run");
+        let shared_run = InitializationRunKey::aggregate("project_0001", "lc_0001", "shared-run");
         let lease = shared_dependencies.runs.register(shared_run.clone()).unwrap();
         assert!(second_dependencies.runs.is_active(&shared_run));
         drop(lease);

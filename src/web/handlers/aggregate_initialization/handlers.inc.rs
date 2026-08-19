@@ -49,7 +49,11 @@ async fn create_aggregate_initialization_for_lc(
         .map_err(aggregate_initialization_api_error)?;
     // `begin` returns only a newly-created operation: an existing terminal
     // operation with the same key is reported as an idempotency conflict.
-    let key = InitializationRunKey::aggregate(&project_id, &operation.operation_id);
+    let key = InitializationRunKey::aggregate(
+        &project_id,
+        &logical_codebase_id,
+        &operation.operation_id,
+    );
     let lease = dependencies.runs.register(key).ok_or_else(|| {
         ApiError::runtime(
             "aggregate_initialization_in_progress",
@@ -154,7 +158,7 @@ fn get_aggregate_initialization_for_lc(
     validate_project_id(&project_id)?;
     validate_operation_id(&operation_id)?;
     let dependencies =
-        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id);
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
     let operation = dependencies
         .coordinator
         .get(&project_id, &operation_id)
@@ -164,7 +168,11 @@ fn get_aggregate_initialization_for_lc(
         AggregateInitializationOperationStatus::Running
     ) && !dependencies
         .runs
-        .is_active(&InitializationRunKey::aggregate(&project_id, &operation_id))
+        .is_active(&InitializationRunKey::aggregate(
+            &project_id,
+            &logical_codebase_id,
+            &operation_id,
+        ))
     {
         dependencies
             .coordinator
@@ -209,7 +217,7 @@ fn cancel_aggregate_initialization_for_lc(
     validate_project_id(&project_id)?;
     validate_operation_id(&operation_id)?;
     let dependencies =
-        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id);
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
     let operation = dependencies
         .coordinator
         .cancel(
@@ -224,7 +232,11 @@ fn cancel_aggregate_initialization_for_lc(
     // after the provider turn currently in flight completes.
     dependencies
         .runs
-        .cancel(&InitializationRunKey::aggregate(&project_id, &operation_id));
+        .cancel(&InitializationRunKey::aggregate(
+            &project_id,
+            &logical_codebase_id,
+            &operation_id,
+        ));
     Ok((StatusCode::OK, Json(aggregate_initialization_dto(operation))).into_response())
 }
 
