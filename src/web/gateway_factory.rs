@@ -93,7 +93,12 @@ impl LogicalCodebaseGatewayFactory {
                 capabilities,
                 project_id.to_string(),
             )),
-            Arc::new(ProductionPolicyTargetResolver::new(self.paths.clone())),
+            Arc::new(match lc_id {
+                // R9 fix round 1【Important-1】：resolver 同步按 lc_id 作用域解析 checkout
+                // 目标，否则非 legacy 新 LC 的 coding session 启动会 fail-closed。
+                Some(lc_id) => ProductionPolicyTargetResolver::for_lc(self.paths.clone(), lc_id),
+                None => ProductionPolicyTargetResolver::new(self.paths.clone()),
+            }),
             self.registry.clone(),
             self.sync_adapter.clone(),
             self.availability_gate.clone(),

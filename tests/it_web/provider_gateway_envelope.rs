@@ -337,6 +337,145 @@ async fn coding_internal_review_launches_through_gateway_and_audits_stream_launc
     assert!(audit.all_have_policy_digest());
 }
 
+/// R9 fix round 1【Important-1】it_web 最小覆盖：非默认（非 legacy）LC 的 coding
+/// session 启动 gateway 校验。`LogicalCodebaseGatewayFactory::build_for_lc` 组装的
+/// gateway 注入了生产 `ProductionPolicyTargetResolver`，其 checkout 目标复验必须按
+/// `logical-codebases/{lc_id}/` 子树权威解析（否则 fail-closed）。
+#[tokio::test]
+async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_target() {
+    let root = tempdir().expect("temporary root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let project = ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "new-lc gateway project".to_string(),
+            description: None,
+        })
+        .expect("create project");
+    let aggregate_root = root.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+    let record = LogicalCodebaseStore::new(paths.clone())
+        .create(
+            &project.id,
+            cadence_aria::product::logical_codebase::LogicalCodebaseCreateInput {
+                name: "new-lc".to_string(),
+                aggregate_root,
+            },
+        )
+        .expect("create logical codebase record");
+    let lc_id = record.id;
+
+    let worktree = root.path().join("api");
+    std::fs::create_dir_all(&worktree).expect("create repository root");
+    run_git(&worktree, &["init", "--quiet"]);
+    run_git(
+        &worktree,
+        &["config", "user.email", "itweb-lc@example.test"],
+    );
+    run_git(&worktree, &["config", "user.name", "Itweb New LC"]);
+    std::fs::write(worktree.join("README.md"), "# api\n").expect("write file");
+    run_git(&worktree, &["add", "README.md"]);
+    run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
+
+    let authority = LogicalCodebaseStore::for_lc(paths.clone(), lc_id.clone());
+    let logical_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+    let physical_repository_id = format!("repository_{}", uuid::Uuid::new_v4().simple());
+    authority
+        .save_manifest(
+            &project.id,
+            &LogicalCodebaseManifest::new(
+                &project.id,
+                root.path().join("aggregate-root"),
+                vec![logical_id],
+            ),
+        )
+        .expect("save lc manifest");
+    let source_identity =
+        cadence_aria::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+            &worktree,
+            worktree.join(".git"),
+            None,
+        );
+    let now = "2026-08-18T00:00:00Z".to_string();
+    authority
+        .save_member(
+            &project.id,
+            &cadence_aria::product::logical_codebase::CodebaseMemberRecord {
+                logical_repository_id: logical_id,
+                physical_repository_id: physical_repository_id.clone(),
+                alias: "api".to_string(),
+                role: "repository".to_string(),
+                ordinal: 0,
+                source_identity: source_identity.clone(),
+                repo_type: cadence_aria::product::logical_codebase::RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: cadence_aria::product::logical_codebase::MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .expect("save lc member");
+    authority
+        .save_checkout(
+            &project.id,
+            &RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: logical_id,
+                physical_repository_id: physical_repository_id.clone(),
+                kind: CheckoutKind::Main,
+                canonical_path: worktree.clone(),
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: source_identity.git_dir_identity().to_string(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )
+        .expect("save lc checkout");
+    cadence_aria::product::logical_codebase::IdentityRegistryStore::new(paths.clone())
+        .upsert_active(
+            &project.id,
+            cadence_aria::product::logical_codebase::IdentityRegistryEntry::active(
+                source_identity,
+                logical_id,
+                physical_repository_id,
+                checkout_id,
+                "itweb-new-lc-fixture".to_string(),
+            ),
+        )
+        .expect("register identity");
+
+    let factory = fake_registry_gateway_factory(paths.clone());
+    let gateway = factory
+        .build_for_lc(&project.id, Some(&lc_id))
+        .expect("build gateway for non-default lc");
+
+    let request = SessionLaunchRequest {
+        project_id: project.id.clone(),
+        provider: ProviderRef::claude_code("cap_managed_snapshot"),
+        action: cadence_aria::product::logical_codebase::SessionPolicyAction::CodingTargetWrite,
+        target: PolicyTarget::checkout(
+            logical_id.0.to_string(),
+            checkout_id.0.to_string(),
+            worktree.clone(),
+        ),
+        readable_roots: vec![worktree.clone()],
+        writable_roots: vec![worktree],
+        config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+    };
+
+    let validated = gateway
+        .validate(request)
+        .expect("non-default lc coding launch must pass gateway validation");
+    assert_eq!(validated.envelope().policy_revision, 1);
+}
+
 // ---------------------------------------------------------------------------
 // fixtures / helpers
 // ---------------------------------------------------------------------------

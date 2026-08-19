@@ -18,20 +18,36 @@ use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction
 use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
 use crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED;
 use crate::product::logical_codebase::{
-    LogicalRepositoryId, PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource,
-    ProviderGatewayError, ProviderRef, ProviderRefType, SessionLaunchRequest,
+    LogicalCodebaseFeature, LogicalRepositoryId, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
+    SessionLaunchRequest,
 };
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
 /// 生产 target resolver:按请求 project 构造 `RepositoryStore` 以在启动前重新解析三层身份。
+///
+/// v1.3（R9 fix round 1）：`lc_id = Some` 时 checkout 目标改从
+/// `logical-codebases/{lc_id}/` 子树权威记录解析（与
+/// `RepositoryStore::resolve_logical_repository_for_issue_codebase` 语义一致）；
+/// `lc_id = None`（单仓/legacy）保持既有 project 级 `for_project` + strict 行为不变。
 pub struct ProductionPolicyTargetResolver {
     paths: ProductAppPaths,
+    lc_id: Option<String>,
 }
 
 impl ProductionPolicyTargetResolver {
+    /// legacy/project 级行为（单仓与旧数据字节级不变）。
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// v1.3：按 issue 所属 lc_id 作用域解析 checkout 目标（非 legacy 新 LC 用）。
+    pub fn for_lc(paths: ProductAppPaths, lc_id: &str) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.to_string()),
+        }
     }
 
     /// checkout 目标复验:解析 logical id → 严格解析三层身份 → 比对 checkout id
@@ -46,13 +62,26 @@ impl ProductionPolicyTargetResolver {
                 ProviderGatewayError::Target("invalid logical repository id".to_string())
             })?;
 
-        let project = ProjectStore::new(self.paths.clone())
-            .get(&request.project_id)
-            .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
-        let (_member, checkout, _repository) =
-            RepositoryStore::for_project(self.paths.clone(), &project)
-                .resolve_logical_repository_strict(&request.project_id, logical_id)
-                .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
+        let (_member, checkout, _repository) = match self.lc_id.as_deref() {
+            Some(lc_id) => RepositoryStore::with_logical_codebase_feature(
+                self.paths.clone(),
+                LogicalCodebaseFeature::enabled(),
+            )
+            .resolve_logical_repository_for_issue_codebase(
+                &request.project_id,
+                Some(lc_id),
+                logical_id,
+            )
+            .map_err(|error| ProviderGatewayError::Target(error.to_string()))?,
+            None => {
+                let project = ProjectStore::new(self.paths.clone())
+                    .get(&request.project_id)
+                    .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
+                RepositoryStore::for_project(self.paths.clone(), &project)
+                    .resolve_logical_repository_strict(&request.project_id, logical_id)
+                    .map_err(|error| ProviderGatewayError::Target(error.to_string()))?
+            }
+        };
 
         if checkout.checkout_id.0.to_string() != request.target.checkout_id {
             return Err(ProviderGatewayError::TargetMismatch {
@@ -413,6 +442,224 @@ mod tests {
         );
         assert!(resolved.logical_repository_id.is_empty());
         assert!(resolved.checkout_id.is_empty());
+    }
+
+    /// 非 legacy LC fixture：project + 新建 LC（logical-codebases/{lc_id}/ 子树权威）
+    /// + 真实 git 仓 member/checkout + identity registry。
+    ///
+    /// 不写 project 级 legacy manifest/repos.json（R9 新 LC 登记语义）。
+    struct NewLcResolverFixture {
+        _root: TempDir,
+        paths: ProductAppPaths,
+        project_id: String,
+        lc_id: String,
+        logical_id: LogicalRepositoryId,
+        checkout_id: crate::product::logical_codebase::RepositoryCheckoutId,
+        worktree: PathBuf,
+    }
+
+    fn new_lc_resolver_fixture() -> NewLcResolverFixture {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "new-lc resolver project".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        let aggregate_root = root.path().join("aggregate-root");
+        fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+        let record = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
+            .create(
+                &project.id,
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "new-lc".to_string(),
+                    aggregate_root,
+                },
+            )
+            .expect("create logical codebase record");
+        let lc_id = record.id;
+
+        let worktree = root.path().join("api");
+        fs::create_dir_all(&worktree).expect("create repository root");
+        run_git(&worktree, &["init", "--quiet"]);
+        run_git(
+            &worktree,
+            &["config", "user.email", "lc-resolver@example.test"],
+        );
+        run_git(&worktree, &["config", "user.name", "New LC Resolver"]);
+        fs::write(worktree.join("README.md"), "# api\n").expect("write file");
+        run_git(&worktree, &["add", "README.md"]);
+        run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
+
+        let authority = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+            paths.clone(),
+            lc_id.clone(),
+        );
+        let logical_id = LogicalRepositoryId(Uuid::new_v4());
+        let checkout_id = crate::product::logical_codebase::RepositoryCheckoutId(Uuid::new_v4());
+        let physical_repository_id = format!("repository_{}", Uuid::new_v4().simple());
+        let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+            &project.id,
+            root.path().join("aggregate-root"),
+            vec![logical_id],
+        );
+        authority
+            .save_manifest(&project.id, &manifest)
+            .expect("save lc manifest");
+        let now = "2026-08-18T00:00:00Z".to_string();
+        let source_identity =
+            crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+                &worktree,
+                worktree.join(".git"),
+                None,
+            );
+        authority
+            .save_member(
+                &project.id,
+                &crate::product::logical_codebase::CodebaseMemberRecord {
+                    logical_repository_id: logical_id,
+                    physical_repository_id: physical_repository_id.clone(),
+                    alias: "api".to_string(),
+                    role: "repository".to_string(),
+                    ordinal: 0,
+                    source_identity: source_identity.clone(),
+                    repo_type: crate::product::logical_codebase::RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: crate::product::logical_codebase::MemberStatus::Active,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .expect("save lc member");
+        authority
+            .save_checkout(
+                &project.id,
+                &crate::product::logical_codebase::RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: logical_id,
+                    physical_repository_id: physical_repository_id.clone(),
+                    kind: crate::product::logical_codebase::CheckoutKind::Main,
+                    canonical_path: worktree.clone(),
+                    checkout_path_hash: "sha256:checkout".to_string(),
+                    git_dir_identity: source_identity.git_dir_identity().to_string(),
+                    revision: None,
+                    availability: crate::product::logical_codebase::CheckoutAvailability::Available,
+                    observed_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            )
+            .expect("save lc checkout");
+        crate::product::logical_codebase::IdentityRegistryStore::new(paths.clone())
+            .upsert_active(
+                &project.id,
+                crate::product::logical_codebase::IdentityRegistryEntry::active(
+                    source_identity,
+                    logical_id,
+                    physical_repository_id,
+                    checkout_id,
+                    "new-lc-resolver-fixture".to_string(),
+                ),
+            )
+            .expect("register identity");
+
+        NewLcResolverFixture {
+            _root: root,
+            paths,
+            project_id: project.id,
+            lc_id,
+            logical_id,
+            checkout_id,
+            worktree,
+        }
+    }
+
+    impl NewLcResolverFixture {
+        fn coding_request(&self, worktree: PathBuf) -> SessionLaunchRequest {
+            SessionLaunchRequest {
+                project_id: self.project_id.clone(),
+                provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
+                action: SessionPolicyAction::CodingTargetWrite,
+                target: PolicyTarget::checkout(
+                    self.logical_id.0.to_string(),
+                    self.checkout_id.0.to_string(),
+                    worktree.clone(),
+                ),
+                readable_roots: vec![self.paths.root().to_path_buf()],
+                writable_roots: vec![worktree],
+                config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+            }
+        }
+    }
+
+    /// 红→绿基线：legacy（project 级）resolver 对新 LC 子树 checkout fail-closed
+    /// （新 LC 不写 legacy manifest，strict 解析必失败）。修复前即红，用于钉住
+    /// 「不能用 for_project 解析新 LC」这一约束。
+    #[test]
+    fn legacy_project_resolver_fails_closed_for_new_lc_checkout() {
+        let fixture = new_lc_resolver_fixture();
+        let request = fixture.coding_request(fixture.worktree.clone());
+
+        let error = ProductionPolicyTargetResolver::new(fixture.paths.clone())
+            .resolve_and_revalidate(&request)
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderGatewayError::Target(_)));
+    }
+
+    /// R9 fix round 1【Important-1】：非 legacy LC 的 coding 启动 target 复验必须
+    /// 按 lc_id 子树权威解析通过。
+    #[test]
+    fn for_lc_resolver_validates_new_lc_checkout_target() {
+        let fixture = new_lc_resolver_fixture();
+        let request = fixture.coding_request(fixture.worktree.clone());
+
+        let resolved =
+            ProductionPolicyTargetResolver::for_lc(fixture.paths.clone(), &fixture.lc_id)
+                .resolve_and_revalidate(&request)
+                .expect("resolve new lc checkout target");
+
+        assert_eq!(
+            resolved.worktree,
+            fs::canonicalize(&fixture.worktree).unwrap()
+        );
+        assert_eq!(
+            resolved.logical_repository_id,
+            fixture.logical_id.0.to_string()
+        );
+        assert_eq!(resolved.checkout_id, fixture.checkout_id.0.to_string());
+    }
+
+    /// 非 legacy LC 下 checkout_id 不匹配仍 fail-closed（lc 寻址不放松身份复验）。
+    #[test]
+    fn for_lc_resolver_rejects_checkout_id_mismatch() {
+        let fixture = new_lc_resolver_fixture();
+        let request = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: PolicyTarget::checkout(
+                fixture.logical_id.0.to_string(),
+                Uuid::new_v4().to_string(),
+                fixture.worktree.clone(),
+            ),
+            readable_roots: vec![fixture.paths.root().to_path_buf()],
+            writable_roots: vec![fixture.worktree.clone()],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+
+        let error = ProductionPolicyTargetResolver::for_lc(fixture.paths.clone(), &fixture.lc_id)
+            .resolve_and_revalidate(&request)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ProviderGatewayError::TargetMismatch { ref field } if field == "checkout_id")
+        );
     }
 
     fn write_gitdir_file(worktree_dir: &std::path::Path, git_dir: &std::path::Path) {
