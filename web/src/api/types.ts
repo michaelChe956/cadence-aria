@@ -1,4 +1,5 @@
 export * from "./types/aggregate-index";
+export * from "./types/aggregate-initialization";
 export * from "./types/common";
 export * from "./types/coding";
 export * from "./types/image-create";

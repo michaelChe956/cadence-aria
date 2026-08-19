@@ -27,6 +27,11 @@ import {
   getActiveAggregateIndex,
   rebuildAggregateIndex,
 } from "../../api/aggregate-index";
+import {
+  cancelAggregateInitialization,
+  getAggregateInitialization,
+  startAggregateInitialization,
+} from "../../api/aggregate-initialization";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import {
@@ -37,6 +42,7 @@ import {
 } from "../../api/pointer-publication";
 import type {
   AggregateIndexActiveResponse,
+  AggregateInitializationOperationSnapshot,
   CodingAttemptAddress,
   IssueLifecycleResponse,
   LogicalCodebaseMemberDto,
@@ -63,6 +69,7 @@ import {
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
 import { AggregateIndexCard } from "./AggregateIndexCard";
+import { AggregateInitializationCard } from "./AggregateInitializationCard";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
 import { PointerPublicationPanel } from "./PointerPublicationPanel";
 import { ProjectSidebar } from "./ProjectSidebar";
@@ -138,6 +145,10 @@ export function IssueLifecycleWorkbench({
     useState<AggregateIndexActiveResponse | null>(null);
   const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
     useState(false);
+  const [aggregateInitialization, setAggregateInitialization] =
+    useState<AggregateInitializationOperationSnapshot | null>(null);
+  const [aggregateInitializationBusy, setAggregateInitializationBusy] =
+    useState(false);
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
@@ -202,6 +213,7 @@ export function IssueLifecycleWorkbench({
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
+        setAggregateInitialization(null);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
         return;
@@ -256,6 +268,7 @@ export function IssueLifecycleWorkbench({
       );
       if (projectChanged) {
         setSelectedCardKey(null);
+        setAggregateInitialization(null);
       }
     } catch (reason) {
       if (isLatestRefresh(requestId)) {
@@ -361,6 +374,48 @@ export function IssueLifecycleWorkbench({
       window.clearInterval(interval);
     };
   }, [latestPointerPublicationId, selectedProjectId]);
+
+  useEffect(() => {
+    if (
+      !selectedProjectId ||
+      !aggregateInitialization ||
+      (aggregateInitialization.status !== "created" &&
+        aggregateInitialization.status !== "running")
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const operation = await getAggregateInitialization(
+          selectedProjectId,
+          aggregateInitialization.operation_id,
+        );
+        if (!disposed) {
+          setAggregateInitialization(operation);
+        }
+      } catch {
+        // 轮询失败保持现状，下一次间隔重试。
+      } finally {
+        inFlight = false;
+      }
+    };
+    const interval = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [
+    selectedProjectId,
+    aggregateInitialization?.operation_id,
+    aggregateInitialization?.status,
+  ]);
 
   async function handleSelectProject(projectId: string) {
     if (projectId === selectedProjectId) {
@@ -666,6 +721,57 @@ export function IssueLifecycleWorkbench({
     }
   }
 
+  async function handleStartAggregateInitialization() {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    setAggregateInitializationBusy(true);
+    setError(null);
+    try {
+      const operation = await startAggregateInitialization(
+        selectedProjectId,
+        crypto.randomUUID(),
+      );
+      setAggregateInitialization(operation);
+    } catch (reason) {
+      setError(
+        reason instanceof ApiRequestError
+          ? reason.message
+          : errorMessage(reason, "启动聚合初始化失败"),
+      );
+    } finally {
+      setAggregateInitializationBusy(false);
+    }
+  }
+
+  async function handleCancelAggregateInitialization() {
+    if (!selectedProjectId || !aggregateInitialization) {
+      setError("缺少 Project 或初始化操作");
+      return;
+    }
+
+    setAggregateInitializationBusy(true);
+    setError(null);
+    try {
+      const operation = await cancelAggregateInitialization(
+        selectedProjectId,
+        aggregateInitialization.operation_id,
+        { reason: "user_cancelled", detail: null },
+      );
+      setAggregateInitialization(operation);
+    } catch (reason) {
+      setError(
+        reason instanceof ApiRequestError
+          ? reason.message
+          : errorMessage(reason, "取消聚合初始化失败"),
+      );
+    } finally {
+      setAggregateInitializationBusy(false);
+    }
+  }
+
   async function handleDeleteProject(projectId: string) {
     setError(null);
     await deleteProject(projectId);
@@ -949,6 +1055,14 @@ export function IssueLifecycleWorkbench({
                       登记成员
                     </button>
                   </div>
+                  {selectedProject?.multi_repo ? (
+                    <AggregateInitializationCard
+                      operation={aggregateInitialization}
+                      busy={aggregateInitializationBusy}
+                      onStart={() => void handleStartAggregateInitialization()}
+                      onCancel={() => void handleCancelAggregateInitialization()}
+                    />
+                  ) : null}
                   {aggregateIndex ? (
                     <AggregateIndexCard
                       index={aggregateIndex}

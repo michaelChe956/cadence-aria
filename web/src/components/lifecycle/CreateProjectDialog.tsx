@@ -3,6 +3,7 @@ import { useRef, useState, type FormEvent } from "react";
 export type CreateProjectPayload = {
   name: string;
   description: string | null;
+  multi_repo: boolean;
 };
 
 export function CreateProjectDialog({
@@ -14,6 +15,7 @@ export function CreateProjectDialog({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [multiRepo, setMultiRepo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -37,6 +39,7 @@ export function CreateProjectDialog({
       await onCreate({
         name: trimmedName,
         description: description.trim() ? description.trim() : null,
+        multi_repo: multiRepo,
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "创建 Project 失败");
@@ -87,6 +90,18 @@ export function CreateProjectDialog({
               }}
               className="mt-1 block min-h-20 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             />
+          </label>
+          <label className="flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
+            <input
+              type="checkbox"
+              checked={multiRepo}
+              onChange={(event) => {
+                setMultiRepo(event.target.checked);
+                setError(null);
+              }}
+              className="h-4 w-4 rounded border-[var(--aria-line)]"
+            />
+            启用多仓库模式
           </label>
           {error ? (
             <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">

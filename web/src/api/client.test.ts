@@ -363,6 +363,35 @@ describe("api client", () => {
     );
   });
 
+  it("serializes an explicit multi_repo false project payload", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(
+          JSON.stringify({
+            project_id: "project_0001",
+            name: "Legacy",
+            description: null,
+            created_at: "2026-05-14T00:00:00Z",
+            updated_at: "2026-05-14T00:00:00Z",
+            last_opened_at: null,
+            multi_repo: false,
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    await createProject({ name: "Legacy", description: null, multi_repo: false });
+
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.body).toBe(
+      JSON.stringify({ name: "Legacy", description: null, multi_repo: false }),
+    );
+  });
+
   it("calls product repository and issue endpoints with project scoped payloads", async () => {
     const calls: Array<{ input: string; init?: RequestInit }> = [];
     vi.stubGlobal(

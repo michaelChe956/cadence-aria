@@ -534,6 +534,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
         body: JSON.stringify({
           name: "New Project",
           description: "新的生命周期项目",
+          multi_repo: false,
         }),
       }),
     );

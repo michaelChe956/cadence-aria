@@ -1,6 +1,7 @@
 import { beforeEach, vi } from "vitest";
 import type {
   AggregateIndexActiveResponse,
+  AggregateInitializationOperationSnapshot,
   CodingAttempt,
   IssueWorkItemPlanDetailDto,
   PointerPublicationDto,
@@ -54,6 +55,9 @@ export function lifecycleFetch(options?: {
   pointerPublications?: PointerPublicationDto[];
   aggregateIndex?: AggregateIndexActiveResponse;
   aggregateIndexRebuild?: AggregateIndexActiveResponse;
+  aggregateInitializationStart?: AggregateInitializationOperationSnapshot;
+  aggregateInitializationSnapshots?: AggregateInitializationOperationSnapshot[];
+  aggregateInitializationCancel?: AggregateInitializationOperationSnapshot;
   registrationPreflight?: RegistrationPreflightResponse;
   registrationSubmit?: RegistrationBatchDto;
   registrationResume?: RegistrationBatchDto;
@@ -83,6 +87,7 @@ export function lifecycleFetch(options?: {
   const latestIssueTitlesByProject = new Map<string, string>();
   const lifecycleByIssue = new Map<string, MockLifecycleData>();
   let pointerPublications = [...(options?.pointerPublications ?? [])];
+  let aggregateInitializationGetCount = 0;
 
   function issueRecord(issueId: string, title: string) {
     return {
@@ -194,11 +199,13 @@ export function lifecycleFetch(options?: {
       const payload = JSON.parse(String(init.body)) as {
         name: string;
         description?: string | null;
+        multi_repo?: boolean;
       };
       const project = projectRecord(
         `project_${String(projects.length + 1).padStart(4, "0")}`,
         payload.name,
         payload.description ?? null,
+        payload.multi_repo ?? false,
       );
       projects.push(project);
       return jsonResponse(project);
@@ -859,6 +866,37 @@ export function lifecycleFetch(options?: {
             }),
       );
     }
+    const aggregateInitializationStartMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations$/,
+    );
+    if (aggregateInitializationStartMatch && init?.method === "POST") {
+      return jsonResponse(
+        options?.aggregateInitializationStart ??
+          options?.aggregateInitializationSnapshots?.[0] ??
+          aggregateInitializationOperation("created"),
+      );
+    }
+    const aggregateInitializationCancelMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)\/cancel$/,
+    );
+    if (aggregateInitializationCancelMatch && init?.method === "POST") {
+      return jsonResponse(
+        options?.aggregateInitializationCancel ??
+          aggregateInitializationOperation("cancelled"),
+      );
+    }
+    const aggregateInitializationGetMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)$/,
+    );
+    if (aggregateInitializationGetMatch && init?.method !== "POST") {
+      const snapshots = options?.aggregateInitializationSnapshots ?? [];
+      const snapshot =
+        snapshots[aggregateInitializationGetCount] ??
+        snapshots[snapshots.length - 1] ??
+        aggregateInitializationOperation("completed");
+      aggregateInitializationGetCount += 1;
+      return jsonResponse(snapshot);
+    }
     const pointerPublicationsMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebase\/pointer-publications$/,
     );
@@ -947,5 +985,82 @@ export function lifecycleFetch(options?: {
       return jsonResponse(publication);
     }
     return jsonResponse({});
+  });
+}
+
+export function aggregateInitializationOperation(
+  status: AggregateInitializationOperationSnapshot["status"],
+  overrides: Partial<AggregateInitializationOperationSnapshot> = {},
+): AggregateInitializationOperationSnapshot {
+  const completed = status === "completed";
+  const failed = status === "failed";
+  const running = status === "running";
+  return {
+    operation_id: "aggregate_initialization_0001",
+    project_id: "project_0001",
+    status,
+    profile: null,
+    steps: [
+      {
+        step_id: "machine_skills",
+        status: completed || running || failed ? "completed" : "pending",
+      },
+      {
+        step_id: "aggregate_preflight",
+        status: failed ? "failed" : completed || running ? "completed" : "pending",
+      },
+      {
+        step_id: "pre_check",
+        status: completed || running ? "running" : "pending",
+      },
+      { step_id: "rule_and_mcp_config", status: completed ? "completed" : "pending" },
+      { step_id: "openspec_and_examples", status: completed ? "completed" : "pending" },
+    ],
+    current_step: completed ? null : running || failed ? "pre_check" : "machine_skills",
+    failed_step: failed ? "aggregate_preflight" : null,
+    member_projections: [],
+    cancellation: null,
+    error:
+      status === "failed"
+        ? { code: "aggregate_initialization_failed", message: "初始化命令执行失败", details: {} }
+        : null,
+    created_at: "2026-08-18T00:00:00Z",
+    updated_at: "2026-08-18T00:00:01Z",
+    completed_at: completed ? "2026-08-18T00:01:00Z" : null,
+    ...overrides,
+  };
+}
+
+export function aggregateInitializationFetch(
+  operationSnapshots: AggregateInitializationOperationSnapshot[],
+  options?: Parameters<typeof lifecycleFetch>[0],
+) {
+  const baseFetch = lifecycleFetch(options);
+  let getCount = 0;
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input).replace(/\/$/u, "");
+    const startMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations$/,
+    );
+    if (startMatch && init?.method === "POST") {
+      return jsonResponse(operationSnapshots[0] ?? aggregateInitializationOperation("created"));
+    }
+    const cancelMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)\/cancel$/,
+    );
+    if (cancelMatch && init?.method === "POST") {
+      return jsonResponse(aggregateInitializationOperation("cancelled"));
+    }
+    const getMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebase\/initializations\/([^/]+)$/,
+    );
+    if (getMatch && init?.method !== "POST") {
+      const snapshot =
+        operationSnapshots[getCount] ??
+        operationSnapshots[operationSnapshots.length - 1];
+      getCount += 1;
+      return jsonResponse(snapshot);
+    }
+    return baseFetch(input, init);
   });
 }
