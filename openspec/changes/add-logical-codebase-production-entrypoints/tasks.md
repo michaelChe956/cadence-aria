@@ -50,7 +50,7 @@
 - [x] R5 routing/resolver/gateway/selection 按 issue 所属 codebase 解析（补偿事务按 LC；issue 增加 logical_codebase_id 归属；单仓 issue 零变化）
 - [x] R6 废除多仓 project 防护语义（legacy_repository_endpoint_on_multi_repo 不再产出）+ 单仓端点全回归
 - [x] R7 前端：代码库混合列表 + 添加代码库弹窗模式单选（单仓→既有流程/多仓→建 LC→登记向导 auto_discover）
-- [ ] R8 前端：逻辑代码库页按 LC 分区（初始化/索引/指针）+ issue 创建代码库选择 + 恢复创建 project 弹窗（撤 UX 2.1 单选）
+- [x] R8 前端：逻辑代码库页按 LC 分区（初始化/索引/指针）+ issue 创建代码库选择 + 恢复创建 project 弹窗（撤 UX 2.1 单选）
 - [ ] R9 P0 e2e 更新为新寻址全链（建 LC→登记→初始化→索引→逻辑 issue→Story/Design→Draft）+ 单仓回归。编码/交付链残留切换点清单（按 issue 所属 lc_id 寻址，单仓/无 LC 回退 legacy）：
   - [ ] gateway 调用点：gateway_factory build → build_for_lc（workspace_ws_handler/socket.rs、coding_ws_handler/runner/task.rs、aggregate_initialization/production_dependencies.inc.rs）——R5 fix round 1 已接线，R9 仅 e2e 覆盖
   - [ ] build_attempt_target_snapshot（target_snapshot.rs:34）：LogicalCodebaseStore/AggregatePolicyArtifactStore 仍 project 级 + RepositoryStore::for_project（:50）；签名无 issue 上下文，需按 issue lc_id 扩展
