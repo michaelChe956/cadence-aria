@@ -32,3 +32,8 @@
 
 - replace_active 跨文件非事务：single-writer 解决并发，崩溃窗口保留（与既有行为一致，不恶化）。
 - poll_due 定时兜底出界；REQ-IND"定时"场景以手动重建+读时 sync 满足。
+
+## 已知限制（merge 前标注，2026-08-19）
+
+- **多仓 WorkItemPlan 目前止于 Draft**：schema-v2 finalize 不持久化 per-target LifecycleWorkItemRecord，且多 target plan 的 plan 级 start_generation 被 repository_routing_ambiguous 拒绝——"多 target plan → coding"生产链路待专项 change（见 ledger park-1/park-2 与最终审查报告）。
+- aggregate_initialization_in_progress / aggregate_initialization_state_rejected 两码暂落默认 500，待后续补 409 映射。
