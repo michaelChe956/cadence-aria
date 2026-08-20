@@ -555,9 +555,25 @@ fn open_item_section_is_resolved(section: &str) -> bool {
         return true;
     }
 
-    normalized
-        .iter()
-        .all(|line| open_item_line_is_resolved(line))
+    // 首个非空行声明空标记后，后续解释行仅硬未解决 cue 才破坏整节已解决判定；
+    // 软 cue（如否定语境下的“未决问题”）不再单独拒绝良性解释（见 change
+    // tolerate-explained-empty-open-items spec Requirement 1）。
+    let mut section_declared_empty = false;
+    for (index, line) in normalized.iter().enumerate() {
+        if index == 0 && open_item_empty_marker_raw_remainder(line).is_some() {
+            section_declared_empty = true;
+        }
+        if section_declared_empty && index > 0 {
+            if open_item_line_has_hard_unresolved_cue(line) {
+                return false;
+            }
+            continue;
+        }
+        if !open_item_line_is_resolved(line) {
+            return false;
+        }
+    }
+    true
 }
 
 fn open_item_line_is_resolved(line: &str) -> bool {

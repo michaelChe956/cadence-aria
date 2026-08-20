@@ -1112,3 +1112,74 @@ fn fallback_review_verdict_records_stable_diagnostic_and_bounded_preview() {
         2_048
     );
 }
+
+#[test]
+fn story_artifact_accepts_multiline_empty_marker_explanation() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。\n所有范围与验收约束均由 Issue 明示得出，不存在未决问题。\n实现细节留待 Design 阶段决策。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "multiline empty marker explanation should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
+fn story_artifact_rejects_hard_cue_on_later_line_after_empty_marker() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。\n单元测试运行器选型仍待确认。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn story_artifact_accepts_alternate_empty_marker_variants() {
+    for marker_section in [
+        "暂无。其余范围与验收约束均由 Issue 明示约束得出。\n",
+        "none. All scope and acceptance constraints are explicit in the issue.\n",
+        "单元测试运行器选型仍待确认。\n",
+    ] {
+        let expect_passed = !marker_section.starts_with("单元测试");
+        let report = validate_workspace_artifact_constraints(
+            &format!(
+                "# Aria Provider Setup Story Spec\n\n\
+                 ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+                 ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+                 ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+                 ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+                 ## 待确认项\n{marker_section}\n\
+                 ## 非功能需求\n无。\n"
+            ),
+            &WorkspaceType::Story,
+        );
+        assert_eq!(
+            report.passed, expect_passed,
+            "section `{marker_section}`: {:?}",
+            report.blocking_reasons()
+        );
+    }
+}
