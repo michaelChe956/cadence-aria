@@ -121,6 +121,49 @@ fn story_artifact_rejects_nested_artifact_fence_and_thinking_pollution() {
 }
 
 #[test]
+fn story_artifact_accepts_empty_marker_with_benign_explanation() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。Issue 已明确需求、格式规则、验收示例与范围限制；单元测试运行器选型、库文件与页面文件的具体路径、模块文件扩展名（如 `.mjs`）等属实现细节，留待 Design 阶段决策，不构成本 Story 的未决问题。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "empty marker with benign explanation should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
+fn story_artifact_rejects_open_item_disguised_as_wu_prefix() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无论使用哪种单元测试运行器，都需要确认其选型。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
 fn story_artifact_rejects_unresolved_open_items_without_interaction() {
     let report = validate_workspace_artifact_constraints(
         "# Aria Provider Setup Story Spec\n\n\

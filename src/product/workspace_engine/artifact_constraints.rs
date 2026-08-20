@@ -578,7 +578,9 @@ fn open_item_line_is_resolved(line: &str) -> bool {
         if open_item_line_has_hard_unresolved_cue(line) {
             return false;
         }
-        return !has_unresolved_cue || has_resolved_cue;
+        // 行首已声明空标记且无硬未解决 cue：剩余解释中的软 cue（如否定语境下的
+        // “未决问题”）不再单独拒绝该行（见 change tolerate-explained-empty-open-items）。
+        return true;
     }
 
     has_resolved_cue && !has_unresolved_cue
@@ -686,7 +688,35 @@ fn open_item_empty_marker_raw_remainder(line: &str) -> Option<String> {
         lower
             .starts_with(marker)
             .then(|| trimmed[marker.len()..].to_string())
+            // 空标记后必须紧跟句读边界（或行尾），防止「无论…」「无关…」等词被
+            // 单字「无」前缀误判为空标记声明。
+            .filter(|remainder| open_item_marker_boundary(remainder))
     })
+}
+
+fn open_item_marker_boundary(remainder: &str) -> bool {
+    let Some(first) = remainder.chars().next() else {
+        return true;
+    };
+    matches!(
+        first,
+        '。' | '.'
+            | '，'
+            | ','
+            | '；'
+            | ';'
+            | '：'
+            | ':'
+            | '！'
+            | '!'
+            | '？'
+            | '?'
+            | '（'
+            | '('
+            | ' '
+            | '\t'
+            | '\u{3000}'
+    )
 }
 
 fn normalize_open_item_inline_markdown(text: &str) -> String {
