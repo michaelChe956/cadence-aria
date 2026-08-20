@@ -1,9 +1,6 @@
 // 路由引用注入契约测试（T3 裁决 A）：
-// - Legacy 上下文下 outline/draft prompt 注入改造前的原始路由引用文本；
+// - Legacy 上下文下 outline/draft prompt 注入按需查阅、非阻塞的生成类路由引用文本；
 // - Logical 上下文下注入聚合政策 locator（authority_root/policy_id/revision/digest）。
-//
-// 基线：`git show cf2b0ba2:src/product/work_item_split_engine/prompts.rs` 的
-// :69/:89 注入文本（`direct_cadence_routing_rules_reference_legacy()`）。
 //
 // 注意：本目录测试经 `tests.rs` 的 `include!` 内联进同一模块，故这里只 import
 // 未被他文件引入的新名字，其余全部全限定引用，避免 E0252 重名 import。
@@ -20,7 +17,7 @@ fn logical_policy_fixture() -> LogicalPolicyReference {
 }
 
 #[test]
-fn work_item_draft_prompt_legacy_injects_original_routing_reference() {
+fn work_item_draft_prompt_legacy_injects_generation_routing_reference() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
         .outline
@@ -38,6 +35,10 @@ fn work_item_draft_prompt_legacy_injects_original_routing_reference() {
     );
 
     assert!(prompt.contains("[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md"));
+    assert!(prompt.contains("按需查阅"));
+    assert!(prompt.contains("项目规则未加载"));
+    assert!(!prompt.contains("完整读取"));
+    assert!(!prompt.contains("只报告阻塞"));
     assert!(!prompt.contains("authority_root:"));
 }
 
@@ -66,7 +67,7 @@ fn work_item_draft_prompt_logical_injects_aggregate_policy_reference() {
 }
 
 #[test]
-fn outline_prompt_legacy_injects_original_routing_reference() {
+fn outline_prompt_legacy_injects_generation_routing_reference() {
     let (request, issue, repository) = split_prompt_fixture();
 
     let (prompt, _nonce) =
@@ -83,6 +84,10 @@ fn outline_prompt_legacy_injects_original_routing_reference() {
         );
 
     assert!(prompt.contains("[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md"));
+    assert!(prompt.contains("按需查阅"));
+    assert!(prompt.contains("项目规则未加载"));
+    assert!(!prompt.contains("完整读取"));
+    assert!(!prompt.contains("只报告阻塞"));
     assert!(!prompt.contains("authority_root:"));
 }
 

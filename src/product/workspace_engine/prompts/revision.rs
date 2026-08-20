@@ -1,6 +1,6 @@
 use super::*;
 use crate::product::cadence_skills::routing_reference::{
-    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    RoutingReferenceContext, generation_cadence_routing_rules_reference,
 };
 use crate::product::workspace_engine::review::trusted_review_comments;
 
@@ -79,7 +79,7 @@ impl WorkspaceEngine {
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str("请作为 author 继续返修当前 Workspace 产物。\n\n");
-        prompt.push_str(&direct_cadence_routing_rules_reference(context));
+        prompt.push_str(&generation_cadence_routing_rules_reference(context));
         prompt.push_str(
             "当前阶段：真实 Provider resume 后的 bounded revision。\n必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
         );
@@ -113,7 +113,7 @@ impl WorkspaceEngine {
         let mut prompt = String::new();
         prompt.push_str("请作为 author 返修当前 Workspace 产物。\n\n");
         if !self.has_direct_cadence_routing_rules_system_context() {
-            prompt.push_str(&direct_cadence_routing_rules_reference(context));
+            prompt.push_str(&generation_cadence_routing_rules_reference(context));
         }
         prompt.push_str(
             "当前阶段：候选产物 bounded revision。\n必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
@@ -149,7 +149,7 @@ impl WorkspaceEngine {
 mod revision_routing_reference_tests {
     use super::*;
     use crate::product::cadence_skills::routing_reference::{
-        LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+        LogicalPolicyReference, RoutingReferenceContext,
     };
     use crate::product::checkpoint_store::CheckpointStore;
     use std::sync::Arc;
@@ -208,15 +208,14 @@ mod revision_routing_reference_tests {
     }
 
     #[test]
-    fn revision_delta_prompt_legacy_matches_legacy_reference() {
+    fn revision_delta_prompt_legacy_uses_on_demand_generation_reference() {
         let engine = engine_for_revision();
         let prompt =
             engine.build_revision_delta_prompt(&review_verdict(), &RoutingReferenceContext::Legacy);
-        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
-        assert!(
-            prompt.contains(&legacy),
-            "legacy routing reference missing: {prompt}"
-        );
+        assert!(prompt.contains("按需查阅"), "{prompt}");
+        assert!(prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(!prompt.contains("完整读取"), "{prompt}");
+        assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
     }
 
@@ -239,18 +238,17 @@ mod revision_routing_reference_tests {
     }
 
     #[test]
-    fn revision_full_prompt_legacy_matches_legacy_reference() {
+    fn revision_full_prompt_legacy_uses_on_demand_generation_reference() {
         let engine = engine_for_revision();
         let prompt = engine.build_revision_full_prompt(
             "# Existing Artifact",
             &review_verdict(),
             &RoutingReferenceContext::Legacy,
         );
-        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
-        assert!(
-            prompt.contains(&legacy),
-            "legacy routing reference missing: {prompt}"
-        );
+        assert!(prompt.contains("按需查阅"), "{prompt}");
+        assert!(prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(!prompt.contains("完整读取"), "{prompt}");
+        assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
     }
 
@@ -258,7 +256,7 @@ mod revision_routing_reference_tests {
     fn revision_full_prompt_reuses_routing_reference_present_in_generation_context() {
         let mut engine = engine_for_revision();
         let context = logical_context();
-        let logical_text = direct_cadence_routing_rules_reference(&context);
+        let logical_text = generation_cadence_routing_rules_reference(&context);
         engine.session.messages.push(SessionMessage {
             id: "msg_generation_context".to_string(),
             role: "system".to_string(),

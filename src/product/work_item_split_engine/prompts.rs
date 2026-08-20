@@ -1,5 +1,5 @@
 use crate::product::cadence_skills::routing_reference::{
-    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    RoutingReferenceContext, generation_cadence_routing_rules_reference,
 };
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
@@ -70,7 +70,7 @@ fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n\n",
-        direct_cadence_routing_rules_reference(context),
+        generation_cadence_routing_rules_reference(context),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
@@ -90,7 +90,7 @@ fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String
          {allowed_outputs}\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n",
-        direct_cadence_routing_rules_reference(context),
+        generation_cadence_routing_rules_reference(context),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )

@@ -68,7 +68,6 @@ fn logical_cadence_routing_rules_reference(policy: &LogicalPolicyReference) -> S
 /// Logical 分支与 direct 版逐字一致（政策权威门禁不降级）。
 /// 文案保留 `[cadence_project_rules]` 段标记，
 /// `has_direct_cadence_routing_rules_system_context` 对新旧变体同判去重。
-#[allow(dead_code)] // 生成侧调用方由 Task 2/3 接入；接入后移除本注解
 pub(crate) fn generation_cadence_routing_rules_reference(
     context: &RoutingReferenceContext,
 ) -> String {

@@ -1,7 +1,7 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::cadence_skills::routing_reference::{
-    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    RoutingReferenceContext, generation_cadence_routing_rules_reference,
 };
 
 mod author_revision;
@@ -43,7 +43,7 @@ pub(crate) fn normalize_generation_prompt(
 
 fn initial_author_runtime_contract(
     workspace_type: &WorkspaceType,
-    include_direct_routing_reference: bool,
+    include_routing_reference: bool,
     context: &RoutingReferenceContext,
 ) -> String {
     let (phase, required_skill) = match workspace_type {
@@ -65,8 +65,8 @@ fn initial_author_runtime_contract(
         ),
     };
 
-    let routing_reference = if include_direct_routing_reference {
-        direct_cadence_routing_rules_reference(context)
+    let routing_reference = if include_routing_reference {
+        generation_cadence_routing_rules_reference(context)
     } else {
         String::new()
     };
@@ -172,7 +172,7 @@ pub(crate) fn reviewer_output_contract(
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
          {schema}\n\
          </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
-        direct_cadence_routing_rules_reference(context),
+        generation_cadence_routing_rules_reference(context),
     )
 }
 
@@ -666,7 +666,7 @@ mod aggregate_scope_prompt_tests {
 mod routing_reference_prompt_tests {
     use super::*;
     use crate::product::cadence_skills::routing_reference::{
-        LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+        LogicalPolicyReference, RoutingReferenceContext,
     };
 
     fn logical_context() -> RoutingReferenceContext {
@@ -679,17 +679,16 @@ mod routing_reference_prompt_tests {
     }
 
     #[test]
-    fn initial_author_runtime_contract_legacy_matches_legacy_reference() {
+    fn initial_author_runtime_contract_legacy_uses_on_demand_generation_reference() {
         let prompt = initial_author_runtime_contract(
             &WorkspaceType::Story,
             true,
             &RoutingReferenceContext::Legacy,
         );
-        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
-        assert!(
-            prompt.contains(&legacy),
-            "legacy routing reference missing: {prompt}"
-        );
+        assert!(prompt.contains("按需查阅"), "{prompt}");
+        assert!(prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(!prompt.contains("完整读取"), "{prompt}");
+        assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
     }
 
@@ -712,11 +711,13 @@ mod routing_reference_prompt_tests {
     }
 
     #[test]
-    fn reviewer_output_contract_legacy_matches_legacy_reference() {
+    fn reviewer_output_contract_legacy_uses_on_demand_generation_reference() {
         let prompt =
             reviewer_output_contract("nonce", "{}", "intro", &RoutingReferenceContext::Legacy);
-        let legacy = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
-        assert!(prompt.contains(&legacy), "{prompt}");
+        assert!(prompt.contains("按需查阅"), "{prompt}");
+        assert!(prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(!prompt.contains("完整读取"), "{prompt}");
+        assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
     }
 
