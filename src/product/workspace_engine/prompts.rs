@@ -686,7 +686,8 @@ mod routing_reference_prompt_tests {
             &RoutingReferenceContext::Legacy,
         );
         assert!(prompt.contains("按需查阅"), "{prompt}");
-        assert!(prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(prompt.contains("忽略规则约束"), "{prompt}");
+        assert!(!prompt.contains("项目规则未加载"), "{prompt}");
         assert!(!prompt.contains("完整读取"), "{prompt}");
         assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
@@ -715,7 +716,8 @@ mod routing_reference_prompt_tests {
         let prompt =
             reviewer_output_contract("nonce", "{}", "intro", &RoutingReferenceContext::Legacy);
         assert!(prompt.contains("按需查阅"), "{prompt}");
-        assert!(prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(prompt.contains("忽略规则约束"), "{prompt}");
+        assert!(!prompt.contains("项目规则未加载"), "{prompt}");
         assert!(!prompt.contains("完整读取"), "{prompt}");
         assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);

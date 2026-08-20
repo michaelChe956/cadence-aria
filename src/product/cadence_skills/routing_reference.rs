@@ -75,7 +75,7 @@ pub(crate) fn generation_cadence_routing_rules_reference(
         RoutingReferenceContext::Legacy => concat!(
             "[cadence_project_rules]\n",
             "当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据；生成候选产物时按需查阅其中适用章节即可，无需预先通读全文。\n",
-            "规则文件缺失或读取失败时，在产物中注明\"项目规则未加载\"并继续生成，不得以此阻塞输出。\n",
+            "规则文件缺失或读取失败时，忽略规则约束继续生成候选产物，不得以此阻塞输出，也不要在产物 JSON 中添加任何额外标注字段。\n",
         )
         .to_string(),
         RoutingReferenceContext::Logical(policy) => logical_cadence_routing_rules_reference(policy),

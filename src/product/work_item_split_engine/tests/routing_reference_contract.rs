@@ -36,7 +36,8 @@ fn work_item_draft_prompt_legacy_injects_generation_routing_reference() {
 
     assert!(prompt.contains("[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md"));
     assert!(prompt.contains("按需查阅"));
-    assert!(prompt.contains("项目规则未加载"));
+    assert!(prompt.contains("忽略规则约束"));
+    assert!(!prompt.contains("项目规则未加载"));
     assert!(!prompt.contains("完整读取"));
     assert!(!prompt.contains("只报告阻塞"));
     assert!(!prompt.contains("authority_root:"));
@@ -85,7 +86,8 @@ fn outline_prompt_legacy_injects_generation_routing_reference() {
 
     assert!(prompt.contains("[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md"));
     assert!(prompt.contains("按需查阅"));
-    assert!(prompt.contains("项目规则未加载"));
+    assert!(prompt.contains("忽略规则约束"));
+    assert!(!prompt.contains("项目规则未加载"));
     assert!(!prompt.contains("完整读取"));
     assert!(!prompt.contains("只报告阻塞"));
     assert!(!prompt.contains("authority_root:"));
