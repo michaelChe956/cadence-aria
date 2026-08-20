@@ -62,10 +62,32 @@ fn logical_cadence_routing_rules_reference(policy: &LogicalPolicyReference) -> S
     )
 }
 
+/// 生成类 prompt（outline/draft/plan/revision/生成侧 review）使用的规则引用。
+///
+/// Legacy 分支降级为按需查阅：不以规则读取为输出前置，不因文件缺失阻塞生成。
+/// Logical 分支与 direct 版逐字一致（政策权威门禁不降级）。
+/// 文案保留 `[cadence_project_rules]` 段标记，
+/// `has_direct_cadence_routing_rules_system_context` 对新旧变体同判去重。
+#[allow(dead_code)] // 生成侧调用方由 Task 2/3 接入；接入后移除本注解
+pub(crate) fn generation_cadence_routing_rules_reference(
+    context: &RoutingReferenceContext,
+) -> String {
+    match context {
+        RoutingReferenceContext::Legacy => concat!(
+            "[cadence_project_rules]\n",
+            "当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据；生成候选产物时按需查阅其中适用章节即可，无需预先通读全文。\n",
+            "规则文件缺失或读取失败时，在产物中注明\"项目规则未加载\"并继续生成，不得以此阻塞输出。\n",
+        )
+        .to_string(),
+        RoutingReferenceContext::Logical(policy) => logical_cadence_routing_rules_reference(policy),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+        generation_cadence_routing_rules_reference,
     };
 
     fn policy_fixture() -> LogicalPolicyReference {
@@ -161,5 +183,35 @@ mod tests {
             RoutingReferenceContext::default(),
             RoutingReferenceContext::Legacy
         ));
+    }
+
+    #[test]
+    fn generation_legacy_reference_is_on_demand_and_non_blocking() {
+        let prompt = generation_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(prompt.contains("[cadence_project_rules]"));
+        assert!(prompt.contains("AGENTS.md"));
+        assert!(prompt.contains("CLAUDE.md"));
+        assert!(prompt.contains("按需"));
+        // 不得保留强制完整读取与失败关闭语义
+        assert!(!prompt.contains("完整读取"));
+        assert!(!prompt.contains("只报告阻塞"));
+        assert!(!prompt.contains("不得继续输出"));
+    }
+
+    #[test]
+    fn generation_logical_reference_matches_direct_exactly() {
+        let ctx = logical();
+        assert_eq!(
+            generation_cadence_routing_rules_reference(&ctx),
+            direct_cadence_routing_rules_reference(&ctx)
+        );
+    }
+
+    #[test]
+    fn direct_legacy_reference_unchanged() {
+        // 守卫：coding 路径与交互入口继续使用旧文案
+        let prompt = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(prompt.contains("完整读取"));
+        assert!(prompt.contains("只报告阻塞"));
     }
 }
