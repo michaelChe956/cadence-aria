@@ -373,7 +373,7 @@ fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
 mod tests {
     use super::{ProviderContextBuilderInput, build_provider_context};
     use crate::product::cadence_skills::routing_reference::{
-        LogicalPolicyReference, RoutingReferenceContext,
+        LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
     };
     use serde_json::json;
 
@@ -427,5 +427,13 @@ mod tests {
             .prompt;
         assert!(logical.contains("authority_root:"), "{logical}");
         assert!(logical.contains("不作为政策正文"), "{logical}");
+    }
+
+    #[test]
+    fn coding_path_still_uses_direct_reference() {
+        // coding 路径的 routing_reference 槽位必须仍是 direct 版（完整读取 + 失败关闭）
+        let value = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(value.contains("完整读取"));
+        assert!(value.contains("只报告阻塞"));
     }
 }
