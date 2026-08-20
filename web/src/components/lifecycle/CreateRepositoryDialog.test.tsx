@@ -26,7 +26,9 @@ function providerEntry(
         ? "Claude Code"
         : provider === "codex"
           ? "Codex"
-          : "Pi",
+          : provider === "pi"
+            ? "Pi"
+            : "Kimi Code",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -40,6 +42,7 @@ function setProviderHealth(
   claudeAvailable: boolean,
   codexAvailable: boolean,
   piAvailable = false,
+  kimiAvailable = false,
   overrides: Partial<ProviderHealthResponse> = {},
 ) {
   const snapshot: ProviderHealthResponse = {
@@ -48,12 +51,13 @@ function setProviderHealth(
     checked_at: "2026-07-14T00:00:00Z",
     state_status: "ready",
     state_error: null,
-    real_workflow_blocked: !claudeAvailable && !codexAvailable,
+    real_workflow_blocked: !claudeAvailable && !codexAvailable && !piAvailable && !kimiAvailable,
     test_provider_enabled: false,
     providers: [
       providerEntry("claude_code", claudeAvailable),
       providerEntry("codex", codexAvailable),
       providerEntry("pi", piAvailable),
+      providerEntry("kimi_code", kimiAvailable),
     ],
     ...overrides,
   };
@@ -271,6 +275,13 @@ describe("CreateRepositoryDialog", () => {
     expect(onInitializationCompleted).toHaveBeenCalledWith(completed.result);
     expect(screen.getByText("代码库初始化完成")).toBeInTheDocument();
     expect(screen.getByText("offline")).toBeInTheDocument();
+    // changed_paths 默认收起，展开后可见
+    expect(screen.queryByText(".claude/rules/project.md")).not.toBeInTheDocument();
+    await act(async () => {
+      screen
+        .getAllByRole("button", { name: /展开/i })
+        .forEach((button) => fireEvent.click(button));
+    });
     expect(screen.getByText(".claude/rules/project.md")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "完成" })).toBeInTheDocument();
 
@@ -278,6 +289,49 @@ describe("CreateRepositoryDialog", () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
     expect(onFetchOperation).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the completion button visible and collapses long command/path lists by default", async () => {
+    vi.useFakeTimers();
+    setProviderHealth(true, true);
+    const result = createResponse();
+    result.initialization.commands = Array.from({ length: 30 }, (_, i) => ({
+      index: i + 1,
+      command: `command-${i + 1}`,
+      status: "completed" as const,
+    }));
+    result.initialization.changed_paths = Array.from(
+      { length: 30 },
+      (_, i) => `path-${i + 1}`,
+    );
+    const completed = completedOperation({ result });
+    render(
+      <CreateRepositoryDialog
+        onCreate={vi.fn().mockResolvedValue(operation())}
+        onFetchOperation={vi.fn().mockResolvedValue(completed)}
+        onInitializationCompleted={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await submitRequiredFieldsWithFakeTimers();
+    await flushAsyncWork();
+
+    // 根因修复目标：无论内容多长，“完成”按钮始终可见
+    expect(screen.getByRole("button", { name: "完成" })).toBeInTheDocument();
+    // 默认收起：完整命令/路径列表不直接展开
+    expect(screen.queryByText("command-30")).not.toBeInTheDocument();
+    expect(screen.queryByText("path-30")).not.toBeInTheDocument();
+    // 提供展开控件（commands 与 changed_paths 各一个）
+    expect(screen.getAllByRole("button", { name: /展开/i })).toHaveLength(2);
+    // 点击展开后显示完整列表
+    await act(async () => {
+      screen
+        .getAllByRole("button", { name: /展开/i })
+        .forEach((button) => fireEvent.click(button));
+    });
+    expect(screen.getByText("command-30")).toBeInTheDocument();
+    expect(screen.getByText("path-30")).toBeInTheDocument();
   });
 
   it("keeps a completed operation successful while surfacing a failed git finalize step", async () => {
@@ -579,6 +633,29 @@ describe("CreateRepositoryDialog", () => {
     const provider = screen.getByLabelText("Provider");
     expect(
       within(provider).queryByRole("option", { name: "Pi" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(provider).getByRole("option", { name: "Claude Code" }),
+    ).toBeEnabled();
+    await user.selectOptions(provider, "claude_code");
+    expect(provider).toHaveValue("claude_code");
+  });
+
+  it("仓库初始化不显示 Kimi Code 即使 Kimi 可用", async () => {
+    setProviderHealth(true, true, false, true);
+    const user = userEvent.setup();
+    render(
+      <CreateRepositoryDialog
+        onCreate={vi.fn()}
+        onFetchOperation={vi.fn()}
+        onInitializationCompleted={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const provider = screen.getByLabelText("Provider");
+    expect(
+      within(provider).queryByRole("option", { name: "Kimi Code" }),
     ).not.toBeInTheDocument();
     expect(
       within(provider).getByRole("option", { name: "Claude Code" }),

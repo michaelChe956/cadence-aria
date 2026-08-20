@@ -343,13 +343,17 @@ export function providerConfigFor(
   } = { author: "auto", reviewer: "auto" },
 ): ProviderConfigSnapshot {
   const author = providerNameFor(providers?.author, "claude_code");
-  const reviewer = reviewerEnabled
-    ? providerNameFor(providers?.reviewer, "codex")
-    : null;
+  // spec-design-dialog-revision T8：reviewer 不再随 reviewerEnabled 置 null，
+  // review_rounds 与 reviewerEnabled 解耦（未启用传 0）——provisional 快照需携带
+  // 用户原始选择，由后端 start_generation 自行捕获 provisional reviewer 并清理激活态。
+  const reviewer = providerNameFor(providers?.reviewer, "codex");
+  const effectiveReviewRounds = reviewerEnabled
+    ? clampReviewRounds(reviewRounds)
+    : 0;
   return {
     author,
     reviewer,
-    review_rounds: reviewer ? clampReviewRounds(reviewRounds) : 0,
+    review_rounds: effectiveReviewRounds,
     permission_modes: {
       author: author === "pi" ? "auto" : permissionModes.author,
       reviewer: reviewer === "pi" ? "auto" : permissionModes.reviewer,
@@ -366,7 +370,13 @@ function providerNameFor(
   value: string | null | undefined,
   fallback: WorkspaceProviderName,
 ): WorkspaceProviderName {
-  if (value === "claude_code" || value === "codex" || value === "pi" || value === "fake") {
+  if (
+    value === "claude_code" ||
+    value === "codex" ||
+    value === "pi" ||
+    value === "kimi_code" ||
+    value === "fake"
+  ) {
     return value;
   }
   return fallback;

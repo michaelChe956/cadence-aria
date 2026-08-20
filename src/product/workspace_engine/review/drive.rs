@@ -57,7 +57,10 @@ impl WorkspaceEngine {
 
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
-            Err(first_error) if first_error.is_repairable() && reviewer != ProviderName::Pi => {
+            // Kimi 仅复用既有的一次 JSON 等值 repair；Pi 仍不进入 repair。
+            Err(first_error)
+                if provider_allows_review_repair(&reviewer) && first_error.is_repairable() =>
+            {
                 let repair_input = match self.build_review_repair_input(
                     &input,
                     &first_completion,
@@ -435,8 +438,12 @@ impl WorkspaceEngine {
             )
             .await;
         }
+        // 第一阶段不实证 Kimi resume 稳定性，排除 artifact retry（同 Pi）
         let retry_context =
-            (self.session.author_provider != ProviderName::Pi).then(|| ArtifactRetryContext {
+            crate::product::workspace_engine::provider_drive::provider_allows_artifact_retry(
+                &self.session.author_provider,
+            )
+            .then(|| ArtifactRetryContext {
                 provider: provider.clone(),
                 input: input.clone(),
                 attempted: false,
@@ -848,6 +855,10 @@ impl WorkspaceEngine {
     }
 }
 
+fn provider_allows_review_repair(provider: &ProviderName) -> bool {
+    !matches!(provider, ProviderName::Pi)
+}
+
 /// 逻辑 review 会话经 gateway 启动:组装 `ReviewReadOnly` launch → `validate` →
 /// `start_streaming`。gateway 错误映射为 `ProviderAdapterError`(与
 /// `drive_reviewer_provider_session_once` 的 `Start` 失败路径对齐)。
@@ -880,4 +891,16 @@ async fn start_review_session_via_gateway(
 /// `provider.start` 完全一致(`ReviewProviderRunFailure::Start`)。
 fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterError {
     ProviderAdapterError::provider_unavailable(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_pi_is_excluded_from_review_repair() {
+        assert!(provider_allows_review_repair(&ProviderName::KimiCode));
+        assert!(!provider_allows_review_repair(&ProviderName::Pi));
+        assert!(provider_allows_review_repair(&ProviderName::Codex));
+    }
 }

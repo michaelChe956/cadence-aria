@@ -25,4 +25,5 @@ frontend.log
 
 # pi subagent 运行时产物
 .pi-subagents/
+.pi/subagents/
 .superpowers/

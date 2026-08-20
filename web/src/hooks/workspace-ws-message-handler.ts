@@ -28,7 +28,7 @@ import {
 import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artifact-summary";
 import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
-import { trustedReviewComments } from "../state/workspace-review-trust";
+import { buildGatePromptEntry } from "../state/workspace-chat-rebuild";
 
 export type WsServerMessage = WsOutMessage & Record<string, unknown>;
 
@@ -138,7 +138,7 @@ const store = useWorkspaceStore.getState();
           metadata: { stage: nextStage },
         });
         if (nextStage === "human_confirm") {
-          const gatePrompt = gatePromptEntryForState(useWorkspaceStore.getState());
+          const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
           if (gatePrompt) {
             store.appendChatEntry(gatePrompt);
           }
@@ -636,7 +636,13 @@ function providerNameForNode(
 }
 
 export function providerName(value: string): WorkspaceProviderName | null {
-  if (value === "claude_code" || value === "codex" || value === "pi" || value === "fake") {
+  if (
+    value === "claude_code" ||
+    value === "codex" ||
+    value === "pi" ||
+    value === "kimi_code" ||
+    value === "fake"
+  ) {
     return value;
   }
   return null;
@@ -666,40 +672,4 @@ export function wsReadyStateName(socket: WebSocket | null) {
     default:
       return "missing";
   }
-}
-
-function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getState>): ChatEntry | null {
-  if (state.stage !== "human_confirm") {
-    return null;
-  }
-
-  const gatePromptNode =
-    [...state.timelineNodes].reverse().find((node) => node.node_type === "human_confirm") ??
-    state.timelineNodes.at(-1);
-  const latestReview = state.chatEntries.filter((entry) => entry.type === "review_verdict").at(-1);
-  const summary = latestReview?.metadata?.summary?.toString() ?? "";
-  const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
-  const comments = trustedReviewComments(
-    latestReview?.metadata as Record<string, unknown> | undefined,
-  );
-  const findings = Array.isArray(latestReview?.metadata?.findings)
-    ? latestReview.metadata.findings
-    : [];
-  const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
-  const metadata = {
-    ...(summary ? { summary } : {}),
-    ...(verdict ? { verdict } : {}),
-    ...(comments ? { comments } : {}),
-    ...(findings.length > 0 ? { findings } : {}),
-    ...(reviewGate ? { review_gate: reviewGate } : {}),
-  };
-  return {
-    id: `${gatePromptNode?.node_id ?? "human_confirm"}:gate-prompt`,
-    type: "gate_prompt",
-    role: "system",
-    content: verdict === "needs_human" ? "需要人工确认" : "等待人工确认",
-    timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
-    node_id: gatePromptNode?.node_id,
-    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-  };
 }

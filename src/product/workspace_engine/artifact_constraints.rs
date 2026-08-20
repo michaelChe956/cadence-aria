@@ -35,6 +35,7 @@ pub(crate) struct ArtifactConstraintSpec {
     pub(crate) forbidden_tokens: Vec<ArtifactTokenRule>,
     pub(crate) required_tokens: Vec<ArtifactTokenRule>,
     pub(crate) required_id_patterns: Vec<ArtifactIdPatternRule>,
+    pub(crate) open_item_policy_hint: Option<&'static str>,
     pub(crate) reviewer_must_fix_rules: Vec<&'static str>,
 }
 
@@ -111,6 +112,9 @@ pub(crate) fn artifact_constraint_spec_for(
                 id_rule("[REQ-*]", ArtifactTokenPattern::BracketPrefix("REQ-")),
                 id_rule("[AC-*]", ArtifactTokenPattern::BracketPrefix("AC-")),
             ],
+            open_item_policy_hint: Some(
+                "## 待确认项：若某项已通过 AskUserQuestion 交互解决，必须标注「已通过 AskUserQuestion 确认：<结论>」；若无开放问题，写「无待确认项」。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项。",
+            ),
             reviewer_must_fix_rules: vec![
                 "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix.",
             ],
@@ -148,6 +152,7 @@ pub(crate) fn artifact_constraint_spec_for(
             reviewer_must_fix_rules: vec![
                 "Design artifact: Work Item Plan、开发任务列表、任务拆分、测试计划、测试范围或场景、测试文件或模块、测试框架或夹具、测试命令、构建命令、执行 checklist 或将测试或验证职责分配给组件或文件必须报告为 must_fix；仅把 [DEC-*] 关联到 [REQ-*]/[AC-*] 且不描述如何测试的抽象验收可追踪性不得报告为 must_fix。",
             ],
+            open_item_policy_hint: None,
         },
         WorkspaceType::WorkItem => ArtifactConstraintSpec {
             workspace_type: workspace_type.clone(),
@@ -179,6 +184,7 @@ pub(crate) fn artifact_constraint_spec_for(
             reviewer_must_fix_rules: vec![
                 "Work Item artifact: sibling tasks, issue-level full plans, or cross-task content must be reported as must_fix.",
             ],
+            open_item_policy_hint: None,
         },
         WorkspaceType::WorkItemPlan => ArtifactConstraintSpec {
             workspace_type: workspace_type.clone(),
@@ -208,6 +214,7 @@ pub(crate) fn artifact_constraint_spec_for(
             reviewer_must_fix_rules: vec![
                 "Work Item Plan artifact: code implementation or rewritten full Story/Design content must be reported as must_fix.",
             ],
+            open_item_policy_hint: None,
         },
     }
 }
@@ -350,13 +357,15 @@ fn append_markdown_artifact_schema_items(output: &mut String, spec: &ArtifactCon
             format_rule_labels(spec.forbidden_tokens.iter().map(|rule| rule.label))
         ));
     }
+    if let Some(hint) = spec.open_item_policy_hint {
+        output.push_str(&format!("- 待确认项策略：{hint}\n"));
+    }
 }
 
 fn markdown_artifact_constraint_spec_for(
     workspace_type: &WorkspaceType,
 ) -> Option<ArtifactConstraintSpec> {
-    (!matches!(workspace_type, WorkspaceType::WorkItemPlan))
-        .then(|| artifact_constraint_spec_for(workspace_type))
+    Some(artifact_constraint_spec_for(workspace_type))
 }
 
 fn format_rule_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> String {
@@ -431,7 +440,7 @@ fn id_rule(label: &'static str, pattern: ArtifactTokenPattern) -> ArtifactIdPatt
     ArtifactIdPatternRule { label, pattern }
 }
 
-fn heading_matches_rule(heading: &str, rule: &ArtifactHeadingRule) -> bool {
+pub(crate) fn heading_matches_rule(heading: &str, rule: &ArtifactHeadingRule) -> bool {
     heading.eq_ignore_ascii_case(rule.label)
         || rule
             .aliases
@@ -557,29 +566,142 @@ fn open_item_line_is_resolved(line: &str) -> bool {
         return true;
     }
 
-    let starts_with_empty_marker = compact.starts_with("无")
-        || compact.starts_with("暂无")
-        || compact.starts_with("none")
-        || compact.starts_with("na")
-        || compact.starts_with("notapplicable")
-        || compact.starts_with("noopenitems")
-        || compact.starts_with("noopenquestions");
+    let raw_empty_marker_remainder = open_item_empty_marker_raw_remainder(line);
+    let starts_with_empty_marker = raw_empty_marker_remainder.is_some();
     let has_unresolved_cue = open_item_line_has_unresolved_cue(line);
     let has_resolved_cue = open_item_line_has_resolved_cue(line);
     if starts_with_empty_marker {
+        let raw_remainder = raw_empty_marker_remainder.as_deref().unwrap_or_default();
+        if open_item_remainder_claims_upstream_derivation(raw_remainder) {
+            return open_item_remainder_is_strict_upstream_derivation_note(raw_remainder);
+        }
+        if open_item_line_has_hard_unresolved_cue(line) {
+            return false;
+        }
         return !has_unresolved_cue || has_resolved_cue;
     }
 
     has_resolved_cue && !has_unresolved_cue
 }
 
-fn compact_open_item_text(text: &str) -> String {
-    text.to_ascii_lowercase().replace(
-        [
-            ' ', '\t', '\r', '\n', '。', '.', '，', ',', '：', ':', '/', '-',
-        ],
-        "",
+fn open_item_remainder_claims_upstream_derivation(remainder: &str) -> bool {
+    let compact = compact_open_item_derivation_clause(remainder);
+    compact.contains("上游issue") && compact.contains("推导")
+}
+
+fn open_item_remainder_is_strict_upstream_derivation_note(remainder: &str) -> bool {
+    if open_item_line_has_unresolved_cue(remainder) {
+        return false;
+    }
+
+    let Some(statement) = strict_open_item_statement(remainder) else {
+        return false;
+    };
+    let clauses = statement
+        .split(['；', ';'])
+        .map(str::trim)
+        .collect::<Vec<_>>();
+
+    matches!(clauses.as_slice(), [derivation, no_interaction]
+        if strict_derivation_clause_matches(derivation)
+            && strict_no_structured_interaction_clause_matches(no_interaction))
+}
+
+fn strict_open_item_statement(remainder: &str) -> Option<String> {
+    let normalized = normalize_open_item_inline_markdown(remainder);
+    let statement = normalized
+        .trim()
+        .trim_start_matches(['。', '.', '：', ':', ' ', '\t', '\r', '\n'])
+        .trim()
+        .trim_end_matches(['。', '！', '？', '.', '!', '?'])
+        .trim()
+        .to_string();
+
+    if statement.is_empty() || statement.contains(['。', '！', '？', '.', '!', '?']) {
+        return None;
+    }
+
+    Some(statement)
+}
+
+fn strict_derivation_clause_matches(clause: &str) -> bool {
+    [
+        "所有需求成功标准与验收口径均可由上游issue",
+        "全部需求成功标准与验收口径均可由上游issue",
+    ]
+    .iter()
+    .any(|prefix| {
+        compact_open_item_derivation_clause(clause)
+            .strip_prefix(prefix)
+            .and_then(strip_optional_issue_parenthetical)
+            .is_some_and(|tail| tail == "的明示约束推导得出")
+    })
+}
+
+fn strict_no_structured_interaction_clause_matches(clause: &str) -> bool {
+    matches!(
+        compact_open_item_derivation_clause(clause).as_str(),
+        "无需发起结构化交互" | "不需要发起结构化交互" | "未发起结构化交互确认"
     )
+}
+
+fn strip_optional_issue_parenthetical(tail: &str) -> Option<&str> {
+    if let Some(parenthetical_tail) = tail.strip_prefix('（') {
+        let close = parenthetical_tail.find('）')?;
+        return Some(&parenthetical_tail[close + '）'.len_utf8()..]);
+    }
+    if let Some(parenthetical_tail) = tail.strip_prefix('(') {
+        let close = parenthetical_tail.find(')')?;
+        return Some(&parenthetical_tail[close + ')'.len_utf8()..]);
+    }
+    Some(tail)
+}
+
+fn compact_open_item_derivation_clause(text: &str) -> String {
+    normalize_open_item_inline_markdown(text)
+        .to_ascii_lowercase()
+        .replace([' ', '\t', '\r', '\n', '、'], "")
+}
+
+fn open_item_empty_marker_raw_remainder(line: &str) -> Option<String> {
+    let normalized = normalize_open_item_inline_markdown(line);
+    let trimmed = normalized.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    [
+        "无待确认项",
+        "no open questions",
+        "noopenquestions",
+        "no open items",
+        "noopenitems",
+        "暂无",
+        "无",
+        "none",
+        "not applicable",
+        "notapplicable",
+        "n/a",
+        "na",
+    ]
+    .iter()
+    .find_map(|marker| {
+        lower
+            .starts_with(marker)
+            .then(|| trimmed[marker.len()..].to_string())
+    })
+}
+
+fn normalize_open_item_inline_markdown(text: &str) -> String {
+    text.replace("**", "").replace("__", "").replace('`', "")
+}
+
+fn compact_open_item_text(text: &str) -> String {
+    normalize_open_item_inline_markdown(text)
+        .to_ascii_lowercase()
+        .replace(
+            [
+                ' ', '\t', '\r', '\n', '。', '.', '，', '、', ',', '：', ':', '/', '-', '（', '）',
+            ],
+            "",
+        )
 }
 
 fn open_item_empty_marker_matches(compact: &str) -> bool {
@@ -596,7 +718,7 @@ fn open_item_empty_marker_matches(compact: &str) -> bool {
 }
 
 fn open_item_line_has_unresolved_cue(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+    let lower = normalize_open_item_inline_markdown(line).to_ascii_lowercase();
     [
         "[open-",
         "open-",
@@ -606,6 +728,7 @@ fn open_item_line_has_unresolved_cue(line: &str) -> bool {
         "仍待",
         "尚待",
         "待定",
+        "未决",
         "未明确",
         "未确认",
         "tbd",
@@ -615,16 +738,34 @@ fn open_item_line_has_unresolved_cue(line: &str) -> bool {
     .any(|cue| lower.contains(cue))
 }
 
+fn open_item_line_has_hard_unresolved_cue(line: &str) -> bool {
+    let lower = normalize_open_item_inline_markdown(line).to_ascii_lowercase();
+    [
+        "[open-",
+        "open-",
+        "仍待确认",
+        "需确认",
+        "需要确认",
+        "尚待确认",
+        "tbd",
+        "todo",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
 fn open_item_line_has_resolved_cue(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+    let normalized = normalize_open_item_inline_markdown(line);
+    let lower = normalized.to_ascii_lowercase();
     line.contains("已通过结构化交互确认")
         || line.contains("已通过 AskUserQuestion")
         || lower.contains("已通过askuserquestion")
-        || line.contains("已确认")
-        || line.contains("均已确认")
-        || line.contains("非待确认项")
-        || line.contains("非未决项")
-        || (line.contains("不属于") && (line.contains("待确认项") || line.contains("未决项")))
+        || normalized.contains("已确认")
+        || normalized.contains("均已确认")
+        || normalized.contains("非待确认项")
+        || normalized.contains("非未决项")
+        || (normalized.contains("不属于")
+            && (normalized.contains("待确认项") || normalized.contains("未决项")))
         || lower.contains("not an open item")
 }
 
@@ -702,7 +843,7 @@ fn find_bracket_prefixed_tokens(content: &str, prefix: &str) -> Vec<String> {
     let mut matches = Vec::new();
     for token in content.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';') {
         let trimmed = token.trim_matches(|ch: char| {
-            matches!(ch, '-' | '*' | ')' | '(' | '。' | '，' | ':' | '：')
+            matches!(ch, '-' | '*' | ')' | '(' | '。' | '，' | ':' | '：' | '`')
         });
         if trimmed.starts_with('[')
             && trimmed

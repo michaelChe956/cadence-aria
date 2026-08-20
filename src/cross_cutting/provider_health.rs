@@ -16,6 +16,7 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
     TokioBoundedCommandRunner,
 };
+use crate::cross_cutting::kimi_code_provider::MIN_KIMI_VERSION;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::ProviderType;
 
@@ -31,6 +32,7 @@ pub enum ProviderHealthReasonCode {
     Timeout,
     NonZeroExit,
     VersionUnparseable,
+    VersionTooLow,
     IoError,
 }
 
@@ -65,6 +67,7 @@ impl ProviderHealthSnapshot {
             ProviderName::ClaudeCode,
             ProviderName::Codex,
             ProviderName::Pi,
+            ProviderName::KimiCode,
         ]
         .iter()
         .all(|provider| !self.entry(provider).is_some_and(|entry| entry.available))
@@ -187,8 +190,9 @@ impl ProviderHealthService {
             .version_command
             .clone();
         let pi = pi_version_command();
+        let kimi = kimi_version_command();
 
-        let (claude, codex, pi) = tokio::join!(
+        let (claude, codex, pi, kimi) = tokio::join!(
             self.probe_provider(
                 ProviderName::ClaudeCode,
                 claude,
@@ -196,13 +200,14 @@ impl ProviderHealthService {
                 cancellation.clone()
             ),
             self.probe_provider(ProviderName::Codex, codex, checked_at, cancellation.clone()),
-            self.probe_provider(ProviderName::Pi, pi, checked_at, cancellation)
+            self.probe_provider(ProviderName::Pi, pi, checked_at, cancellation.clone()),
+            self.probe_provider(ProviderName::KimiCode, kimi, checked_at, cancellation)
         );
         let diagnostic = Arc::new(ProviderHealthSnapshot {
             schema_version: PROVIDER_HEALTH_SCHEMA_VERSION,
             generation,
             checked_at,
-            providers: vec![claude, codex, pi],
+            providers: vec![claude, codex, pi, kimi],
         });
 
         {
@@ -269,6 +274,10 @@ fn pi_version_command() -> CommandSpec {
     CommandSpec::new("pi", vec!["--version".to_string()])
 }
 
+fn kimi_version_command() -> CommandSpec {
+    CommandSpec::new("kimi", vec!["--version".to_string()])
+}
+
 fn uninitialized_snapshot() -> ProviderHealthSnapshot {
     let checked_at = Utc
         .timestamp_opt(0, 0)
@@ -293,6 +302,7 @@ fn uninitialized_snapshot() -> ProviderHealthSnapshot {
                 .clone(),
         ),
         (ProviderName::Pi, pi_version_command()),
+        (ProviderName::KimiCode, kimi_version_command()),
     ];
     let providers = commands
         .into_iter()
@@ -374,6 +384,18 @@ fn entry_from_result(
         );
     };
 
+    if provider == ProviderName::KimiCode && !kimi_version_supported(&version) {
+        return unavailable_entry(
+            provider,
+            command,
+            checked_at,
+            ProviderHealthReasonCode::VersionTooLow,
+            format!(
+                "Kimi Code version {version} is below the minimum supported version {MIN_KIMI_VERSION}; upgrade Kimi Code"
+            ),
+        );
+    }
+
     ProviderHealthEntry {
         provider,
         command,
@@ -417,6 +439,31 @@ fn parse_version_token(output: &str) -> Option<String> {
             .any(|character| character.is_ascii_digit())
             .then(|| token.to_string())
     })
+}
+
+fn kimi_version_supported(version: &str) -> bool {
+    let numeric = version.trim_start_matches(|character: char| !character.is_ascii_digit());
+    let mut components = numeric.split('.').map(|component| {
+        component
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u64>()
+            .ok()
+    });
+    let Some(major) = components.next().flatten() else {
+        return false;
+    };
+    let Some(minor) = components.next().flatten() else {
+        return false;
+    };
+    let patch = components.next().flatten().unwrap_or(0);
+    let minimum = MIN_KIMI_VERSION
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("MIN_KIMI_VERSION must be a three-part numeric version");
+    (major, minor, patch) >= (minimum[0], minimum[1], minimum[2])
 }
 
 fn sanitize_reason(reason: &str) -> String {
@@ -477,7 +524,7 @@ mod tests {
 
     use super::{
         ProviderHealthClock, ProviderHealthReasonCode, ProviderHealthService,
-        ProviderHealthSnapshot, pi_version_command,
+        ProviderHealthSnapshot, kimi_version_command,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -508,11 +555,26 @@ mod tests {
             codex: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
             pi: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
         ) -> Self {
+            Self::with_kimi(
+                claude,
+                codex,
+                pi,
+                vec![success("kimi 0.34.0\n", ""), success("kimi 0.34.0\n", "")],
+            )
+        }
+
+        fn with_kimi(
+            claude: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
+            codex: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
+            pi: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
+            kimi: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
+        ) -> Self {
             Self {
                 responses: Mutex::new(HashMap::from([
                     ("claude".to_string(), claude.into()),
                     ("codex".to_string(), codex.into()),
                     ("pi".to_string(), pi.into()),
+                    ("kimi".to_string(), kimi.into()),
                 ])),
                 active: AtomicUsize::new(0),
                 max_active: AtomicUsize::new(0),
@@ -614,14 +676,39 @@ mod tests {
     }
 
     #[test]
-    fn pi_version_command_uses_pi_binary() {
-        let command = pi_version_command();
-        assert_eq!(command.program, "pi");
+    fn kimi_version_command_uses_kimi_binary() {
+        let command = kimi_version_command();
+        assert_eq!(command.program, "kimi");
         assert_eq!(command.args, vec!["--version".to_string()]);
     }
 
     #[tokio::test]
-    async fn provider_health_refresh_probes_both_real_providers_in_parallel() {
+    async fn provider_health_marks_kimi_below_minimum_version_unavailable() {
+        let root = tempfile::tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::with_kimi(
+            vec![success("claude 1.0\n", "")],
+            vec![success("codex 1.0\n", "")],
+            vec![success("pi 0.83.0\n", "")],
+            vec![success("kimi 0.33.9\n", "")],
+        ));
+        let health = service(root.path(), runner);
+
+        let snapshot = health
+            .refresh(CancellationToken::new())
+            .await
+            .expect("refresh");
+        let kimi = snapshot.entry(&ProviderName::KimiCode).expect("Kimi entry");
+
+        assert!(!kimi.available);
+        assert_eq!(
+            kimi.reason_code,
+            Some(ProviderHealthReasonCode::VersionTooLow)
+        );
+        assert!(kimi.reason.as_deref().unwrap().contains("0.34.0"));
+    }
+
+    #[tokio::test]
+    async fn provider_health_refresh_probes_all_real_providers_in_parallel() {
         let root = tempfile::tempdir().expect("root");
         let runner = Arc::new(
             ScriptedRunner::new(
@@ -639,8 +726,8 @@ mod tests {
         let codex = snapshot.entry(&ProviderName::Codex).unwrap();
         let pi = snapshot.entry(&ProviderName::Pi).unwrap();
         assert_eq!(snapshot.generation, 1);
-        assert_eq!(runner.max_active(), 3);
-        assert_eq!(snapshot.providers.len(), 3);
+        assert_eq!(runner.max_active(), 4);
+        assert_eq!(snapshot.providers.len(), 4);
         assert!(snapshot.entry(&ProviderName::ClaudeCode).unwrap().available);
         assert_eq!(codex.version.as_deref(), Some("0.124.0"));
         assert_eq!(pi.version.as_deref(), Some("0.83.0"));
@@ -651,13 +738,14 @@ mod tests {
     #[tokio::test]
     async fn provider_health_snapshot_excludes_fake_and_blocks_only_when_all_real_unavailable() {
         let root = tempfile::tempdir().expect("root");
-        let runner = Arc::new(ScriptedRunner::new(
+        let runner = Arc::new(ScriptedRunner::with_kimi(
             vec![Err(BoundedCommandError::CommandMissing {
                 executable: "claude".to_string(),
                 details: "not found".to_string(),
             })],
             vec![non_zero("license expired\n")],
             vec![non_zero("pi unavailable\n")],
+            vec![non_zero("kimi unavailable\n")],
         ));
         let health = service(root.path(), runner);
         let snapshot = health
@@ -668,6 +756,7 @@ mod tests {
         let codex = snapshot.entry(&ProviderName::Codex).unwrap();
         assert!(snapshot.entry(&ProviderName::Fake).is_none());
         assert!(snapshot.entry(&ProviderName::Pi).is_some());
+        assert!(snapshot.entry(&ProviderName::KimiCode).is_some());
         assert!(snapshot.real_workflow_blocked());
         assert_eq!(
             claude.reason_code,

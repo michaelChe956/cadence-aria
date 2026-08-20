@@ -1,4 +1,4 @@
-import { ArrowLeft, TriangleAlert, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, Check, ClipboardCopy, GitBranch, PanelRightOpen, TriangleAlert, Wifi, WifiOff } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -13,14 +13,19 @@ import {
   fetchWorkspacePrompt,
 } from "../api/workspace-content";
 import type {
+  AuthorDecisionChoice,
   RevisionPath,
 } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
+import { ArtifactReviewPanel } from "../components/chat-workspace/ArtifactReviewPanel";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
-import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
+import {
+  ChatInputBar,
+  type ChatInputBarHandle,
+} from "../components/chat-workspace/ChatInputBar";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import {
   DisconnectBanner,
@@ -41,6 +46,7 @@ import type {
 import {
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
+import { selectLatestReviewReport } from "../state/workspace-ws-selectors";
 import { workItemPlanProjectionArtifactsFromVersions } from "../state/workspace-ws-store-helpers";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import {
@@ -145,6 +151,7 @@ export function ChatWorkspacePage({
     (state) => state.recoverableInterruptedRun,
   );
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
+  const latestReviewReport = useWorkspaceStore(selectLatestReviewReport);
   const stageConfig = useStageUI(stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
@@ -155,6 +162,31 @@ export function ChatWorkspacePage({
   ] = useState<number | null>(null);
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
+  // spec-workbench-canvas-experience T4：面板可见性完全由 stage 驱动——
+  // stage === "author_confirm" 且 story/design 时自动展开；userDismissed 仅为
+  // 组件本地状态（输入聚焦 / 收起钮 / 采纳预填置 true），stage 重新进入
+  // author_confirm 时重置为 false（重连恢复也会自动滑出）。
+  const reviewPanelEnabled =
+    stage === "author_confirm" &&
+    (workspaceType === "story" || workspaceType === "design");
+  const [reviewPanelDismissed, setReviewPanelDismissed] = useState(false);
+  const reviewPanelVisible = reviewPanelEnabled && !reviewPanelDismissed;
+  const chatInputRef = useRef<ChatInputBarHandle | null>(null);
+
+  useEffect(() => {
+    if (stage === "author_confirm") {
+      setReviewPanelDismissed(false);
+    }
+  }, [stage]);
+  const changelogSummary = useMemo(() => {
+    const lastCompletedRevision = timelineNodes
+      .filter(
+        (node) => node.node_type === "revision" && node.status === "completed",
+      )
+      .at(-1);
+    const summary = lastCompletedRevision?.summary?.trim();
+    return summary ? summary : undefined;
+  }, [timelineNodes]);
   const reviewDecisionOptions = useMemo(
     () =>
       pendingDecision?.options ??
@@ -400,7 +432,13 @@ export function ChatWorkspacePage({
     sendHumanConfirm(decision, payload);
   }
 
-  function handleAuthorDecision(decision: "accept" | "reject") {
+  function handleAuthorDecision(decision: AuthorDecisionChoice, feedback?: string) {
+    // spec-design-dialog-revision T8："revise" 携带反馈，由 useWorkspaceWs 构造
+    // `{revise: {feedback}}` 线格式；其余变体（含 WorkItemPlan outline 的兼容 "accept"）原样透传。
+    if (decision === "revise") {
+      sendAuthorDecision("revise", feedback);
+      return;
+    }
     sendAuthorDecision(decision);
   }
 
@@ -572,13 +610,159 @@ export function ChatWorkspacePage({
           onSelectNode={handleSelectNode}
           className="border-b border-[var(--aria-line)] md:border-b-0 md:border-r"
         />
-        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
-          <WorkspacePanelTabs
-            activePanel={activePanel}
-            onSelectPanel={setActivePanel}
-            artifactCount={artifactVersions.length}
-          />
-          {activePanel === "artifact" ? (
+        <section
+          className={`grid min-h-0 bg-[var(--aria-panel)] ${
+            reviewPanelEnabled
+              ? "grid-rows-[minmax(0,1fr)]"
+              : "grid-rows-[auto_minmax(0,1fr)]"
+          }`}
+        >
+          {reviewPanelEnabled ? (
+            <div
+              data-testid="review-split-grid"
+              className={
+                // spec-workbench-canvas-experience T5：dismissed 时降为单列，
+                // 对话流在 ≥1440px 恢复全宽（不保留空右列）。
+                reviewPanelVisible
+                  ? "relative grid min-h-0 min-[1440px]:grid-cols-[minmax(320px,1fr)_minmax(0,1.4fr)]"
+                  : "relative grid min-h-0 grid-cols-1"
+              }
+            >
+              <div
+                className={
+                  // spec-workbench-canvas-experience T5：dismissed 时对话列占满全宽，
+                  // 「展开 Artifact 审核」以工具行形式沉入输入区上方。
+                  reviewPanelVisible
+                    ? "grid min-h-0 min-w-[320px] grid-rows-[minmax(0,1fr)_auto] border-r border-[var(--aria-line)]"
+                    : "grid min-h-0 min-w-[320px] grid-rows-[minmax(0,1fr)_auto_auto]"
+                }
+              >
+                <ChatEntryList
+                  ref={chatListRef}
+                  entries={chatEntries}
+                  onPermissionResponse={handlePermissionResponse}
+                  onChoiceResponse={handleChoiceResponse}
+                  onHumanConfirm={handleHumanConfirm}
+                  sessionId={sessionReady ? sessionId : null}
+                  contentCache={contentCacheValues}
+                  loadContent={handleLoadContent}
+                  onCacheContent={handleCacheContent}
+                />
+                <ChatInputBar
+                  ref={chatInputRef}
+                  stage={stage}
+                  activeNodeType={activeNode?.node_type ?? null}
+                  workItemPlanArtifact={workItemPlanArtifact}
+                  disabled={inputDisabled}
+                  onInputFocus={() => {
+                    // spec-workbench-canvas-experience 测试反馈：≥1440px 三栏并存时
+                    // 聚焦不收起面板（用户对照 artifact 内容提修改意见）；
+                    // <1440px overlay 面板遮挡输入框，聚焦时临时收起。
+                    if (window.innerWidth < 1440) {
+                      setReviewPanelDismissed(true);
+                    }
+                  }}
+                  onSendContextNote={sendContextNote}
+                  onStartGeneration={handleStartGeneration}
+                  hideStartGeneration={Boolean(recoverableInterruptedRun)}
+                  onSendHumanDecision={(payload) =>
+                    sendHumanConfirm("request-change", payload)
+                  }
+                  onAuthorDecision={handleAuthorDecision}
+                  onSelectWorkItemGenerationMode={
+                    sendSelectWorkItemGenerationMode
+                  }
+                  onRequestOutlineRevision={() => sendRequestOutlineRevision()}
+                  onWorkItemDraftDecision={sendWorkItemDraftDecision}
+                  onWorkItemBatchDecision={sendWorkItemBatchDecision}
+                  onAbort={abort}
+                />
+                {reviewPanelVisible ? null : (
+                  <div
+                    data-testid="review-panel-restore-slot"
+                    className="flex items-center justify-end border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2"
+                  >
+                    <button
+                      type="button"
+                      className="btn-secondary h-9"
+                      onClick={() => setReviewPanelDismissed(false)}
+                    >
+                      <PanelRightOpen className="h-4 w-4" />
+                      展开 Artifact 审核
+                    </button>
+                  </div>
+                )}
+              </div>
+              {reviewPanelVisible ? (
+                <div className="absolute inset-y-0 right-0 w-[65%] min-h-0 max-w-full border-l border-[var(--aria-line)] bg-[var(--aria-panel)] p-2 min-[1440px]:static min-[1440px]:w-auto min-[1440px]:border-l-0">
+                  <ArtifactReviewPanel
+                    artifactVersions={artifactVersions}
+                    artifact={artifact}
+                    sessionId={sessionReady ? sessionId : null}
+                    artifactContentCache={artifactContentCacheValues}
+                    loadArtifactVersion={handleLoadArtifactVersion}
+                    onCacheArtifactContent={handleCacheArtifactContent}
+                    changelogSummary={changelogSummary}
+                    onClose={() => setReviewPanelDismissed(true)}
+                    actions={
+                      // spec-workbench-canvas-experience T4：三动作自 ChatInputBar
+                      // 迁移至面板 actions 插槽（决策 payload 不变）。
+                      <>
+                        {latestReviewReport ? (
+                          <button
+                            type="button"
+                            className="btn-secondary h-9"
+                            onClick={() => {
+                              // 复用 ChatInputBar 预填逻辑（覆盖式，不自动发送）+ 收起面板。
+                              chatInputRef.current?.prefill(
+                                `按以下 review 意见修订：\n\n${latestReviewReport}`,
+                              );
+                              setReviewPanelDismissed(true);
+                            }}
+                          >
+                            <ClipboardCopy className="h-4 w-4" />
+                            采纳 Review 意见
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className={
+                            reviewerEnabled
+                              ? "btn-primary h-9"
+                              : "btn-secondary h-9"
+                          }
+                          onClick={() => sendAuthorDecision("accept_with_review")}
+                        >
+                          <GitBranch className="h-4 w-4" />
+                          确认并送审
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            reviewerEnabled
+                              ? "btn-secondary h-9"
+                              : "btn-primary h-9"
+                          }
+                          onClick={() => sendAuthorDecision("accept_finalize")}
+                        >
+                          <Check className="h-4 w-4" />
+                          确认定稿
+                        </button>
+                      </>
+                    }
+                    className="h-full min-h-0"
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <>
+              <WorkspacePanelTabs
+                activePanel={activePanel}
+                onSelectPanel={setActivePanel}
+                artifactCount={artifactVersions.length}
+              />
+              {activePanel === "artifact" ? (
             workspaceType === "work_item_plan" ? (
               displayedWorkItemPlanArtifact ? (
                 <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
@@ -689,8 +873,8 @@ export function ChatWorkspacePage({
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
-                onSendHumanDecision={(content) =>
-                  sendHumanConfirm("request-change", content)
+                onSendHumanDecision={(payload) =>
+                  sendHumanConfirm("request-change", payload)
                 }
                 onAuthorDecision={handleAuthorDecision}
                 onSelectWorkItemGenerationMode={
@@ -702,6 +886,8 @@ export function ChatWorkspacePage({
                 onAbort={abort}
               />
             </div>
+            )}
+            </>
           )}
         </section>
       </main>

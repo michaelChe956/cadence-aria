@@ -14,7 +14,14 @@ function providerEntry(
 ): ProviderHealthEntry {
   return {
     provider,
-    display_name: provider === "claude_code" ? "Claude Code CLI" : "Codex CLI",
+    display_name:
+      provider === "claude_code"
+        ? "Claude Code CLI"
+        : provider === "codex"
+          ? "Codex CLI"
+          : provider === "pi"
+            ? "Pi"
+            : "Kimi Code CLI",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -64,7 +71,7 @@ function piEntry(available: boolean): ProviderHealthEntry {
   };
 }
 
-function setHealthWithPi(piAvailable: boolean) {
+function setHealthWithPiAndKimi(piAvailable: boolean, kimiAvailable = false) {
   useProviderAvailabilityStore.setState({
     snapshot: {
       schema_version: 1,
@@ -78,6 +85,7 @@ function setHealthWithPi(piAvailable: boolean) {
         providerEntry("claude_code", true),
         providerEntry("codex", true),
         piEntry(piAvailable),
+        providerEntry("kimi_code", kimiAvailable),
       ],
     },
   });
@@ -89,7 +97,7 @@ afterEach(() => {
 
 describe("ProviderConfigPanel", () => {
   it("author 可选 Pi，且 Pi 角色只提供 Auto", () => {
-    setHealthWithPi(true);
+    setHealthWithPiAndKimi(true);
     const onPermissionModeSelect = vi.fn();
     render(
       <ProviderConfigPanel
@@ -118,8 +126,31 @@ describe("ProviderConfigPanel", () => {
     ).toBeTruthy();
   });
 
+  it("Kimi Code 同时提供 Auto 与 Supervised 权限模式", () => {
+    setHealthWithPiAndKimi(false, true);
+    render(
+      <ProviderConfigPanel
+        providers={{ author: "kimi_code", reviewer: "kimi_code" }}
+        editable
+        onSelectProvider={() => {}}
+        reviewerEnabled
+        onToggleReviewer={() => {}}
+        permissionModes={{ author: "auto", reviewer: "supervised" }}
+        onPermissionModeSelect={() => {}}
+      />,
+    );
+
+    for (const role of ["author", "reviewer"] as const) {
+      const modes = screen.getByTestId(`${role}-permission-mode`);
+      expect(within(modes).getByRole("button", { name: "Auto" })).toBeTruthy();
+      expect(
+        within(modes).getByRole("button", { name: "Supervised" }),
+      ).toBeTruthy();
+    }
+  });
+
   it("选择 Pi 时将权限模式重置为 Auto", () => {
-    setHealthWithPi(true);
+    setHealthWithPiAndKimi(true);
     const onSelectProvider = vi.fn();
     const onPermissionModeSelect = vi.fn();
     render(
@@ -141,7 +172,7 @@ describe("ProviderConfigPanel", () => {
   });
 
   it("Pi 不可用时选项禁用且显示原因", () => {
-    setHealthWithPi(false);
+    setHealthWithPiAndKimi(false);
     render(
       <ProviderConfigPanel
         providers={{ author: "pi", reviewer: "codex" }}

@@ -70,6 +70,11 @@ impl ProviderAdapter for RoutingProviderAdapter {
                 String::new(),
                 String::new(),
             )),
+            ProviderType::KimiCode => Err(ProviderAdapterError::incompatible_output(
+                "task run routing provider does not schedule kimi_code",
+                String::new(),
+                String::new(),
+            )),
             ProviderType::Fake => Err(ProviderAdapterError::incompatible_output(
                 "task run routing provider does not execute fake provider inputs",
                 String::new(),
@@ -303,6 +308,25 @@ mod tests {
             .expect_err("task run must reject Pi provider");
 
         assert_eq!(error.code, ProviderErrorCode::ProviderIncompatibleOutput);
+        assert_eq!(claude_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(codex_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn routing_provider_rejects_kimi_code_without_calling_real_providers() {
+        let claude_calls = Arc::new(AtomicUsize::new(0));
+        let codex_calls = Arc::new(AtomicUsize::new(0));
+        let provider = RoutingProviderAdapter::new(
+            Box::new(RecordingProvider(claude_calls.clone())),
+            Box::new(RecordingProvider(codex_calls.clone())),
+        );
+
+        let error = provider
+            .run(&input(ProviderType::KimiCode))
+            .expect_err("task run must reject Kimi Code provider");
+
+        assert_eq!(error.code, ProviderErrorCode::ProviderIncompatibleOutput);
+        assert!(error.details.contains("kimi_code"));
         assert_eq!(claude_calls.load(Ordering::SeqCst), 0);
         assert_eq!(codex_calls.load(Ordering::SeqCst), 0);
     }

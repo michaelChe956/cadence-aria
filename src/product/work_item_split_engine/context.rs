@@ -3,7 +3,10 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{DesignContextCapabilities, IssueRecord};
+use crate::product::models::{DesignContextCapabilities, IssueRecord, WorkspaceType};
+use crate::product::workspace_engine::{
+    artifact_constraint_spec_for, heading_matches_rule, normalize_workspace_heading_line,
+};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::types::GenerateWorkItemsRequest;
 
@@ -129,7 +132,40 @@ pub(crate) fn summarize_repository_structure(path: &Path) -> String {
     }
 }
 
+/// 规范 Design Spec 结构判定复用 parser 契约作为单一事实来源：
+/// 强制标题与别名直接取自 artifact_constraints.rs 的
+/// `artifact_constraint_spec_for(&WorkspaceType::Design).required_headings`，
+/// 标题归一化（容忍 "## 1. 设计范围" 等编号前缀）与匹配逻辑复用 parser 的
+/// `normalize_workspace_heading_line` / `heading_matches_rule`。
+/// 同步义务：此处不得另行复制标题/别名表；parser 契约变更时本判定自动跟随。
+/// 判定口径仅限 parser 的 `required_headings` 存在性（非完整 artifact 完整性门禁），
+/// 避免真实缺失被误判齐备。
+fn has_canonical_design_spec_structure(markdown: &str) -> bool {
+    let spec = artifact_constraint_spec_for(&WorkspaceType::Design);
+    let headings: Vec<String> = markdown
+        .lines()
+        .filter_map(normalize_workspace_heading_line)
+        .collect();
+    spec.required_headings.iter().all(|rule| {
+        headings
+            .iter()
+            .any(|heading| heading_matches_rule(heading, rule))
+    })
+}
+
 pub fn extract_design_context_capabilities(markdown: &str) -> DesignContextCapabilities {
+    // Aria 规范 Design Spec 使用 设计范围/设计决策/公共组件/API 契约/数据模型/风险/追踪关系
+    // 等 parser 强制标题，永远不会命中下方启发式标题，会被误判为 5 项上下文全缺失；
+    // 检测到规范结构时直接视为 5 项能力均具备。
+    if has_canonical_design_spec_structure(markdown) {
+        return DesignContextCapabilities {
+            has_architecture: true,
+            has_module_breakdown: true,
+            has_tech_stack: true,
+            has_test_strategy: true,
+            has_key_paths: true,
+        };
+    }
     let normalized = markdown_headings(markdown).join("\n").to_lowercase();
     DesignContextCapabilities {
         has_architecture: contains_any(&normalized, &["架构概览", "系统架构", "architecture"]),

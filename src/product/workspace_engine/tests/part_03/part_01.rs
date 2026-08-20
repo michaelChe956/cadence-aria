@@ -364,7 +364,7 @@ fn review_complete_event_preserves_work_item_plan_extension() {
 }
 
 #[tokio::test]
-async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() {
+async fn optional_review_findings_route_author_confirm_or_human_confirm_for_all_workspace_types() {
     for workspace_type in [
         WorkspaceType::Story,
         WorkspaceType::Design,
@@ -377,7 +377,7 @@ async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() 
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n可用版本"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -406,14 +406,35 @@ async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() 
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-        assert!(
-            engine
-                .timeline_nodes
-                .iter()
-                .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
-            "{workspace_type:?} should create human_confirm node"
-        );
+        // spec-design-dialog-revision T5：Story/Design 可选建议 review 完成统一回 AuthorConfirm（报告进对话流），
+        // WorkItem 维持既有 HumanConfirm 路由（design.md「WorkItem 不受影响」）。
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} optional findings 必须回 AuthorConfirm（报告进对话流）"
+                );
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::AuthorConfirm),
+                    "{workspace_type:?} should create author_confirm node"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
+                    "{workspace_type:?} should create human_confirm node"
+                );
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
         assert!(
             !engine
                 .timeline_nodes

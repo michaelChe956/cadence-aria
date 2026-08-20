@@ -74,7 +74,9 @@ export function CreateRepositoryDialog({
   const providerOptions = getProviderOptions(availabilitySnapshot);
   const visibleProviderOptions = providerOptions.filter(
     (option) =>
-      option.value !== "pi" && // 仓库初始化仅支持 Claude Code（Decision 1：不扩大初始化范围）
+      // capability policy: 仅 Claude Code 可初始化仓库，Kimi 同 Pi 不参与
+      option.value !== "pi" &&
+      option.value !== "kimi_code" &&
       (option.visible || option.value === providerMode),
   );
   const unavailableProviderOptions = visibleProviderOptions.filter(
@@ -247,9 +249,9 @@ export function CreateRepositoryDialog({
         aria-label="添加代码库"
         aria-modal="true"
         onSubmit={handleSubmit}
-        className="w-full max-w-md rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+        className="flex max-h-[85vh] w-full max-w-md flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
       >
-        <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="mb-4 flex shrink-0 items-center justify-between gap-3">
           <h2 className="text-base font-semibold text-[var(--aria-ink)]">
             添加代码库
           </h2>
@@ -263,14 +265,48 @@ export function CreateRepositoryDialog({
           </button>
         </div>
         {operation ? (
-          completedResult ? (
-            <>
-              <RepositoryInitializationProgress operation={operation} />
-              <RepositoryInitializationSuccess
-                response={completedResult}
-                operation={operation}
-              />
-              <div className="mt-4 flex justify-end">
+          <>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {completedResult ? (
+                <>
+                  <RepositoryInitializationProgress operation={operation} />
+                  <RepositoryInitializationSuccess
+                    response={completedResult}
+                    operation={operation}
+                  />
+                </>
+              ) : (
+                <>
+                  <RepositoryInitializationProgress operation={operation} />
+                  {isOperationRunning ? (
+                    <p className="mt-3 text-sm text-[var(--aria-ink-muted)]">
+                      正在初始化，请保持此窗口打开
+                    </p>
+                  ) : null}
+                  {pollingError ? (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className="mt-3 text-sm text-[var(--aria-danger)]"
+                    >
+                      {pollingError}
+                    </p>
+                  ) : null}
+                  {failedOperationError ? (
+                    <div className="mt-3">
+                      <RepositoryRegistrationError error={failedOperationError} />
+                    </div>
+                  ) : null}
+                  {completedWithoutResultError ? (
+                    <div className="mt-3">
+                      <RepositoryRegistrationError error={completedWithoutResultError} />
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="mt-4 flex shrink-0 justify-end gap-2">
+              {completedResult ? (
                 <button
                   type="button"
                   onClick={onClose}
@@ -278,57 +314,26 @@ export function CreateRepositoryDialog({
                 >
                   完成
                 </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <RepositoryInitializationProgress operation={operation} />
-              {isOperationRunning ? (
-                <p className="mt-3 text-sm text-[var(--aria-ink-muted)]">
-                  正在初始化，请保持此窗口打开
-                </p>
-              ) : null}
-              {pollingError ? (
-                <p
-                  role="status"
-                  aria-live="polite"
-                  className="mt-3 text-sm text-[var(--aria-danger)]"
+              ) : isOperationRunning ? (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled
+                  className="cursor-pointer rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed"
                 >
-                  {pollingError}
-                </p>
+                  取消
+                </button>
+              ) : operation.status === "failed" || completedWithoutResultError ? (
+                <button
+                  type="button"
+                  onClick={handleRefill}
+                  className="cursor-pointer rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white"
+                >
+                  重新填写
+                </button>
               ) : null}
-              {failedOperationError ? (
-                <div className="mt-3">
-                  <RepositoryRegistrationError error={failedOperationError} />
-                </div>
-              ) : null}
-              {completedWithoutResultError ? (
-                <div className="mt-3">
-                  <RepositoryRegistrationError error={completedWithoutResultError} />
-                </div>
-              ) : null}
-              <div className="mt-4 flex justify-end gap-2">
-                {isOperationRunning ? (
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    disabled
-                    className="cursor-pointer rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed"
-                  >
-                    取消
-                  </button>
-                ) : operation.status === "failed" || completedWithoutResultError ? (
-                  <button
-                    type="button"
-                    onClick={handleRefill}
-                    className="cursor-pointer rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white"
-                  >
-                    重新填写
-                  </button>
-                ) : null}
-              </div>
-            </>
-          )
+            </div>
+          </>
         ) : (
           <>
             <div className="space-y-3">
@@ -560,6 +565,8 @@ function RepositoryInitializationSuccess({
   operation: RepositoryInitializationOperationSnapshot;
 }) {
   const { initialization } = response;
+  const [showCommands, setShowCommands] = useState(false);
+  const [showPaths, setShowPaths] = useState(false);
   const gitFinalizeFailed = operation.steps.some(
     (step) => step.step_id === "git_finalize" && step.status === "failed",
   );
@@ -574,22 +581,50 @@ function RepositoryInitializationSuccess({
       </dl>
       {initialization.commands.length > 0 ? (
         <div>
-          <div className="font-semibold">completed commands</div>
-          <ul className="list-disc pl-5 font-mono text-xs">
-            {initialization.commands.map((command) => (
-              <li key={command.index}>{command.command}</li>
-            ))}
-          </ul>
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold">completed commands</span>
+            <button
+              type="button"
+              onClick={() => setShowCommands((v) => !v)}
+              aria-expanded={showCommands}
+              className="cursor-pointer rounded-md border border-[var(--aria-line)] px-2 py-0.5 text-xs font-semibold text-[var(--aria-ink-muted)]"
+            >
+              {showCommands
+                ? "收起"
+                : `展开（${initialization.commands.length} 条）`}
+            </button>
+          </div>
+          {showCommands ? (
+            <ul className="list-disc pl-5 font-mono text-xs">
+              {initialization.commands.map((command) => (
+                <li key={command.index}>{command.command}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       {initialization.changed_paths.length > 0 ? (
         <div>
-          <div className="font-semibold">changed_paths</div>
-          <ul className="list-disc pl-5 font-mono text-xs">
-            {initialization.changed_paths.map((path) => (
-              <li key={path}>{path}</li>
-            ))}
-          </ul>
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold">changed_paths</span>
+            <button
+              type="button"
+              onClick={() => setShowPaths((v) => !v)}
+              aria-expanded={showPaths}
+              className="cursor-pointer rounded-md border border-[var(--aria-line)] px-2 py-0.5 text-xs font-semibold text-[var(--aria-ink-muted)]"
+            >
+              {showPaths
+                ? "收起"
+                : `展开（${initialization.changed_paths.length} 条）`}
+            </button>
+          </div>
+          {showPaths ? (
+            <ul className="list-disc pl-5 font-mono text-xs">
+              {initialization.changed_paths.map((path) => (
+                <li key={path}>{path}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       {initialization.warnings.length > 0 ? (

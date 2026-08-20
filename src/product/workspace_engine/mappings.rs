@@ -31,6 +31,7 @@ pub(crate) fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
         ProviderName::Pi => ProviderType::Pi,
+        ProviderName::KimiCode => ProviderType::KimiCode,
         ProviderName::Fake => ProviderType::Fake,
     }
 }
@@ -59,6 +60,7 @@ pub(crate) fn provider_name_text(provider: &ProviderName) -> &'static str {
         ProviderName::ClaudeCode => "claude_code",
         ProviderName::Codex => "codex",
         ProviderName::Pi => "pi",
+        ProviderName::KimiCode => "kimi_code",
         ProviderName::Fake => "fake",
     }
 }
@@ -245,12 +247,32 @@ pub(crate) fn latest_artifact_from_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::provider_type_for_name;
+    use super::{permission_mode_for_provider, provider_type_for_name};
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
     use crate::product::models::ProviderName;
     use crate::protocol::contracts::ProviderType;
 
     #[test]
     fn provider_type_for_name_maps_pi() {
         assert_eq!(provider_type_for_name(&ProviderName::Pi), ProviderType::Pi);
+    }
+
+    #[test]
+    fn provider_type_for_name_maps_kimi_code() {
+        assert_eq!(
+            provider_type_for_name(&ProviderName::KimiCode),
+            ProviderType::KimiCode
+        );
+    }
+
+    #[test]
+    fn kimi_supervised_mode_is_preserved_not_forced_auto() {
+        assert_eq!(
+            permission_mode_for_provider(
+                &ProviderName::KimiCode,
+                ProviderPermissionMode::Supervised
+            ),
+            ProviderPermissionMode::Supervised
+        );
     }
 }

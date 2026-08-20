@@ -1,12 +1,15 @@
 import { ImagePlus, MessageSquare, Plus, Trash2, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   IMAGE_CREATE_PROVIDER_OPTIONS,
   type ImageCreatePreset,
   type ImageCreateProvider,
+  type ImageCreateProviderOption,
   type ImageCreateTemplateChoice,
   type SessionSummary,
 } from "../../api/types/image-create";
+import { getProviderOptions } from "../../state/provider-options";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import { useImageCreateStore } from "../../state/image-create-store";
 import { CustomSelect } from "./CustomSelect";
 
@@ -23,6 +26,31 @@ const TEMPLATE_SELECTION_OPTIONS = [
   "自定义引导词",
 ] as const;
 
+function imageCreateOptions(
+  snapshot: Parameters<typeof getProviderOptions>[0],
+): ImageCreateProviderOption[] {
+  const optionsByProvider = new Map(
+    getProviderOptions(snapshot).map((option) => [option.value, option]),
+  );
+  return IMAGE_CREATE_PROVIDER_OPTIONS.map((provider) => {
+    const option = optionsByProvider.get(provider);
+    return {
+      value: provider,
+      label: option?.label ?? providerLabel(provider),
+      disabled: option?.disabled ?? true,
+      reason: option?.reason ?? "Provider 状态尚未确认",
+    };
+  });
+}
+
+function providerLabel(provider: ImageCreateProvider): string {
+  return {
+    claude_code: "Claude Code",
+    codex: "Codex",
+    pi: "Pi",
+    kimi_code: "Kimi Code",
+  }[provider];
+}
 function templateSelectionLabel(selection: TemplateSelection): string {
   return selection === "custom" ? "自定义引导词" : TEMPLATE_LABELS[selection];
 }
@@ -53,6 +81,18 @@ export function SessionList({
   );
   const openSession = useImageCreateStore((state) => state.openSession);
   const createSession = useImageCreateStore((state) => state.createSession);
+  const providerSnapshot = useProviderAvailabilityStore((state) => state.snapshot);
+  const providerLoadStatus = useProviderAvailabilityStore(
+    (state) => state.loadStatus,
+  );
+  const loadProviderAvailability = useProviderAvailabilityStore((state) => state.load);
+  const imageCreateProviderOptions = imageCreateOptions(providerSnapshot);
+
+  useEffect(() => {
+    if (!providerSnapshot && providerLoadStatus === "idle") {
+      void loadProviderAvailability();
+    }
+  }, [loadProviderAvailability, providerLoadStatus, providerSnapshot]);
   const deleteSession = useImageCreateStore((state) => state.deleteSession);
   const [showCreate, setShowCreate] = useState(false);
   const [template, setTemplate] = useState<TemplateSelection>(
@@ -224,10 +264,8 @@ export function SessionList({
               <CustomSelect
                 label="Provider"
                 value={provider}
-                options={IMAGE_CREATE_PROVIDER_OPTIONS}
-                onChange={(value) =>
-                  setProvider(value as ImageCreateProvider)
-                }
+                options={imageCreateProviderOptions}
+                onChange={(value) => setProvider(value as ImageCreateProvider)}
               />
               {error ? (
                 <p role="alert" className="rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">

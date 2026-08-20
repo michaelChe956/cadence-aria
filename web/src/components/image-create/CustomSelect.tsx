@@ -7,10 +7,19 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 
+export type CustomSelectOption =
+  | string
+  | {
+      value: string;
+      label: string;
+      disabled?: boolean;
+      reason?: string | null;
+    };
+
 export interface CustomSelectProps {
   label?: string;
   value: string;
-  options: readonly string[];
+  options: readonly CustomSelectOption[];
   disabled?: boolean;
   onChange: (value: string) => void;
   "aria-label"?: string;
@@ -127,11 +136,16 @@ export function CustomSelect({
 
   function handleOptionClick(
     event: ReactMouseEvent<HTMLButtonElement>,
-    option: string,
+    option: CustomSelectOption,
   ) {
     event.preventDefault();
-    if (option !== value) {
-      onChange(option);
+    const optionValue = typeof option === "string" ? option : option.value;
+    const optionDisabled = typeof option === "string" ? false : option.disabled === true;
+    if (optionDisabled) {
+      return;
+    }
+    if (optionValue !== value) {
+      onChange(optionValue);
     }
     closeList({ restoreFocus: true });
   }
@@ -181,21 +195,34 @@ export function CustomSelect({
           }`}
         >
           {options.map((option) => {
-            const selected = option === value;
+            const optionValue = typeof option === "string" ? option : option.value;
+            const optionLabel = typeof option === "string" ? option : option.label;
+            const optionDisabled =
+              typeof option === "string" ? false : option.disabled === true;
+            const optionReason = typeof option === "string" ? null : option.reason;
+            const selected = optionValue === value;
             return (
               <button
-                key={option}
+                key={optionValue}
                 type="button"
                 role="option"
                 aria-selected={selected}
+                disabled={optionDisabled}
                 onClick={(event) => handleOptionClick(event, option)}
-                className={`flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-lg border-l-2 px-3.5 py-2.5 text-left text-base font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aria-primary)] sm:text-sm ${
+                className={`flex min-h-11 w-full items-center gap-2 rounded-lg border-l-2 px-3.5 py-2.5 text-left text-base font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aria-primary)] sm:text-sm ${
                   selected
                     ? "border-l-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
                     : "border-l-transparent text-[var(--aria-ink)] hover:bg-[var(--aria-primary-soft)] hover:text-[var(--aria-primary)]"
+                } ${
+                  optionDisabled
+                    ? "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--aria-ink)]"
+                    : "cursor-pointer"
                 }`}
               >
-                <span className="min-w-0 flex-1 truncate">{option}</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {optionLabel}
+                  {optionReason ? ` — ${optionReason}` : ""}
+                </span>
                 {selected ? (
                   <Check
                     aria-hidden="true"

@@ -446,7 +446,11 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     render(
       <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
     );
-    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+    // spec-workbench-canvas-experience T3/T4：story + author_confirm 走并存面板，
+    // 不再互斥 Tab 切换。
+    expect(
+      screen.queryByRole("button", { name: "Artifact" }),
+    ).not.toBeInTheDocument();
 
     expect(
       screen.queryByTestId("work-item-plan-candidate-panel"),

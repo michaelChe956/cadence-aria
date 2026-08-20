@@ -180,6 +180,7 @@ fn provider_type_key(provider_type: &ProviderType) -> &'static str {
         ProviderType::ClaudeCode => "claude_code",
         ProviderType::Codex => "codex",
         ProviderType::Pi => unreachable!("provider capability probe has no pi compatibility entry"),
+        ProviderType::KimiCode => "kimi_code",
         ProviderType::Fake => "fake",
     }
 }
@@ -190,6 +191,6 @@ fn adapter_dialect_for(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::ClaudeCode => ADAPTER_DIALECT_CLAUDE_CODE_CLI_V1,
         ProviderType::Codex => ADAPTER_DIALECT_CODEX_CLI_V1,
-        ProviderType::Pi | ProviderType::Fake => "unknown",
+        ProviderType::KimiCode | ProviderType::Pi | ProviderType::Fake => "unknown",
     }
 }

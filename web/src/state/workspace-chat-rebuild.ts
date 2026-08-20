@@ -513,7 +513,9 @@ function timelineAnchorContent(node: TimelineNode) {
   return summary ? `${node.title} · ${summary}` : node.title;
 }
 
-function buildGatePromptEntry(
+// live 路径（workspace-ws-message-handler.ts 的 stage_change 处理）与 rebuild
+// 路径共享本函数构造 gate_prompt 条目，避免两条路径行为漂移。
+export function buildGatePromptEntry(
   state: WorkspaceWsState,
   entries = state.chatEntries,
 ): ChatEntry | null {
@@ -533,12 +535,19 @@ function buildGatePromptEntry(
     ? latestReview.metadata.findings
     : [];
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
+  const contextBlockerGate = isWorkItemPlanContextBlockerGate(state);
   const metadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
     ...(comments ? { comments } : {}),
     ...(findings.length > 0 ? { findings } : {}),
     ...(reviewGate ? { review_gate: reviewGate } : {}),
+    ...(contextBlockerGate
+      ? {
+          gate_kind: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND,
+          allowed_actions: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_ALLOWED_ACTIONS,
+        }
+      : {}),
   };
   const fallbackContent = verdict === "needs_human" ? "需要人工确认" : "等待人工确认";
   return {
@@ -553,14 +562,25 @@ function buildGatePromptEntry(
 }
 
 function workItemPlanContextBlockerGatePromptContent(state: WorkspaceWsState): string | null {
-  if (
-    state.workspaceType !== "work_item_plan" ||
-    state.workItemPlanArtifact?.type !== "context_blocker"
-  ) {
+  const artifact = state.workItemPlanArtifact;
+  if (!isWorkItemPlanContextBlockerGate(state) || artifact?.type !== "context_blocker") {
     return null;
   }
-  const summary = state.workItemPlanArtifact.payload.exploration_summary.trim();
+  const summary = artifact.payload.exploration_summary.trim();
   return summary || null;
+}
+
+// work_item_plan context_blocker gate：后端 blocker payload 声明 allowed_actions 为
+// provide_context/abort（见 workspace_engine/plan_outline/authoring.rs），confirm 必被拒
+// （INVALID_HUMAN_CONFIRM_ACTION），前端用 gate_kind 标记隐藏确认按钮；此处词汇必须与后端保持一致。
+export const WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND = "work_item_plan_context_blocker";
+const WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_ALLOWED_ACTIONS = ["provide_context", "abort"];
+
+function isWorkItemPlanContextBlockerGate(state: WorkspaceWsState): boolean {
+  return (
+    state.workspaceType === "work_item_plan" &&
+    state.workItemPlanArtifact?.type === "context_blocker"
+  );
 }
 
 function findLatestNodeOfType(nodes: TimelineNode[], type: TimelineNodeType) {

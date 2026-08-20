@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ProviderHealthEntry,
   ProviderHealthResponse,
+  RealProviderName,
 } from "../api/types";
 import { getProviderStatus, recheckProviders } from "../api/client";
 import { useProviderAvailabilityStore } from "./provider-availability-store";
@@ -15,12 +16,19 @@ const getProviderStatusMock = vi.mocked(getProviderStatus);
 const recheckProvidersMock = vi.mocked(recheckProviders);
 
 function entry(
-  provider: "claude_code" | "codex",
+  provider: RealProviderName,
   available: boolean,
 ): ProviderHealthEntry {
   return {
     provider,
-    display_name: provider === "claude_code" ? "Claude Code" : "Codex",
+    display_name:
+      provider === "claude_code"
+        ? "Claude Code"
+        : provider === "codex"
+          ? "Codex"
+          : provider === "pi"
+            ? "Pi"
+            : "Kimi Code",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -42,7 +50,12 @@ function snapshot(
     state_error: null,
     real_workflow_blocked: false,
     test_provider_enabled: false,
-    providers: [entry("claude_code", true), entry("codex", false)],
+    providers: [
+      entry("claude_code", true),
+      entry("codex", false),
+      entry("pi", false),
+      entry("kimi_code", false),
+    ],
     ...overrides,
   };
 }

@@ -54,6 +54,15 @@ describe("provider options", () => {
       available: { claude_code: false, codex: true },
     },
     {
+      name: "Kimi available and all other real providers unavailable",
+      providers: [
+        entry("claude_code", false),
+        entry("codex", false),
+        entry("kimi_code", true, { display_name: "Kimi Code API" }),
+      ],
+      available: { claude_code: false, codex: false, kimi_code: true },
+    },
+    {
       name: "all real providers unavailable",
       providers: [entry("claude_code", false), entry("codex", false)],
       available: { claude_code: false, codex: false },
@@ -69,6 +78,7 @@ describe("provider options", () => {
       "claude_code",
       "codex",
       "pi",
+      "kimi_code",
       "fake",
     ]);
     expect(options[0]).toMatchObject({
@@ -87,6 +97,16 @@ describe("provider options", () => {
       disabled: !available.codex,
       installHint: "Install codex",
     });
+    expect(options[3]).toMatchObject({
+      value: "kimi_code",
+      label: providers.some((provider) => provider.provider === "kimi_code")
+        ? "Kimi Code API"
+        : "Kimi Code",
+      visible: true,
+      real: true,
+      available: "kimi_code" in available ? available.kimi_code : false,
+      disabled: !("kimi_code" in available && available.kimi_code),
+    });
     expect(options[2]).toMatchObject({
       value: "pi",
       label: "Pi",
@@ -102,6 +122,41 @@ describe("provider options", () => {
     if (!available.codex) {
       expect(options[1].reason).toBe("codex unavailable");
     }
+  });
+
+  it("maps Kimi Code availability failures to readable health reasons", () => {
+    const versionTooLow = getProviderOption(
+      snapshot([
+        entry("kimi_code", false, {
+          display_name: "Kimi Code CLI",
+          reason_code: "version_too_low",
+          reason: "Kimi Code CLI 0.33.9 is below the required 0.34.0; please upgrade.",
+          install_hint: "Install Kimi Code CLI and ensure `kimi` is available on PATH.",
+        }),
+      ]),
+      "kimi_code",
+    );
+    const notLoggedIn = getProviderOption(
+      snapshot([
+        entry("kimi_code", false, {
+          display_name: "Kimi Code CLI",
+          reason_code: "non_zero_exit",
+          reason: "Kimi Code is not logged in; run `kimi login` and retry.",
+        }),
+      ]),
+      "kimi_code",
+    );
+
+    expect(versionTooLow).toMatchObject({
+      disabled: true,
+      available: false,
+      reason: expect.stringMatching(/upgrade/i),
+    });
+    expect(notLoggedIn).toMatchObject({
+      disabled: true,
+      available: false,
+      reason: expect.stringMatching(/kimi login/i),
+    });
   });
 
   it("fails closed for a degraded snapshot even when old entries remain available", () => {

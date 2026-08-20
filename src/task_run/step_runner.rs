@@ -113,6 +113,7 @@ fn provider_type_text(provider_type: &ProviderType) -> &'static str {
         ProviderType::ClaudeCode => "claude_code",
         ProviderType::Codex => "codex",
         ProviderType::Pi => unreachable!("task run node contracts do not produce pi"),
+        ProviderType::KimiCode => "kimi_code",
         ProviderType::Fake => "fake",
     }
 }
@@ -142,5 +143,16 @@ fn verification_commands_for_node(node_id: &str) -> Vec<String> {
         "N16" | "N18" | "N19" => vec!["cargo test --locked".to_string()],
         "N25" | "N27" => vec!["cargo test --locked".to_string()],
         _ => vec!["cargo check --locked".to_string()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_type_text;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn provider_type_text_kimi_code_is_stable() {
+        assert_eq!(provider_type_text(&ProviderType::KimiCode), "kimi_code");
     }
 }

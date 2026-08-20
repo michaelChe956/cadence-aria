@@ -60,6 +60,7 @@ fn provider_type_slug(provider_type: &ProviderType) -> &'static str {
         ProviderType::ClaudeCode => "claude",
         ProviderType::Codex => "codex",
         ProviderType::Pi => unreachable!("task run output chunks do not originate from pi"),
+        ProviderType::KimiCode => "kimi_code",
         ProviderType::Fake => "fake",
     }
 }
@@ -141,4 +142,23 @@ pub(super) fn git_head(workspace_root: &std::path::Path) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|head| !head.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_run_id_for_chunk;
+    use crate::cross_cutting::cli_adapter::CliOutputChunk;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn kimi_code_chunk_has_stable_run_id() {
+        let run_id = provider_run_id_for_chunk(&CliOutputChunk {
+            provider_type: ProviderType::KimiCode,
+            output_schema: "coding_report".to_string(),
+            stream: "stdout".to_string(),
+            text: "test".to_string(),
+        });
+
+        assert_eq!(run_id, "stream_kimi_code_n16");
+    }
 }

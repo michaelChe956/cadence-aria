@@ -318,6 +318,8 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         reviewer_provider: Some(ProviderName::Codex),
         review_rounds: 2,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
         superpowers_enabled: true,
         openspec_enabled: true,
         provider_conversations: Vec::new(),

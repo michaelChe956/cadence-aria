@@ -52,6 +52,8 @@ async fn interrupted_recovery_provider_start_failure_returns_to_prepare_context(
         reviewer_provider: Some(ProviderName::Codex),
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
         superpowers_enabled: false,
         openspec_enabled: false,
         provider_conversations: vec![],

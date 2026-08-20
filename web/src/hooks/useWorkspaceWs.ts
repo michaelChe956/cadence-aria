@@ -443,8 +443,14 @@ export function useWorkspaceWs(sessionId: string | null) {
   );
 
   const sendAuthorDecision = useCallback(
-    (decision: AuthorDecision) => {
-      sendJson({ type: "author_decision", decision });
+    (decision: AuthorDecision, feedback?: string) => {
+      // spec-design-dialog-revision T8："revise" 以反馈构造 `{revise: {feedback}}`
+      // 线格式（T1 serde externally tagged），其余变体原样透传。
+      const payload: AuthorDecision =
+        decision === "revise"
+          ? { revise: { feedback: (feedback ?? "").trim() } }
+          : decision;
+      sendJson({ type: "author_decision", decision: payload });
     },
     [sendJson],
   );

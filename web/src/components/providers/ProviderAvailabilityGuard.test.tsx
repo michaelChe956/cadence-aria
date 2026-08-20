@@ -11,13 +11,20 @@ const originalActions = {
 };
 
 function entry(
-  provider: "claude_code" | "codex",
+  provider: "claude_code" | "codex" | "pi" | "kimi_code",
   available: boolean,
   overrides: Partial<ProviderHealthEntry> = {},
 ): ProviderHealthEntry {
   return {
     provider,
-    display_name: provider === "claude_code" ? "Claude Code" : "Codex",
+    display_name:
+      provider === "claude_code"
+        ? "Claude Code"
+        : provider === "codex"
+          ? "Codex"
+          : provider === "pi"
+            ? "Pi"
+            : "Kimi Code",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -51,7 +58,12 @@ function snapshot(
     state_error: null,
     real_workflow_blocked: false,
     test_provider_enabled: false,
-    providers: [entry("claude_code", true), entry("codex", false)],
+    providers: [
+      entry("claude_code", true),
+      entry("codex", false),
+      entry("pi", false),
+      entry("kimi_code", false),
+    ],
     ...overrides,
   };
 }

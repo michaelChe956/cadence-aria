@@ -21,3 +21,8 @@
 
 - **WHEN** single-attempt 已通过适用的 review 流程和其他非 testing 完成门禁，work item 引用了含 required gate 的 verification plan，但 attempt 没有 testing report
 - **THEN** 系统 SHALL 允许最终完成流程继续，不得仅因缺少 testing report 阻塞完成
+
+#### Scenario: 存量 testing report 状态不参与 gate 判定
+
+- **WHEN** attempt 存在历史 testing report，其状态不是 Passed 或 PassedWithWarnings，但适用的 review 流程和全部非 testing gate 均满足
+- **THEN** 系统 SHALL 忽略该 report 对 completion gate 判定的影响，且 MUST 保留原 report 数据不变

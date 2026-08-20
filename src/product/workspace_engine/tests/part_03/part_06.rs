@@ -185,7 +185,7 @@ async fn persistent_queued_review_engine_for(
         tx,
         session,
     );
-    engine.start_review_or_skip().await;
+    engine.start_review().await;
     let review_node_id = engine
         .active_node_id
         .clone()
@@ -340,11 +340,25 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                 .drive_review_session(Arc::new(provider), empty_provider_commands())
                 .await;
 
-            assert_eq!(
-                engine.session.stage,
-                WorkspaceStage::HumanConfirm,
-                "{workspace_type:?} repair terminal mode {mode:?} must safely degrade"
-            );
+            // spec-design-dialog-revision T5：Story/Design repair 终态 review 完成统一回 AuthorConfirm
+            // （报告进对话流，reviewer 结论不自动定稿）；WorkItem 维持既有 HumanConfirm 路由。
+            match workspace_type {
+                WorkspaceType::Story | WorkspaceType::Design => {
+                    assert_eq!(
+                        engine.session.stage,
+                        WorkspaceStage::AuthorConfirm,
+                        "{workspace_type:?} repair terminal mode {mode:?} must safely degrade 回 AuthorConfirm"
+                    );
+                }
+                WorkspaceType::WorkItem => {
+                    assert_eq!(
+                        engine.session.stage,
+                        WorkspaceStage::HumanConfirm,
+                        "{workspace_type:?} repair terminal mode {mode:?} must safely degrade"
+                    );
+                }
+                other => panic!("unexpected workspace type {other:?}"),
+            }
             assert_eq!(
                 engine
                     .timeline_nodes
@@ -398,7 +412,19 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                 reload_tx,
                 WorkspaceSession::from_record(persisted_session),
             );
-            assert_eq!(reloaded.session.stage, WorkspaceStage::HumanConfirm);
+            match workspace_type {
+                WorkspaceType::Story | WorkspaceType::Design => {
+                    assert_eq!(
+                        reloaded.session.stage,
+                        WorkspaceStage::AuthorConfirm,
+                        "{workspace_type:?} repair terminal mode {mode:?} reload 后 stage 必须一致回 AuthorConfirm"
+                    );
+                }
+                WorkspaceType::WorkItem => {
+                    assert_eq!(reloaded.session.stage, WorkspaceStage::HumanConfirm);
+                }
+                other => panic!("unexpected workspace type {other:?}"),
+            }
             assert_eq!(
                 reloaded
                     .timeline_nodes
@@ -455,7 +481,8 @@ async fn repair_permission_timeout_resolves_persisted_request_before_fallback_re
         .drive_review_session(Arc::new(provider), empty_provider_commands())
         .await;
 
-    assert_eq!(engine.session.stage, WorkspaceStage::HumanConfirm);
+    // spec-design-dialog-revision T5：Story repair permission timeout 终态 review 完成回 AuthorConfirm（报告进对话流）。
+    assert_eq!(engine.session.stage, WorkspaceStage::AuthorConfirm);
     assert_eq!(
         engine
             .timeline_nodes
@@ -513,7 +540,7 @@ async fn repair_permission_timeout_resolves_persisted_request_before_fallback_re
         reload_tx,
         WorkspaceSession::from_record(persisted_session),
     );
-    assert_eq!(reloaded.session.stage, WorkspaceStage::HumanConfirm);
+    assert_eq!(reloaded.session.stage, WorkspaceStage::AuthorConfirm);
     assert_eq!(
         reloaded
             .timeline_nodes
@@ -541,11 +568,12 @@ async fn repair_abort_closes_started_event_as_failed() {
         Some("review-session-1".to_string()),
     );
     let starts = provider.starts.clone();
+    let abort_starts = starts.clone();
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_review_engine("sess_repair_terminal_abort").await;
     let (command_tx, command_rx) = mpsc::channel(4);
     let abort = tokio::spawn(async move {
-        while starts.load(Ordering::SeqCst) < 2 {
+        while abort_starts.load(Ordering::SeqCst) < 2 {
             tokio::task::yield_now().await;
         }
         command_tx.send(ProviderCommand::Abort).await.unwrap();
@@ -555,6 +583,10 @@ async fn repair_abort_closes_started_event_as_failed() {
         .drive_review_session(Arc::new(provider), command_rx)
         .await;
     abort.await.unwrap();
+
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+    assert!(engine.latest_review_verdict.is_none());
 
     assert_eq!(
         repair_event_statuses(&mut rx),

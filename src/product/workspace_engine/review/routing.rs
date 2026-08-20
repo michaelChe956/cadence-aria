@@ -68,6 +68,13 @@ impl WorkspaceEngine {
             Some(TimelineNodeType::WorkItemBatchReview) => {
                 self.route_work_item_batch_review(verdict).await;
             }
+            _ if matches!(
+                self.session.workspace_type,
+                WorkspaceType::Story | WorkspaceType::Design
+            ) =>
+            {
+                self.route_review_report_to_author_confirm(&verdict).await;
+            }
             _ => match &verdict.review_gate {
                 ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
                     self.enter_human_confirm(Some(verdict.summary.clone()))
@@ -79,6 +86,18 @@ impl WorkspaceEngine {
                 }
             },
         }
+    }
+
+    /// Story/Design：review 报告进对话流，回到 AuthorConfirm（spec「review 结果回对话流」2 场景）。
+    /// 无论 pass/revise 统一回 AuthorConfirm，reviewer 结论不自动定稿；
+    /// WorkItem/WorkItemPlan 维持既有 HumanConfirm/ReviewDecision 路由（design.md「WorkItem 不受影响」）。
+    async fn route_review_report_to_author_confirm(&mut self, verdict: &ReviewVerdict) {
+        let report = format_review_feedback(verdict);
+        self.record_review_message(report);
+        self.complete_active_node(Some("Review 完成，报告已进入对话流".to_string()))
+            .await;
+        self.enter_author_confirm(Some("请基于 Review 报告继续修订或确认定稿".to_string()))
+            .await;
     }
 
     pub(crate) async fn enter_review_decision(&mut self, round: u32, summary: String) {

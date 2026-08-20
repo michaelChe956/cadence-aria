@@ -87,6 +87,25 @@ fn story_artifact_constraint_report_rejects_work_item_leakage() {
 }
 
 #[test]
+fn story_artifact_with_inline_code_ids_passes_validation() {
+    let report = validate_workspace_artifact_constraints(
+        "# Story Spec\n\n\
+         ## 范围\n来源 source id: Issue issue_0001；覆盖基础流程。\n\n\
+         ## 用户故事\n作为用户，我要完成操作。\n\n\
+         ## 功能需求\n- `[REQ-001]` 系统支持操作。\n\n\
+         ## 成功标准\n- `[AC-001]` 操作成功。\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+    assert!(
+        report.passed,
+        "inline code 包裹的 [REQ-*]/[AC-*] 应通过校验: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
 fn work_item_plan_constraints_allow_task_ids() {
     let report = validate_workspace_artifact_constraints(
         "# Work Item Plan\n\n\

@@ -1,6 +1,6 @@
 use crate::product::models::{ProviderName, WorkspaceType};
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
+    ArtifactPayload, ArtifactVersion, AuthorDecision, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
     ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdict, ReviewVerdictType,
     TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
     VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
@@ -228,6 +228,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
         human_presentation_revisions: Vec::new(),
+        reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
     })
@@ -794,10 +795,41 @@ fn session_state_artifact_accepts_markdown_payload() {
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
         human_presentation_revisions: Vec::new(),
+        reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");
     assert!(json["artifact"]["diff"].is_null());
+}
+
+#[test]
+fn author_decision_new_variants_roundtrip() {
+    let revise = serde_json::json!({"revise": {"feedback": "补充异常场景"}});
+    let parsed: AuthorDecision = serde_json::from_value(revise.clone()).unwrap();
+    assert_eq!(
+        parsed,
+        AuthorDecision::Revise {
+            feedback: "补充异常场景".to_string()
+        }
+    );
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), revise);
+
+    for (raw, expected) in [
+        (
+            serde_json::json!("accept_with_review"),
+            AuthorDecision::AcceptWithReview,
+        ),
+        (
+            serde_json::json!("accept_finalize"),
+            AuthorDecision::AcceptFinalize,
+        ),
+        (serde_json::json!("accept"), AuthorDecision::Accept),
+        (serde_json::json!("reject"), AuthorDecision::Reject),
+    ] {
+        let parsed: AuthorDecision = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(parsed, expected);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+    }
 }

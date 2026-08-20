@@ -131,17 +131,26 @@ async fn start_generation_locks_provider_and_creates_node() {
 }
 
 #[tokio::test]
-async fn reviewer_disabled_enters_human_confirm_without_review_node() {
+async fn reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node() {
+    // spec-design-dialog-revision T3：旧记录（reviewer_enabled_at_start=None）+ review 未启用
+    // → Accept 走 legacy 有效态判定 → HumanConfirm，且不创建 review 节点。
+    // T6 Minor-4 修订：Story/Design 已退役 HumanConfirm（无 reviewer 时直接定稿，见
+    // author_revision_loop::legacy_accept_without_reviewer_finalizes_for_story_design_not_human_confirm），
+    // 本用例改为 WorkItemPlan——该类型 HumanConfirm 仍有效，保留原“无 review 节点落入 HumanConfirm”覆盖。
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let mut session = make_session("sess_reviewer_disabled");
-    session.stage = WorkspaceStage::Running;
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    session.stage = WorkspaceStage::AuthorConfirm;
     session.reviewer_provider = None;
     session.review_rounds = 0;
     let mut engine = WorkspaceEngine::new(store, tx, session);
 
-    engine.start_review_or_skip().await;
-
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(outcome, AuthorDecisionOutcome::HumanConfirm);
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
     assert!(
         !engine
@@ -206,6 +215,222 @@ async fn handle_human_confirm_request_change_starts_revision() {
             && node.status == TimelineNodeStatus::Active
             && node.summary.as_deref() == Some("根据人工反馈返修")
     }));
+}
+
+#[tokio::test]
+async fn human_confirm_request_change_requires_context_after_untrusted_review() {
+    let (_tmp, store) = setup();
+    let (tx, _) = mpsc::channel(64);
+    let session = make_session("sess_human_request_change_untrusted_review");
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::NeedsHuman,
+        comments: "reviewer 输出封装失败".to_string(),
+        summary: String::new(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserTriageRequired,
+        work_item_plan_review: None,
+        structured_output_diagnostic: Some(StructuredOutputDiagnostic {
+            code: "missing_end_nonce".to_string(),
+            message: "missing structured output end nonce".to_string(),
+            repair_attempted: true,
+            repair_succeeded: false,
+            raw_output_preview: None,
+        }),
+    });
+    engine
+        .enter_human_confirm(Some("需要人工确认".to_string()))
+        .await;
+
+    let error = engine
+        .handle_human_confirm(HumanConfirmDecision::RequestChange, None)
+        .await
+        .expect_err("untrusted review requires an explicit revision target");
+
+    assert!(error.contains("非空"));
+    assert!(error.contains("修改说明"));
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    assert!(!engine.timeline_nodes.iter().any(|node| {
+        node.node_type == TimelineNodeType::Revision && node.status == TimelineNodeStatus::Active
+    }));
+
+    let error = engine
+        .handle_human_confirm(
+            HumanConfirmDecision::RequestChange,
+            Some(serde_json::json!({"description": "补充失败路径"})),
+        )
+        .await
+        .expect_err("untrusted review must identify human-authored feedback");
+    assert!(error.contains("source"));
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+    let error = engine
+        .handle_human_confirm(
+            HumanConfirmDecision::RequestChange,
+            Some(serde_json::json!({"description": "补充失败路径", "source": "review_findings"})),
+        )
+        .await
+        .expect_err("review findings source is not trusted when findings are absent");
+    assert!(error.contains("source"));
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+    let outcome = engine
+        .handle_human_confirm(
+            HumanConfirmDecision::RequestChange,
+            Some(serde_json::json!({"description": "补充失败路径", "source": "human"})),
+        )
+        .await
+        .expect("explicit human revision target may start revision");
+
+    assert_eq!(outcome, ReviewDecisionOutcome::StartRevision);
+    assert_eq!(engine.session().stage, WorkspaceStage::Revision);
+    assert!(engine.timeline_nodes.iter().any(|node| {
+        node.node_type == TimelineNodeType::Revision && node.status == TimelineNodeStatus::Active
+    }));
+}
+
+#[tokio::test]
+async fn human_confirm_request_change_requires_context_for_untrusted_review_across_workspace_routes() {
+    enum HumanConfirmRoute {
+        General(WorkspaceType),
+        WorkItemPlanOutline,
+    }
+
+    for route in [
+        HumanConfirmRoute::General(WorkspaceType::Story),
+        HumanConfirmRoute::General(WorkspaceType::Design),
+        HumanConfirmRoute::General(WorkspaceType::WorkItem),
+        HumanConfirmRoute::WorkItemPlanOutline,
+    ] {
+        let (route_name, is_outline, mut engine, _fixture) = match route {
+            HumanConfirmRoute::General(workspace_type) => {
+                let (_tmp, store) = setup();
+                let (tx, _) = mpsc::channel(64);
+                let mut session = make_session(&format!(
+                    "sess_human_request_change_untrusted_{workspace_type:?}"
+                ));
+                session.workspace_type = workspace_type.clone();
+                let mut engine = WorkspaceEngine::new(store, tx, session);
+                engine.latest_review_verdict = Some(ReviewVerdict {
+                    verdict: ReviewVerdictType::NeedsHuman,
+                    comments: "需要人工判断".to_string(),
+                    summary: "需要人工确认".to_string(),
+                    findings: Vec::new(),
+                    review_gate: ReviewGate::UserTriageRequired,
+                    work_item_plan_review: None,
+                    structured_output_diagnostic: None,
+                });
+                engine
+                    .enter_human_confirm(Some("需要人工确认".to_string()))
+                    .await;
+                (format!("{workspace_type:?}"), false, engine, _tmp)
+            }
+            HumanConfirmRoute::WorkItemPlanOutline => {
+                let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+                    make_work_item_plan_engine_with_draft_candidate(
+                        "sess_human_request_change_untrusted_work_item_plan",
+                    );
+                let persisted_session = lifecycle
+                    .list_workspace_sessions("project_0001", "issue_0001")
+                    .expect("workspace sessions")
+                    .into_iter()
+                    .next()
+                    .expect("persisted workspace session");
+                engine.session.session_id = persisted_session.id;
+                prepare_work_item_plan_outline_artifact(&mut engine).await;
+                engine
+                    .complete_active_node(Some("准备 Outline review".to_string()))
+                    .await;
+                let review_node_id = engine
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::WorkItemPlanOutlineReview,
+                        agent: Some(ProviderName::Codex),
+                        stage: WorkspaceStage::CrossReview,
+                        round: Some(1),
+                        title: "WorkItemPlan Outline Review Round 1".to_string(),
+                        summary: None,
+                        status: TimelineNodeStatus::Active,
+                    })
+                    .await;
+                engine
+                    .update_timeline_node(
+                        &review_node_id,
+                        TimelineNodeStatus::Completed,
+                        Some("恢复的审核结果需要人工确认".to_string()),
+                    )
+                    .await;
+                engine.latest_review_verdict = Some(ReviewVerdict {
+                    verdict: ReviewVerdictType::NeedsHuman,
+                    comments: "需要人工判断".to_string(),
+                    summary: "需要人工确认 Outline review".to_string(),
+                    findings: Vec::new(),
+                    review_gate: ReviewGate::UserTriageRequired,
+                    work_item_plan_review: None,
+                    structured_output_diagnostic: None,
+                });
+                engine
+                    .enter_human_confirm(Some("等待人工确认 Outline review".to_string()))
+                    .await;
+                ("WorkItemPlanOutline".to_string(), true, engine, _tmp)
+            }
+        };
+
+        let error = engine
+            .handle_human_confirm(HumanConfirmDecision::RequestChange, None)
+            .await
+            .expect_err("untrusted review without an explicit target must be rejected");
+        assert!(error.contains("非空"), "{route_name}");
+        assert!(error.contains("修改说明"), "{route_name}");
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm, "{route_name}");
+        assert!(
+            !engine.timeline_nodes.iter().any(|node| {
+                node.status == TimelineNodeStatus::Active
+                    && matches!(
+                        node.node_type,
+                        TimelineNodeType::Revision | TimelineNodeType::WorkItemPlanOutlineRun
+                    )
+            }),
+            "{route_name} must not start a revision"
+        );
+
+        for payload in [
+            serde_json::json!({"description": "补充失败路径"}),
+            serde_json::json!({"description": "补充失败路径", "source": "review_findings"}),
+        ] {
+            let error = engine
+                .handle_human_confirm(HumanConfirmDecision::RequestChange, Some(payload))
+                .await
+                .expect_err("untrusted review must require source=human for every workspace route");
+            assert!(error.contains("source"), "{route_name}");
+            assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm, "{route_name}");
+        }
+
+        let outcome = engine
+            .handle_human_confirm(
+                HumanConfirmDecision::RequestChange,
+                Some(serde_json::json!({"description": "补充失败路径", "source": "human"})),
+            )
+            .await
+            .expect("explicit human revision target must preserve the route");
+        if is_outline {
+            assert!(matches!(
+                outcome,
+                ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
+            ));
+            assert_eq!(engine.session().stage, WorkspaceStage::Running, "{route_name}");
+            assert!(engine.timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::WorkItemPlanOutlineRun
+                    && node.status == TimelineNodeStatus::Active
+            }));
+        } else {
+            assert_eq!(outcome, ReviewDecisionOutcome::StartRevision, "{route_name}");
+            assert_eq!(engine.session().stage, WorkspaceStage::Revision, "{route_name}");
+            assert!(engine.timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::Revision
+                    && node.status == TimelineNodeStatus::Active
+            }));
+        }
+    }
 }
 
 #[tokio::test]
@@ -349,15 +574,18 @@ async fn author_decision_accept_starts_review_or_final_confirmation() {
         .await
         .unwrap();
 
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    // T6 Minor-4：Story/Design 已退役 HumanConfirm——无 review 时 Accept 直接定稿（Completed），
+    // 不再进入人工确认阶段（WorkItemPlan 的 HumanConfirm 覆盖见
+    // reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node）。
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
     assert!(engine.timeline_nodes.iter().any(|node| {
-        node.node_type == TimelineNodeType::HumanConfirm
-            && node.status == TimelineNodeStatus::Active
+        node.node_type == TimelineNodeType::Completed
+            && node.status == TimelineNodeStatus::Completed
     }));
 }
 
 #[tokio::test]
-async fn author_decision_reject_returns_to_prepare_without_losing_history() {
+async fn author_decision_reject_returns_guidance_error_without_reset() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let mut session = make_session("sess_author_reject");
@@ -375,20 +603,23 @@ async fn author_decision_reject_returns_to_prepare_without_losing_history() {
         )
         .await;
 
-    engine
+    let err = engine
         .handle_author_decision(AuthorDecision::Reject)
         .await
-        .unwrap();
-
-    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
-    assert_eq!(engine.session().artifact, None);
+        .unwrap_err();
+    assert!(err.contains("反馈"), "应引导改用反馈修订: {err}");
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+    assert!(
+        engine.session().artifact.is_some(),
+        "拒绝不得清空产物（改用反馈修订）"
+    );
     assert!(
         engine
             .session()
             .messages
             .iter()
             .any(|message| message.role == "assistant" && message.content.contains("不满意的候选")),
-        "rejected author output should remain in message history"
+        "author output should remain in message history"
     );
     assert_eq!(engine.artifact_versions.len(), 1);
     assert!(
@@ -397,37 +628,30 @@ async fn author_decision_reject_returns_to_prepare_without_losing_history() {
             .contains("不满意的候选")
     );
     assert!(
-        !engine.artifact_versions[0].is_current,
-        "rejected artifact version should remain historical but not active"
-    );
-    assert!(
-        engine.timeline_nodes.iter().any(|node| {
-            node.node_type == TimelineNodeType::AuthorConfirm
-                && node.status == TimelineNodeStatus::Completed
-                && node.summary.as_deref() == Some("用户要求重新编写")
-        }),
-        "author_confirm node should record the rejection decision"
+        engine.artifact_versions[0].is_current,
+        "拒绝不再作废产物，当前稿保持 current"
     );
 }
 
 #[tokio::test]
-async fn rejected_author_artifact_is_not_restored_after_reconnect() {
+async fn rejected_author_artifact_survives_reject_error_after_reconnect() {
     let (tmp, lifecycle_store, mut engine) = persistent_test_engine();
     engine
         .handle_user_message(
             "开始生成".to_string(),
             Arc::new(ImmediateOutputRecordingProvider {
                 inputs: Arc::new(Mutex::new(Vec::new())),
-                output: complete_story_artifact("被拒绝候选。", "不应恢复为当前稿。"),
+                output: complete_story_artifact("候选。", "不因拒绝被清空。"),
             }),
             empty_provider_commands(),
         )
         .await;
 
-    engine
+    let err = engine
         .handle_author_decision(AuthorDecision::Reject)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(err.contains("反馈"), "应引导改用反馈修订: {err}");
 
     let session_record = lifecycle_store
         .get_workspace_session(&engine.session().session_id)
@@ -439,10 +663,13 @@ async fn rejected_author_artifact_is_not_restored_after_reconnect() {
         WorkspaceSession::from_record(session_record),
     );
 
-    assert_eq!(reloaded.session().stage, WorkspaceStage::PrepareContext);
-    assert_eq!(reloaded.session().artifact, None);
+    assert_eq!(reloaded.session().stage, WorkspaceStage::AuthorConfirm);
+    assert!(
+        reloaded.session().artifact.is_some(),
+        "拒绝返回引导错误后产物应保留，不推倒重来"
+    );
     match reloaded.build_session_state() {
-        WsOutMessage::SessionState { artifact, .. } => assert_eq!(artifact, None),
+        WsOutMessage::SessionState { artifact, .. } => assert!(artifact.is_some()),
         other => panic!("expected SessionState, got {other:?}"),
     }
 }

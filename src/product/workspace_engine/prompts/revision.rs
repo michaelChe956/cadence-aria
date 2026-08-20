@@ -37,15 +37,22 @@ impl WorkspaceEngine {
         } else {
             None
         };
-        let review = self
-            .latest_review_verdict
-            .as_ref()
-            .ok_or_else(|| "review verdict is unavailable for revision".to_string())?;
+        let review = self.latest_review_verdict.as_ref();
         let context = self.routing_reference_context();
-        let prompt = if resume_provider_session_id.is_some() {
-            self.build_revision_delta_prompt(review, &context)
+        // spec-design-dialog-revision T4：author 反馈修订路径（pending_revision_context 存在且无 review
+        // verdict）走专用增量修订 prompt，reviewer 返修路径维持既有 delta/full 分流。
+        // T5/M-1：谓词提取为共享 helper is_author_feedback_revision（decisions.rs），与 provider_drive.rs 同语义。
+        let prompt = if self.is_author_feedback_revision() {
+            let feedback = self.pending_revision_context.as_deref().unwrap_or_default();
+            self.build_author_revision_prompt(feedback)
         } else {
-            self.build_revision_full_prompt(&artifact, review, &context)
+            let review =
+                review.ok_or_else(|| "review verdict is unavailable for revision".to_string())?;
+            if resume_provider_session_id.is_some() {
+                self.build_revision_delta_prompt(review, &context)
+            } else {
+                self.build_revision_full_prompt(&artifact, review, &context)
+            }
         };
 
         Ok(StreamingProviderInput {
@@ -178,6 +185,8 @@ mod revision_routing_reference_tests {
             reviewer_provider: Some(ProviderName::Codex),
             review_rounds: 1,
             permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            provisional_reviewer_provider: None,
+            reviewer_enabled_at_start: None,
             superpowers_enabled: true,
             openspec_enabled: true,
             provider_conversations: Vec::new(),

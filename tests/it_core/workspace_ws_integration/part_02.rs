@@ -144,7 +144,7 @@ async fn workspace_session_detail_http_api_returns_full_persisted_content() {
 }
 
 #[tokio::test]
-async fn workspace_ws_review_decision_continue_runs_revision_and_second_review() {
+async fn workspace_ws_review_report_feedback_revision_runs_second_review() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture_with_providers(&root, "fake", "codex", 2).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
@@ -206,10 +206,12 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
     )
     .await;
 
-    let mut decision_required = false;
+    // spec-design-dialog-revision T9：旧「ReviewDecision continue_with_context」四段路径迁移为
+    // 对话式循环：review revise 报告回对话流 → AuthorConfirm 反馈修订 → 再次确认送审 → 二次 review。
+    let mut saw_first_review = false;
     for _ in 0..600 {
         match recv_json(&mut ws).await {
-            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && !saw_first_review => {
                 send_json(
                     &mut ws,
                     &WsInMessage::AuthorDecision {
@@ -218,29 +220,33 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
                 )
                 .await;
             }
-            WsOutMessage::ReviewDecisionRequired { options, .. } => {
-                assert!(options.contains(&"continue_with_context".to_string()));
-                decision_required = true;
+            WsOutMessage::ReviewComplete {
+                verdict: ReviewVerdictType::Revise,
+                ..
+            } => {
+                saw_first_review = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && saw_first_review => {
+                // 首轮 review 完成后的 AuthorConfirm：改用反馈修订而非旧 ReviewDecisionResponse。
+                send_json(
+                    &mut ws,
+                    &WsInMessage::AuthorDecision {
+                        decision: AuthorDecision::Revise {
+                            feedback: "补充登录错误码".to_string(),
+                        },
+                    },
+                )
+                .await;
                 break;
             }
             WsOutMessage::Error { message } => panic!("ws error: {message}"),
             _ => {}
         }
     }
-    assert!(decision_required, "review decision should be required");
-
-    send_json(
-        &mut ws,
-        &WsInMessage::ReviewDecisionResponse {
-            decision: "continue_with_context".to_string(),
-            extra_context: Some("补充登录错误码".to_string()),
-        },
-    )
-    .await;
+    assert!(saw_first_review, "first review should report revise verdict");
 
     let mut saw_revision_stream = false;
-    let mut saw_review_pass = false;
-    let mut saw_human_confirm = false;
+    let mut saw_post_revision_confirm = false;
     for _ in 0..600 {
         match recv_json(&mut ws).await {
             WsOutMessage::StreamChunk { content, .. }
@@ -248,10 +254,8 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
             {
                 saw_revision_stream = true;
             }
-            WsOutMessage::ReviewComplete { summary, .. } if summary == "可以确认" => {
-                saw_review_pass = true;
-            }
             WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+                saw_post_revision_confirm = true;
                 send_json(
                     &mut ws,
                     &WsInMessage::AuthorDecision {
@@ -259,9 +263,26 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
                     },
                 )
                 .await;
+                break;
             }
-            WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
-                saw_human_confirm = true;
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_post_revision_confirm,
+        "revision completion should return to author_confirm"
+    );
+
+    let mut saw_review_pass = false;
+    let mut saw_final_author_confirm = false;
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ReviewComplete { summary, .. } if summary == "可以确认" => {
+                saw_review_pass = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" && saw_review_pass => {
+                saw_final_author_confirm = true;
                 break;
             }
             WsOutMessage::Error { message } => panic!("ws error: {message}"),
@@ -275,14 +296,14 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
     );
     assert!(saw_review_pass, "second review should pass");
     assert!(
-        saw_human_confirm,
-        "second review pass should enter human confirm"
+        saw_final_author_confirm,
+        "second review pass should return to author_confirm (T5: 不再自动进入 human_confirm)"
     );
     let prompts = author_prompts.lock().unwrap();
     let revision_prompt = prompts.get(1).expect("revision author prompt");
-    assert!(revision_prompt.contains("需要补充失败路径"));
+    // T4：反馈修订走 build_author_revision_prompt（产物全文 + 用户反馈），不再携带 reviewer 返修 preamble。
+    assert!(revision_prompt.contains("## 用户反馈"));
     assert!(revision_prompt.contains("补充登录错误码"));
-    assert!(revision_prompt.contains("请根据以上审核意见修改产物"));
     assert_eq!(reviewer_prompts.lock().unwrap().len(), 2);
 
     drop(ws);
@@ -552,9 +573,20 @@ async fn workspace_ws_author_decision_accept_starts_reviewer() {
         recv_until_stage(&mut ws, "cross_review").await,
         "cross_review"
     );
+    // spec-design-dialog-revision T5：review pass 不自动定稿，统一回 AuthorConfirm 等待用户确认。
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ReviewComplete { verdict, .. } => {
+                assert_eq!(verdict, ReviewVerdictType::Pass);
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
     assert_eq!(
-        recv_until_stage(&mut ws, "human_confirm").await,
-        "human_confirm"
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
     );
     let prompts = reviewer_prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
@@ -565,10 +597,13 @@ async fn workspace_ws_author_decision_accept_starts_reviewer() {
     server.abort();
 }
 
+// spec-design-dialog-revision T9：Reject 在 Story/Design 已移除推倒重来出口——返回引导性错误，
+// 阶段与产物保持不变（改用反馈修订表达重写意图），重连后仍处于 AuthorConfirm 且产物保留。
 #[tokio::test]
-async fn workspace_ws_author_decision_reject_returns_to_prepare_and_survives_reconnect() {
+async fn workspace_ws_author_decision_reject_returns_guidance_error_and_survives_reconnect() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::Fake,
@@ -580,8 +615,8 @@ async fn workspace_ws_author_decision_reject_returns_to_prepare_and_survives_rec
     registry.register(
         ProviderName::Codex,
         Arc::new(ScriptedStreamingProvider::new(
-            ["reviewer should not run before author accept"],
-            Arc::new(Mutex::new(Vec::new())),
+            ["reviewer should not run when author decision is rejected"],
+            reviewer_prompts.clone(),
         )),
     );
     let app = build_web_router(WebAppState::with_provider_registry(
@@ -626,7 +661,31 @@ async fn workspace_ws_author_decision_reject_returns_to_prepare_and_survives_rec
     )
     .await;
 
-    match recv_until_session_state(&mut ws).await {
+    let mut reject_error = None;
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ProtocolError { code, message, .. } => {
+                reject_error = Some((code, message));
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    let (code, message) = reject_error.expect("reject should return guidance protocol error");
+    assert_eq!(code, "INVALID_AUTHOR_DECISION");
+    assert!(
+        message.contains("反馈"),
+        "reject guidance should point to feedback revision: {message}"
+    );
+    assert!(
+        reviewer_prompts.lock().unwrap().is_empty(),
+        "reviewer must not run when author decision is rejected"
+    );
+
+    drop(ws);
+    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+    match recv_json(&mut reconnected).await {
         WsOutMessage::SessionState {
             stage,
             artifact,
@@ -635,26 +694,21 @@ async fn workspace_ws_author_decision_reject_returns_to_prepare_and_survives_rec
             messages,
             ..
         } => {
-            assert_eq!(stage, "prepare_context");
-            assert_eq!(artifact, None);
+            assert_eq!(stage, "author_confirm");
+            assert!(
+                artifact.is_some(),
+                "reject guidance error must not discard the artifact"
+            );
+            // Story 会话 SessionState 的 artifact_versions 恒空（版本史走 artifact_version_summaries）。
             assert_eq!(artifact_versions.len(), 0);
             assert_eq!(artifact_version_summaries.len(), 1);
-            assert!(!artifact_version_summaries[0].is_current);
+            assert!(
+                artifact_version_summaries[0].is_current,
+                "reject 不再作废产物，当前稿保持 current"
+            );
             assert!(messages.iter().any(|message| {
                 message.role == "assistant" && message.content.contains("# Story Spec")
             }));
-        }
-        other => panic!("expected session state after reject, got {other:?}"),
-    }
-
-    drop(ws);
-    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
-    match recv_json(&mut reconnected).await {
-        WsOutMessage::SessionState {
-            stage, artifact, ..
-        } => {
-            assert_eq!(stage, "prepare_context");
-            assert_eq!(artifact, None);
         }
         other => panic!("expected reconnected session state, got {other:?}"),
     }

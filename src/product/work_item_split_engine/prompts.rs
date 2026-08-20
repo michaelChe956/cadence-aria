@@ -282,6 +282,19 @@ fn split_option_semantics(request: &GenerateWorkItemsRequest) -> String {
     )
 }
 
+/// Renders a non-empty JSON string array for the outline prompt 最小正确示例。
+///
+/// 校验器强制 work_item_outlines 每项的 source spec ID 非空；示例若用空数组，
+/// 弱模型 provider 照抄示例会导致第一轮 outline 必失败。优先注入 request 中
+/// 的真实 spec ID；request 为空时退回占位 ID。
+fn example_source_spec_id_array(ids: &[String], placeholder: &str) -> String {
+    if ids.is_empty() {
+        return format!("[\"{placeholder}\"]");
+    }
+    let quoted = ids.iter().map(|id| format!("\"{id}\"")).collect::<Vec<_>>();
+    format!("[{}]", quoted.join(","))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_outline_prompt_with_nonce(
     request: &GenerateWorkItemsRequest,
@@ -336,6 +349,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          work_item_outlines[] 每项必须同时提供稳定且唯一的 outline_id 与 logical_work_item_id；依赖只能写在各 item 的 depends_on 数组中。\n\
          不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
          work_item_outlines[] 每项必须包含 estimated_context_tokens(1..=50000) 与 session_fit=\"fits_single_agent_session\"。\n\
+         work_item_outlines[] 每项的 source_story_spec_ids/source_design_spec_ids 必须填写 [confirmed_story_specs]/[confirmed_design_specs] 中的真实 spec ID，禁止空数组。\n\
          work_item_outlines[] 每项必须包含 trusted_verification_commands：仅登记已确认仓库/Design/Outline 证据支持的 command、cwd、purpose、source_ref；证据不足时使用空数组，绝不根据 WorkItemKind 猜测命令。\n\
          不得修改仓库文件，不得创建计划文档。\n\
          如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n\
@@ -347,7 +361,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
          标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
-         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
+         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         title = issue.title,
@@ -371,6 +385,10 @@ pub(crate) fn build_outline_prompt_with_nonce(
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+        example_story_spec_ids =
+            example_source_spec_id_array(&request.story_spec_ids, "story_spec_0001"),
+        example_design_spec_ids =
+            example_source_spec_id_array(&request.design_spec_ids, "design_spec_0001"),
     );
     (prompt, nonce)
 }

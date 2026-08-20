@@ -1,4 +1,4 @@
-export type RealProviderName = "claude_code" | "codex" | "pi";
+export type RealProviderName = "claude_code" | "codex" | "pi" | "kimi_code";
 
 export type ProviderHealthStateStatus = "ready" | "degraded";
 
@@ -7,6 +7,7 @@ export type ProviderHealthReasonCode =
   | "timeout"
   | "non_zero_exit"
   | "version_unparseable"
+  | "version_too_low"
   | "io_error";
 
 export type ProviderHealthEntry = {

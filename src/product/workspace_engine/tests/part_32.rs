@@ -197,16 +197,16 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
     );
     assert_eq!(
         engine.session().stage,
-        WorkspaceStage::HumanConfirm,
-        "pass verdict must enter human confirm"
+        WorkspaceStage::AuthorConfirm,
+        "Story/Design pass verdict must return its report to author confirmation"
     );
     assert!(
         engine.timeline_nodes.iter().any(|node| {
             node.node_type == TimelineNodeType::ReviewerRun
                 && node.status == TimelineNodeStatus::Completed
-                && node.summary.as_deref() == Some("可以确认")
+                && node.summary.as_deref() == Some("Review 完成，报告已进入对话流")
         }),
-        "reviewer run node must be completed with pass summary"
+        "Story/Design reviewer run must complete before its report returns to author confirmation"
     );
 }
 

@@ -116,11 +116,14 @@ impl WorkspaceEngine {
         )
         .await;
 
+        // 第一阶段不实证 Kimi resume 稳定性，排除 artifact retry（同 Pi）
         let retry_context =
-            (self.session.author_provider != ProviderName::Pi).then(|| ArtifactRetryContext {
-                provider: provider.clone(),
-                input: input.clone(),
-                attempted: false,
+            provider_allows_artifact_retry(&self.session.author_provider).then(|| {
+                ArtifactRetryContext {
+                    provider: provider.clone(),
+                    input: input.clone(),
+                    attempted: false,
+                }
             });
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
@@ -851,10 +854,19 @@ impl WorkspaceEngine {
                 node_id,
             })
             .await;
+        // spec-design-dialog-revision T4：author 反馈修订完成后回 AuthorConfirm，summary 携带改动摘要
+        // （brief 未覆盖提取机制，按现有 Revision 完成路径最小适配：从产物「## 改动摘要」小节提取）。
+        // T5/M-1：谓词提取为共享 helper is_author_feedback_revision（decisions.rs）。
+        let confirm_summary = if self.is_author_feedback_revision() {
+            extract_changelog_summary(&artifact_markdown)
+                .map(|changelog| format!("修订完成。\n\n## 改动摘要\n{changelog}"))
+                .unwrap_or_else(|| "等待用户确认 author 结果".to_string())
+        } else {
+            "等待用户确认 author 结果".to_string()
+        };
         self.complete_active_node(Some("生成完成".to_string()))
             .await;
-        self.enter_author_confirm(Some("等待用户确认 author 结果".to_string()))
-            .await;
+        self.enter_author_confirm(Some(confirm_summary)).await;
     }
 
     /// 方案X阶段2：AI run 完成后解析 structured output，将 AI 声明的 involved/change_order
@@ -968,6 +980,37 @@ impl WorkspaceEngine {
                 message.to_string(),
             );
         }
+    }
+}
+
+/// 从修订产物 markdown 提取「## 改动摘要」小节正文（到下一个二级标题或文末为止）。
+/// spec-design-dialog-revision T4：author 反馈修订完成后，AuthorConfirm summary 携带改动摘要。
+pub(crate) fn extract_changelog_summary(markdown: &str) -> Option<String> {
+    const HEADER: &str = "## 改动摘要";
+    let start = markdown.find(HEADER)?;
+    let rest = &markdown[start + HEADER.len()..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    let section = rest[..end].trim();
+    if section.is_empty() {
+        None
+    } else {
+        Some(section.to_string())
+    }
+}
+
+pub(crate) fn provider_allows_artifact_retry(provider: &ProviderName) -> bool {
+    !matches!(provider, ProviderName::Pi | ProviderName::KimiCode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_is_excluded_from_artifact_retry() {
+        assert!(!provider_allows_artifact_retry(&ProviderName::KimiCode));
+        assert!(!provider_allows_artifact_retry(&ProviderName::Pi));
+        assert!(provider_allows_artifact_retry(&ProviderName::Codex));
     }
 }
 

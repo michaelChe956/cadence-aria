@@ -134,6 +134,9 @@ fn structured_interaction_guidance_for(provider: &ProviderName) -> &'static str 
         ProviderName::Pi => {
             "当前 author provider 是 Pi；需要向用户确认时，使用 `ask_user` 工具提问并等待回答。禁止输出文本 A/B/C 选择题作为交互替代；`ask_user` 会经 Aria 弹出选择卡片，用户回答后同一 Pi 进程继续。"
         }
+        ProviderName::KimiCode => {
+            "当前 author provider 是 Kimi Code；Supervised 模式下工具操作必须使用结构化 permission request（逐工具审批），并等待用户审批或回答。需要向用户确认时，必须使用结构化 AskUserQuestion（用户可选择选项或自由输入）并等待回答。禁止输出文本 A/B/C 选择题作为交互替代。每次 AskUserQuestion 只询问一个产品/范围/验收决策，禁止把多个独立问题放入同一个 questions[]；收到回答后才继续下一题。未获回答时不得把「按推荐项自行决定」写入待确认项——若结论可由 Issue 明示约束推导，直接写入需求/验收并把待确认项写「无待确认项」；否则等待用户回答。"
+        }
         ProviderName::Fake => {
             "当前 author provider 未声明原生结构化交互能力；需要向用户确认时，必须输出 daemon 可识别的暂停信号并交给 text_fallback。禁止伪造 AskUserQuestion 或 requestUserInput 工具调用，也不要把文本选择题作为正常交互路径。"
         }
@@ -155,7 +158,7 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
                 .to_string()
         }
         WorkspaceType::WorkItemPlan => {
-            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。拆分目标是在单个 Claude Code 或 Codex 会话可完成的前提下最少拆分。每个任务必须最大内聚，优先合并目标一致、范围重叠且可在同一会话闭环的工作；不超过 40k 属正常范围，40001..=50000 需经 Reviewer 判断，超过 50k 必须继续拆分。"
+            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；每个任务必须显式绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。拆分目标是在单个 Claude Code 或 Codex 会话可完成的前提下最少拆分。每个任务必须最大内聚，优先合并目标一致、范围重叠且可在同一会话闭环的工作；不超过 40k 属正常范围，40001..=50000 需经 Reviewer 判断，超过 50k 必须继续拆分。下方 parser schema 是唯一的 Markdown 结构、heading、稳定 ID 与追踪合同。"
                 .to_string()
         }
     };

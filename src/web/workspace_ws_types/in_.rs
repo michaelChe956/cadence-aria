@@ -129,10 +129,13 @@ pub enum HumanConfirmDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthorDecision {
     Accept,
     Reject,
+    Revise { feedback: String },
+    AcceptWithReview,
+    AcceptFinalize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

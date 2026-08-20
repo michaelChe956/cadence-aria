@@ -485,13 +485,6 @@ impl WorkspaceEngine {
         }
     }
 
-    pub(crate) fn mark_latest_artifact_rejected(&mut self) {
-        if let Some(version) = self.artifact_versions.last_mut() {
-            version.is_current = false;
-            self.persist_artifact_versions();
-        }
-    }
-
     pub(crate) fn persist_timeline_nodes(&self) {
         if let Some(store) = &self.lifecycle_store {
             let _ = store.save_timeline_nodes(&self.session.session_id, &self.timeline_nodes);

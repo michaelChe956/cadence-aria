@@ -343,6 +343,7 @@ export interface WorkspaceWsActions {
     timeline_node_summaries?: Record<string, NodeDetailSummary>;
     active_run_id?: string | null;
     human_presentation_revisions?: HumanPresentationRevision[];
+    reviewer_enabled_at_start?: boolean | null;
     recoverable_interrupted_run?: RecoverableInterruptedRun | null;
     plan_repair?: PlanRepairSessionSnapshot | null;
   }) => void;

@@ -1,5 +1,7 @@
+// spec-design-dialog-revision T5：Story/Design 强 revise 完成统一回 AuthorConfirm（报告进对话流），
+// WorkItem 维持既有 ReviewDecision 路由（design.md「WorkItem 不受影响」）。
 #[tokio::test]
-async fn strong_review_findings_enter_review_decision_for_all_workspace_types() {
+async fn strong_review_findings_route_author_confirm_or_review_decision_for_all_workspace_types() {
     for workspace_type in [
         WorkspaceType::Story,
         WorkspaceType::Design,
@@ -12,7 +14,7 @@ async fn strong_review_findings_enter_review_decision_for_all_workspace_types() 
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n缺少验收标准"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -41,14 +43,33 @@ async fn strong_review_findings_enter_review_decision_for_all_workspace_types() 
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
-        assert!(
-            engine
-                .timeline_nodes
-                .iter()
-                .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
-            "{workspace_type:?} should require revision for strong findings"
-        );
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} strong revise 完成必须回 AuthorConfirm（报告进对话流）"
+                );
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::AuthorConfirm),
+                    "{workspace_type:?} should route review report back to author confirm"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
+                    "{workspace_type:?} should require revision for strong findings"
+                );
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
     }
 }
 
@@ -66,7 +87,7 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n需要人工裁决的版本"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -86,7 +107,8 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        // review_gate 语义不变（fallback 判定仍为 UserTriageRequired）；仅路由终点按类型分流：
+        // Story/Design → AuthorConfirm（报告进对话流），WorkItem → HumanConfirm（用户 triage）。
         assert_eq!(
             engine
                 .latest_review_verdict
@@ -95,13 +117,26 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
                 .review_gate,
             ReviewGate::UserTriageRequired
         );
-        assert!(
-            engine
-                .timeline_nodes
-                .iter()
-                .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
-            "{workspace_type:?} should create human_confirm node for user triage"
-        );
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} revise 无 findings 必须回 AuthorConfirm（报告进对话流）"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+                assert!(
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
+                    "{workspace_type:?} should create human_confirm node for user triage"
+                );
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
         assert!(
             !engine
                 .timeline_nodes
@@ -126,7 +161,7 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
         session.review_rounds = 2;
         session.artifact = Some(artifact_payload("# Artifact\n\n需要人工裁决的版本"));
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        engine.start_review_or_skip().await;
+        engine.start_review().await;
 
         engine
             .drive_review_session(
@@ -147,7 +182,6 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
             )
             .await;
 
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
         assert_eq!(
             engine
                 .latest_review_verdict
@@ -156,6 +190,19 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
                 .review_gate,
             ReviewGate::UserTriageRequired
         );
+        match workspace_type {
+            WorkspaceType::Story | WorkspaceType::Design => {
+                assert_eq!(
+                    engine.session().stage,
+                    WorkspaceStage::AuthorConfirm,
+                    "{workspace_type:?} malformed findings 必须回 AuthorConfirm（报告进对话流）"
+                );
+            }
+            WorkspaceType::WorkItem => {
+                assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+            }
+            other => panic!("unexpected workspace type {other:?}"),
+        }
     }
 }
 
@@ -357,7 +404,7 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
 }
 
 #[tokio::test]
-async fn drive_review_session_pass_enters_human_confirm() {
+async fn drive_review_session_pass_enters_author_confirm() {
     let (_tmp, store) = setup();
     let (tx, mut rx) = mpsc::channel(64);
     let session = make_session("sess_review_pass");
@@ -398,13 +445,18 @@ async fn drive_review_session_pass_enters_human_confirm() {
             .unwrap()
             .contains("# Story Spec")
     );
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    // spec-design-dialog-revision T5：Story review pass 完成不得自动定稿，统一回 AuthorConfirm。
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
     match engine.build_session_state() {
         WsOutMessage::SessionState { timeline_nodes, .. } => {
             assert!(timeline_nodes.iter().any(|node| {
                 node.node_type == TimelineNodeType::ReviewerRun
                     && node.status == TimelineNodeStatus::Completed
-                    && node.summary.as_deref() == Some("可以确认")
+            }));
+            // T5：回 AuthorConfirm 必须创建 AuthorConfirm 节点（报告进对话流后等待作者确认）。
+            assert!(timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::AuthorConfirm
+                    && node.status == TimelineNodeStatus::Active
             }));
         }
         _ => panic!("expected SessionState"),
@@ -431,7 +483,7 @@ async fn drive_review_session_pass_enters_human_confirm() {
 }
 
 #[tokio::test]
-async fn drive_review_session_strong_revise_pauses_for_decision() {
+async fn drive_review_session_strong_revise_returns_to_author_confirm() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let session = make_session("sess_review_revise");
@@ -472,7 +524,8 @@ async fn drive_review_session_strong_revise_pauses_for_decision() {
         )
         .await;
 
-    assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+    // spec-design-dialog-revision T5：Story 强 revise 完成不再停在 ReviewDecision，统一回 AuthorConfirm。
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
     match engine.build_session_state() {
         WsOutMessage::SessionState {
             timeline_nodes,
@@ -482,9 +535,9 @@ async fn drive_review_session_strong_revise_pauses_for_decision() {
             let active = timeline_nodes
                 .iter()
                 .find(|node| Some(&node.node_id) == active_node_id.as_ref())
-                .expect("active review decision node");
-            assert_eq!(active.node_type, TimelineNodeType::ReviewDecision);
-            assert_eq!(active.status, TimelineNodeStatus::Paused);
+                .expect("active author confirm node");
+            assert_eq!(active.node_type, TimelineNodeType::AuthorConfirm);
+            assert_eq!(active.status, TimelineNodeStatus::Active);
         }
         _ => panic!("expected SessionState"),
     }
@@ -605,7 +658,7 @@ async fn queued_review_engine_for(
     session.workspace_type = workspace_type;
     session.artifact = Some(artifact);
     let mut engine = WorkspaceEngine::new(store, tx, session);
-    engine.start_review_or_skip().await;
+    engine.start_review().await;
     let review_node_id = engine
         .active_node_id
         .clone()
@@ -637,6 +690,115 @@ fn valid_structured_output(json: &str) -> String {
     format!(
         "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">"
     )
+}
+
+#[tokio::test]
+async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
+    enum KimiReviewRepairCase {
+        General {
+            name: &'static str,
+            workspace_type: WorkspaceType,
+            artifact: ArtifactPayload,
+            review_json: &'static str,
+        },
+        WorkItemPlan,
+    }
+
+    let general_review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let cases = [
+        KimiReviewRepairCase::General {
+            name: "story",
+            workspace_type: WorkspaceType::Story,
+            artifact: artifact_payload(&complete_story_artifact(
+                "补充格式修复",
+                "修复后可继续审核",
+            )),
+            review_json: general_review_json,
+        },
+        KimiReviewRepairCase::General {
+            name: "design",
+            workspace_type: WorkspaceType::Design,
+            artifact: artifact_payload(&complete_design_artifact(
+                "保持业务 payload",
+                "复用 reviewer session",
+            )),
+            review_json: general_review_json,
+        },
+        KimiReviewRepairCase::General {
+            name: "work_item",
+            workspace_type: WorkspaceType::WorkItem,
+            artifact: artifact_payload(&complete_work_item_artifact("修复 reviewer 结构化输出")),
+            review_json: general_review_json,
+        },
+        KimiReviewRepairCase::WorkItemPlan,
+    ];
+
+    for case in cases {
+        let (_tmp, case_name, review_json, mut engine, mut rx, review_node_id) = match case {
+            KimiReviewRepairCase::General {
+                name,
+                workspace_type,
+                artifact,
+                review_json,
+            } => {
+                let (_tmp, engine, rx, review_node_id) = queued_review_engine_for(
+                    &format!("sess_kimi_review_repair_{name}"),
+                    workspace_type,
+                    artifact,
+                )
+                .await;
+                (_tmp, name, review_json, engine, rx, review_node_id)
+            }
+            KimiReviewRepairCase::WorkItemPlan => {
+                let (_tmp, engine, rx, review_node_id) = queued_work_item_plan_outline_review_engine(
+                    "sess_kimi_review_repair_work_item_plan",
+                )
+                .await;
+                (
+                    _tmp,
+                    "work_item_plan",
+                    work_item_plan_outline_revise_json(),
+                    engine,
+                    rx,
+                    review_node_id,
+                )
+            }
+        };
+        let provider = QueuedReviewProvider::new(vec![
+            missing_end_nonce_output(review_json),
+            valid_structured_output(review_json),
+        ]);
+        engine.session.reviewer_provider = Some(ProviderName::KimiCode);
+
+        engine
+            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .await;
+
+        assert_eq!(provider.starts.load(Ordering::SeqCst), 2, "{case_name}");
+        assert_eq!(
+            provider.resume_provider_session_ids.lock().unwrap()[1],
+            Some("review-session-1".to_string()),
+            "{case_name}"
+        );
+        let diagnostic = engine
+            .latest_review_verdict
+            .as_ref()
+            .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
+            .expect("repair diagnostic");
+        assert!(diagnostic.repair_attempted, "{case_name}");
+        assert!(diagnostic.repair_succeeded, "{case_name}");
+        assert_eq!(
+            repair_event_statuses(&mut rx),
+            vec![
+                (
+                    ProviderExecutionEventStatus::Started,
+                    Some(review_node_id.clone())
+                ),
+                (ProviderExecutionEventStatus::Completed, Some(review_node_id)),
+            ],
+            "{case_name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -692,6 +854,7 @@ async fn review_structured_output_repair_rejects_payload_change() {
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_review_engine("sess_review_repair_payload_changed").await;
+    engine.session.reviewer_provider = Some(ProviderName::KimiCode);
 
     engine
         .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())

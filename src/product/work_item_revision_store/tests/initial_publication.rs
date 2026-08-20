@@ -825,6 +825,8 @@ fn work_item_workspace_session(
         reviewer_provider: ProviderName::ClaudeCode,
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding,

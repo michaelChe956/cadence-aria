@@ -326,6 +326,25 @@ async fn build_session_state_returns_correct_structure() {
 }
 
 #[tokio::test]
+async fn build_session_state_projects_reviewer_enabled_at_start() {
+    let (_tmp, store) = setup();
+    let (tx, _) = mpsc::channel(64);
+    let mut session = make_session("sess_reas_001");
+    session.reviewer_enabled_at_start = Some(false);
+    let engine = WorkspaceEngine::new(store, tx, session);
+
+    match engine.build_session_state() {
+        WsOutMessage::SessionState {
+            reviewer_enabled_at_start,
+            ..
+        } => {
+            assert_eq!(reviewer_enabled_at_start, Some(false));
+        }
+        _ => panic!("expected SessionState"),
+    }
+}
+
+#[tokio::test]
 async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_active_run_id() {
     let (tmp, checkpoint_store) = setup();
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
@@ -722,10 +741,10 @@ async fn append_context_note_creates_timeline_node() {
 // Blocker 2：confirm gate 下沉 —— WebSocket handle_confirm 不能绕过 gate
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 多仓 Design（involved=2 无 change_order）在 handle_confirm 时必须被 gate 拦截，
-/// 返回 Err 且不把 session 置为 Confirmed（REQ-PLN-05 收紧，不能绕过）。
+/// 多仓 Design（involved=2 无 change_order）在当前 AuthorConfirm 定稿路径必须被 gate
+/// 拦截，返回 Err 且不把 session 置为 Confirmed（REQ-PLN-05 收紧，不能绕过）。
 #[tokio::test]
-async fn handle_confirm_rejects_multi_repo_design_without_change_order_without_setting_confirmed() {
+async fn author_finalize_rejects_multi_repo_design_without_change_order_without_setting_confirmed() {
     let root = tempfile::TempDir::new().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(paths.clone());
@@ -770,13 +789,16 @@ async fn handle_confirm_rejects_multi_repo_design_without_change_order_without_s
     ));
     let (tx, _rx) = mpsc::channel(64);
     let mut session = WorkspaceSession::from_record(record);
-    session.stage = WorkspaceStage::HumanConfirm;
+    session.stage = WorkspaceStage::AuthorConfirm;
     let mut engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
 
-    let error = engine.handle_confirm().await.unwrap_err();
+    let error = engine
+        .handle_author_decision(AuthorDecision::AcceptFinalize)
+        .await
+        .unwrap_err();
     assert!(
         error.contains("change_order_required_for_logical_codebase"),
-        "handle_confirm must fail the confirm gate for multi-repo Design without change_order: {error}"
+        "author finalization must fail the confirm gate for multi-repo Design without change_order: {error}"
     );
 
     let stored = lifecycle
@@ -789,9 +811,9 @@ async fn handle_confirm_rejects_multi_repo_design_without_change_order_without_s
     );
 }
 
-/// 多仓 Story（involved 空）在 handle_confirm 时同样被 gate 拦截（REQ-PLN-04）。
+/// 多仓 Story（involved 空）在当前 AuthorConfirm 定稿路径同样被 gate 拦截（REQ-PLN-04）。
 #[tokio::test]
-async fn handle_confirm_rejects_multi_repo_story_without_involved_without_setting_confirmed() {
+async fn author_finalize_rejects_multi_repo_story_without_involved_without_setting_confirmed() {
     let root = tempfile::TempDir::new().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(paths.clone());
@@ -833,13 +855,16 @@ async fn handle_confirm_rejects_multi_repo_story_without_involved_without_settin
     ));
     let (tx, _rx) = mpsc::channel(64);
     let mut session = WorkspaceSession::from_record(record);
-    session.stage = WorkspaceStage::HumanConfirm;
+    session.stage = WorkspaceStage::AuthorConfirm;
     let mut engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
 
-    let error = engine.handle_confirm().await.unwrap_err();
+    let error = engine
+        .handle_author_decision(AuthorDecision::AcceptFinalize)
+        .await
+        .unwrap_err();
     assert!(
         error.contains("involved_repositories_undetermined"),
-        "handle_confirm must fail the confirm gate for multi-repo Story without involved: {error}"
+        "author finalization must fail the confirm gate for multi-repo Story without involved: {error}"
     );
 
     let stored = lifecycle

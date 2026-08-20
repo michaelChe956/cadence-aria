@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn single_review_round_strong_revise_still_pauses_for_decision() {
+async fn single_review_round_strong_revise_still_pauses_for_author_decision() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let mut session = make_session("sess_single_review_revise");
@@ -41,18 +41,20 @@ async fn single_review_round_strong_revise_still_pauses_for_decision() {
         )
         .await;
 
-    assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+    // spec-design-dialog-revision T5：Story 强 revise 完成不再停在 ReviewDecision，统一回 AuthorConfirm
+    // （报告进对话流后等待作者决策；review_rounds=1 时不得自动续第二轮）。
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
     let active_node = engine
         .timeline_nodes
         .iter()
         .find(|node| Some(&node.node_id) == engine.active_node_id.as_ref())
-        .expect("active review decision node");
-    assert_eq!(active_node.node_type, TimelineNodeType::ReviewDecision);
-    assert_eq!(active_node.status, TimelineNodeStatus::Paused);
+        .expect("active author confirm node");
+    assert_eq!(active_node.node_type, TimelineNodeType::AuthorConfirm);
+    assert_eq!(active_node.status, TimelineNodeStatus::Active);
 }
 
 #[tokio::test]
-async fn review_decision_continue_after_strong_revise_runs_revision() {
+async fn strong_revise_then_author_feedback_runs_revision() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
     let session = make_session("sess_review_revision");
@@ -104,15 +106,16 @@ async fn review_decision_continue_after_strong_revise_runs_revision() {
             empty_provider_commands(),
         )
         .await;
-    assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+    // spec-design-dialog-revision T5：Story 强 revise 完成统一回 AuthorConfirm（报告进对话流），
+    // 作者经反馈修订继续返修（I-1：新反馈清空 review verdict，走 author 增量修订 prompt）。
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
 
     engine
-        .handle_review_decision(
-            "continue_with_context".to_string(),
-            Some("补充登录错误码".to_string()),
-        )
+        .handle_author_decision(AuthorDecision::Revise {
+            feedback: "需要补充失败路径。补充登录错误码".to_string(),
+        })
         .await
-        .expect("decision should be accepted");
+        .expect("author feedback should enter revision");
     assert_eq!(engine.session().stage, WorkspaceStage::Revision);
 
     let revision_provider_type = Arc::new(Mutex::new(None));
@@ -153,9 +156,18 @@ async fn review_decision_continue_after_strong_revise_runs_revision() {
     assert!(prompt.contains("# Story Spec"));
     assert!(prompt.contains("需要补充失败路径"));
     assert!(prompt.contains("补充登录错误码"));
-    assert!(prompt.contains("用户补充信息优先级高于 Reviewer 审核意见"));
-    assert!(prompt.contains("如二者冲突，以用户补充信息为准"));
-    assert!(prompt.contains("请根据以上审核意见修改产物"));
+    assert!(
+        prompt.contains("增量修订"),
+        "author 反馈修订必须走增量修订 prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("## 用户反馈"),
+        "author 反馈修订 prompt 必须包含用户反馈小节: {prompt}"
+    );
+    assert!(
+        prompt.contains("## 改动摘要"),
+        "author 反馈修订 prompt 必须要求改动摘要小节: {prompt}"
+    );
     assert_eq!(
         engine
             .session()

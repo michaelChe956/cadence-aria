@@ -10,6 +10,8 @@ use crate::cross_cutting::bounded_command_runner::{
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::image_client::ImageClient;
+use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
+use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_health::{
@@ -438,8 +440,7 @@ fn default_provider_registry(
     Arc::new(registry)
 }
 
-/// 生产模式 registry:只注册真实 ClaudeCode/Codex 实现,不含 `ProviderName::Fake`,
-/// 也不注册 Pi。
+/// 生产模式 registry:注册所有实际 provider，不含 `ProviderName::Fake`。
 fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
     registry.register_gated(
@@ -450,13 +451,23 @@ fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> Provi
     registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+        provider_gate.clone(),
+    );
+    registry.register_gated(
+        ProviderName::Pi,
+        Arc::new(PiProvider::new(PathBuf::from("pi"))),
+        provider_gate.clone(),
+    );
+    registry.register_gated(
+        ProviderName::KimiCode,
+        Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
         provider_gate,
     );
     registry
 }
 
-/// fake 模式 registry:保持既有 fake 分支全部内容(Fake + 冒充 ClaudeCode/Codex/Pi
-/// 的 `TestControlledFakeStreamingProvider`)。
+/// fake 模式 registry:保持所有 provider 名称由
+/// `TestControlledFakeStreamingProvider` 承接。
 fn fake_mode_provider_registry(test_controls: TestControls) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
     registry.register(
@@ -479,6 +490,12 @@ fn fake_mode_provider_registry(test_controls: TestControls) -> ProviderRegistry 
     );
     registry.register(
         ProviderName::Pi,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::KimiCode,
         Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
     );
     registry
@@ -613,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn default_provider_registry_real_mode_excludes_fake_and_pi() {
+    fn default_provider_registry_real_mode_excludes_fake_and_registers_all_real_providers() {
         let root = tempdir().expect("root");
         let runner = Arc::new(ScriptedRunner::new(Vec::new()));
         let health = provider_health(root.path(), runner);
@@ -622,12 +639,13 @@ mod tests {
 
         assert!(registry.get(&ProviderName::ClaudeCode).is_some());
         assert!(registry.get(&ProviderName::Codex).is_some());
+        assert!(registry.get(&ProviderName::Pi).is_some());
+        assert!(registry.get(&ProviderName::KimiCode).is_some());
         assert!(registry.get(&ProviderName::Fake).is_none());
-        assert!(registry.get(&ProviderName::Pi).is_none());
     }
 
     #[test]
-    fn default_provider_registry_real_registry_only_holds_gated_claude_code_and_codex() {
+    fn default_provider_registry_real_registry_holds_all_gated_real_providers() {
         let root = tempdir().expect("root");
         let runner = Arc::new(ScriptedRunner::new(Vec::new()));
         let health = provider_health(root.path(), runner);
@@ -636,18 +654,20 @@ mod tests {
 
         assert!(registry.get(&ProviderName::ClaudeCode).is_some());
         assert!(registry.get(&ProviderName::Codex).is_some());
+        assert!(registry.get(&ProviderName::Pi).is_some());
+        assert!(registry.get(&ProviderName::KimiCode).is_some());
         assert!(registry.get(&ProviderName::Fake).is_none());
-        assert!(registry.get(&ProviderName::Pi).is_none());
     }
 
     #[test]
-    fn default_provider_registry_fake_mode_registry_keeps_legacy_fake_branch_contents() {
+    fn default_provider_registry_fake_mode_registry_keeps_all_provider_names() {
         let registry = fake_mode_provider_registry(TestControls::default());
 
         assert!(registry.get(&ProviderName::Fake).is_some());
         assert!(registry.get(&ProviderName::ClaudeCode).is_some());
         assert!(registry.get(&ProviderName::Codex).is_some());
         assert!(registry.get(&ProviderName::Pi).is_some());
+        assert!(registry.get(&ProviderName::KimiCode).is_some());
     }
 
     #[test]
@@ -659,11 +679,13 @@ mod tests {
 
         let real = default_provider_registry(TestControls::default(), gate.clone(), false);
         assert!(real.get(&ProviderName::Fake).is_none());
-        assert!(real.get(&ProviderName::Pi).is_none());
+        assert!(real.get(&ProviderName::Pi).is_some());
+        assert!(real.get(&ProviderName::KimiCode).is_some());
 
         let fake = default_provider_registry(TestControls::default(), gate, true);
         assert!(fake.get(&ProviderName::Fake).is_some());
         assert!(fake.get(&ProviderName::Pi).is_some());
+        assert!(fake.get(&ProviderName::KimiCode).is_some());
     }
 
     #[test]
@@ -780,6 +802,7 @@ mod tests {
                 success("1.0"),
                 success("2.0"),
                 success("0.83.0"),
+                success("0.34.0"),
             ]));
             let health = provider_health(root.path(), runner.clone());
             let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));

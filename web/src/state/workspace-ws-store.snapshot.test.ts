@@ -61,6 +61,48 @@ describe("workspace ws store snapshots", () => {
     ]);
   });
 
+  it("restores reviewerEnabled from the session snapshot projection", () => {
+    const store = useWorkspaceStore.getState();
+    // 初始默认 true；创建时未启用 review 的会话经 SessionState 投影恢复为 false。
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+
+    store.setSessionState({
+      session_id: "session_reviewer_off",
+      workspace_type: "story",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      reviewer_enabled_at_start: false,
+    });
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(false);
+
+    store.setSessionState({
+      session_id: "session_reviewer_off",
+      workspace_type: "story",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      reviewer_enabled_at_start: true,
+    });
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+
+    // 旧会话（字段缺失/None）→ 不动，保持现值。
+    store.setSessionState({
+      session_id: "session_reviewer_off",
+      workspace_type: "story",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+  });
+
   it("initializes timeline state from a session snapshot", () => {
     const store = useWorkspaceStore.getState();
 

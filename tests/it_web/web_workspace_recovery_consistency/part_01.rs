@@ -418,11 +418,14 @@ async fn story_workspace_review_sentinel_fallback_still_passes() {
     .expect("send author accept");
 
     let messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
-        messages
-            .iter()
-            .any(|message| message["type"] == "review_complete")
+        messages.iter().any(|message| message["type"] == "review_complete")
             && messages.iter().any(|message| {
-                message["type"] == "stage_change" && message["stage"] == "human_confirm"
+                message["type"] == "stage_change" && message["stage"] == "author_confirm"
+            })
+            && messages.iter().any(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "author_confirm"
+                    && message["node"]["summary"] == "请基于 Review 报告继续修订或确认定稿"
             })
     })
     .await;
@@ -437,11 +440,29 @@ async fn story_workspace_review_sentinel_fallback_still_passes() {
             .is_none_or(Value::is_null),
         "Story review_complete must not carry WorkItemPlan extension: {review_complete:?}"
     );
+    // spec-design-dialog-revision T5：review 完成统一回 AuthorConfirm（报告进对话流），
+    // 不再路由 HumanConfirm（Fake reviewer 快速路径除外，本用例为 codex 真实评审）。
     assert!(
         messages
             .iter()
-            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm"),
-        "Story review fallback should enter human_confirm, got {messages:?}"
+            .any(|message| message["type"] == "stage_change" && message["stage"] == "author_confirm"),
+        "Story review fallback should return to author_confirm, got {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_updated"
+                && message["summary"] == "Review 完成，报告已进入对话流"
+        }),
+        "review report should be recorded into conversation flow, got {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "author_confirm"
+                && message["node"]["summary"]
+                    == "请基于 Review 报告继续修订或确认定稿"
+        }),
+        "post-review author_confirm node should invite revision or finalize, got {messages:?}"
     );
 
     ws.close(None).await.ok();
