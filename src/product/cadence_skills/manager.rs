@@ -18,7 +18,11 @@ use crate::cross_cutting::bounded_command_runner::{
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(180);
 const OUTPUT_LIMIT: usize = 8 * 1024;
-const REPOSITORY_URL: &str = "https://gitee.com/michaelChe-World/Cadence-skills.git";
+const CANDIDATE_URLS: [&str; 3] = [
+    "https://ghfast.top/https://github.com/michaelChe956/Cadence-skills.git",
+    "https://gh-proxy.com/https://github.com/michaelChe956/Cadence-skills.git",
+    "https://mirror.ghproxy.com/https://github.com/michaelChe956/Cadence-skills.git",
+];
 static PREPARE_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub struct CadenceSkillsManager {
@@ -110,55 +114,47 @@ impl CadenceSkillsManager {
                 &offline_action(self.paths.repository_root()),
             )
         })?;
-        let request = self.git_request(
-            vec![
-                "clone".to_string(),
-                REPOSITORY_URL.to_string(),
-                self.paths.repository_root().to_string_lossy().into_owned(),
-            ],
-            self.home.clone(),
-            cancellation,
-        );
-        let result = match self.runner.run(request.clone()).await {
-            Ok(result) => result,
-            Err(error) => {
-                let reason = format!(
-                    "{}: {}{}",
-                    command_label(&request),
-                    sanitize_reason(&error.to_string()),
+        let mut failures = Vec::new();
+        for url in CANDIDATE_URLS {
+            let request = self.git_request(
+                vec![
+                    "clone".to_string(),
+                    url.to_string(),
+                    self.paths.repository_root().to_string_lossy().into_owned(),
+                ],
+                self.home.clone(),
+                cancellation.clone(),
+            );
+            let result = self.runner.run(request.clone()).await;
+            match result {
+                Ok(result) if command_succeeded(&result) => {
+                    if self.paths.source_root().is_dir() {
+                        return Ok(());
+                    }
+                    failures.push(format!(
+                        "clone {} reported success but cadence-init/skills is missing{}",
+                        url,
+                        self.cleanup_failed_clone_reason()
+                    ));
+                }
+                Ok(result) => failures.push(format!(
+                    "clone {}{}",
+                    command_summary(&request, &result),
                     self.cleanup_failed_clone_reason()
-                );
-                return Err(CadenceSkillsError::unavailable(
-                    "clone",
-                    &reason,
-                    clone_download_action(),
-                ));
+                )),
+                Err(error) => failures.push(format!(
+                    "clone {}{}",
+                    command_summary_for_error(&request, &error),
+                    self.cleanup_failed_clone_reason()
+                )),
             }
-        };
-        if !command_succeeded(&result) {
-            let reason = format!(
-                "{}{}",
-                command_summary(&request, &result),
-                self.cleanup_failed_clone_reason()
-            );
-            return Err(CadenceSkillsError::unavailable(
-                "clone",
-                &reason,
-                clone_download_action(),
-            ));
         }
-        if !self.paths.source_root().is_dir() {
-            let reason = format!(
-                "git clone reported success but cadence-init/skills is missing{}",
-                self.cleanup_failed_clone_reason()
-            );
-            return Err(CadenceSkillsError::unavailable(
-                "clone_source_validation",
-                &reason,
-                clone_download_action(),
-            ));
-        }
-        Ok(())
+        let reason = format!("all mirrors failed: {}", failures.join("; "));
+        Err(CadenceSkillsError::unavailable(
+            "clone",
+            &reason,
+            clone_download_action(),
+        ))
     }
 
     fn cleanup_failed_clone_reason(&self) -> String {
@@ -190,8 +186,8 @@ impl CadenceSkillsManager {
         &self,
         cancellation: CancellationToken,
     ) -> Result<(CadenceSkillsSourceMode, bool, Vec<String>), CadenceSkillsError> {
-        self.ensure_origin_remote(cancellation.clone()).await?;
-        self.run_update_command("fetch", vec!["fetch", "--all"], cancellation.clone())
+        let start_index = self.ensure_origin_remote(cancellation.clone()).await?;
+        self.fetch_with_rotation(start_index, cancellation.clone())
             .await?;
 
         let upstream_request = self.git_request(
@@ -239,7 +235,7 @@ impl CadenceSkillsManager {
     async fn ensure_origin_remote(
         &self,
         cancellation: CancellationToken,
-    ) -> Result<(), CadenceSkillsError> {
+    ) -> Result<usize, CadenceSkillsError> {
         let request = self.git_request(
             vec![
                 "remote".to_string(),
@@ -261,15 +257,58 @@ impl CadenceSkillsManager {
                 "retry when Git is available",
             ));
         }
-        if result.stdout.trim() == REPOSITORY_URL {
-            return Ok(());
+        let current_url = result.stdout.trim();
+        if let Some(index) = CANDIDATE_URLS.iter().position(|url| *url == current_url) {
+            return Ok(index);
         }
         self.run_update_command(
             "remote",
-            vec!["remote", "set-url", "origin", REPOSITORY_URL],
+            vec!["remote", "set-url", "origin", CANDIDATE_URLS[0]],
             cancellation,
         )
-        .await
+        .await?;
+        Ok(0)
+    }
+
+    async fn fetch_with_rotation(
+        &self,
+        start_index: usize,
+        cancellation: CancellationToken,
+    ) -> Result<(), CadenceSkillsError> {
+        let mut failures = Vec::new();
+        for offset in 0..CANDIDATE_URLS.len() {
+            let index = (start_index + offset) % CANDIDATE_URLS.len();
+            if offset > 0 {
+                self.run_update_command(
+                    "remote",
+                    vec!["remote", "set-url", "origin", CANDIDATE_URLS[index]],
+                    cancellation.clone(),
+                )
+                .await?;
+            }
+            match self.try_fetch(cancellation.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(reason) => failures.push(reason),
+            }
+        }
+        Err(CadenceSkillsError::update_failed(
+            "fetch",
+            &format!("all mirrors failed: {}", failures.join("; ")),
+            "retry when Git and the network are available",
+        ))
+    }
+
+    async fn try_fetch(&self, cancellation: CancellationToken) -> Result<(), String> {
+        let request = self.git_request(
+            vec!["fetch".to_string(), "--all".to_string()],
+            self.paths.repository_root().to_path_buf(),
+            cancellation,
+        );
+        match self.runner.run(request.clone()).await {
+            Ok(result) if command_succeeded(&result) => Ok(()),
+            Ok(result) => Err(command_summary(&request, &result)),
+            Err(error) => Err(command_summary_for_error(&request, &error)),
+        }
     }
 
     async fn run_update_command(
@@ -378,6 +417,13 @@ fn command_summary(request: &BoundedCommandRequest, result: &BoundedCommandResul
     ))
 }
 
+fn command_summary_for_error(
+    request: &BoundedCommandRequest,
+    error: &BoundedCommandError,
+) -> String {
+    sanitize_reason(&format!("{}: {}", command_label(request), error))
+}
+
 fn command_label(request: &BoundedCommandRequest) -> String {
     std::iter::once(request.executable.as_str())
         .chain(request.argv.iter().map(String::as_str))
@@ -422,10 +468,14 @@ mod tests {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
-    use super::CadenceSkillsManager;
+    use super::{CANDIDATE_URLS, CadenceSkillsManager};
     use crate::cross_cutting::bounded_command_runner::{
         BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
     };
+
+    fn mirror(index: usize) -> &'static str {
+        CANDIDATE_URLS[index]
+    }
     use crate::product::cadence_skills::{CadenceSkillsError, CadenceSkillsSourceMode};
 
     struct Step {
@@ -598,7 +648,7 @@ mod tests {
             &requests[0],
             &[
                 "clone",
-                "https://gitee.com/michaelChe-World/Cadence-skills.git",
+                mirror(0),
                 home.path().join(".agents/Cadence-skills").to_str().unwrap(),
             ],
             home.path(),
@@ -608,8 +658,12 @@ mod tests {
     #[tokio::test]
     async fn clone_failure_and_missing_source_are_unavailable() {
         for steps in [
-            vec![step(failure("network\nsecret"))],
-            vec![step(success())],
+            vec![
+                step(failure("network\nsecret")),
+                step(failure("mirror two down")),
+                step(failure("mirror three down")),
+            ],
+            vec![step(success()), step(success()), step(success())],
         ] {
             let home = TempDir::new().unwrap();
             let error = manager(home.path(), Arc::new(RecordingRunner::new(steps)))
@@ -628,7 +682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_failure_cleans_only_this_call_directory_and_allows_retry() {
+    async fn clone_falls_through_to_next_mirror_after_failure_and_cleanup() {
         let home = TempDir::new().unwrap();
         let repository = home.path().join(".agents/Cadence-skills");
         let source = repository.join("cadence-init/skills");
@@ -646,13 +700,44 @@ mod tests {
         ]));
         let manager = manager(home.path(), runner.clone());
 
-        let first_error = manager.prepare(CancellationToken::new()).await.unwrap_err();
-        assert_eq!(first_error.code(), "cadence_skills_unavailable");
-        assert!(!repository.exists());
+        let result = manager.prepare(CancellationToken::new()).await.unwrap();
 
-        let second = manager.prepare(CancellationToken::new()).await.unwrap();
-        assert_eq!(second.source_mode, CadenceSkillsSourceMode::OnlineClone);
-        assert_eq!(runner.requests().len(), 2);
+        assert_eq!(result.source_mode, CadenceSkillsSourceMode::OnlineClone);
+        assert!(result.git_updated);
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].argv[1], mirror(0));
+        assert_eq!(requests[1].argv[1], mirror(1));
+    }
+
+    #[tokio::test]
+    async fn clone_all_mirrors_failing_reports_aggregated_reason() {
+        let home = TempDir::new().unwrap();
+        let runner = Arc::new(RecordingRunner::new(vec![
+            step(failure("mirror one down")),
+            step(failure("mirror two down")),
+            step(failure("mirror three down")),
+        ]));
+
+        let error = manager(home.path(), runner.clone())
+            .prepare(CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "cadence_skills_unavailable");
+        assert!(error.to_string().contains("mirror one down"));
+        assert!(error.to_string().contains("mirror two down"));
+        assert!(error.to_string().contains("mirror three down"));
+        assert!(error.to_string().contains(mirror(0)));
+        assert!(error.to_string().contains(mirror(2)));
+        assert!(
+            error
+                .to_string()
+                .contains("Cadence-skills 无法下载，请找管理员获取")
+        );
+        assert!(!error.to_string().contains('\n'));
+        assert_eq!(runner.requests().len(), 3);
+        assert!(!home.path().join(".agents/Cadence-skills").exists());
     }
 
     #[tokio::test]
@@ -675,9 +760,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         prepare_online_repository(home.path());
         let runner = Arc::new(RecordingRunner::new(vec![
-            step(success_with_stdout(
-                "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
-            )),
+            step(success_with_stdout(&format!("{}\n", mirror(0)))),
             step(success()),
             step(success()),
             step(success()),
@@ -709,7 +792,7 @@ mod tests {
         prepare_online_repository(home.path());
         let runner = Arc::new(RecordingRunner::new(vec![
             step(success_with_stdout(
-                "https://github.com/michaelChe956/Cadence-skills\n",
+                "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
             )),
             step(success()),
             step(success()),
@@ -730,12 +813,7 @@ mod tests {
         assert_git_request(&requests[0], &["remote", "get-url", "origin"], &cwd);
         assert_git_request(
             &requests[1],
-            &[
-                "remote",
-                "set-url",
-                "origin",
-                "https://gitee.com/michaelChe-World/Cadence-skills.git",
-            ],
+            &["remote", "set-url", "origin", mirror(0)],
             &cwd,
         );
         assert_git_request(&requests[2], &["fetch", "--all"], &cwd);
@@ -782,9 +860,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         prepare_online_repository(home.path());
         let runner = Arc::new(RecordingRunner::new(vec![
-            step(success_with_stdout(
-                "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
-            )),
+            step(success_with_stdout(&format!("{}\n", mirror(0)))),
             step(success()),
             step(failure("fatal: no upstream configured for branch 'main'")),
         ]));
@@ -804,9 +880,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         prepare_online_repository(home.path());
         let runner = Arc::new(RecordingRunner::new(vec![
-            step(success_with_stdout(
-                "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
-            )),
+            step(success_with_stdout(&format!("{}\n", mirror(0)))),
             step(success()),
             step(failure("fatal: bad object HEAD")),
         ]));
@@ -821,18 +895,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_failure_rotates_mirrors_before_failing() {
+        let home = TempDir::new().unwrap();
+        prepare_online_repository(home.path());
+        let runner = Arc::new(RecordingRunner::new(vec![
+            step(success_with_stdout(&format!("{}\n", mirror(0)))),
+            step(failure("fetch mirror one down")),
+            step(success()),
+            step(success()),
+            step(success()),
+            step(success()),
+        ]));
+
+        let result = manager(home.path(), runner.clone())
+            .prepare(CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.source_mode, CadenceSkillsSourceMode::OnlineUpdate);
+        assert!(result.git_updated);
+        let cwd = home.path().join(".agents/Cadence-skills");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 6);
+        assert_git_request(&requests[0], &["remote", "get-url", "origin"], &cwd);
+        assert_git_request(&requests[1], &["fetch", "--all"], &cwd);
+        assert_git_request(
+            &requests[2],
+            &["remote", "set-url", "origin", mirror(1)],
+            &cwd,
+        );
+        assert_git_request(&requests[3], &["fetch", "--all"], &cwd);
+        assert_git_request(
+            &requests[4],
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            &cwd,
+        );
+        assert_git_request(&requests[5], &["pull", "--ff-only"], &cwd);
+    }
+
+    #[tokio::test]
+    async fn fetch_all_mirrors_failing_reports_aggregated_reason() {
+        let home = TempDir::new().unwrap();
+        prepare_online_repository(home.path());
+        let runner = Arc::new(RecordingRunner::new(vec![
+            step(success_with_stdout(&format!("{}\n", mirror(1)))),
+            step(failure("fetch mirror two down")),
+            step(success()),
+            step(failure("fetch mirror three down")),
+            step(success()),
+            step(failure("fetch mirror one down")),
+        ]));
+
+        let error = manager(home.path(), runner.clone())
+            .prepare(CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "cadence_skills_update_failed");
+        assert!(error.to_string().contains("fetch mirror two down"));
+        assert!(error.to_string().contains("fetch mirror three down"));
+        assert!(error.to_string().contains("fetch mirror one down"));
+        assert!(
+            error
+                .to_string()
+                .contains("retry when Git and the network are available")
+        );
+        assert!(!error.to_string().contains('\n'));
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 6);
+        let cwd = home.path().join(".agents/Cadence-skills");
+        assert_git_request(
+            &requests[4],
+            &["remote", "set-url", "origin", mirror(0)],
+            &cwd,
+        );
+        assert!(!home.path().join(".agents/skills/demo").exists());
+    }
+
+    #[tokio::test]
     async fn fetch_and_pull_failures_block_before_link_sync() {
         for steps in [
             vec![
-                step(success_with_stdout(
-                    "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
-                )),
-                step(failure("fetch failed")),
+                step(success_with_stdout(&format!("{}\n", mirror(0)))),
+                step(failure("fetch failed one")),
+                step(success()),
+                step(failure("fetch failed two")),
+                step(success()),
+                step(failure("fetch failed three")),
             ],
             vec![
-                step(success_with_stdout(
-                    "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
-                )),
+                step(success_with_stdout(&format!("{}\n", mirror(0)))),
                 step(success()),
                 step(success()),
                 step(failure("pull failed")),
@@ -882,11 +1034,7 @@ mod tests {
         let runner = Arc::new(
             RecordingRunner::new(
                 (0..8)
-                    .map(|_| {
-                        step(success_with_stdout(
-                            "https://gitee.com/michaelChe-World/Cadence-skills.git\n",
-                        ))
-                    })
+                    .map(|_| step(success_with_stdout(&format!("{}\n", mirror(0)))))
                     .collect(),
             )
             .with_delay(Duration::from_millis(20)),
