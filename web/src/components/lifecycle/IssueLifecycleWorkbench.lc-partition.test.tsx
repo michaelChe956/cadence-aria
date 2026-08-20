@@ -258,6 +258,28 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     );
   });
 
+  it("单仓 project（仅 kind=single_repo）：不渲染「逻辑代码库」管理面板", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+        lifecycleFetch({
+          projects: [projectRecord("project_0001", "Aria")],
+          logicalCodebases: [],
+        })(input, init),
+      ),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    // 等待工作台主内容加载完成后，面板标题（h2「逻辑代码库」）不应出现
+    expect(
+      await screen.findByRole("button", { name: "新建 Issue" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "逻辑代码库" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("issue 创建：选逻辑代码库时提交 logical_codebase_id + primary repository_id", async () => {
     const issueBodies: string[] = [];
     const fetchMock = lifecycleFetch({

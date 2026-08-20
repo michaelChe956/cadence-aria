@@ -43,15 +43,21 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
   it("无逻辑代码库时登记成员禁用；单仓库模式走既有添加对话框", async () => {
     vi.stubGlobal(
       "fetch",
-      lifecycleFetch({ projects: [projectRecord("project_0001", "Aria")] }),
+      lifecycleFetch({
+        // hotfix：仅单仓 codebase 时面板整体不渲染，无「登记成员」入口
+        projects: [projectRecord("project_0001", "Aria")],
+      }),
     );
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
     expect(
-      await screen.findByRole("button", { name: "登记成员" }),
-    ).toBeDisabled();
+      await screen.findByRole("button", { name: "添加代码库" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "登记成员" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "添加代码库" }));
     expect(

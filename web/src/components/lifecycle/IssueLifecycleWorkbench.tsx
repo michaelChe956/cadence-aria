@@ -994,7 +994,7 @@ export function IssueLifecycleWorkbench({
           }
           main={
             <div className="space-y-3">
-              {selectedProjectId ? (
+              {selectedProjectId && logicalCodebases.length > 0 ? (
                 <LogicalCodebaseManagementPanel
                   logicalCodebases={logicalCodebases}
                   activeLogicalCodebaseId={activeLogicalCodebaseId}

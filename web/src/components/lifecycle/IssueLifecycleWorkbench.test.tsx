@@ -280,6 +280,10 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     vi.stubGlobal(
       "fetch",
       lifecycleFetch({
+        // hotfix：面板仅在存在逻辑条目时渲染，补一条 LC 使指针发布面板可见
+        logicalCodebases: [
+          { id: "lc_0001", name: "monorepo", member_count: 1 },
+        ],
         pointerPublications: [
           pointerPublication({
             entries: [
