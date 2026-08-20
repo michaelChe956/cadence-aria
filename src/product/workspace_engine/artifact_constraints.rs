@@ -113,7 +113,7 @@ pub(crate) fn artifact_constraint_spec_for(
                 id_rule("[AC-*]", ArtifactTokenPattern::BracketPrefix("AC-")),
             ],
             open_item_policy_hint: Some(
-                "## 待确认项：若某项已通过 AskUserQuestion 交互解决，必须标注「已通过 AskUserQuestion 确认：<结论>」；若无开放问题，写「无待确认项」。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项。",
+                "## 待确认项：若某项已通过 AskUserQuestion 交互解决，必须标注「已通过 AskUserQuestion 确认：<结论>」；若无开放问题，只写「无待确认项」四个字，不得附加解释，解释性内容写入其他章节。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项。",
             ),
             reviewer_must_fix_rules: vec![
                 "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix.",

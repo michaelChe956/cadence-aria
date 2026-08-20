@@ -282,6 +282,10 @@ fn story_schema_contract_exposes_open_item_resolution_protocol() {
         schema.contains("无待确认项"),
         "Story schema contract must teach the empty marker for 待确认项: {schema}"
     );
+    assert!(
+        schema.contains("不得附加解释"),
+        "Story schema contract must require the bare empty marker without explanation: {schema}"
+    );
 }
 
 #[test]
