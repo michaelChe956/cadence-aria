@@ -43,7 +43,9 @@ fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
     let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(!prompt.contains(&["</ARIA_STRUCTURED_OUTPUT", " nonce="].concat()));
+    assert!(prompt.contains("JSON 顶层必须含 `\"nonce\":\""));
     assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
     assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
     assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
@@ -127,7 +129,9 @@ fn build_revision_prompt_allows_readable_stream_before_final_sentinel() {
     );
 
     assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(!prompt.contains(&["</ARIA_STRUCTURED_OUTPUT", " nonce="].concat()));
+    assert!(prompt.contains("JSON 顶层必须含 `\"nonce\":\""));
     assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
     assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
     assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));

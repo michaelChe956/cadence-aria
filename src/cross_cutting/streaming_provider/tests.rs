@@ -59,7 +59,7 @@ fn provider_completion_parses_requested_structured_output() {
         schema_name: "workspace_review".to_string(),
     };
     let completion = ProviderCompletion::from_output(
-        "可读说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">".to_string(),
+        "可读说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT>".to_string(),
         Some(&contract),
         Some("provider-session-1".to_string()),
     );
@@ -314,7 +314,9 @@ async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
 
     let full_output = completed.expect("completed output");
     assert!(streamed.contains("Fake Work Item Plan streaming draft"));
-    assert!(full_output.contains("<ARIA_STRUCTURED_OUTPUT>"));
+    assert!(full_output.contains("<ARIA_STRUCTURED_OUTPUT nonce=\"FAKE0001\">"));
+    assert!(full_output.contains("\"nonce\":\"FAKE0001\""));
+    assert!(full_output.contains("</ARIA_STRUCTURED_OUTPUT>"));
     assert!(full_output.contains("\"work_items\""));
     assert!(full_output.contains("\"target_context_k\""));
 }

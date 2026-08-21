@@ -469,7 +469,7 @@ async fn review_fixture_raw_text_preserves_structured_output_failure() {
                 matches!(
                     &completion.structured_output,
                     StructuredOutputState::Failed(error)
-                        if error.code.as_str() == "missing_end_nonce"
+                        if error.code.as_str() == "missing_json_nonce"
                 ),
                 "unexpected structured output state: {:?}; output={}",
                 completion.structured_output,

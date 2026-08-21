@@ -43,8 +43,10 @@ impl ReviewCompletionError {
                     && matches!(
                         error.code,
                         StructuredOutputErrorCode::MissingEndTag
-                            | StructuredOutputErrorCode::MissingEndNonce
+                            | StructuredOutputErrorCode::InvalidEndTag
                             | StructuredOutputErrorCode::NonceMismatch
+                            | StructuredOutputErrorCode::MissingJsonNonce
+                            | StructuredOutputErrorCode::JsonNonceMismatch
                     )
         )
     }

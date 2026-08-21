@@ -359,9 +359,9 @@ pub(crate) fn build_outline_prompt_with_nonce(
          JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
          可以在最终结构化 JSON 前输出简短、可读的规划过程，供 Workbench 流式展示。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
-         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
-         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
+         最小正确示例：{{\"nonce\":\"{nonce}\",\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":{example_story_spec_ids},\"source_design_spec_ids\":{example_design_spec_ids},\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"trusted_verification_commands\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         title = issue.title,
@@ -434,8 +434,8 @@ pub(crate) fn build_outline_revision_prompt(
          JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
          可以在最终结构化 JSON 前输出简短、可读的修改说明，供 Workbench 流式展示。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
-         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         project_id = issue.project_id,
@@ -504,8 +504,8 @@ pub(crate) fn build_split_prompt(
          如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
          这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
-         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出。\n\
          work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。\n\
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
@@ -601,8 +601,8 @@ pub(crate) fn build_revision_prompt(
          如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
          这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
-         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
-         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，JSON 顶层必须含 `\"nonce\":\"{nonce}\"` 并与开始标签一致，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出 redo-only 结果。\n\
          work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。\n\
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
@@ -750,8 +750,8 @@ pub(crate) fn build_work_item_draft_prompt(
          - 禁止把提交历史、提交顺序、开发时序、分支操作历史作为 acceptance criterion；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。\n\
          - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\n\
          [output]\n\
-         使用 nonce `{nonce}` 包裹唯一 JSON：开始标签 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`，结束标签 `</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`。\n\
-         JSON 顶层必须是 `draft`；draft 只能包含 outline_id、logical_work_item_id{target_output_fields}、canonical_contract、verification_plan。",
+         使用 nonce `{nonce}` 包裹唯一 JSON：开始标签 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`，结束标签 `</ARIA_STRUCTURED_OUTPUT>`。\n\
+         JSON 顶层必须先含 `\"nonce\":\"{nonce}\"`，再含 `draft`；除 nonce 外 draft 只能包含 outline_id、logical_work_item_id{target_output_fields}、canonical_contract、verification_plan。",
         outline_id = current_outline.outline_id,
         logical_work_item_id = current_outline.logical_work_item_id,
         runtime_contract = runtime_contract,

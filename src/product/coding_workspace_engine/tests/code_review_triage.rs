@@ -116,12 +116,12 @@ async fn code_review_accepts_routing_receipt_and_sentinel_payload() {
     assert_eq!(report.verdict, ReviewVerdict::Approve);
     assert_eq!(report.summary, "sentinel review complete");
     let input = provider.input();
-    let contract = input
+    let _contract = input
         .structured_output_contract
         .expect("code review structured output contract");
     assert!(input
         .prompt
-        .ends_with(&format!("</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n- 不得输出 Markdown fence 包裹 JSON；最终结论的 JSON 必须是合法对象。\n", contract.nonce)));
+        .ends_with("</ARIA_STRUCTURED_OUTPUT>\n- 不得输出 Markdown fence 包裹 JSON；最终结论的 JSON 必须是合法对象。\n"));
 }
 
 #[tokio::test]

@@ -276,7 +276,7 @@ fn review_input_keeps_current_artifact_and_context_without_old_assistant_artifac
     assert!(
         input
             .prompt
-            .contains("{\"verdict\":\"pass|revise|needs_human\"")
+            .contains("\"verdict\":\"pass|revise|needs_human\"")
     );
 }
 
@@ -857,7 +857,7 @@ async fn provider_drive_story_run_writes_back_involved_from_structured_output() 
 
     // AI 产出含 structured output 的完整 Story artifact。
     let structured = format!(
-        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"focus_repository_id\":\"{b}\"}}</ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">",
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"nonce\":\"abcd1234\",\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"focus_repository_id\":\"{b}\"}}</ARIA_STRUCTURED_OUTPUT>",
         a = member_a.0,
         b = member_b.0,
     );
@@ -938,7 +938,7 @@ async fn provider_drive_design_run_writes_back_involved_and_change_order_from_st
         WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
 
     let structured = format!(
-        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"change_order\":[\"{a}\",\"{b}\"]}}</ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">",
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"nonce\":\"abcd1234\",\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"change_order\":[\"{a}\",\"{b}\"]}}</ARIA_STRUCTURED_OUTPUT>",
         a = member_a.0,
         b = member_b.0,
     );

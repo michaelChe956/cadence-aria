@@ -1,67 +1,18 @@
 use super::*;
+use crate::cross_cutting::structured_output::parse_last_structured_output;
 
 mod choice;
 pub(crate) use choice::*;
 
-pub(crate) const STRUCTURED_OUTPUT_START_PREFIX: &str = "<ARIA_STRUCTURED_OUTPUT";
-
-pub(crate) const STRUCTURED_OUTPUT_END_PREFIX: &str = "</ARIA_STRUCTURED_OUTPUT";
-
+/// Extracts the final sentinel through the cross-cutting single parser. The parser
+/// authenticates the JSON envelope nonce and strips it before returning JSON to the
+/// existing workspace business deserializers.
 pub(crate) fn extract_structured_json(output: &str) -> Option<(String, String)> {
-    extract_nonce_sentinel_json(output).or_else(|| extract_markdown_fence_json(output))
-}
-
-pub(crate) fn extract_nonce_sentinel_json(output: &str) -> Option<(String, String)> {
-    let mut search_end = output.len();
-    while let Some(start) = output[..search_end].rfind(STRUCTURED_OUTPUT_START_PREFIX) {
-        let after_start_prefix = &output[start + STRUCTURED_OUTPUT_START_PREFIX.len()..];
-        let Some((Some(start_nonce), start_tag_len)) =
-            parse_structured_output_tag(after_start_prefix)
-        else {
-            search_end = start;
-            continue;
-        };
-        let json_start = start + STRUCTURED_OUTPUT_START_PREFIX.len() + start_tag_len;
-        let after_start = &output[json_start..];
-        let Some(end) = after_start.find(STRUCTURED_OUTPUT_END_PREFIX) else {
-            search_end = start;
-            continue;
-        };
-        let after_end_prefix = &after_start[end + STRUCTURED_OUTPUT_END_PREFIX.len()..];
-        let Some((end_nonce, _end_tag_len)) = parse_structured_output_tag(after_end_prefix) else {
-            search_end = start;
-            continue;
-        };
-        if end_nonce.as_deref() != Some(start_nonce.as_str()) {
-            search_end = start;
-            continue;
-        }
-        return Some((
-            output[..start].to_string(),
-            after_start[..end].trim().to_string(),
-        ));
-    }
-    None
-}
-
-pub(crate) fn parse_structured_output_tag(after_prefix: &str) -> Option<(Option<String>, usize)> {
-    let end_offset = after_prefix.find('>')?;
-    let attrs = after_prefix[..end_offset].trim();
-    let nonce = parse_structured_output_nonce(attrs)?;
-    Some((nonce, end_offset + 1))
-}
-
-pub(crate) fn parse_structured_output_nonce(attrs: &str) -> Option<Option<String>> {
-    if attrs.is_empty() {
-        return Some(None);
-    }
-    let nonce = attrs
-        .strip_prefix("nonce=\"")
-        .and_then(|value| value.strip_suffix('"'))?;
-    if nonce.len() != 8 || !nonce.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(Some(nonce.to_string()))
+    parse_last_structured_output(output)
+        .ok()
+        .flatten()
+        .map(|(comments, value)| (comments, value.to_string()))
+        .or_else(|| extract_markdown_fence_json(output))
 }
 
 pub(crate) fn extract_markdown_fence_json(output: &str) -> Option<(String, String)> {

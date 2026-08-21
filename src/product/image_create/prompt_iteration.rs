@@ -119,7 +119,7 @@ fn iteration_input(
 ) -> StreamingProviderInput {
     let nonce = make_nonce();
     let prompt = format!(
-        "{prompt}\n\n请严格按以下格式输出（不要输出其他内容）：\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n{{\"suggested_prompt\":\"用中文撰写的最终图片生成 prompt\"}}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\n要求：suggested_prompt 的内容必须用中文撰写（描述主体、场景、风格、构图等），不要用英文。\n"
+        "{prompt}\n\n请严格按以下格式输出（不要输出其他内容）：\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n{{\"nonce\":\"{nonce}\",\"suggested_prompt\":\"用中文撰写的最终图片生成 prompt\"}}\n</ARIA_STRUCTURED_OUTPUT>\n\n要求：suggested_prompt 的内容必须用中文撰写（描述主体、场景、风格、构图等），不要用英文。\n"
     );
     StreamingProviderInput {
         provider_type,
@@ -240,7 +240,7 @@ fn strip_structured_output_block(text: &str) -> String {
     let Some(start) = text.find(START) else {
         return text.to_string();
     };
-    // 从 END 开始找其后的 '>'（结束标签形如 </ARIA_STRUCTURED_OUTPUT nonce="...">）
+    // 从 END 开始找其后的 '>'（结束标签形如 </ARIA_STRUCTURED_OUTPUT>）
     let Some(end_tag_start) = text[start..].find(END) else {
         return text.to_string();
     };
@@ -377,8 +377,9 @@ mod tests {
                         .and_then(|input| input.structured_output_contract.clone());
                     let full_output = match (contract.as_ref(), structured) {
                         (Some(contract), Some(value)) => format!(
-                            "{text}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-                            contract.nonce, value, contract.nonce
+                            "{text}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{}\n</ARIA_STRUCTURED_OUTPUT>",
+                            contract.nonce,
+                            serde_json::json!({"nonce": contract.nonce, "suggested_prompt": value["suggested_prompt"]})
                         ),
                         _ => text.clone(),
                     };
@@ -497,9 +498,12 @@ mod tests {
         );
         assert_eq!(contract.schema_name, SUGGESTED_PROMPT_SCHEMA);
         let start_tag = format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce);
-        let end_tag = format!("</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce);
+        let end_tag = "</ARIA_STRUCTURED_OUTPUT>";
         assert!(inputs[0].prompt.contains(&start_tag));
-        assert!(inputs[0].prompt.contains("{\"suggested_prompt\""));
+        assert!(inputs[0].prompt.contains(&format!(
+            "{{\"nonce\":\"{}\",\"suggested_prompt\"",
+            contract.nonce
+        )));
         assert!(inputs[0].prompt.contains(&end_tag));
         assert!(inputs[0].working_dir.is_dir());
     }
@@ -599,10 +603,11 @@ mod tests {
                 "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
                 contract.nonce
             )));
-            assert!(input.prompt.contains(&format!(
-                "</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-                contract.nonce
-            )));
+            assert!(
+                input
+                    .prompt
+                    .contains(&"</ARIA_STRUCTURED_OUTPUT>".to_string())
+            );
         }
     }
 }

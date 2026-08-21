@@ -16,7 +16,7 @@ while IFS= read -r line; do
   elif [[ "$line" == *'"turn/start"'* ]]; then
     id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
     echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"turn\":{\"id\":\"codex_structured_turn\",\"status\":\"inProgress\"}}}"
-    echo '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"message_001","text":"审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"verdict\":\"pass\",\"summary\":\"审核通过\",\"findings\":[]}</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">","phase":"final_answer"},"threadId":"codex_structured_thread","turnId":"codex_structured_turn"}}'
+    echo '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"message_001","text":"审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"nonce\":\"96aca42f\",\"verdict\":\"pass\",\"summary\":\"审核通过\",\"findings\":[]}</ARIA_STRUCTURED_OUTPUT>","phase":"final_answer"},"threadId":"codex_structured_thread","turnId":"codex_structured_turn"}}'
     echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"codex_structured_thread","turn":{"id":"codex_structured_turn","status":"completed"}}}'
     exit 0
   fi

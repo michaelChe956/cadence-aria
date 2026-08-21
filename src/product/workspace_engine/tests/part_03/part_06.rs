@@ -55,7 +55,7 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
             .unwrap()
             .push(input.resume_provider_session_id.clone());
         if start == 1 {
-            let output = missing_end_nonce_output(
+            let output = missing_json_nonce_output(
                 r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#,
             );
             let output = input
@@ -234,7 +234,7 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
     for (workspace_type, artifact) in cases {
         let session_id = format!("sess_review_repair_success_{workspace_type:?}");
         let provider = QueuedReviewProvider::new(vec![
-            missing_end_nonce_output(review_json),
+            missing_json_nonce_output(review_json),
             valid_structured_output(review_json),
         ]);
         let (_tmp, mut engine, mut rx, review_node_id) =
@@ -255,7 +255,7 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
         assert_eq!(review_nodes[0].round, Some(1));
         let prompts = provider.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
-        assert!(prompts[1].contains("missing_end_nonce"));
+        assert!(prompts[1].contains("missing_json_nonce"));
         assert!(prompts[1].contains("Artifact 未覆盖失败路径"));
         assert!(prompts[1].contains("不得改变 verdict、summary、findings"));
         drop(prompts);
@@ -378,7 +378,7 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                 .unwrap_or_else(|| {
                     panic!("{workspace_type:?} repair terminal mode {mode:?} diagnostic")
                 });
-            assert_eq!(diagnostic.code, "missing_end_nonce");
+            assert_eq!(diagnostic.code, "missing_json_nonce");
             assert!(diagnostic.repair_attempted);
             assert!(!diagnostic.repair_succeeded);
 
@@ -622,7 +622,7 @@ async fn missing_or_blank_first_provider_session_id_starts_one_fresh_session_rep
             .as_ref()
             .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
             .expect("missing provider session diagnostic");
-        assert_eq!(diagnostic.code, "missing_end_nonce");
+        assert_eq!(diagnostic.code, "missing_json_nonce");
         assert!(diagnostic.repair_attempted);
         assert!(!diagnostic.repair_succeeded);
         assert_eq!(

@@ -140,6 +140,9 @@ impl WorkspaceEngine {
             prompt.push_str(context);
         }
         self.append_author_artifact_output_contract(&mut prompt, true);
+        prompt.push_str(super::author_artifact_skeleton_example(
+            &self.session.workspace_type,
+        ));
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
         prompt
     }

@@ -115,11 +115,14 @@ mod tests {
         AggregateOutputError, parse_design_aggregate_output, parse_story_aggregate_output,
     };
 
-    /// 构造仓库规范的 AI structured output 封装：开始/结束标签均携带同一 nonce。
+    /// Constructs the repository sentinel protocol with a JSON envelope nonce.
     fn wrapped(nonce: &str, json: &str) -> String {
-        format!(
-            "<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">"
-        )
+        let mut value: serde_json::Value = serde_json::from_str(json).expect("fixture JSON");
+        value
+            .as_object_mut()
+            .expect("fixture JSON object")
+            .insert("nonce".to_string(), serde_json::json!(nonce));
+        format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{value}</ARIA_STRUCTURED_OUTPUT>")
     }
 
     #[test]

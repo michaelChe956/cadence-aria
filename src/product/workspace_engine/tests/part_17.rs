@@ -271,8 +271,8 @@ async fn persistent_engine_recovers_outline_review_with_valid_string_references(
     let review_output = r#"审核结论：Outline 可以继续，以下均为非阻塞建议。
 
 <ARIA_STRUCTURED_OUTPUT nonce="abc12345">
-{"verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有非阻塞建议","affects_items":["outline_a","outline_b"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","impact":"不影响 Draft 生成","required_action":"补充 handoff 说明"}]}
-</ARIA_STRUCTURED_OUTPUT nonce="abc12345">"#;
+{"nonce":"abc12345","verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有非阻塞建议","affects_items":["outline_a","outline_b"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","impact":"不影响 Draft 生成","required_action":"补充 handoff 说明"}]}
+</ARIA_STRUCTURED_OUTPUT>"#;
     let fallback = ReviewVerdict {
         verdict: ReviewVerdictType::NeedsHuman,
         comments: "审核结论：Outline 可以继续，以下均为非阻塞建议。".to_string(),
@@ -443,8 +443,8 @@ async fn outline_review_schema_recovery_rolls_back_verdict_when_timeline_commit_
                 messages: Vec::new(),
                 streaming_content: r#"Outline 可以继续，但有可选建议。
 <ARIA_STRUCTURED_OUTPUT nonce="abc12345">
-{"verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有可选建议","affects_items":["outline_a"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","impact":"不影响 Draft 生成","required_action":"补充说明"}]}
-</ARIA_STRUCTURED_OUTPUT nonce="abc12345">"#
+{"nonce":"abc12345","verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有可选建议","affects_items":["outline_a"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","impact":"不影响 Draft 生成","required_action":"补充说明"}]}
+</ARIA_STRUCTURED_OUTPUT>"#
                     .to_string(),
                 execution_events: Vec::new(),
                 permission_events: Vec::new(),

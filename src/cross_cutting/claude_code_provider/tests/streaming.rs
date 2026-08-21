@@ -35,7 +35,7 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
 }
 
 #[tokio::test]
-async fn claude_provider_classifies_missing_end_nonce() {
+async fn claude_provider_classifies_missing_json_nonce() {
     let fixture = write_fixture(
         "claude_structured_output_fixture.sh",
         r##"#!/usr/bin/env bash
@@ -70,7 +70,7 @@ done
     let StructuredOutputState::Failed(error) = completion.structured_output else {
         panic!("expected structured output failure");
     };
-    assert_eq!(error.code, StructuredOutputErrorCode::MissingEndNonce);
+    assert_eq!(error.code, StructuredOutputErrorCode::MissingJsonNonce);
     assert_eq!(completion.readable_output, "审核说明");
 }
 

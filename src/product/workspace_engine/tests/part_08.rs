@@ -560,9 +560,17 @@ fn assert_review_contract(input: &StreamingProviderInput, expected_schema_name: 
             .prompt
             .matches(&format!("nonce=\"{}\"", contract.nonce))
             .count(),
-        2,
-        "review prompt should use the same nonce in both sentinel tags"
+        1,
+        "only the opening sentinel tag carries the request nonce"
     );
+    assert!(
+        input
+            .prompt
+            .contains(&format!("\"nonce\":\"{}\"", contract.nonce)),
+        "the JSON envelope must carry the request nonce"
+    );
+    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(!input.prompt.contains(&["</ARIA_STRUCTURED_OUTPUT", " nonce="].concat()));
 }
 
 fn assert_work_item_plan_boundary_rules(prompt: &str) {

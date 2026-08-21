@@ -708,7 +708,7 @@ fn reviewer_prompt_requires_nonce_sentinel() {
     let input = engine.build_review_input().expect("review input");
 
     assert!(input.prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
     assert!(input.prompt.contains("不得使用 Markdown code fence"));
     assert!(!input.prompt.contains("```json"));
     assert!(input.prompt.contains("[cadence_project_rules]"));
@@ -764,9 +764,9 @@ fn reviewer_structured_output_repair_does_not_restart_routing() {
 #[test]
 fn extract_structured_json_prefers_last_matching_nonce_block() {
     let output = "第一次输出\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"verdict\":\"needs_human\",\"summary\":\"old\"}</ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">\n\
+        <ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"nonce\":\"old00001\",\"verdict\":\"needs_human\",\"summary\":\"old\"}</ARIA_STRUCTURED_OUTPUT>\n\
         最终输出\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"verdict\":\"pass\",\"summary\":\"new\"}</ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">";
+        <ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"nonce\":\"new00002\",\"verdict\":\"pass\",\"summary\":\"new\"}</ARIA_STRUCTURED_OUTPUT>";
 
     let (comments, json) = extract_structured_json(output).expect("structured json");
 
@@ -777,7 +777,7 @@ fn extract_structured_json_prefers_last_matching_nonce_block() {
 #[test]
 fn extract_structured_json_ignores_nonce_mismatch() {
     let output = "review text\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"verdict\":\"pass\",\"summary\":\"ok\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">";
+        <ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"nonce\":\"deadbeef\",\"verdict\":\"pass\",\"summary\":\"ok\"}</ARIA_STRUCTURED_OUTPUT>";
 
     assert!(extract_structured_json(output).is_none());
 }
@@ -957,7 +957,7 @@ fn review_completion_reports_syntax_error() {
         engine.parse_review_completion_for_active_node(&completion),
         Err(ReviewCompletionError::Syntax(error))
             if error.code
-                == crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingEndNonce
+                == crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingJsonNonce
     ));
 }
 
@@ -1094,13 +1094,13 @@ fn fallback_review_verdict_records_stable_diagnostic_and_bounded_preview() {
     );
     let error = engine
         .parse_review_completion_for_active_node(&completion)
-        .expect_err("missing end nonce should fail");
+        .expect_err("missing JSON nonce should fail");
 
     let verdict = fallback_review_verdict(&completion, &error, false);
     let diagnostic = verdict
         .structured_output_diagnostic
         .expect("fallback diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(!diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert_eq!(

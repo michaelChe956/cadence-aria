@@ -56,8 +56,14 @@ impl StreamingProviderAdapter for CapturingProjectionProvider {
                 .output
                 .split_once('\n')
                 .expect("sentinel payload requires receipt and JSON payload");
+            let mut payload: serde_json::Value =
+                serde_json::from_str(payload).expect("sentinel payload must be JSON");
+            payload
+                .as_object_mut()
+                .expect("sentinel payload must be an object")
+                .insert("nonce".to_string(), serde_json::json!(nonce));
             format!(
-                "{receipt}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{payload}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">"
+                "{receipt}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{payload}</ARIA_STRUCTURED_OUTPUT>"
             )
         } else {
             self.output.clone()
@@ -227,10 +233,11 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
         "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
         contract.nonce
     )));
-    assert!(input.prompt.contains(&format!(
-        "</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-        contract.nonce
-    )));
+    assert!(
+        input
+            .prompt
+            .contains(&"</ARIA_STRUCTURED_OUTPUT>".to_string())
+    );
     assert!(input.prompt.ends_with("最终结论的 JSON 必须是合法对象。\n"));
     assert!(input.prompt.starts_with(&expected_reviewer.text));
     assert_eq!(

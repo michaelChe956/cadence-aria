@@ -366,9 +366,14 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
             let full_output = if let Some(contract) = structured_output_contract.as_ref() {
                 let (comments, json) =
                     extract_structured_json(&output).expect("review fixture structured output");
+                let mut json: serde_json::Value =
+                    serde_json::from_str(&json).expect("review fixture JSON must be an object");
+                json.as_object_mut()
+                    .expect("review fixture JSON must be an object")
+                    .insert("nonce".to_string(), serde_json::json!(contract.nonce));
                 format!(
-                    "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-                    contract.nonce, contract.nonce
+                    "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT>",
+                    contract.nonce
                 )
             } else {
                 output
@@ -680,20 +685,21 @@ fn repair_event_statuses(
     events
 }
 
-fn missing_end_nonce_output(json: &str) -> String {
+fn missing_json_nonce_output(json: &str) -> String {
     format!(
         "审核发现需要返修。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT>"
     )
 }
 
 fn valid_structured_output(json: &str) -> String {
+    let json = json.replacen('{', r#"{"nonce":"__NONCE__","#, 1);
     format!(
-        "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">"
+        "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT>"
     )
 }
 
 #[tokio::test]
-async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
+async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
     enum KimiReviewRepairCase {
         General {
             name: &'static str,
@@ -765,7 +771,7 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
             }
         };
         let provider = QueuedReviewProvider::new(vec![
-            missing_end_nonce_output(review_json),
+            missing_json_nonce_output(review_json),
             valid_structured_output(review_json),
         ]);
         engine.session.reviewer_provider = Some(ProviderName::KimiCode);
@@ -805,8 +811,8 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
 async fn review_structured_output_repair_failure_persists_diagnostic() {
     let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(review_json),
-        missing_end_nonce_output(review_json),
+        missing_json_nonce_output(review_json),
+        missing_json_nonce_output(review_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_review_engine("sess_review_repair_failure").await;
@@ -822,7 +828,7 @@ async fn review_structured_output_repair_failure_persists_diagnostic() {
         .structured_output_diagnostic
         .as_ref()
         .expect("repair failure diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert!(
@@ -849,7 +855,7 @@ async fn review_structured_output_repair_rejects_payload_change() {
     let first_json = r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
     let changed_json = r#"{"verdict":"pass","summary":"可以确认","findings":[]}"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(first_json),
+        missing_json_nonce_output(first_json),
         valid_structured_output(changed_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =

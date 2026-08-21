@@ -48,7 +48,7 @@ fn work_item_plan_outline_revise_json() -> &'static str {
 async fn work_item_plan_outline_review_repair_preserves_scope_and_business_payload() {
     let review_json = work_item_plan_outline_revise_json();
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(review_json),
+        missing_json_nonce_output(review_json),
         valid_structured_output(review_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
@@ -94,7 +94,7 @@ async fn work_item_plan_outline_review_repair_preserves_scope_and_business_paylo
         .structured_output_diagnostic
         .as_ref()
         .expect("repair success diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(diagnostic.repair_attempted);
     assert!(diagnostic.repair_succeeded);
     assert_eq!(
@@ -136,7 +136,7 @@ async fn work_item_plan_outline_repair_provider_failure_safely_degrades() {
         .structured_output_diagnostic
         .as_ref()
         .expect("work item plan repair diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert_eq!(
@@ -161,7 +161,7 @@ async fn work_item_plan_outline_review_repair_rejects_payload_change() {
         "findings": []
     }"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(work_item_plan_outline_revise_json()),
+        missing_json_nonce_output(work_item_plan_outline_revise_json()),
         valid_structured_output(changed_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
@@ -207,7 +207,7 @@ async fn work_item_plan_outline_review_repair_keeps_active_scope_schema_strict()
         "findings": []
     }"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(mismatched_scope_json),
+        missing_json_nonce_output(mismatched_scope_json),
         valid_structured_output(mismatched_scope_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =

@@ -107,6 +107,7 @@ pub(crate) fn build_artifact_retry_prompt(
     if let Some(schema) = author_artifact_schema_contract_for(workspace_type) {
         prompt.push_str(&schema);
     }
+    prompt.push_str(author_artifact_skeleton_example(workspace_type));
     prompt.push_str(structured_interaction_artifact_decision_contract(
         workspace_type,
     ));
@@ -143,17 +144,19 @@ pub(crate) fn aggregate_author_schema_name_for(workspace_type: &WorkspaceType) -
     }
 }
 
-/// 聚合 Story/Design author 的 nonce sentinel 输出指令（协议闭环：AI 必须产出带 nonce 的
-/// ARIA_STRUCTURED_OUTPUT 标签，供 `extract_structured_json` 提取 involved/change_order）。
+/// 聚合 Story/Design author 的 nonce sentinel 输出指令。 The envelope nonce
+/// is authenticated by the single structured-output parser, then removed before
+/// aggregate business schema deserialization.
 pub(crate) fn aggregate_author_output_contract(nonce: &str, schema: &str) -> String {
     format!(
         "\n\n聚合视野结构化输出（aggregate Story/Design 必须提供）：\n\
          artifact 之外必须额外输出一个 nonce sentinel block 承载聚合视野 JSON，\
          不得用 Markdown code fence 包裹该 JSON；involved_repository_ids 只能取成员清单中的 \
-         logical_repository_id，不确定即声明 blocker。schema：\n\
+         logical_repository_id，不确定即声明 blocker。JSON 顶层 nonce 必须与开始标签一致。schema：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
-         {schema}\n\
-         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n",
+        schema_with_nonce(nonce, schema),
     )
 }
 
@@ -169,11 +172,27 @@ pub(crate) fn reviewer_output_contract(
          必调 Skill：using-superpowers。\n\
          前置 gate：仅只读审核当前材料；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\
          {intro}\
+         完整示例（仅用于理解结构，绝不可照抄 nonce）：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n\
+         实际输出模板（必须使用本请求 nonce）：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
-         {schema}\n\
-         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n",
         generation_cadence_routing_rules_reference(context),
+        schema_with_nonce("EXAMPLE_NONCE", schema),
+        schema_with_nonce(nonce, schema),
     )
+}
+
+fn schema_with_nonce(nonce: &str, schema: &str) -> String {
+    let schema = schema.trim();
+    let body = schema
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .expect("structured output schema must be a JSON object");
+    format!(r#"{{"nonce":"{nonce}",{body}}}"#)
 }
 
 impl WorkspaceEngine {
@@ -321,6 +340,9 @@ impl WorkspaceEngine {
         {
             prompt.push_str(&schema);
         }
+        prompt.push_str(author_artifact_skeleton_example(
+            &self.session.workspace_type,
+        ));
         let last_current_user_message_index =
             self.session.messages.len().checked_sub(1).filter(|index| {
                 let message = &self.session.messages[*index];
@@ -428,6 +450,25 @@ impl WorkspaceEngine {
         prompt.push_str(structured_interaction_artifact_decision_contract(
             &self.session.workspace_type,
         ));
+    }
+}
+
+fn author_artifact_skeleton_example(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        // Story's six required headings are shown without any REQ/AC, source ID,
+        // or traceability token, so an exact copy is rejected by the artifact gate.
+        WorkspaceType::Story => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Story Spec 标题\n\n## 范围\n\n## 用户故事\n\n## 功能需求\n\n## 成功标准\n\n## 待确认项\n\n## 非功能需求\n```\n"
+        }
+        WorkspaceType::Design => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Design Spec 标题\n\n## 设计范围\n\n## 设计决策\n\n## 公共组件\n\n## API 契约\n\n## 数据模型\n\n## 风险\n\n## 追踪关系\n```\n"
+        }
+        WorkspaceType::WorkItem => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Work Item 标题\n\n## 目标\n\n## 范围\n\n## 实现步骤\n\n## 依赖\n\n## 验证命令\n\n## 风险\n\n## 追踪关系\n```\n"
+        }
+        WorkspaceType::WorkItemPlan => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Work Item Plan 标题\n\n## 计划范围\n\n## 任务拆分\n\n## 依赖图\n\n## 验证计划\n\n## 执行顺序\n\n## 风险\n\n## 追踪关系\n```\n"
+        }
     }
 }
 
@@ -721,6 +762,39 @@ mod routing_reference_prompt_tests {
         assert!(!prompt.contains("完整读取"), "{prompt}");
         assert!(!prompt.contains("只报告阻塞"), "{prompt}");
         assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
+    }
+
+    #[test]
+    fn author_skeletons_are_gate_incomplete_and_reviewer_example_uses_an_unissued_nonce() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+            WorkspaceType::WorkItemPlan,
+        ] {
+            let skeleton = author_artifact_skeleton_example(&workspace_type)
+                .strip_prefix("\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n")
+                .and_then(|value| value.strip_suffix("```\n"))
+                .expect("skeleton has the expected artifact fence");
+            assert!(
+                !validate_workspace_artifact_constraints(skeleton, &workspace_type).passed,
+                "{workspace_type:?} skeleton must not pass the artifact gate"
+            );
+        }
+
+        let reviewer = reviewer_output_contract(
+            "96aca42f",
+            r#"{"verdict":"pass|revise|needs_human","summary":"...","findings":[]}"#,
+            "intro",
+            &RoutingReferenceContext::Legacy,
+        );
+        assert!(reviewer.contains("nonce=\"EXAMPLE_NONCE\""));
+        assert!(reviewer.contains("\"nonce\":\"EXAMPLE_NONCE\""));
+        assert!(reviewer.contains("\"nonce\":\"96aca42f\""));
+        assert!(
+            reviewer.find("EXAMPLE_NONCE").expect("example")
+                < reviewer.find("96aca42f").expect("actual nonce")
+        );
     }
 
     #[test]

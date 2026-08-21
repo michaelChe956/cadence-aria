@@ -296,7 +296,7 @@ fn work_item_plan_outline_revision_feedback_uses_failed_diagnostic_without_raw_p
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: None,
         structured_output_diagnostic: Some(StructuredOutputDiagnostic {
-            code: "missing_end_nonce".to_string(),
+            code: "missing_json_nonce".to_string(),
             message: "missing structured output end nonce".to_string(),
             repair_attempted: true,
             repair_succeeded: false,

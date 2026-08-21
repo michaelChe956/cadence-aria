@@ -351,6 +351,16 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     "{workspace_type:?} {kind} prompt must include parser label `{label}`: {prompt}"
                 );
             }
+            if matches!(kind, "retry" | "full revision") {
+                assert!(
+                    prompt.contains("最小结构骨架示例"),
+                    "{workspace_type:?} {kind} must include the artifact few-shot skeleton: {prompt}"
+                );
+                assert!(
+                    prompt.contains("不能照抄"),
+                    "{workspace_type:?} {kind} must say the skeleton cannot pass the artifact gate: {prompt}"
+                );
+            }
             if workspace_type == WorkspaceType::WorkItemPlan {
                 assert!(prompt.contains("[TASK-001]"), "{workspace_type:?} {kind}: {prompt}");
                 for heading in &spec.required_headings {

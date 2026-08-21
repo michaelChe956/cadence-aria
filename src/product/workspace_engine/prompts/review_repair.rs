@@ -31,7 +31,7 @@ impl WorkspaceEngine {
              已恢复的原业务 JSON（必须逐字段保持语义一致）：\n{}\n\
              原始输出：\n{}\n\
              请只返回以下 nonce block，不要输出其他说明：\n\
-             <ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{修复后的原业务 JSON}}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n",
+             <ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",修复后的原业务 JSON}}\n</ARIA_STRUCTURED_OUTPUT>\n",
             schema_name,
             error.code(),
             recoverable_json,

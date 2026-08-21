@@ -174,16 +174,28 @@ fn matrix_provider_completion(
 ) -> ProviderCompletion {
     let Some(contract) = contract else {
         if work_item_split_output {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&output).expect("matrix work-item output must be JSON");
+            value
+                .as_object_mut()
+                .expect("matrix work-item output must be an object")
+                .insert("nonce".to_string(), serde_json::json!("MATRIX01"));
             let full_output = format!(
-                "<ARIA_STRUCTURED_OUTPUT nonce=\"MATRIX01\">{output}</ARIA_STRUCTURED_OUTPUT nonce=\"MATRIX01\">"
+                "<ARIA_STRUCTURED_OUTPUT nonce=\"MATRIX01\">{value}</ARIA_STRUCTURED_OUTPUT>"
             );
             return ProviderCompletion::plain(full_output, provider_session_id);
         }
         return ProviderCompletion::plain(output, provider_session_id);
     };
+    let mut value: serde_json::Value =
+        serde_json::from_str(&output).expect("matrix structured output must be JSON");
+    value
+        .as_object_mut()
+        .expect("matrix structured output must be an object")
+        .insert("nonce".to_string(), serde_json::json!(contract.nonce));
     let full_output = format!(
-        "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-        contract.nonce, output, contract.nonce
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{value}</ARIA_STRUCTURED_OUTPUT>",
+        contract.nonce
     );
     ProviderCompletion::from_output(full_output, Some(contract), provider_session_id)
 }
