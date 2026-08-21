@@ -3,7 +3,9 @@ use crate::protocol::contracts::{AdapterOutput, AdapterRole, TimeoutStatus};
 use crate::protocol::provider_errors::ProviderErrorCode;
 use serde_json::{Value, json};
 
-pub const STRUCTURED_OUTPUT_START: &str = "<ARIA_STRUCTURED_OUTPUT>";
+/// Prefix used only by stream-display filters. Protocol producers must use
+/// [`structured_output_sentinel`] so every block includes the JSON nonce envelope.
+pub const STRUCTURED_OUTPUT_START_PREFIX: &str = "<ARIA_STRUCTURED_OUTPUT";
 pub const STRUCTURED_OUTPUT_END: &str = "</ARIA_STRUCTURED_OUTPUT>";
 pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 3 * 60 * 60;
 
@@ -214,6 +216,20 @@ pub fn parse_last_structured_output(stdout: &str) -> Result<Option<Value>, Provi
     parse_last_structured_output_value(stdout).map_err(|error| {
         ProviderAdapterError::parse_error(error.message, stdout.to_string(), String::new())
     })
+}
+
+/// Renders an unambiguous structured-output block for adapters and test providers.
+///
+/// The parser removes this transport-only envelope before returning business JSON.
+/// A producer-supplied field named `nonce` is overwritten deliberately so it cannot
+/// disagree with the start tag.
+pub fn structured_output_sentinel(nonce: &str, payload: &Value) -> String {
+    let mut payload = payload.clone();
+    payload
+        .as_object_mut()
+        .expect("structured output payload must be a JSON object")
+        .insert("nonce".to_string(), Value::String(nonce.to_string()));
+    format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{payload}</ARIA_STRUCTURED_OUTPUT>")
 }
 
 fn default_structured_output_for_role(role: &AdapterRole) -> Option<Value> {

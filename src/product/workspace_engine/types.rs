@@ -541,15 +541,15 @@ impl StructuredOutputDisplayFilter {
                 break;
             }
 
-            if let Some(start_index) = self.pending.find(STRUCTURED_OUTPUT_START) {
+            if let Some(start_index) = self.pending.find(STRUCTURED_OUTPUT_START_PREFIX) {
                 visible.push_str(&self.pending[..start_index]);
-                let drain_end = start_index + STRUCTURED_OUTPUT_START.len();
+                let drain_end = start_index + STRUCTURED_OUTPUT_START_PREFIX.len();
                 self.pending.drain(..drain_end);
                 self.inside_structured_output = true;
                 continue;
             }
 
-            let keep = longest_suffix_prefix_len(&self.pending, STRUCTURED_OUTPUT_START);
+            let keep = longest_suffix_prefix_len(&self.pending, STRUCTURED_OUTPUT_START_PREFIX);
             if self.pending.len() > keep {
                 let emit: String = self.pending.drain(..self.pending.len() - keep).collect();
                 visible.push_str(&emit);

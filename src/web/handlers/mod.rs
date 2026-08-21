@@ -14,9 +14,7 @@ use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::cross_cutting::provider_adapter::{
-    FakeProviderAdapter, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
-};
+use crate::cross_cutting::provider_adapter::{FakeProviderAdapter, structured_output_sentinel};
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{

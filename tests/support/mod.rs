@@ -36,8 +36,8 @@ case "${1:-run}" in
       printf '%s' "changed" > "$2/generated.txt"
     fi
     echo "provider log line"
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":["fixture constraint"],"open_questions":[],"assumptions":["fixture"],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":["fixture constraint"],"open_questions":[],"assumptions":["fixture"],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -104,8 +104,8 @@ case "${1:-run}" in
     ;;
   run)
     cat >/dev/null
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"spec"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"spec"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;

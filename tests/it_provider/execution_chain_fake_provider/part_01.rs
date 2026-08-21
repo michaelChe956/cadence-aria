@@ -1,7 +1,7 @@
 use cadence_aria::cross_cutting::integration_queue::IntegrationQueue;
 use cadence_aria::cross_cutting::provider_adapter::{
-    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
-    parse_last_structured_output,
+    parse_last_structured_output, structured_output_sentinel, ProviderAdapter,
+    ProviderAdapterError,
 };
 use cadence_aria::cross_cutting::worktree::{WorktreeLeaseManager, WorktreeLeaseStatus};
 use cadence_aria::protocol::contracts::{

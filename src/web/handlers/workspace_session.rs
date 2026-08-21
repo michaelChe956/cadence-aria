@@ -204,7 +204,10 @@ pub(crate) fn provider_workspace_prompt(prompt: String) -> String {
         "review_result": "review completed",
         "revision_result": "revision completed"
     });
-    format!("{prompt}\n\n{STRUCTURED_OUTPUT_START}\n{structured}\n{STRUCTURED_OUTPUT_END}")
+    format!(
+        "{prompt}\n\n{}",
+        structured_output_sentinel("fake0001", &structured)
+    )
 }
 
 #[cfg(test)]

@@ -259,6 +259,12 @@ fn prompt_variables(
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
     let canonical_inputs_json = serde_json::to_string(&input.canonical_inputs)
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
+    let structured_output_nonce = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect::<String>();
 
     Ok(BTreeMap::from([
         ("node_id".to_string(), input.node_id.clone()),
@@ -293,7 +299,15 @@ fn prompt_variables(
         ),
         (
             "output_schema_summary".to_string(),
-            output_schema_summary(&input.node_id, &contract.output_schema_ref),
+            output_schema_summary(
+                &input.node_id,
+                &contract.output_schema_ref,
+                &structured_output_nonce,
+            ),
+        ),
+        (
+            "structured_output_nonce".to_string(),
+            structured_output_nonce,
         ),
         (
             "artifact_kind".to_string(),
@@ -329,7 +343,7 @@ fn artifact_kind_for_node(node_id: &str) -> &'static str {
     }
 }
 
-fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
+fn output_schema_summary(node_id: &str, output_schema_ref: &str, nonce: &str) -> String {
     let fields = match artifact_kind_for_node(node_id) {
         "clarification_record" => {
             r#"{"artifact_kind":"clarification_record","goal_summary":"...","constraints":[],"assumptions":[],"open_questions":[],"suggested_scope":"..."}"#
@@ -364,8 +378,11 @@ fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
         }
         _ => r#"{"artifact_kind":"..."}"#,
     };
+    let fields = fields
+        .strip_prefix('{')
+        .expect("output schema examples must be JSON objects");
     format!(
-        "{output_schema_ref}\n最终 sentinel 内只能放一个 JSON 对象，不要放 Markdown code fence。不要省略任何 key；没有内容的数组字段必须输出 []。JSON 对象必须至少符合：\n{fields}"
+        "{output_schema_ref}\n最终 sentinel 内只能放一个 JSON 对象，不要放 Markdown code fence。不要省略任何 key；没有内容的数组字段必须输出 []。JSON 对象必须至少符合：\n{{\"nonce\":\"{nonce}\",{fields}"
     )
 }
 

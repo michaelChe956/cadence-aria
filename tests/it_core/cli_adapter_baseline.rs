@@ -151,8 +151,8 @@ if [ "${2:-}" != "" ]; then
   exit 7
 fi
 cat >/dev/null
-echo "<ARIA_STRUCTURED_OUTPUT>"
-echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
 echo "</ARIA_STRUCTURED_OUTPUT>"
 "#,
     );
@@ -199,8 +199,8 @@ case "${1:-run}" in
       echo "provider log line $i with enough bytes to fill stdout pipe before process exit"
       i=$((i + 1))
     done
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -245,8 +245,8 @@ case "${1:-run}" in
     ;;
   run)
     cat >/dev/null
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     sleep 30
     exit 0
@@ -300,8 +300,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout before structured output"
     echo "stderr before structured output" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -357,8 +357,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout without log dir"
     echo "stderr without log dir" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -407,8 +407,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout marker line"
     echo "stderr marker line" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -485,8 +485,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout chunk for browser"
     echo "stderr chunk for browser" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;

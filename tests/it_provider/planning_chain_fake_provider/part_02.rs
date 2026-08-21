@@ -70,8 +70,8 @@ impl ProviderAdapter for ScriptedPlanningProvider {
             other => panic!("unexpected schema {other}"),
         };
         let stdout = format!(
-            "provider log\n{STRUCTURED_OUTPUT_START}\n{}\n{STRUCTURED_OUTPUT_END}\n",
-            serde_json::to_string(&payload).expect("payload json")
+            "provider log\n{}\n",
+            structured_output_sentinel("fix00001", &payload)
         );
         let structured_output = parse_last_structured_output(&stdout)?;
         Ok(AdapterOutput {

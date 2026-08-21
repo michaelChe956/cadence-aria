@@ -398,9 +398,13 @@ fn scripted_provider_completion(
         );
     };
     let (comments, json) = review_output_parts(&output);
+    let mut json: serde_json::Value = serde_json::from_str(json).expect("review fixture JSON");
+    json.as_object_mut()
+        .expect("review fixture JSON object")
+        .insert("nonce".to_string(), serde_json::json!(contract.nonce));
     let full_output = format!(
-        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-        contract.nonce, contract.nonce
+        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT>",
+        contract.nonce
     );
     cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::from_output(
         full_output,

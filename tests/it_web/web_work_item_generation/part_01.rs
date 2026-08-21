@@ -272,8 +272,8 @@ pub(crate) fn malformed_outline_structured_stdout() -> String {
     r#"Fake Work Item Plan streaming draft
 
 <ARIA_STRUCTURED_OUTPUT nonce="badjson1">
-{"outline":{"id":"outline_artifact_wip_0001","project_id":"project_0001","issue_id":"issue_0001","source_story_spec_ids":[],"source_design_spec_ids":[],"strategy_summary":"bad json","work_item_outlines":[{"outline_id":"outline_backend_session","title":"后端：会话 API","kind":"backend","goal":"实现后端会话 API","scope":[],"non_goals":[],"source_story_spec_ids":[],"source_design_spec_ids":[],"exclusive_write_scopes":["src/product/session.rs"],"forbidden_write_scopes":[],"depends_on":[],"verification_intent":[],"handoff_notes":"后续前端依赖 DTO"},"handoff_strategy":"wrongly nested top-level field","risks":[],"status":"draft"},"context_blockers":[]}
-</ARIA_STRUCTURED_OUTPUT nonce="badjson1">"#
+{"nonce":"badjson1","outline":{"id":"outline_artifact_wip_0001","project_id":"project_0001","issue_id":"issue_0001","source_story_spec_ids":[],"source_design_spec_ids":[],"strategy_summary":"bad json","work_item_outlines":[{"outline_id":"outline_backend_session","title":"后端：会话 API","kind":"backend","goal":"实现后端会话 API","scope":[],"non_goals":[],"source_story_spec_ids":[],"source_design_spec_ids":[],"exclusive_write_scopes":["src/product/session.rs"],"forbidden_write_scopes":[],"depends_on":[],"verification_intent":[],"handoff_notes":"后续前端依赖 DTO"},"handoff_strategy":"wrongly nested top-level field","risks":[],"status":"draft"},"context_blockers":[]}
+</ARIA_STRUCTURED_OUTPUT>"#
         .to_string()
 }
 

@@ -69,7 +69,7 @@ fn fake_provider_parses_last_structured_output_sentinel_and_keeps_raw_stdout() {
 
 #[test]
 fn parser_accepts_fenced_json_inside_structured_output_sentinel() {
-    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT>\n```json\n{\"artifact_kind\":\"clarification_record\"}\n```\n</ARIA_STRUCTURED_OUTPUT>\n";
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"fenced01\">\n```json\n{\"nonce\":\"fenced01\",\"artifact_kind\":\"clarification_record\"}\n```\n</ARIA_STRUCTURED_OUTPUT>\n";
     let structured = parse_last_structured_output(stdout)
         .expect("parse sentinel")
         .expect("structured output");
@@ -79,7 +79,7 @@ fn parser_accepts_fenced_json_inside_structured_output_sentinel() {
 
 #[test]
 fn provider_adapter_parses_nonce_structured_output_sentinel() {
-    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">\n{\"artifact_kind\":\"clarification_record\",\"goal_summary\":\"nonce\"}\n</ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">\n";
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">\n{\"nonce\":\"a1b2c3d4\",\"artifact_kind\":\"clarification_record\",\"goal_summary\":\"nonce\"}\n</ARIA_STRUCTURED_OUTPUT>\n";
     let structured = parse_last_structured_output(stdout)
         .expect("parse nonce sentinel")
         .expect("structured output");
@@ -90,7 +90,7 @@ fn provider_adapter_parses_nonce_structured_output_sentinel() {
 
 #[test]
 fn provider_adapter_nonce_parser_uses_last_complete_block() {
-    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"artifact_kind\":\"old\"}</ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">\ntext\n<ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"artifact_kind\":\"new\"}</ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">\n";
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"nonce\":\"old00001\",\"artifact_kind\":\"old\"}</ARIA_STRUCTURED_OUTPUT>\ntext\n<ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"nonce\":\"new00002\",\"artifact_kind\":\"new\"}</ARIA_STRUCTURED_OUTPUT>\n";
     let structured = parse_last_structured_output(stdout)
         .expect("parse nonce sentinel")
         .expect("structured output");
@@ -100,11 +100,13 @@ fn provider_adapter_nonce_parser_uses_last_complete_block() {
 
 #[test]
 fn provider_adapter_rejects_nonce_mismatch() {
-    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"artifact_kind\":\"clarification_record\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">\n";
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"nonce\":\"deadbeef\",\"artifact_kind\":\"clarification_record\"}</ARIA_STRUCTURED_OUTPUT>\n";
     let error = parse_last_structured_output(stdout).expect_err("nonce mismatch should fail");
 
     assert!(
-        error.details.contains("structured output nonce mismatch"),
+        error
+            .details
+            .contains("structured output json envelope nonce mismatch"),
         "unexpected parse error: {}",
         error.details
     );
