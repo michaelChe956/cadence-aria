@@ -700,10 +700,12 @@ mod tests {
     #[tokio::test]
     async fn output_is_capped_and_truncation_flagged_once() {
         let dir = tempfile::tempdir().expect("dir");
-        // Emit exactly MAX+1 bytes combined across stdout and stderr.
+        // Emit exactly MAX+1 bytes on a single stream (stdout) so the test is
+        // deterministic: no cross-stream budget race, no timing dependence.
+        // The cap must retain the first MAX bytes and flag truncation once.
         let script = format!(
-            "head -c {} /dev/zero | tr '\\0' 'a'; printf 'b' >&2",
-            MAX_TERMINAL_OUTPUT_BYTES
+            "head -c {} /dev/zero | tr '\\0' 'a'",
+            MAX_TERMINAL_OUTPUT_BYTES + 1
         );
         let bin = write_executable(dir.path(), "big", &script);
         let (manager, mut output_rx) = manager(Duration::from_secs(30));
@@ -732,6 +734,47 @@ mod tests {
         .await
         .expect("terminal output test timed out");
         assert!(result.truncated);
+        assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_exactly_at_cap_is_not_truncated() {
+        let dir = tempfile::tempdir().expect("dir");
+        // Emit exactly MAX bytes on stdout: everything must be returned and
+        // truncation must not be flagged (boundary case, MAX = 1048576).
+        let script = format!(
+            "head -c {} /dev/zero | tr '\\0' 'a'",
+            MAX_TERMINAL_OUTPUT_BYTES
+        );
+        let bin = write_executable(dir.path(), "exact", &script);
+        let (manager, mut output_rx) = manager(Duration::from_secs(30));
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let (result, combined) = tokio::time::timeout(Duration::from_secs(10), async {
+            let wait = manager.wait_for_exit(&id);
+            tokio::pin!(wait);
+            let mut combined = 0usize;
+            let result = loop {
+                tokio::select! {
+                    result = &mut wait => break result.expect("wait"),
+                    event = output_rx.recv() => {
+                        combined += event.expect("output channel closed").output.len();
+                    }
+                }
+            };
+            while let Ok(event) = output_rx.try_recv() {
+                combined += event.output.len();
+            }
+            (result, combined)
+        })
+        .await
+        .expect("terminal output test timed out");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.truncated);
         assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
     }
 
