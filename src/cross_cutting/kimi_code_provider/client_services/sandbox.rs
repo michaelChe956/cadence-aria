@@ -137,9 +137,7 @@ fn open_fd_no_follow_flags(
 /// Open an existing file read-only with `O_NOFOLLOW`, anchored beneath `root`.
 pub fn open_read_no_follow(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
     let fd = open_fd_no_follow_flags(root, rel, libc::O_RDONLY)?;
-    Ok(std::fs::File::from(unsafe {
-        std::fs::File::from_raw_fd(fd.into_raw_fd())
-    }))
+    Ok(unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) })
 }
 
 /// Open a file for writing (creating/truncating) with `O_NOFOLLOW`. The final
@@ -147,9 +145,7 @@ pub fn open_read_no_follow(root: &Path, rel: &Path) -> std::io::Result<std::fs::
 /// and be a non-symlink directory beneath `root`.
 pub fn open_write_no_follow(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
     let fd = open_fd_no_follow_flags(root, rel, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC)?;
-    Ok(std::fs::File::from(unsafe {
-        std::fs::File::from_raw_fd(fd.into_raw_fd())
-    }))
+    Ok(unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) })
 }
 
 /// Open a directory anchored beneath `root` with `O_NOFOLLOW` + `O_CLOEXEC`.

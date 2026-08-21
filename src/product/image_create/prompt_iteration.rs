@@ -504,7 +504,7 @@ mod tests {
             "{{\"nonce\":\"{}\",\"suggested_prompt\"",
             contract.nonce
         )));
-        assert!(inputs[0].prompt.contains(&end_tag));
+        assert!(inputs[0].prompt.contains(end_tag));
         assert!(inputs[0].working_dir.is_dir());
     }
 

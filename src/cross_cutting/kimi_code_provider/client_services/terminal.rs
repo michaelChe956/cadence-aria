@@ -295,11 +295,11 @@ struct TerminalChild {
 impl TerminalChild {
     fn start_kill(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.pgid {
-            if pgid > 0 {
-                unsafe {
-                    let _ = libc::killpg(pgid, libc::SIGKILL);
-                }
+        if let Some(pgid) = self.pgid
+            && pgid > 0
+        {
+            unsafe {
+                let _ = libc::killpg(pgid, libc::SIGKILL);
             }
         }
         let _ = self.child.start_kill();
@@ -318,11 +318,11 @@ impl TerminalChild {
 impl Drop for TerminalChild {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.pgid {
-            if pgid > 0 {
-                unsafe {
-                    let _ = libc::killpg(pgid, libc::SIGKILL);
-                }
+        if let Some(pgid) = self.pgid
+            && pgid > 0
+        {
+            unsafe {
+                let _ = libc::killpg(pgid, libc::SIGKILL);
             }
         }
         let _ = self.child.start_kill();
@@ -521,11 +521,7 @@ async fn read_terminal_stream<R>(
     R: AsyncRead + Unpin,
 {
     let mut chunk = [0_u8; 8192];
-    loop {
-        let read = match reader.read(&mut chunk).await {
-            Ok(read) => read,
-            Err(_) => break,
-        };
+    while let Ok(read) = reader.read(&mut chunk).await {
         if read == 0 {
             break;
         }

@@ -149,6 +149,9 @@ impl<W> KimiClientServiceDispatcher<W>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    /// 8 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/role/permission_mode/bridge/event_tx/cancel），
+    /// 无自然聚合语义且仅在 `new` 使用一次，重构为 struct 会引入额外间接层，故允许 clippy::too_many_arguments。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: JsonRpcPeer<W>,
         session_id: String,
@@ -287,12 +290,12 @@ async fn handle_request<W>(
 }
 
 fn check_session(state: &ClientServiceState, params: &Value) -> Result<(), ClientServiceError> {
-    if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
-        if session_id != state.session_id {
-            return Err(ClientServiceError::Rejected(
-                "sessionId does not match the active session".to_string(),
-            ));
-        }
+    if let Some(session_id) = params.get("sessionId").and_then(Value::as_str)
+        && session_id != state.session_id
+    {
+        return Err(ClientServiceError::Rejected(
+            "sessionId does not match the active session".to_string(),
+        ));
     }
     Ok(())
 }

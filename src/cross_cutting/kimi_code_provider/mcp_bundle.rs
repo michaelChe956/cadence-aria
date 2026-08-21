@@ -356,9 +356,7 @@ fn validate_credential_reference(value: &str) -> Result<(), String> {
         }
         return Ok(());
     }
-    Err(format!(
-        "value is not a credential reference (literal credentials are rejected)"
-    ))
+    Err("value is not a credential reference (literal credentials are rejected)".to_string())
 }
 
 /// 从 Aria 控制的 CodeGraph 安装位置与聚合根构造受控 server 声明（argv 走 mcp 子命令）。
