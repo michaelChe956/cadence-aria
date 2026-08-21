@@ -1385,6 +1385,33 @@ mod session_tests {
             completion.provider_session_id.as_deref(),
             Some("fresh-session-after-drift")
         );
+        // superseded 事件化（REQ-ENV-04）：旧会话必须以可消费的 Execution 事件暴露。
+        let superseded_event = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Execution(execution)
+                    if execution.event_id.starts_with("kimi_session_superseded_") =>
+                {
+                    Some(execution)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("superseded execution event; events: {events:?}"));
+        let payload: Value = serde_json::from_str(
+            superseded_event
+                .output
+                .as_deref()
+                .expect("superseded payload"),
+        )
+        .expect("superseded payload must be valid JSON");
+        assert_eq!(payload["superseded"], Value::Bool(true));
+        assert_eq!(payload["old_session_id"], "drifted-session");
+        assert_eq!(payload["new_session_id"], "fresh-session-after-drift");
+        assert_eq!(payload["new_session_started"], Value::Bool(true));
+        assert_eq!(
+            payload["frozen_digest"],
+            "frozen-digest-that-no-longer-matches"
+        );
         assert!(run.await.expect("run join").is_ok());
         server_task.await.expect("server task");
     }

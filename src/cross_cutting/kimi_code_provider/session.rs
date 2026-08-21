@@ -10,7 +10,8 @@ use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderStatus, ProviderToolCall,
+    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, ProviderToolCall,
     ProviderToolResult, RiskLevel, StreamingProviderInput,
 };
 
@@ -167,6 +168,7 @@ where
         }
     }
     let decision = resolve_session_method(resume_id.as_deref(), mcp_injection.as_ref());
+    let mut pending_superseded = None;
     let (session_method, session_request) = match decision {
         SessionMethodDecision::Load {
             session_id,
@@ -182,7 +184,7 @@ where
             superseded,
             mcp_servers,
         } => {
-            if let Some(superseded) = superseded {
+            if let Some(superseded) = superseded.as_ref() {
                 tracing::warn!(
                     target: "kimi_code_provider",
                     old_session_id = %superseded.session_id,
@@ -192,6 +194,7 @@ where
                     "kimi MCP bundle digest drifted on resume; rejecting session/load and starting a new session (REQ-ENV-04)"
                 );
             }
+            pending_superseded = superseded;
             (
                 "session/new",
                 json!({
@@ -218,6 +221,37 @@ where
                 "Kimi ACP {session_method} response did not contain sessionId"
             ))
         })?;
+
+    // digest 漂移 → 旧会话标记 superseded：在 ProviderEvent 通道发可消费的
+    // Execution 事件（gateway/审计层后续可订阅消费，REQ-ENV-04）。tracing 保留。
+    if let Some(superseded) = pending_superseded {
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: format!("kimi_session_superseded_{}", superseded.session_id),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Aborted,
+                title: "Kimi session superseded on resume (MCP bundle digest drift)".to_string(),
+                detail: Some(format!(
+                    "session/load rejected for session {} (frozen_digest={}, actual_digest={}); a new session was started",
+                    superseded.session_id, superseded.frozen_digest, superseded.actual_digest
+                )),
+                command: None,
+                cwd: Some(input.working_dir.display().to_string()),
+                output: Some(
+                    json!({
+                        "superseded": true,
+                        "old_session_id": superseded.session_id,
+                        "frozen_digest": superseded.frozen_digest,
+                        "actual_digest": superseded.actual_digest,
+                        "new_session_id": session_id,
+                        "new_session_started": true,
+                    })
+                    .to_string(),
+                ),
+                exit_code: None,
+            }))
+            .await;
+    }
 
     let dispatcher = KimiClientServiceDispatcher::new(
         peer.clone(),
