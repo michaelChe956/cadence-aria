@@ -67,6 +67,13 @@ enum ClaudeStreamOutcome {
     EofWithoutResult,
 }
 
+fn permission_mode_for_claude(mode: &ProviderPermissionMode) -> &'static str {
+    // 新版 CLI UI 显示为 manual，wire 兼容名仍为 default。
+    match mode {
+        ProviderPermissionMode::Auto | ProviderPermissionMode::Supervised => "default",
+    }
+}
+
 impl ClaudeCodeProvider {
     pub fn new(command: PathBuf) -> Self {
         Self { command }
@@ -320,10 +327,7 @@ impl ClaudeCodeProvider {
                 "type": "control_request",
                 "request": {
                     "subtype": "set_permission_mode",
-                    "mode": match input.permission_mode {
-                        ProviderPermissionMode::Auto => "auto",
-                        ProviderPermissionMode::Supervised => "supervised",
-                    },
+                    "mode": permission_mode_for_claude(&input.permission_mode),
                 },
             }),
         )
