@@ -1,0 +1,27 @@
+{
+  "capture": {
+    "source": "real kimi acp 0.38.0 stdio transcript after Bash approval",
+    "direction": "server_to_client notification",
+    "redaction": "sessionId and opaque toolCallId are replaced; command is an intentionally non-sensitive fixture command",
+    "response_semantics": "session/update is a JSON-RPC notification; it has no client JSON-RPC response"
+  },
+  "notification": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "<REDACTED>",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "<REDACTED>",
+        "title": "Running: pwd",
+        "kind": "execute",
+        "status": "in_progress",
+        "rawInput": {"command": "pwd", "description": "Print working directory"},
+        "content": [
+          {"type": "content", "content": {"type": "text", "text": "{\"command\":\"pwd\",\"description\":\"Print working directory\"}"}}
+        ]
+      }
+    }
+  },
+  "response": null
+}

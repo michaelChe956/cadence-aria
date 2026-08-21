@@ -1,0 +1,32 @@
+{
+  "capture": {
+    "source": "real kimi acp 0.38.0 stdio transcript",
+    "direction": "server_to_client request, followed by client_to_server response",
+    "redaction": "sessionId and opaque toolCallId are replaced while preserving string fields and JSON shape"
+  },
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 0,
+    "method": "session/request_permission",
+    "params": {
+      "sessionId": "<REDACTED>",
+      "options": [
+        {"optionId": "approve_once", "name": "Approve once", "kind": "allow_once"},
+        {"optionId": "approve_always", "name": "Approve for this session", "kind": "allow_always"},
+        {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+      ],
+      "toolCall": {
+        "toolCallId": "<REDACTED>",
+        "title": "Bash",
+        "content": [
+          {"type": "content", "content": {"type": "text", "text": "Requesting approval to Running: pwd"}}
+        ]
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 0,
+    "result": {"outcome": {"outcome": "selected", "optionId": "approve_once"}}
+  }
+}

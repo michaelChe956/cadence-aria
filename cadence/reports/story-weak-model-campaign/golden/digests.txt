@@ -1,0 +1,1 @@
+2e9c1ab63cfb44815ac85afa652dec8a3992d0a86379390d05d1fe3ade4ae2bf  cadence/reports/story-weak-model-campaign/golden/issue_0001.golden.json
