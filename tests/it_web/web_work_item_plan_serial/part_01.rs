@@ -216,9 +216,8 @@ fn item_review_revise(outline_id: &str, draft_id: &str) -> Value {
         "affects_items": [{ "target_outline_id": outline_id }],
         "findings": [{
             "severity": "blocking",
-            "message": "当前 draft 缺少关键异常路径",
+            "message": "当前 draft 缺少关键异常路径\n影响：后续 item 无法可靠消费 handoff",
             "evidence": "未说明会话刷新失败处理",
-            "impact": "后续 item 无法可靠消费 handoff",
             "required_action": "补充刷新失败处理"
         }]
     })
@@ -235,9 +234,8 @@ fn item_review_plan_reopen(outline_id: &str, draft_id: &str) -> Value {
         "affects_items": [{ "target_outline_id": outline_id }],
         "findings": [{
             "severity": "blocking",
-            "message": "当前问题需要调整拆分边界",
+            "message": "当前问题需要调整拆分边界\n影响：必须回到 Outline 重新规划依赖",
             "evidence": "当前 item 需要前序 item 未规划的 API",
-            "impact": "必须回到 Outline 重新规划依赖",
             "required_action": "重开 Outline"
         }]
     })

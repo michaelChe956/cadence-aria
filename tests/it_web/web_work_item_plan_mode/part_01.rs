@@ -170,9 +170,8 @@ async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &s
                 "findings": if verdict == "revise" {
                     json!([{
                         "severity": "must_fix",
-                        "message": "拆分遗漏前端错误状态",
+                        "message": "拆分遗漏前端错误状态\n影响：后续 work item 无法覆盖体验缺口",
                         "evidence": "Outline 未覆盖前端错误状态",
-                        "impact": "后续 work item 无法覆盖体验缺口",
                         "required_action": "补充前端错误状态 outline"
                     }])
                 } else {

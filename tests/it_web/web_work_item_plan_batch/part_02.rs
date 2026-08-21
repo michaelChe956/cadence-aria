@@ -302,10 +302,11 @@ async fn batch_oversized_review_feedback_fails_batch_run_node() {
     })
     .await;
 
-    // 可选通过的 batch review：summary 约 72KB。`apply_optional_findings` 会把
-    // `format_review_feedback(verdict)` 写入 `pending_revision_context`，重写 batch 时
-    // prompt 构建必然触发 64KB provider-context 硬兜底 fail-closed。
-    let oversized = "超".repeat(24_000);
+    // 可选通过的 batch review：summary 约 63KB，保持在新 sentinel 的 64KB JSON 上限内，
+    // 但 `apply_optional_findings` 会把 `format_review_feedback(verdict)` 写入
+    // `pending_revision_context`，重写 batch 时叠加基础 prompt 后必然触发 64KB
+    // provider-context 硬兜底 fail-closed。
+    let oversized = "超".repeat(21_000);
     enable_work_item_plan_review_fixture(
         &app,
         &session_id,
@@ -324,7 +325,6 @@ async fn batch_oversized_review_feedback_fails_batch_run_node() {
                     "severity": "suggestion",
                     "message": "可选建议：补充边界用例",
                     "evidence": "",
-                    "impact": "",
                     "required_action": ""
                 }
             ]

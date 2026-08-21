@@ -473,11 +473,27 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
             .pop_front()
             .unwrap_or_else(|| QueuedSplitOutput::Json(valid_split_output()));
         let full_output = match output {
-            QueuedSplitOutput::Json(output) => Some(format!(
+            QueuedSplitOutput::Json(mut output) => {
+                let nonce = input
+                    .structured_output_contract
+                    .as_ref()
+                    .map(|contract| contract.nonce.clone())
+                    .unwrap_or_else(|| {
+                        input
+                            .prompt
+                            .split_once("<ARIA_STRUCTURED_OUTPUT nonce=\"")
+                            .and_then(|(_, tail)| tail.split_once('"'))
+                            .map(|(nonce, _)| nonce.to_string())
+                            .unwrap_or_else(|| "FAKE0001".to_string())
+                    });
+                if let Some(object) = output.as_object_mut() {
+                    object.insert("nonce".to_string(), serde_json::json!(nonce));
+                }
+                Some(format!(
                     "Fake Work Item Plan streaming draft\n\n\
-                     <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
-                    output
-                )),
+                     <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{output}</ARIA_STRUCTURED_OUTPUT>",
+                ))
+            }
             QueuedSplitOutput::RawStdout(output) => Some(output),
             QueuedSplitOutput::Pending => None,
         };

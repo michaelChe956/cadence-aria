@@ -107,7 +107,7 @@ async fn reviewer_repair_failure_live_diagnostic_matches_reloaded_node_detail() 
     assert_eq!(live_review["round"], 1);
     assert_eq!(live_review["verdict"], "needs_human");
     assert_eq!(live_review["findings"], json!([]));
-    assert_eq!(live_diagnostic["code"], "missing_end_nonce");
+    assert_eq!(live_diagnostic["code"], "missing_json_nonce");
     assert_eq!(live_diagnostic["repair_attempted"], true);
     assert_eq!(live_diagnostic["repair_succeeded"], false);
     assert!(

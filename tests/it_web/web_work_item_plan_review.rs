@@ -140,9 +140,8 @@ async fn enable_revise_review_fixture(app: &axum::Router, session_id: &str) {
             "comments": "存在阻塞问题",
             "findings": [{
                 "severity": "blocking",
-                "message": "缺少异常路径处理",
+                "message": "缺少异常路径处理\n影响：运行时可能遗漏边界条件",
                 "evidence": "候选计划未覆盖失败场景",
-                "impact": "运行时可能遗漏边界条件",
                 "required_action": "补充错误处理与回滚策略"
             }]
         }),

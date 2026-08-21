@@ -444,9 +444,8 @@ fn outline_review_revise() -> Value {
         "affects_items": [{ "target_outline_id": "outline_backend_session" }],
         "findings": [{
             "severity": "blocking",
-            "message": "写入范围存在重叠",
+            "message": "写入范围存在重叠\n影响：后续 work item 无法安全并行",
             "evidence": "outline_frontend 与 outline_backend 都声明 web/",
-            "impact": "后续 work item 无法安全并行",
             "required_action": "重新拆分 exclusive_write_scopes"
         }]
     })

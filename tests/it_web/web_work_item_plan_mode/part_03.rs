@@ -68,7 +68,7 @@ async fn outline_human_confirm_request_change_starts_dedicated_revision_over_web
     assert_eq!(review_complete["verdict"], "needs_human");
     assert_eq!(
         review_complete["structured_output_diagnostic"]["code"],
-        "missing_end_nonce"
+        "missing_json_nonce"
     );
     assert_eq!(
         review_complete["structured_output_diagnostic"]["repair_attempted"],
