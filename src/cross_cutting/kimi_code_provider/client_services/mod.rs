@@ -14,6 +14,7 @@ mod terminal;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -547,6 +548,11 @@ async fn handle_fs_write(
     write_text_file(&state.root, path, content).map_err(ClientServiceError::Fs)
 }
 
+/// Monotonic counter for execution event ids. Timestamp-based ids can
+/// collide when events are emitted concurrently; a process-wide atomic
+/// counter is unique by construction.
+static EXECUTION_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 #[allow(clippy::too_many_arguments)]
 fn emit_execution_event(
     state: &ClientServiceState,
@@ -560,10 +566,7 @@ fn emit_execution_event(
 ) {
     let event_id = format!(
         "kimi_exec_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default()
+        EXECUTION_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
     );
     let _ = state
         .event_tx
@@ -583,6 +586,9 @@ fn emit_execution_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     #[test]
     fn kimi_client_capabilities_are_boolean_dialect() {
@@ -616,5 +622,173 @@ mod tests {
         let parsed = parse_command("rg -n -- foo src").expect("parse");
         let argv = build_final_argv(&parsed);
         assert_eq!(argv, vec!["rg", "-n", "--", "foo", "src"]);
+    }
+
+    fn test_state(role: AdapterRole) -> (Arc<ClientServiceState>, mpsc::Receiver<ProviderEvent>) {
+        let (event_tx, events) = mpsc::channel(512);
+        let (terminal_tx, _terminal_rx) = mpsc::channel(1);
+        let state = Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root: std::env::temp_dir(),
+            policy: ClientServicePolicy::new(role, ProviderPermissionMode::Auto),
+            permission_mode: ProviderPermissionMode::Auto,
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(terminal_tx),
+            bwrap: None,
+            cancel: CancellationToken::new(),
+        });
+        (state, events)
+    }
+
+    #[tokio::test]
+    async fn execution_event_ids_are_unique_under_concurrency() {
+        let (state, mut events) = test_state(AdapterRole::Executor);
+        let emitter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                for _ in 0..64 {
+                    emit_execution_event(
+                        &state,
+                        ProviderExecutionEventKind::Command,
+                        ProviderExecutionEventStatus::Started,
+                        "t".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            })
+        };
+        let another = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                for _ in 0..64 {
+                    emit_execution_event(
+                        &state,
+                        ProviderExecutionEventKind::Command,
+                        ProviderExecutionEventStatus::Started,
+                        "t".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            })
+        };
+        emitter.await.expect("emitter");
+        another.await.expect("another");
+        let mut ids = Vec::new();
+        while ids.len() < 128 {
+            match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+                Ok(Some(ProviderEvent::Execution(event))) => ids.push(event.event_id),
+                other => panic!("unexpected event while collecting ids: {other:?}"),
+            }
+        }
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "event ids must be unique");
+    }
+
+    #[tokio::test]
+    async fn reviewer_role_is_read_only_and_confined_to_authorized_root() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new(
+            peer,
+            "reviewer-session".to_string(),
+            dir.path().to_path_buf(),
+            AdapterRole::Reviewer,
+            ProviderPermissionMode::Auto,
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // Reviewer cannot execute terminals or write files even though the
+        // root is the authorized worktree: the role boundary precedes any
+        // root-based authorization.
+        let cases = [
+            (
+                "terminal/create",
+                json!({
+                    "sessionId": "reviewer-session",
+                    "command": "git status",
+                    "cwd": ""
+                }),
+                ERROR_REJECTED,
+            ),
+            (
+                "fs/write_text_file",
+                json!({
+                    "sessionId": "reviewer-session",
+                    "path": "notes.txt",
+                    "content": "x"
+                }),
+                ERROR_REJECTED,
+            ),
+            // The single permitted action (fs read) is still confined to the
+            // authorized root; escaping paths are rejected.
+            (
+                "fs/read_text_file",
+                json!({
+                    "sessionId": "reviewer-session",
+                    "path": "../escape.txt"
+                }),
+                ERROR_FS,
+            ),
+        ];
+        for (index, (method, params, expected_code)) in cases.iter().enumerate() {
+            assert!(dispatcher.dispatch(method, json!(index), params.clone()));
+            let reply = {
+                let mut line = String::new();
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        line.clear();
+                        server_reader
+                            .read_line(&mut line)
+                            .await
+                            .expect("read reply");
+                        if !line.trim().is_empty() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("reply within timeout");
+                serde_json::from_str::<Value>(&line).expect("reply json")
+            };
+            assert_eq!(reply["id"], json!(index), "{method}");
+            assert_eq!(
+                reply["error"]["code"],
+                json!(expected_code),
+                "{method}: {reply}"
+            );
+            if *expected_code == ERROR_REJECTED {
+                assert!(
+                    reply["error"]["message"]
+                        .as_str()
+                        .expect("message")
+                        .contains("reviewer"),
+                    "{method}: {reply}"
+                );
+            }
+        }
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
     }
 }

@@ -59,7 +59,6 @@ pub struct TerminalResult {
 pub enum TerminalError {
     TooManyTerminals,
     UnknownTerminal(String),
-    AlreadyReleased(String),
 }
 
 impl std::fmt::Display for TerminalError {
@@ -70,9 +69,6 @@ impl std::fmt::Display for TerminalError {
                 "terminal concurrency limit of {MAX_TERMINALS} reached"
             ),
             TerminalError::UnknownTerminal(id) => write!(formatter, "unknown terminal: {id}"),
-            TerminalError::AlreadyReleased(id) => {
-                write!(formatter, "terminal already released: {id}")
-            }
         }
     }
 }
@@ -204,18 +200,27 @@ impl TerminalManager {
                 .cloned()
                 .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))?
         };
-        let command = entry
-            .command
-            .lock()
-            .expect("terminal command lock")
-            .take()
-            .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))?;
+        let command = {
+            let mut command = entry.command.lock().expect("terminal command lock").take();
+            if command.is_none() {
+                // start cannot proceed (e.g. double start): release the slot
+                // so the concurrency quota is not leaked.
+                *entry.state.lock().expect("terminal state lock") = TerminalState::Released;
+                return Err(TerminalError::UnknownTerminal(id.to_string()));
+            }
+            command.take().expect("command checked above")
+        };
         let manager = self.clone();
         tokio::spawn(run_terminal(entry, command, manager));
         Ok(())
     }
 
     /// Wait for a terminal to exit (or be killed / time out).
+    ///
+    /// `tokio::sync::Notify` stores no permit, so a terminal that finished
+    /// before this call would never wake a late `notified()` registration.
+    /// Register the future first, then check the result slot; repeat until
+    /// the result is present.
     pub async fn wait_for_exit(&self, id: &str) -> Result<TerminalResult, TerminalError> {
         let entry = {
             let inner = self.inner.lock().expect("terminal manager lock");
@@ -225,13 +230,13 @@ impl TerminalManager {
                 .cloned()
                 .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))?
         };
-        entry.done.notified().await;
-        entry
-            .result
-            .lock()
-            .expect("terminal result lock")
-            .clone()
-            .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))
+        loop {
+            let notified = entry.done.notified();
+            if let Some(result) = entry.result.lock().expect("terminal result lock").clone() {
+                return Ok(result);
+            }
+            notified.await;
+        }
     }
 
     /// Kill a terminal's process group. Idempotent; unknown ids are errors.
@@ -244,10 +249,8 @@ impl TerminalManager {
                 .cloned()
                 .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))?
         };
-        let state = *entry.state.lock().expect("terminal state lock");
-        if state == TerminalState::Released {
-            return Err(TerminalError::AlreadyReleased(id.to_string()));
-        }
+        // Idempotent per spec: killing an already-released (or unknown-state)
+        // terminal succeeds; only unknown ids are errors.
         entry.kill.cancel();
         Ok(())
     }
@@ -734,6 +737,77 @@ mod tests {
         .expect("terminal output test timed out");
         assert!(result.truncated);
         assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_after_fast_exit_returns_immediately() {
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = write_executable(dir.path(), "fast", "exit 0");
+        let (manager, _output) = manager(Duration::from_secs(5));
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        // Let the terminal finish long before the wait registers: Notify has
+        // no permit, so wait_for_exit must observe the stored result instead
+        // of hanging on notified().
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), manager.wait_for_exit(&id))
+            .await
+            .expect("wait must not hang when the terminal already exited")
+            .expect("wait result");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.timed_out);
+        assert!(!result.killed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_after_release_is_idempotent() {
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = write_executable(dir.path(), "slow", "sleep 30");
+        let (manager, _output) = manager(Duration::from_secs(30));
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        manager.release(&id).await.expect("release");
+        manager
+            .kill(&id)
+            .await
+            .expect("kill after release must succeed (idempotent)");
+        manager.release(&id).await.expect("idempotent release");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_start_frees_concurrency_quota() {
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = write_executable(dir.path(), "slow", "sleep 30");
+        let (manager, _output) = manager(Duration::from_secs(30));
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("first start");
+        let error = manager.start(&id).expect_err("second start must fail");
+        assert_eq!(error, TerminalError::UnknownTerminal(id.clone()));
+        manager
+            .release(&id)
+            .await
+            .expect("release after failed start");
+        // The quota consumed by the doomed create must be reusable.
+        for _ in 0..MAX_TERMINALS {
+            let id = manager
+                .create(command(&bin, dir.path(), &[]))
+                .await
+                .expect("create within limit after failed start freed quota");
+            manager.start(&id).expect("start");
+        }
+        manager.cleanup_all();
     }
 
     #[cfg(unix)]

@@ -713,3 +713,168 @@ async fn session_new_params_omit_permission_mode() {
     );
     server_task.await.expect("server task");
 }
+
+fn acp_fixture(name: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src/cross_cutting/kimi_code_provider/tests/fixtures")
+        .join(name);
+    serde_json::from_str(&std::fs::read_to_string(path).expect("fixture file"))
+        .expect("fixture json")
+}
+
+/// Replace `<REDACTED>` placeholders (sessionId) with the live session id so
+/// the recorded transcript can be replayed; opaque ids are left verbatim.
+fn reseat_redacted(value: &Value, key: &str, replacement: &str) -> Value {
+    match value {
+        Value::String(text) if text == "<REDACTED>" => Value::String(replacement.to_string()),
+        Value::String(text) => Value::String(text.clone()),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| reseat_redacted(item, key, replacement))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(field, item)| {
+                    (
+                        field.clone(),
+                        if field == key {
+                            reseat_redacted(item, key, replacement)
+                        } else {
+                            item.clone()
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Replay the captured kimi ACP 0.38.0 fixtures against a fake peer:
+/// - `acp_request_permission_bash.redacted.json`: the recorded
+///   `session/request_permission` request must produce a client response
+///   field-for-field identical to the recorded response (after approving).
+/// - `acp_session_update_tool_call_update.redacted.json`: the recorded
+///   `session/update` notification must parse (content array shape) and its
+///   text must surface in the tool result; as a notification it has no
+///   JSON-RPC response.
+#[tokio::test]
+async fn fake_peer_fixture_replay_matches_recorded_transcript() {
+    let permission_fixture = acp_fixture("acp_request_permission_bash.redacted.json");
+    let update_fixture = acp_fixture("acp_session_update_tool_call_update.redacted.json");
+    const SESSION: &str = "fixture_replay_session";
+    let expected_text = update_fixture["notification"]["params"]["update"]["content"][0]["content"]
+        ["text"]
+        .as_str()
+        .expect("fixture text")
+        .to_string();
+    let update_fixture = update_fixture.clone();
+
+    let (peer, server) = test_peer();
+    let mut session_input = input(None, 10);
+    session_input.permission_mode = ProviderPermissionMode::Supervised;
+    let (commands, mut events, run) = direct_session_events(peer, session_input).await;
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            }),
+        )
+        .await;
+        let _initialized = read_request(&mut reader).await;
+        let new = read_request(&mut reader).await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":SESSION}
+            }),
+        )
+        .await;
+        let prompt = read_request(&mut reader).await;
+
+        // Replay the recorded permission request (sessionId de-redacted).
+        let recorded_request =
+            reseat_redacted(&permission_fixture["request"], "sessionId", SESSION);
+        send_message(&mut writer, recorded_request).await;
+        let reply = read_request(&mut reader).await;
+        // Field-for-field comparison with the recorded response.
+        assert_eq!(reply, permission_fixture["response"]);
+
+        // Replay the recorded session/update notification; it must not
+        // produce any JSON-RPC response (notifications are one-way).
+        let recorded_notification =
+            reseat_redacted(&update_fixture["notification"], "sessionId", SESSION);
+        send_message(&mut writer, recorded_notification.clone()).await;
+        // Complete the same tool call so the buffered content flushes as a
+        // tool result; only the status field differs from the recording.
+        let mut completed = recorded_notification.clone();
+        completed["params"]["update"]["status"] = serde_json::json!("completed");
+        send_message(&mut writer, completed).await;
+
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
+            }),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    // Approve the recorded Bash permission request.
+    let permission_id = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("permission request event")
+            .expect("permission request value")
+        {
+            ProviderEvent::PermissionRequest(request) => {
+                assert_eq!(request.tool_name, "Bash");
+                break request.id;
+            }
+            ProviderEvent::StatusChanged(_) => {}
+            other => panic!("unexpected provider event: {other:?}"),
+        }
+    };
+    commands
+        .send(ProviderCommand::PermissionResponse {
+            id: permission_id,
+            approved: true,
+            reason: None,
+        })
+        .await
+        .expect("approval response");
+
+    // The recorded tool_call_update content must surface verbatim.
+    let mut saw_tool_result = false;
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("terminal event")
+    {
+        if let ProviderEvent::ToolResult(result) = &event {
+            assert!(
+                result.output.contains(&expected_text),
+                "tool result must contain the recorded fixture text: {:?}",
+                result.output
+            );
+            assert!(!result.is_error);
+            saw_tool_result = true;
+        }
+        if matches!(event, ProviderEvent::Completed(_)) {
+            break;
+        }
+    }
+    assert!(
+        saw_tool_result,
+        "recorded tool_call_update must flush a tool result"
+    );
+    assert!(run.await.expect("run join").is_ok());
+    server_task.await.expect("server task");
+}
