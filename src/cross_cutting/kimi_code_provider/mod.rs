@@ -16,8 +16,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 mod client_services;
+pub mod mcp_bundle;
 mod parse;
 mod session;
+
+use mcp_bundle::KimiMcpInjection;
+pub use mcp_bundle::{McpBundleError, McpServerConfig, ValidatedMcpServerBundle};
+
+pub use mcp_bundle::codegraph_server_config;
 
 #[cfg(test)]
 pub mod tests;
@@ -94,14 +100,51 @@ pub async fn probe_kimi_version(command: &std::path::Path) -> KimiVersion {
     }
 }
 
+/// kimi MCP 受控注入的 provider 级状态：受控 bundle +（resume 场景的）冻结 digest。
+/// 数据来源是 Aria-owned 的 session policy envelope（`LogicalCodebaseProviderGateway`
+/// 侧组装，见 tasks.md 6.1 与 session-policy-envelope REQ-ENV-06）；未提供时保持
+/// `mcpServers: []`，绝不从普通 provider 配置透传任意 JSON。
+#[derive(Debug, Clone)]
+pub struct KimiMcpInjectionConfig {
+    bundle: ValidatedMcpServerBundle,
+    frozen_digest: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct KimiCodeProvider {
     command: PathBuf,
+    mcp_injection: Option<KimiMcpInjectionConfig>,
 }
 
 impl KimiCodeProvider {
     pub fn new(command: PathBuf) -> Self {
-        Self { command }
+        Self {
+            command,
+            mcp_injection: None,
+        }
+    }
+
+    /// 附加受控 MCP bundle（新会话场景：无冻结 digest，resume 校验不适用）。
+    pub fn with_mcp_bundle(mut self, bundle: ValidatedMcpServerBundle) -> Self {
+        self.mcp_injection = Some(KimiMcpInjectionConfig {
+            bundle,
+            frozen_digest: None,
+        });
+        self
+    }
+
+    /// 附加受控 MCP bundle 与上次 run 审计冻结的 digest（resume 场景：
+    /// digest 漂移时拒绝 `session/load`、启动新会话并标记旧会话 superseded）。
+    pub fn with_mcp_bundle_for_resume(
+        mut self,
+        bundle: ValidatedMcpServerBundle,
+        frozen_digest: String,
+    ) -> Self {
+        self.mcp_injection = Some(KimiMcpInjectionConfig {
+            bundle,
+            frozen_digest: Some(frozen_digest),
+        });
+        self
     }
 
     pub(crate) fn build_args(&self) -> Vec<String> {
@@ -178,6 +221,7 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         let peer = JsonRpcPeer::new(process.stdout, process.stdin);
         let stderr = process.stderr;
         let mut child = process.child;
+        let mcp_injection = self.mcp_injection.clone();
         let (event_tx, event_rx) = mpsc::channel(32);
         let (command_tx, command_rx) = mpsc::channel(8);
         let _ = event_tx
@@ -200,11 +244,24 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                 }
                 output
             });
-            let result = session::run_kimi_session(
+            let resuming = input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|id| !id.is_empty());
+            let mcp_injection =
+                mcp_injection.map(|config| match (resuming, config.frozen_digest) {
+                    (true, Some(frozen_digest)) => {
+                        KimiMcpInjection::for_resume(config.bundle, frozen_digest)
+                    }
+                    _ => KimiMcpInjection::for_new_session(config.bundle),
+                });
+            let result = session::run_kimi_session_with_mcp(
                 peer,
                 command_rx,
                 event_tx.clone(),
                 input,
+                mcp_injection,
                 cancel.clone(),
             )
             .await;

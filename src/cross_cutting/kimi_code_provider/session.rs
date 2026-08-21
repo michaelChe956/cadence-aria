@@ -15,6 +15,7 @@ use crate::cross_cutting::streaming_provider::{
 };
 
 use super::client_services::{KimiClientServiceDispatcher, kimi_client_capabilities};
+use super::mcp_bundle::{KimiMcpInjection, SessionMethodDecision, resolve_session_method};
 use super::parse::{
     KimiPermissionOption, KimiPromptResult, KimiSessionUpdate, Parsed, parse_message,
 };
@@ -43,6 +44,9 @@ impl Drop for CommandRelayGuard {
     }
 }
 
+/// MCP 兼容入口（测试与既有调用方使用）：等价于不带 bundle 的
+/// `run_kimi_session_with_mcp`，保持 `mcpServers: []`。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_kimi_session<W>(
     peer: JsonRpcPeer<W>,
     command_rx: mpsc::Receiver<ProviderCommand>,
@@ -53,7 +57,23 @@ pub(crate) async fn run_kimi_session<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    run_kimi_session_inner(peer, command_rx, event_tx, input, cancel).await
+    run_kimi_session_inner(peer, command_rx, event_tx, input, None, cancel).await
+}
+
+/// 带 MCP 受控注入的会话入口：`mcpServers` 由经校验的 bundle 派生；
+/// resume 时 digest 漂移则拒绝 session/load、转 session/new 并记录 superseded 审计。
+pub(crate) async fn run_kimi_session_with_mcp<W>(
+    peer: JsonRpcPeer<W>,
+    command_rx: mpsc::Receiver<ProviderCommand>,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    input: StreamingProviderInput,
+    mcp_injection: Option<KimiMcpInjection>,
+    cancel: CancellationToken,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    run_kimi_session_inner(peer, command_rx, event_tx, input, mcp_injection, cancel).await
 }
 
 async fn run_kimi_session_inner<W>(
@@ -61,6 +81,7 @@ async fn run_kimi_session_inner<W>(
     mut command_rx: mpsc::Receiver<ProviderCommand>,
     event_tx: mpsc::Sender<ProviderEvent>,
     input: StreamingProviderInput,
+    mcp_injection: Option<KimiMcpInjection>,
     cancel: CancellationToken,
 ) -> Result<(), ProviderAdapterError>
 where
@@ -138,21 +159,47 @@ where
         .resume_provider_session_id
         .clone()
         .filter(|id| !id.trim().is_empty());
-    let session_method = if resume_id.is_some() {
-        "session/load"
-    } else {
-        "session/new"
-    };
-    let session_request = if let Some(session_id) = resume_id.as_deref() {
-        json!({
-            "jsonrpc":"2.0", "id":2, "method":"session/load",
-            "params":{"sessionId":session_id,"cwd":input.working_dir,"mcpServers":[]}
-        })
-    } else {
-        json!({
-            "jsonrpc":"2.0", "id":2, "method":"session/new",
-            "params":{"cwd":input.working_dir,"mcpServers":[]}
-        })
+    // MCP 受控注入（tasks.md 6.1）：mcpServers 由经校验的 bundle 派生；
+    // resume 时 digest 漂移 → 拒绝 session/load、启动新会话并标记旧会话 superseded。
+    if let Some(bundle) = mcp_injection.as_ref().map(KimiMcpInjection::bundle) {
+        for line in bundle.argv_audit_lines() {
+            tracing::info!(target: "kimi_code_provider", audit = %line, "kimi MCP server injection");
+        }
+    }
+    let decision = resolve_session_method(resume_id.as_deref(), mcp_injection.as_ref());
+    let (session_method, session_request) = match decision {
+        SessionMethodDecision::Load {
+            session_id,
+            mcp_servers,
+        } => (
+            "session/load",
+            json!({
+                "jsonrpc":"2.0", "id":2, "method":"session/load",
+                "params":{"sessionId":session_id,"cwd":input.working_dir,"mcpServers":mcp_servers}
+            }),
+        ),
+        SessionMethodDecision::New {
+            superseded,
+            mcp_servers,
+        } => {
+            if let Some(superseded) = superseded {
+                tracing::warn!(
+                    target: "kimi_code_provider",
+                    old_session_id = %superseded.session_id,
+                    frozen_digest = %superseded.frozen_digest,
+                    actual_digest = %superseded.actual_digest,
+                    superseded = true,
+                    "kimi MCP bundle digest drifted on resume; rejecting session/load and starting a new session (REQ-ENV-04)"
+                );
+            }
+            (
+                "session/new",
+                json!({
+                    "jsonrpc":"2.0", "id":2, "method":"session/new",
+                    "params":{"cwd":input.working_dir,"mcpServers":mcp_servers}
+                }),
+            )
+        }
     };
     let session_response =
         match request_control(&peer, session_request, deadline, &cancel, &event_tx).await? {
