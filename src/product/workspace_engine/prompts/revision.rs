@@ -122,10 +122,17 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
-        prompt.push_str("会话上下文:\n");
-        for msg in &self.session.messages {
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
-        }
+        prompt.push_str("会话上下文（滑动窗口压缩；最近 2 轮保留原文）:\n");
+        prompt.push_str(
+            &super::compact_history(super::HistoryCompactionInput {
+                messages: &self.session.messages,
+                artifact_versions: &self.artifact_versions,
+                timeline_nodes: &self.timeline_nodes,
+                latest_review_verdict: Some(review),
+                mode: super::HistoryCompactionMode::Author,
+            })
+            .rendered,
+        );
         self.append_missing_context_notes_to_prompt(&mut prompt);
         prompt.push_str("\n上一版 Artifact:\n\n");
         prompt.push_str(artifact);

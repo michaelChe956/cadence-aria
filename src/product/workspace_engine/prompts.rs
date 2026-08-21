@@ -5,11 +5,14 @@ use crate::product::cadence_skills::routing_reference::{
 };
 
 mod author_revision;
+mod history_compaction;
 mod review;
 mod review_context;
 mod review_repair;
 mod reviewer_context_filter;
 mod revision;
+
+use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
 
 /// 聚合视野 prompt 的唯一 marker（`aggregate_story_scope_prompt` / `aggregate_design_scope_prompt` /
 /// `aggregate_work_item_target_scope_prompt` 均以 `## 聚合代码库成员清单` 开头）。用于在
@@ -348,12 +351,24 @@ impl WorkspaceEngine {
                 let message = &self.session.messages[*index];
                 message.role == "user" && message.content == user_content
             });
-        for (index, msg) in self.session.messages.iter().enumerate() {
-            if Some(index) == last_current_user_message_index {
-                continue;
-            }
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
-        }
+        let history = compact_history(HistoryCompactionInput {
+            messages: &self.session.messages,
+            artifact_versions: &self.artifact_versions,
+            timeline_nodes: &self.timeline_nodes,
+            latest_review_verdict: self.latest_review_verdict.as_ref(),
+            mode: HistoryCompactionMode::Author,
+        });
+        let history = if let Some(index) = last_current_user_message_index {
+            let current = &self.session.messages[index];
+            history
+                .rendered
+                .strip_suffix(&format!("[{}]: {}\n", current.role, current.content))
+                .unwrap_or(&history.rendered)
+                .to_string()
+        } else {
+            history.rendered
+        };
+        prompt.push_str(&history);
 
         for note in self.missing_context_note_summaries() {
             prompt.push_str(&format!("[user]: {note}\n"));

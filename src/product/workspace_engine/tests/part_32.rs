@@ -342,3 +342,145 @@ fn routing_reference_context_returns_legacy_when_validate_fails() {
         RoutingReferenceContext::Legacy
     ));
 }
+
+
+#[test]
+fn prompt_sliding_window_applies_to_author_revision_and_reviewer_entrypoints() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_prompt_sliding_window");
+    session.workspace_type = WorkspaceType::Story;
+    let mut artifacts = Vec::new();
+    session.messages = vec![SessionMessage {
+        id: "msg_000".to_string(),
+        role: "system".to_string(),
+        content: "Workspace 生成任务已准备\n\n[canonical_inputs]\n完整 canonical inputs：不得裁剪。\n\n[constraint_summary]\n历史约束。".to_string(),
+        checkpoint_id: None,
+        created_at: "2026-08-21T00:00:00Z".to_string(),
+    }];
+    for round in 1..=4 {
+        let markdown = format!(
+            "# Story Artifact v{round}\n\n## 功能需求\n- [REQ-{round:03}] {}\n\n## 成功标准\n- [AC-{round:03}] {}\n",
+            "早期 artifact 正文 ".repeat(30),
+            "验收细节 ".repeat(30),
+        );
+        session.messages.push(SessionMessage {
+            id: format!("msg_user_{round}"),
+            role: "user".to_string(),
+            content: format!("ROUND-{round}-USER-RAW {}", "需求细节 ".repeat(30)),
+            checkpoint_id: None,
+            created_at: format!("2026-08-21T00:00:{round:02}Z"),
+        });
+        session.messages.push(SessionMessage {
+            id: format!("msg_author_{round}"),
+            role: "assistant".to_string(),
+            content: markdown.clone(),
+            checkpoint_id: None,
+            created_at: format!("2026-08-21T00:01:{round:02}Z"),
+        });
+        session.messages.push(SessionMessage {
+            id: format!("msg_reviewer_{round}"),
+            role: "reviewer".to_string(),
+            content: format!(
+                "[review_summary]\nround {round} verdict\n\n[review_findings]\n1. severity: suggestion\n   message: round {round} suggestion\n   evidence: artifact v{round}\n   required_action: optional"
+            ),
+            checkpoint_id: None,
+            created_at: format!("2026-08-21T00:02:{round:02}Z"),
+        });
+        artifacts.push(ArtifactVersion {
+            version: round,
+            payload: ArtifactPayload::Markdown {
+                markdown,
+                diff: None,
+            },
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: Some(ProviderName::Codex),
+            review_verdict: Some(ReviewVerdictType::Revise),
+            confirmed_by: None,
+            is_current: round == 4,
+            created_at: format!("2026-08-21T00:03:{round:02}Z"),
+            source_node_id: format!("author_round_{round}"),
+        });
+    }
+    session.messages.insert(
+        4,
+        SessionMessage {
+            id: "msg_choice".to_string(),
+            role: "system".to_string(),
+            content: "结构化交互审计记录（daemon 捕获）\n- choice_id: choice_rollout\n- answers:\n  - question_id: q1\n    selected: gradual = 分批发布\n- impacts: REQ-001, AC-001".to_string(),
+            checkpoint_id: None,
+            created_at: "2026-08-21T00:00:03Z".to_string(),
+        },
+    );
+    session.artifact = Some(artifacts[3].payload.clone());
+    let checkpoint_tmp = TempDir::new().unwrap();
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        session,
+    );
+    engine.artifact_versions = artifacts;
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "第 1 轮必须修复仍未关闭。".to_string(),
+        summary: "第 1 轮追踪关系未关闭".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::MustFix,
+            message: "ROUND-1-MUST-FIX-FULL-TEXT：REQ-001 必须追踪到 AC-001。".to_string(),
+            evidence: "artifact v1 / REQ-001".to_string(),
+            required_action: "补齐 REQ-001 -> AC-001 trace。".to_string(),
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    });
+
+    let author = engine
+        .build_streaming_input("新的 author 请求", AuthorPromptMode::FullConversation)
+        .expect("author prompt")
+        .prompt;
+    let revision = engine.build_revision_full_prompt(
+        engine
+            .session
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown())
+            .expect("current artifact"),
+        engine.latest_review_verdict.as_ref().expect("review verdict"),
+        &engine.routing_reference_context(),
+    );
+    let reviewer = engine.build_review_input().expect("review prompt").prompt;
+
+    for (entrypoint, prompt) in [
+        ("author", &author),
+        ("revision", &revision),
+        ("reviewer", &reviewer),
+    ] {
+        assert!(
+            prompt.contains("[历史压缩摘要 round=1]"),
+            "{entrypoint} must summarize early rounds: {prompt}"
+        );
+        assert!(
+            !prompt.contains("ROUND-1-USER-RAW"),
+            "{entrypoint} must not replay early raw rounds: {prompt}"
+        );
+        assert!(prompt.contains("ROUND-3-USER-RAW"), "{entrypoint}: {prompt}");
+        assert!(prompt.contains("ROUND-4-USER-RAW"), "{entrypoint}: {prompt}");
+        assert!(prompt.contains("choice_rollout"), "{entrypoint}: {prompt}");
+        assert!(prompt.contains("gradual = 分批发布"), "{entrypoint}: {prompt}");
+        assert!(prompt.contains("# Story Artifact v4"), "{entrypoint}: {prompt}");
+    }
+    assert!(reviewer.contains("完整 canonical inputs：不得裁剪。"));
+    assert!(reviewer.contains("ROUND-1-MUST-FIX-FULL-TEXT"));
+    assert!(reviewer.contains("artifact v1 -> v2 相邻版本差异摘要"));
+
+    let full_replay_len = engine
+        .session
+        .messages
+        .iter()
+        .map(|message| message.role.len() + message.content.len() + 5)
+        .sum::<usize>();
+    assert!(
+        author.len() < full_replay_len + 5_000,
+        "prompt character-count decrease is a proxy metric only, not a release gate"
+    );
+}

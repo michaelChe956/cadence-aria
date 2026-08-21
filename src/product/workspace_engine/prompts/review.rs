@@ -1,3 +1,7 @@
+use super::history_compaction::{
+    HistoryCompactionInput, HistoryCompactionMode, compact_history,
+    render_intermediate_artifact_diffs, render_open_required_findings,
+};
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
@@ -40,14 +44,29 @@ impl WorkspaceEngine {
         if let Some(gate) = reviewer_artifact_schema_gate_for(&self.session.workspace_type) {
             prompt.push_str(&gate);
         }
-        prompt.push_str("会话上下文:\n");
-        for msg in &self.session.messages {
-            let Some(content) = reviewer_context_content(msg) else {
-                continue;
-            };
-            prompt.push_str(&format!("[{}]: {content}\n", msg.role));
-        }
+        prompt.push_str("会话上下文（滑动窗口压缩；最近 2 轮保留原文）:\n");
+        prompt.push_str(
+            &compact_history(HistoryCompactionInput {
+                messages: &self.session.messages,
+                artifact_versions: &self.artifact_versions,
+                timeline_nodes: &self.timeline_nodes,
+                latest_review_verdict: self.latest_review_verdict.as_ref(),
+                mode: HistoryCompactionMode::Reviewer,
+            })
+            .rendered,
+        );
         self.append_missing_context_notes_to_prompt(&mut prompt);
+        let artifact_diffs = render_intermediate_artifact_diffs(&self.artifact_versions);
+        if !artifact_diffs.is_empty() {
+            prompt.push_str("\n中间 Artifact 版本（相邻版本 diff 摘要；失败时已保留全文）:\n");
+            prompt.push_str(&artifact_diffs);
+        }
+        let open_required_findings =
+            render_open_required_findings(self.latest_review_verdict.as_ref());
+        if !open_required_findings.is_empty() {
+            prompt.push('\n');
+            prompt.push_str(&open_required_findings);
+        }
         prompt.push_str("\n当前已提取 Artifact Markdown（daemon 已剥离外层 artifact fence）:\n\n");
         prompt.push_str(&artifact);
         prompt.push_str(
