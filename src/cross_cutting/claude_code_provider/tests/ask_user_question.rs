@@ -201,7 +201,7 @@ done
     assert!(completed.contains("多个 AskUserQuestion 问题全部回填"));
 }
 #[tokio::test]
-async fn claude_provider_deduplicates_assistant_then_control_ask_user_question() {
+async fn claude_provider_answers_ask_user_question_only_via_control_response() {
     let fixture = write_fixture(
         "claude_assistant_then_control_ask_user_question_fixture.sh",
         r##"#!/usr/bin/env bash
@@ -214,31 +214,26 @@ fi
 
 sent_question=0
 while IFS= read -r line; do
-  if [[ "$line" == *'"initialize"'* ]]; then
-    continue
-  fi
-  if [[ "$line" == *'"set_permission_mode"'* ]]; then
+  if [[ "$line" == *'"initialize"'* || "$line" == *'"set_permission_mode"'* ]]; then
     continue
   fi
   if [[ "$sent_question" == "0" && "$line" == *'"user"'* ]]; then
     sent_question=1
     echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]}}]}}'
+    echo '{"type":"control_request","request_id":"ask_req_001","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]},"tool_use_id":"toolu_question"}}'
     continue
   fi
   if [[ "$line" == *'"tool_result"'* ]]; then
-    if [[ "$line" != *'"tool_use_id":"toolu_question"'* || "$line" != *'Scope?'* || "$line" != *'Global'* ]]; then
-      echo "missing AskUserQuestion tool_result: $line" >&2
-      exit 44
-    fi
-    echo '{"type":"control_request","request_id":"ask_req_duplicate","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]},"tool_use_id":"toolu_question"}}'
-    continue
+    echo "aria must not inject AskUserQuestion tool_result: $line" >&2
+    exit 44
   fi
   if [[ "$line" == *'"control_response"'* ]]; then
-    if [[ "$line" != *'"request_id":"ask_req_duplicate"'* || "$line" != *'"updatedInput"'* || "$line" != *'Scope?'* || "$line" != *'Global'* ]]; then
-      echo "missing reused AskUserQuestion control_response: $line" >&2
+    if [[ "$line" != *'"request_id":"ask_req_001"'* || "$line" != *'"updatedInput"'* || "$line" != *'Scope?'* || "$line" != *'Global'* ]]; then
+      echo "missing AskUserQuestion control_response: $line" >&2
       exit 45
     fi
-    echo '{"type":"result","subtype":"success","is_error":false,"result":"# Story Spec\n\n## 功能需求\n- [REQ-001] Duplicate AskUserQuestion events are answered once.\n\n## 成功标准\n- [AC-001] The provider completes without a second frontend choice.","session_id":"claude_fixture_session"}'
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_question","content":"native answer accepted"}]}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"# Story Spec\n\n## 功能需求\n- [REQ-001] AskUserQuestion is answered by control_response only.\n\n## 成功标准\n- [AC-001] Native tool_result completes the run.","session_id":"claude_fixture_session"}'
     exit 0
   fi
 done
@@ -259,9 +254,7 @@ done
             .expect("provider event channel should stay open")
         {
             ProviderEvent::ChoiceRequest(choice) => break choice,
-            ProviderEvent::Failed { message } => {
-                panic!("provider failed before choice: {message}")
-            }
+            ProviderEvent::Failed { message } => panic!("provider failed before choice: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
@@ -277,7 +270,108 @@ done
             | ProviderEvent::Completed(_) => {}
         }
     };
-    assert_eq!(choice.id, "toolu_question");
+    assert_eq!(choice.id, "ask_req_001");
+
+    session
+        .commands
+        .send(ProviderCommand::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("send choice response");
+
+    let completed = recv_completed(&mut session.events).await;
+    assert!(completed.contains("# Story Spec"));
+}
+
+#[tokio::test]
+async fn claude_provider_reuses_choice_for_duplicate_control_request_until_native_tool_result() {
+    let fixture = write_fixture(
+        "claude_duplicate_control_ask_user_question_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+sent_question=0
+responses=0
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* || "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$sent_question" == "0" && "$line" == *'"user"'* ]]; then
+    sent_question=1
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]}}]}}'
+    echo '{"type":"control_request","request_id":"ask_req_001","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]},"tool_use_id":"toolu_question"}}'
+    continue
+  fi
+  if [[ "$line" == *'"tool_result"'* ]]; then
+    echo "aria must not inject AskUserQuestion tool_result: $line" >&2
+    exit 44
+  fi
+  if [[ "$line" == *'"control_response"'* ]]; then
+    responses=$((responses + 1))
+    if [[ "$line" != *'"updatedInput"'* || "$line" != *'Scope?'* || "$line" != *'Global'* ]]; then
+      echo "missing AskUserQuestion control_response: $line" >&2
+      exit 45
+    fi
+    if [[ "$responses" == "1" ]]; then
+      if [[ "$line" != *'"request_id":"ask_req_001"'* ]]; then
+        echo "first control response has wrong request id: $line" >&2
+        exit 46
+      fi
+      echo '{"type":"control_request","request_id":"ask_req_002","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]},"tool_use_id":"toolu_question"}}'
+      continue
+    fi
+    if [[ "$line" != *'"request_id":"ask_req_002"'* ]]; then
+      echo "second control response has wrong request id: $line" >&2
+      exit 47
+    fi
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_question","content":"native answer accepted"}]}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"duplicate control request completed","session_id":"claude_fixture_session"}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let choice = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit choice")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::ChoiceRequest(choice) => break choice,
+            ProviderEvent::Failed { message } => panic!("provider failed before choice: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error before choice: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out before choice: {permission_id}")
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::Completed(_) => {}
+        }
+    };
+    assert_eq!(choice.id, "ask_req_001");
 
     session
         .commands
@@ -297,13 +391,15 @@ done
             .expect("provider event channel should stay open")
         {
             ProviderEvent::Completed(completion) => {
-                let full_output = completion.full_output;
-                assert!(full_output.contains("# Story Spec"));
+                assert_eq!(
+                    completion.full_output,
+                    "duplicate control request completed"
+                );
                 break;
             }
             ProviderEvent::ChoiceRequest(choice) => {
                 panic!(
-                    "duplicate AskUserQuestion should not be emitted: {}",
+                    "duplicate control request emitted a second choice: {}",
                     choice.id
                 )
             }
@@ -320,6 +416,79 @@ done
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_) => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_provider_tool_use_without_control_request_is_protocol_error() {
+    let fixture = write_fixture(
+        "claude_tool_use_without_control_ask_user_question_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* || "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]}}]}}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit protocol error")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::ProtocolError {
+                code,
+                message,
+                context,
+            } => {
+                assert_eq!(code, "ask_user_question_unresolved");
+                assert!(message.contains("tool_use"));
+                assert_eq!(
+                    context.expect("protocol context")["tool_use_id"],
+                    "toolu_question"
+                );
+                break;
+            }
+            ProviderEvent::ChoiceRequest(choice) => {
+                panic!(
+                    "tool_use without control_request must not ask user: {}",
+                    choice.id
+                )
+            }
+            ProviderEvent::Failed { message } => {
+                panic!("provider failed before protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::Completed(_) => {}
         }
     }
 }
@@ -535,68 +704,45 @@ async fn claude_provider_ask_user_question_emits_protocol_error_on_bridge_failur
     );
 }
 #[tokio::test]
-async fn claude_provider_ask_user_question_tool_use_emits_protocol_error_on_bridge_failure() {
+async fn claude_provider_ask_user_question_tool_use_without_control_request_is_protocol_incompatible()
+ {
     let fixture = executable_fixture(
         "tests/fixtures/provider/claude_ask_user_question_tool_use_bridge_failure_fixture.sh",
     );
     let provider = ClaudeCodeProvider::new(fixture);
     let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
-    let cancel = CancellationToken::new();
 
     let mut session = provider
-        .start(input, cancel.clone())
+        .start(input, CancellationToken::new())
         .await
         .expect("start provider");
 
-    let _choice = loop {
+    loop {
         match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
             .await
-            .expect("provider should emit choice")
+            .expect("provider should emit protocol error")
             .expect("provider event channel should stay open")
         {
-            ProviderEvent::ChoiceRequest(choice) => break choice,
-            ProviderEvent::Failed { message } => {
-                panic!("provider failed before choice: {message}")
+            ProviderEvent::ProtocolError {
+                code,
+                message,
+                context,
+            } => {
+                assert_eq!(code, "ask_user_question_unresolved");
+                assert!(message.contains("tool_use"));
+                assert_eq!(context.expect("context")["tool_use_id"], "toolu_question");
+                break;
             }
-            ProviderEvent::ProtocolError { message, .. } => {
-                panic!("provider protocol error before choice: {message}")
+            ProviderEvent::ChoiceRequest(choice) => {
+                panic!(
+                    "protocol-incompatible tool_use must not ask user: {}",
+                    choice.id
+                )
             }
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             _ => {}
         }
-    };
-
-    cancel.cancel();
-
-    let mut saw_protocol_error = false;
-    while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
-        .await
-        .unwrap_or(None)
-    {
-        if let ProviderEvent::ProtocolError {
-            code,
-            message,
-            context,
-        } = event
-        {
-            assert_eq!(code, "ask_user_question_unresolved");
-            assert!(
-                message.contains("AskUserQuestion"),
-                "message should mention AskUserQuestion: {message}"
-            );
-            assert!(
-                message.contains("unresolved"),
-                "message should mention unresolved: {message}"
-            );
-            let ctx = context.expect("context should be present");
-            assert_eq!(ctx["tool_use_id"], "toolu_question");
-            saw_protocol_error = true;
-            break;
-        }
     }
-    assert!(
-        saw_protocol_error,
-        "expected ask_user_question_unresolved protocol error after tool_use bridge failure"
-    );
 }
 #[tokio::test]
 async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_error() {
@@ -624,7 +770,7 @@ async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_e
             _ => {}
         }
     };
-    assert_eq!(choice.id, "toolu_question");
+    assert_eq!(choice.id, "ask_req_001");
 
     session
         .commands

@@ -38,7 +38,6 @@ struct ClaudePermissionRequest {
 
 #[derive(Debug, Clone)]
 struct ResolvedAskUserQuestion {
-    input: Value,
     answers: serde_json::Map<String, Value>,
 }
 
@@ -287,32 +286,6 @@ impl ClaudeCodeProvider {
                 "updatedInput": updated_input,
             }),
         );
-        tool::write_json_line(stdin, &payload).await
-    }
-
-    async fn write_tool_result(
-        stdin: &Arc<Mutex<ChildStdin>>,
-        tool_use_id: &str,
-        input: &Value,
-        answers: &serde_json::Map<String, Value>,
-    ) -> Result<(), ProviderAdapterError> {
-        eprintln!(
-            "[aria-choice-diag] claude writing AskUserQuestion tool_result tool_use_id={} answer_keys={:?}",
-            tool_use_id,
-            answers.keys().cloned().collect::<Vec<_>>()
-        );
-        let content = ask_user_question::ask_user_question_tool_result_content(input, answers);
-        let payload = json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": content,
-                }],
-            },
-        });
         tool::write_json_line(stdin, &payload).await
     }
 

@@ -49,6 +49,24 @@ pub(crate) async fn read_claude_stream(
             })?,
         };
         let Some(line) = line else {
+            if let Some((tool_use_id, _)) = pending_tool_uses
+                .iter()
+                .find(|(_, tool_use)| tool_use.name == "AskUserQuestion")
+            {
+                emit_ask_user_question_protocol_error(
+                    &event_tx,
+                    "tool_use",
+                    json!({ "tool_use_id": tool_use_id }),
+                    "stream ended without a control_request",
+                )
+                .await;
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    "AskUserQuestion stream ended without a control_request",
+                    0,
+                ));
+            }
             return Ok(ClaudeStreamOutcome::EofWithoutResult);
         };
         if line.trim().is_empty() {
@@ -145,13 +163,8 @@ pub(crate) async fn read_claude_stream(
                 )
                 .await?;
                 if let Some(tool_use_id) = request.tool_use_id {
-                    resolved_ask_user_questions.insert(
-                        tool_use_id,
-                        ResolvedAskUserQuestion {
-                            input: request.input,
-                            answers,
-                        },
-                    );
+                    resolved_ask_user_questions
+                        .insert(tool_use_id, ResolvedAskUserQuestion { answers });
                 }
             } else {
                 let decision = bridge
@@ -180,55 +193,7 @@ pub(crate) async fn read_claude_stream(
                         "[aria-choice-diag] claude received assistant tool_use AskUserQuestion tool_use_id={}",
                         tool_use.id
                     );
-                    let resolved = match resolved_ask_user_questions.remove(&tool_use.id) {
-                        Some(resolved) => resolved,
-                        None => {
-                            let choice_request =
-                                ask_user_question::parse_ask_user_question_from_input(
-                                    &tool_use.input,
-                                    &tool_use.id,
-                                );
-                            let choice_decision =
-                                match bridge.request_choice(choice_request, cancel.clone()).await {
-                                    Ok(decision) => decision,
-                                    Err(error) => {
-                                        emit_ask_user_question_protocol_error(
-                                            &event_tx,
-                                            "tool_use",
-                                            json!({ "tool_use_id": tool_use.id }),
-                                            &error.details,
-                                        )
-                                        .await;
-                                        return Err(error);
-                                    }
-                                };
-                            eprintln!(
-                                "[aria-choice-diag] claude got choice decision for assistant tool_use tool_use_id={} selected={:?} free_text_present={}",
-                                tool_use.id,
-                                choice_decision.selected_option_ids,
-                                choice_decision
-                                    .free_text
-                                    .as_ref()
-                                    .is_some_and(|text| !text.trim().is_empty())
-                            );
-                            ResolvedAskUserQuestion {
-                                input: tool_use.input.clone(),
-                                answers: ask_user_question::ask_user_question_answers_from_decision(
-                                    &tool_use.input,
-                                    &choice_decision,
-                                ),
-                            }
-                        }
-                    };
-                    resolved_ask_user_questions.insert(tool_use.id.clone(), resolved.clone());
-                    ClaudeCodeProvider::write_tool_result(
-                        &stdin,
-                        &tool_use.id,
-                        &resolved.input,
-                        &resolved.answers,
-                    )
-                    .await?;
-                    continue;
+                    pending_tool_uses.insert(tool_use.id.clone(), tool_use);
                 } else {
                     let description = tool::tool_use_description(&tool_use);
                     send_provider_event(
@@ -255,8 +220,12 @@ pub(crate) async fn read_claude_stream(
 
         if let Some(results) = ClaudeCodeProvider::parse_tool_result(&value) {
             for result in results {
-                if result.is_error && resolved_ask_user_questions.contains_key(&result.tool_use_id)
-                {
+                let is_ask_user_question = pending_tool_uses
+                    .get(&result.tool_use_id)
+                    .is_some_and(|tool_use| tool_use.name == "AskUserQuestion");
+                let has_resolved_ask_user_question =
+                    resolved_ask_user_questions.contains_key(&result.tool_use_id);
+                if has_resolved_ask_user_question && result.is_error {
                     emit_ask_user_question_protocol_error(
                         &event_tx,
                         "tool_result",
@@ -271,6 +240,23 @@ pub(crate) async fn read_claude_stream(
                         None,
                         result.output,
                         "AskUserQuestion tool_result reported error",
+                        0,
+                    ));
+                }
+                if has_resolved_ask_user_question {
+                    resolved_ask_user_questions.remove(&result.tool_use_id);
+                } else if is_ask_user_question {
+                    emit_ask_user_question_protocol_error(
+                        &event_tx,
+                        "tool_use",
+                        json!({ "tool_use_id": result.tool_use_id }),
+                        "native tool_result arrived without a control_request",
+                    )
+                    .await;
+                    return Err(ProviderAdapterError::execution_failed(
+                        None,
+                        String::new(),
+                        "AskUserQuestion tool_result arrived without a control_request",
                         0,
                     ));
                 }
@@ -300,6 +286,24 @@ pub(crate) async fn read_claude_stream(
         }
 
         if value.get("type").and_then(Value::as_str) == Some("result") {
+            if let Some((tool_use_id, _)) = pending_tool_uses
+                .iter()
+                .find(|(_, tool_use)| tool_use.name == "AskUserQuestion")
+            {
+                emit_ask_user_question_protocol_error(
+                    &event_tx,
+                    "tool_use",
+                    json!({ "tool_use_id": tool_use_id }),
+                    "result arrived without a control_request",
+                )
+                .await;
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    "AskUserQuestion result arrived without a control_request",
+                    0,
+                ));
+            }
             let is_error = value
                 .get("is_error")
                 .and_then(Value::as_bool)

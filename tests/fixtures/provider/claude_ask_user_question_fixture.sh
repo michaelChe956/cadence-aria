@@ -18,6 +18,7 @@ while IFS= read -r line; do
   fi
   if [[ "$sent_request" == "0" && "$line" == *'"user"'* ]]; then
     sent_request=1
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Drink?","options":[{"label":"Tea"},{"label":"Coffee"}]}]}}]}}'
     echo '{"type":"control_request","request_id":"ask_req_001","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Drink?","options":[{"label":"Tea"},{"label":"Coffee"}]}]},"tool_use_id":"toolu_question"}}'
     continue
   fi
@@ -30,14 +31,13 @@ while IFS= read -r line; do
       echo "missing selected answer: $line" >&2
       exit 43
     fi
-    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Drink?","options":[{"label":"Tea"},{"label":"Coffee"}]}]}}]}}'
-    continue
   fi
   if [[ "$line" == *'"tool_result"'* ]]; then
-    if [[ "$line" != *'"tool_use_id":"toolu_question"'* || "$line" != *'Your questions have been answered'* || "$line" != *'Drink?'* || "$line" != *'Tea'* ]]; then
-      echo "missing AskUserQuestion tool_result: $line" >&2
-      exit 44
-    fi
+    echo "aria must not inject AskUserQuestion tool_result: $line" >&2
+    exit 44
+  fi
+  if [[ "$line" == *'"control_response"'* ]]; then
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_question","content":"native answer accepted"}]}}'
     echo '{"type":"result","subtype":"success","is_error":false,"result":"'"${STORY_SPEC}"'","session_id":"claude_fixture_session"}'
     exit 0
   fi
