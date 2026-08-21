@@ -166,8 +166,15 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
             result
                 .adapter_input
                 .prompt
-                .contains("<ARIA_STRUCTURED_OUTPUT>"),
-            "{node_id} prompt must include the exact structured output start sentinel"
+                .contains("<ARIA_STRUCTURED_OUTPUT nonce="),
+            "{node_id} prompt must include the exact structured output start sentinel with nonce"
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("JSON 顶层 nonce 必须与开始标签一致"),
+            "{node_id} prompt must require the JSON envelope nonce to match the start tag nonce"
         );
         assert!(
             result

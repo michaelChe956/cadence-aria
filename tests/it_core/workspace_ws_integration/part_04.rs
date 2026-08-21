@@ -488,9 +488,8 @@ async fn workspace_ws_reconnect_after_review_can_still_run_revision() {
   "findings": [
     {
       "severity": "must_fix",
-      "message": "缺少失败路径",
+      "message": "缺少失败路径\n影响：下一阶段无法验收异常流程",
       "evidence": "Artifact 未覆盖失败路径",
-      "impact": "下一阶段无法验收异常流程",
       "required_action": "补充失败路径说明"
     }
   ]
