@@ -249,7 +249,6 @@ export type WorkspaceReviewFinding = {
   severity: WorkspaceReviewFindingSeverity;
   message: string;
   evidence: string;
-  impact: string;
   required_action: string;
 };
 

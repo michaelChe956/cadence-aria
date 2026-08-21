@@ -62,15 +62,15 @@ impl WorkspaceEngine {
         };
         prompt.push_str(&reviewer_output_contract(
             &nonce,
-            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}]}"#,
+            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前产物中的具体证据","required_action":"需要作者执行的最小动作"}]}"#,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
-             - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
-             - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
+             - 只有影响下一阶段可用性的 finding 才能标记为 `blocking` 或 `must_fix`。\n\
+             - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`。\n\
              - 没有强返修 finding 时，必须允许用户确认当前版本，不要为了普通建议使用强返修。\n\
              - 如果输出 `verdict=revise`，必须给出至少一个结构化 finding；否则系统会进入人工裁决而不是自动返修。\n\
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
-             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
+             - `revise`：仅当存在 blocking/must_fix finding。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
             &self.routing_reference_context(),
         ));
@@ -260,20 +260,20 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前产物中的具体证据","required_action":"需要作者执行的最小动作"}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
             &nonce,
             &schema,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
-             - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
-             - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
+             - 只有影响下一阶段可用性的 finding 才能标记为 `blocking` 或 `must_fix`。\n\
+             - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`。\n\
              - 没有强返修 finding 时，必须允许用户确认当前版本，不要为了普通建议使用强返修。\n\
              - 如果输出 `verdict=revise`，必须给出至少一个结构化 finding；否则系统会进入人工裁决而不是自动返修。\n\
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
-             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding；语义为重开 Outline 并重新生成拆分。\n\
+             - `revise`：仅当存在 blocking/must_fix finding；语义为重开 Outline 并重新生成拆分。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
             &self.routing_reference_context(),
         ));
@@ -573,7 +573,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_outline_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","target_outline_id":"outline id","message":"问题描述","evidence":"Outline 中的具体证据","impact":"为什么影响或不影响 Draft 生成","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","target_outline_id":"outline id","message":"问题描述（含影响）","evidence":"Outline 中的具体证据","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
@@ -581,7 +581,7 @@ impl WorkspaceEngine {
             &schema,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
              - `pass`：Outline 可进入生成模式选择。\n\
-             - `revise`：Outline 需要返修，且必须给出至少一个 blocking/must_fix/strong_recommend_fix finding。\n\
+             - `revise`：Outline 需要返修，且必须给出至少一个 blocking/must_fix finding。\n\
              - `needs_human`：需要用户做产品/范围判断。\n\
              - 每条 finding 如果针对具体 outline，必须填写 `target_outline_id`，且只能引用当前 Outline 中存在的 outline_id。\n\
              - 如果 finding 针对整个 Outline 方案而不是某个具体 outline，可以省略 `target_outline_id`。\n\
@@ -648,7 +648,7 @@ impl WorkspaceEngine {
         prompt.push_str("\n\n");
         prompt.push_str(&reviewer_output_contract(
             &nonce,
-            r#"{"verdict":"pass|revise_batch|needs_human|plan_reopen_required","review_scope":"batch","generation_round_id":"round id","summary":"一句话摘要","affects_items":[{"target_outline_id":"outline id"}],"findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"整组 draft 或依赖上下文中的具体证据","impact":"为什么影响或不影响 final compile","required_action":"需要 batch author 执行的最小动作"}]}"#,
+            r#"{"verdict":"pass|revise_batch|needs_human|plan_reopen_required","review_scope":"batch","generation_round_id":"round id","summary":"一句话摘要","affects_items":[{"target_outline_id":"outline id"}],"findings":[{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"整组 draft 或依赖上下文中的具体证据","required_action":"需要 batch author 执行的最小动作"}]}"#,
             "\n\n审核规则：自动模式只能整组通过、整组返修或要求重开 Outline；不得要求单项重写。最终 JSON 必须放在 nonce sentinel block 中。\n",
             &self.routing_reference_context(),
         ));
@@ -783,7 +783,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_item_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human|plan_reopen_required","review_scope":"item","target_outline_id":"{}","generation_round_id":"{}","draft_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"{}"}}],"findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前 draft 或依赖上下文中的具体证据","impact":"为什么影响或不影响后续生成","required_action":"需要当前 item author 执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human|plan_reopen_required","review_scope":"item","target_outline_id":"{}","generation_round_id":"{}","draft_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"{}"}}],"findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前 draft 或依赖上下文中的具体证据","required_action":"需要当前 item author 执行的最小动作"}}]}}"#,
             draft_candidate.draft_record.outline_id,
             draft_candidate.draft_record.generation_round_id,
             draft_candidate.draft_record.draft_id,
@@ -793,8 +793,8 @@ impl WorkspaceEngine {
             &nonce,
             &schema,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
-             - `pass`：当前 draft 可进入下一项；只允许没有 blocking/must_fix/strong_recommend_fix finding，或只有 suggestion/minor/optional finding。\n\
-             - 不要输出 `verdict=pass` 同时给出 blocking/must_fix/strong_recommend_fix finding；这类输出会被系统判定为需要返修。\n\
+             - `pass`：当前 draft 可进入下一项；只允许没有 blocking/must_fix finding，或只有 suggestion finding。\n\
+             - 不要输出 `verdict=pass` 同时给出 blocking/must_fix finding；这类输出会被系统判定为需要返修。\n\
              - `revise`：只允许重写当前 target_outline_id 对应的 draft；如果问题只需当前 item author 修改，必须返回 `revise`。\n\
              - `plan_reopen_required`：需要修改前序 item、拆分边界或 Outline 依赖。\n\
              - `needs_human`：需要用户做范围或产品判断。\n",

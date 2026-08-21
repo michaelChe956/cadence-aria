@@ -678,9 +678,7 @@ impl WorkspaceEngine {
             verdict.findings.iter().any(|finding| {
                 matches!(
                     &finding.severity,
-                    ReviewFindingSeverity::Blocking
-                        | ReviewFindingSeverity::MustFix
-                        | ReviewFindingSeverity::StrongRecommendFix
+                    ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
                 )
             }) || verdict
                 .structured_output_diagnostic

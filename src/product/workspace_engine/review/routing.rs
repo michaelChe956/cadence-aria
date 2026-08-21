@@ -393,14 +393,14 @@ impl WorkspaceEngine {
         let trimmed = output.trim();
         let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
             if *workspace_type == WorkspaceType::WorkItemPlan {
-                parse_work_item_plan_review_json(
+                parse_historical_work_item_plan_review_json(
                     &json,
                     &comments,
                     &[],
                     WorkItemPlanReviewScope::Outline,
                 )
             } else {
-                parse_review_json(&json, &comments)
+                parse_historical_review_json(&json, &comments)
             }
         });
 

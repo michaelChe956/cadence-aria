@@ -38,7 +38,6 @@ fn work_item_plan_outline_revise_json() -> &'static str {
             "severity": "must_fix",
             "message": "Outline 写入范围重叠",
             "evidence": "outline_a 与 outline_b 共享写入范围",
-            "impact": "并行实现会产生冲突",
             "required_action": "拆分 exclusive_write_scopes"
         }]
     }"#

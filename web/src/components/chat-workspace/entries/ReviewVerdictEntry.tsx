@@ -63,7 +63,6 @@ type ReviewFinding = {
   severity: string;
   message: string;
   evidence?: string;
-  impact?: string;
   required_action?: string;
 };
 
@@ -92,9 +91,7 @@ function isReviewFinding(value: unknown): value is ReviewFinding {
 
 function isRequiredFinding(finding: ReviewFinding) {
   return (
-    finding.severity === "blocking" ||
-    finding.severity === "must_fix" ||
-    finding.severity === "strong_recommend_fix"
+    finding.severity === "blocking" || finding.severity === "must_fix"
   );
 }
 
@@ -125,9 +122,6 @@ function FindingGroup({
             </div>
             {finding.evidence ? (
               <div className="text-xs text-[var(--aria-ink-muted)]">{finding.evidence}</div>
-            ) : null}
-            {finding.impact ? (
-              <div className="text-xs text-[var(--aria-ink-muted)]">{finding.impact}</div>
             ) : null}
             {finding.required_action ? (
               <div className="text-xs font-medium text-[var(--aria-ink)]">
@@ -162,14 +156,8 @@ function severityLabel(severity: string) {
       return "高 · 阻塞";
     case "must_fix":
       return "高 · 必须修复";
-    case "strong_recommend_fix":
-      return "高 · 强烈建议修复";
     case "suggestion":
-      return "中 · 建议";
-    case "minor":
-      return "低 · 轻微";
-    case "optional":
-      return "低 · 可选";
+      return "低 · 建议";
     default:
       return severity;
   }
@@ -199,8 +187,6 @@ function verdictLabel(verdict: string | null, reviewGate: string | null) {
 
 function isRequiredSeverity(severity: string) {
   return (
-    severity === "blocking" ||
-    severity === "must_fix" ||
-    severity === "strong_recommend_fix"
+    severity === "blocking" || severity === "must_fix"
   );
 }

@@ -61,10 +61,9 @@ describe("useWorkspaceWs timeline state", () => {
         summary: "可以确认",
         findings: [
           {
-            severity: "optional",
+            severity: "suggestion",
             message: "建议补充说明",
             evidence: "当前版本可用",
-            impact: "不影响下一阶段",
             required_action: "可后续优化",
           },
         ],
@@ -389,10 +388,9 @@ describe("useWorkspaceWs timeline state", () => {
         summary: "可以确认",
         findings: [
           {
-            severity: "minor",
+            severity: "suggestion",
             message: "建议优化标题",
             evidence: "标题可读但不够具体",
-            impact: "不影响下一阶段",
             required_action: "可后续调整",
           },
         ],

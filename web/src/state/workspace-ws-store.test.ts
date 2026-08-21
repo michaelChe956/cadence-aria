@@ -411,12 +411,11 @@ describe("workspace ws store base state", () => {
           summary: "返修意图需要人工判断",
           findings: [
             {
-              severity: "optional",
-              message: "建议补充说明",
+              severity: "suggestion",
+              message: "建议补充说明；不影响下一阶段",
               evidence: "当前版本可用",
-              impact: "不影响下一阶段",
               required_action: "补充说明段落",
-            },
+            }
           ],
           review_gate: "user_triage_required",
         },
@@ -431,7 +430,7 @@ describe("workspace ws store base state", () => {
       metadata: expect.objectContaining({
         comments: "请补齐异常路径说明。",
         review_gate: "user_triage_required",
-        findings: [expect.objectContaining({ message: "建议补充说明" })],
+        findings: [expect.objectContaining({ message: "建议补充说明；不影响下一阶段" })],
       }),
     });
   });

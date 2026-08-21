@@ -27,10 +27,9 @@ async fn strong_review_findings_route_author_confirm_or_review_decision_for_all_
   "summary": "必须补充验收标准",
   "findings": [
 {
-  "severity": "strong_recommend_fix",
+  "severity": "must_fix",
   "message": "验收标准不足",
   "evidence": "Artifact 未列出可测试验收值",
-  "impact": "下一阶段无法判断实现是否完成",
   "required_action": "补充明确验收标准"
 }
   ]
@@ -219,9 +218,9 @@ fn review_prompt_limits_revise_to_strong_findings() {
     assert!(
         input
             .prompt
-            .contains("blocking|must_fix|strong_recommend_fix")
+            .contains("blocking|must_fix|suggestion")
     );
-    assert!(input.prompt.contains("suggestion|minor|optional"));
+    assert!(input.prompt.contains("suggestion"));
     assert!(
         input
             .prompt
@@ -516,7 +515,6 @@ async fn drive_review_session_strong_revise_returns_to_author_confirm() {
   "severity": "must_fix",
   "message": "缺少失败路径",
   "evidence": "Artifact 未覆盖失败路径",
-  "impact": "下一阶段无法验收异常流程",
   "required_action": "补充失败路径说明"
 }
   ]
@@ -710,7 +708,7 @@ async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
         WorkItemPlan,
     }
 
-    let general_review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let general_review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#;
     let cases = [
         KimiReviewRepairCase::General {
             name: "story",
@@ -809,7 +807,7 @@ async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
 
 #[tokio::test]
 async fn review_structured_output_repair_failure_persists_diagnostic() {
-    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#;
     let provider = QueuedReviewProvider::new(vec![
         missing_json_nonce_output(review_json),
         missing_json_nonce_output(review_json),
@@ -852,7 +850,7 @@ async fn review_structured_output_repair_failure_persists_diagnostic() {
 
 #[tokio::test]
 async fn review_structured_output_repair_rejects_payload_change() {
-    let first_json = r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let first_json = r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#;
     let changed_json = r#"{"verdict":"pass","summary":"可以确认","findings":[]}"#;
     let provider = QueuedReviewProvider::new(vec![
         missing_json_nonce_output(first_json),

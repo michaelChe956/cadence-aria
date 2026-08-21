@@ -64,10 +64,9 @@ fn work_item_plan_item_review_pass_with_strong_finding_requires_current_item_rev
         "summary": "整体可继续，但存在运行时阻塞问题",
         "affects_items": [{ "target_outline_id": "outline_api" }],
         "findings": [{
-            "severity": "strong_recommend_fix",
+            "severity": "must_fix",
             "message": "sync 方法在 tokio runtime 内 block_on 会 panic",
             "evidence": "snapshot 被 tokio::spawn 调用",
-            "impact": "后续实现会在运行时崩溃",
             "required_action": "当前 draft 需明确 spawn_blocking 或改为 async 方案"
         }]
     }"#;
@@ -85,7 +84,7 @@ fn work_item_plan_item_review_pass_with_strong_finding_requires_current_item_rev
     assert_eq!(verdict.findings.len(), 1);
     assert_eq!(
         verdict.findings[0].severity,
-        ReviewFindingSeverity::StrongRecommendFix
+        ReviewFindingSeverity::MustFix
     );
     let review = verdict
         .work_item_plan_review
@@ -110,7 +109,6 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
             "severity": "must_fix",
             "message": "依赖图遗漏必需前置 item",
             "evidence": "outline_api 消费 outline_store 但 depends_on 为空",
-            "impact": "串行生成时会缺少上游 handoff",
             "required_action": "补充 depends_on"
         }]
     }"#;
@@ -390,10 +388,9 @@ async fn optional_review_findings_route_author_confirm_or_human_confirm_for_all_
   "summary": "仅有可选建议",
   "findings": [
 {
-  "severity": "optional",
+  "severity": "suggestion",
   "message": "可补充说明",
   "evidence": "当前主路径完整",
-  "impact": "不影响下一阶段执行",
   "required_action": "可后续优化"
 }
   ]
@@ -476,10 +473,9 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
   "summary": "仅有可选建议",
   "findings": [
 {
-  "severity": "optional",
+  "severity": "suggestion",
   "message": "handoff 描述可以更明确",
   "evidence": "handoff_strategy 只有简短描述",
-  "impact": "不影响 Draft 生成",
   "required_action": "可补充上下游交接说明"
 }
   ]
@@ -545,10 +541,9 @@ async fn work_item_plan_outline_optional_choice_can_skip_and_continue() {
         comments: "当前 outline 可以继续，但有可选建议".to_string(),
         summary: "仅有可选建议".to_string(),
         findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Optional,
-            message: "handoff 描述可以更明确".to_string(),
+            severity: ReviewFindingSeverity::Suggestion,
+            message: "handoff 描述可以更明确\n影响：不影响 Draft 生成".to_string(),
             evidence: "handoff_strategy 只有简短描述".to_string(),
-            impact: "不影响 Draft 生成".to_string(),
             required_action: "可补充上下游交接说明".to_string(),
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
@@ -613,10 +608,9 @@ async fn work_item_plan_optional_outline_review_actions_survive_session_restore(
         comments: "当前 outline 可以继续，但有可选建议".to_string(),
         summary: "仅有可选建议".to_string(),
         findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Minor,
-            message: "handoff 描述可以更明确".to_string(),
+            severity: ReviewFindingSeverity::Suggestion,
+            message: "handoff 描述可以更明确\n影响：不影响 Draft 生成".to_string(),
             evidence: "handoff_strategy 只有简短描述".to_string(),
-            impact: "不影响 Draft 生成".to_string(),
             required_action: "可补充上下游交接说明".to_string(),
         }],
         review_gate: ReviewGate::UserConfirmAllowed,

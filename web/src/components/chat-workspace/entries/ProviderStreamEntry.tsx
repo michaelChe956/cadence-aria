@@ -44,10 +44,7 @@ const STRUCTURED_OUTPUT_PATTERN =
 const SEVERITY_RANK: Record<string, number> = {
   blocking: 0,
   must_fix: 1,
-  strong_recommend_fix: 2,
-  suggestion: 3,
-  minor: 4,
-  optional: 5,
+  suggestion: 2,
 };
 
 function entryTitle(entry: ChatEntry) {

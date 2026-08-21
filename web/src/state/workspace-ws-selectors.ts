@@ -41,7 +41,6 @@ type ReviewFindingLike = {
   severity?: unknown;
   message?: unknown;
   evidence?: unknown;
-  impact?: unknown;
   required_action?: unknown;
 };
 
@@ -57,7 +56,6 @@ function formatReviewFindings(findings: ReviewFindingLike[]): string {
         `${index + 1}. severity: ${severity}`,
         `   message: ${asTrimmedString(finding.message)}`,
         `   evidence: ${asTrimmedString(finding.evidence)}`,
-        `   impact: ${asTrimmedString(finding.impact)}`,
         `   required_action: ${asTrimmedString(finding.required_action)}`,
       ].join("\n");
     })

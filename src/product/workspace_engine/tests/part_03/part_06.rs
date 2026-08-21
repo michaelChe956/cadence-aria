@@ -56,7 +56,7 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
             .push(input.resume_provider_session_id.clone());
         if start == 1 {
             let output = missing_json_nonce_output(
-                r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#,
+                r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#,
             );
             let output = input
                 .structured_output_contract
@@ -209,7 +209,6 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
             "severity": "must_fix",
             "message": "缺少失败路径",
             "evidence": "Artifact 未覆盖失败路径",
-            "impact": "下一阶段无法验收异常流程",
             "required_action": "补充失败路径说明"
         }]
     }"#;

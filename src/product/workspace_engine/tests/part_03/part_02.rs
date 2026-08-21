@@ -19,9 +19,8 @@ async fn work_item_plan_outline_optional_choice_can_apply_findings() {
         summary: "仅有可选建议".to_string(),
         findings: vec![ReviewFinding {
             severity: ReviewFindingSeverity::Suggestion,
-            message: "handoff 描述可以更明确".to_string(),
+            message: "handoff 描述可以更明确\n影响：不影响 Draft 生成".to_string(),
             evidence: "handoff_strategy 只有简短描述".to_string(),
-            impact: "不影响 Draft 生成".to_string(),
             required_action: "补充上下游交接说明".to_string(),
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
@@ -102,10 +101,9 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
   "summary": "仅有 minor 建议",
   "findings": [
 {
-  "severity": "minor",
+  "severity": "suggestion",
   "message": "验证说明可以更明确",
   "evidence": "verification_plan 只有命令",
-  "impact": "不影响当前 draft 使用",
   "required_action": "补充 manual check 说明"
 }
   ]
@@ -223,7 +221,7 @@ async fn work_item_plan_item_optional_choice_can_apply_findings() {
         .expect("draft streaming input");
     assert!(input.prompt.contains("[review_findings]"));
     assert!(input.prompt.contains("evidence: 主路径完整"));
-    assert!(input.prompt.contains("impact: 不影响继续"));
+    assert!(input.prompt.contains("message: 补充说明\n影响：不影响继续"));
     assert!(input.prompt.contains("required_action: 可补充说明"));
 }
 
@@ -276,10 +274,9 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
   "summary": "仅有 optional 建议",
   "findings": [
 {
-  "severity": "optional",
+  "severity": "suggestion",
   "message": "handoff 可以更明确",
   "evidence": "batch 内 handoff_summary 较短",
-  "impact": "不影响 compile",
   "required_action": "补充 handoff_summary"
 }
   ]
@@ -393,7 +390,7 @@ async fn work_item_plan_batch_optional_choice_can_apply_findings() {
     );
     assert!(input.prompt.contains("[review_findings]"));
     assert!(input.prompt.contains("evidence: 主路径完整"));
-    assert!(input.prompt.contains("impact: 不影响继续"));
+    assert!(input.prompt.contains("message: 补充说明\n影响：不影响继续"));
     assert!(input.prompt.contains("required_action: 可补充说明"));
 }
 
@@ -687,10 +684,9 @@ fn optional_work_item_plan_pass_review(
         comments: "当前版本可以继续，但有可选建议".to_string(),
         summary: "仅有可选建议".to_string(),
         findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Optional,
-            message: "补充说明".to_string(),
+            severity: ReviewFindingSeverity::Suggestion,
+            message: "补充说明\n影响：不影响继续".to_string(),
             evidence: "主路径完整".to_string(),
-            impact: "不影响继续".to_string(),
             required_action: "可补充说明".to_string(),
         }],
         review_gate: ReviewGate::UserConfirmAllowed,

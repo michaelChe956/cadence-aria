@@ -65,9 +65,67 @@ impl ReviewStructuredOutputErrorCode {
     }
 }
 
-pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+pub(crate) fn parse_historical_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
+    let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
+    normalize_historical_review_findings(&mut value).ok()?;
     parse_review_value(&value, comments).ok()
+}
+
+pub(crate) fn deserialize_historical_review_verdict(
+    mut value: serde_json::Value,
+) -> Result<ReviewVerdict, String> {
+    normalize_historical_review_findings(&mut value)?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+pub(crate) fn normalize_historical_review_findings(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    let Some(findings) = value.get_mut("findings") else {
+        return Ok(());
+    };
+    let Some(findings) = findings.as_array_mut() else {
+        return Err("historical review findings must be an array".to_string());
+    };
+
+    for finding in findings {
+        let Some(finding) = finding.as_object_mut() else {
+            return Err("historical review finding must be an object".to_string());
+        };
+        let severity = finding
+            .get("severity")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "historical review finding severity is missing".to_string())?;
+        let normalized_severity = match severity {
+            "blocking" => "blocking",
+            "must_fix" | "strong_recommend_fix" => "must_fix",
+            "suggestion" | "minor" | "optional" => "suggestion",
+            other => return Err(format!("unknown review finding severity: {other}")),
+        };
+        finding.insert(
+            "severity".to_string(),
+            serde_json::Value::String(normalized_severity.to_string()),
+        );
+
+        let impact = finding.remove("impact").and_then(|impact| match impact {
+            serde_json::Value::String(impact) if !impact.trim().is_empty() => Some(impact),
+            _ => None,
+        });
+        if let Some(impact) = impact {
+            let message = finding
+                .get("message")
+                .and_then(|message| message.as_str())
+                .ok_or_else(|| "historical review finding message is missing".to_string())?;
+            let suffix = format!("\n影响：{impact}");
+            if !message.contains(&suffix) {
+                finding.insert(
+                    "message".to_string(),
+                    serde_json::Value::String(format!("{message}{suffix}")),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_review_value(
@@ -119,6 +177,7 @@ pub(crate) fn parse_review_value(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_work_item_plan_review_json(
     json: &str,
     comments: &str,
@@ -126,6 +185,17 @@ pub(crate) fn parse_work_item_plan_review_json(
     scope: WorkItemPlanReviewScope,
 ) -> Option<ReviewVerdict> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    parse_work_item_plan_review_value(&value, comments, valid_outline_ids, scope).ok()
+}
+
+pub(crate) fn parse_historical_work_item_plan_review_json(
+    json: &str,
+    comments: &str,
+    valid_outline_ids: &[String],
+    scope: WorkItemPlanReviewScope,
+) -> Option<ReviewVerdict> {
+    let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
+    normalize_historical_review_findings(&mut value).ok()?;
     parse_work_item_plan_review_value(&value, comments, valid_outline_ids, scope).ok()
 }
 
@@ -260,9 +330,7 @@ fn effective_work_item_plan_review_verdict(
         && parsed_findings.findings.iter().any(|finding| {
             matches!(
                 finding.severity,
-                ReviewFindingSeverity::Blocking
-                    | ReviewFindingSeverity::MustFix
-                    | ReviewFindingSeverity::StrongRecommendFix
+                ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
             )
         })
     {
@@ -462,15 +530,23 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
     let mut findings = Vec::new();
     let mut malformed = false;
     for item in items {
-        let Some(severity) = item
+        let Some(object) = item.as_object() else {
+            malformed = true;
+            continue;
+        };
+        if object.contains_key("impact") {
+            malformed = true;
+            continue;
+        }
+        let Some(severity) = object
             .get("severity")
             .and_then(|value| value.as_str())
-            .and_then(parse_review_finding_severity)
+            .and_then(parse_live_review_finding_severity)
         else {
             malformed = true;
             continue;
         };
-        let Some(message) = item.get("message").and_then(|value| value.as_str()) else {
+        let Some(message) = object.get("message").and_then(|value| value.as_str()) else {
             malformed = true;
             continue;
         };
@@ -478,17 +554,12 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
         findings.push(ReviewFinding {
             severity,
             message: message.to_string(),
-            evidence: item
+            evidence: object
                 .get("evidence")
                 .and_then(|value| value.as_str())
                 .unwrap_or("")
                 .to_string(),
-            impact: item
-                .get("impact")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string(),
-            required_action: item
+            required_action: object
                 .get("required_action")
                 .and_then(|value| value.as_str())
                 .unwrap_or("")
@@ -502,14 +573,11 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
     }
 }
 
-pub(crate) fn parse_review_finding_severity(value: &str) -> Option<ReviewFindingSeverity> {
+pub(crate) fn parse_live_review_finding_severity(value: &str) -> Option<ReviewFindingSeverity> {
     match value {
         "blocking" => Some(ReviewFindingSeverity::Blocking),
         "must_fix" => Some(ReviewFindingSeverity::MustFix),
-        "strong_recommend_fix" => Some(ReviewFindingSeverity::StrongRecommendFix),
         "suggestion" => Some(ReviewFindingSeverity::Suggestion),
-        "minor" => Some(ReviewFindingSeverity::Minor),
-        "optional" => Some(ReviewFindingSeverity::Optional),
         _ => None,
     }
 }
@@ -521,9 +589,7 @@ pub(crate) fn review_gate_for(
     if parsed_findings.findings.iter().any(|finding| {
         matches!(
             finding.severity,
-            ReviewFindingSeverity::Blocking
-                | ReviewFindingSeverity::MustFix
-                | ReviewFindingSeverity::StrongRecommendFix
+            ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
         )
     }) {
         return ReviewGate::RequiresRevision;

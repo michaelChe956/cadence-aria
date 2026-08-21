@@ -149,7 +149,6 @@ type ReviewFinding = {
   severity?: string;
   message: string;
   evidence?: string;
-  impact?: string;
   required_action?: string;
 };
 

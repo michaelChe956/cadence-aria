@@ -13,18 +13,17 @@ pub enum ReviewVerdictType {
 pub enum ReviewFindingSeverity {
     Blocking,
     MustFix,
-    StrongRecommendFix,
     Suggestion,
-    Minor,
-    Optional,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewFinding {
     pub severity: ReviewFindingSeverity,
     pub message: String,
+    #[serde(default)]
     pub evidence: String,
-    pub impact: String,
+    #[serde(default)]
     pub required_action: String,
 }
 

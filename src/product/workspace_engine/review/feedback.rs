@@ -38,12 +38,11 @@ pub(crate) fn format_review_feedback(verdict: &ReviewVerdict) -> String {
             .enumerate()
             .map(|(index, finding)| {
                 format!(
-                    "{}. severity: {}\n   message: {}\n   evidence: {}\n   impact: {}\n   required_action: {}",
+                    "{}. severity: {}\n   message: {}\n   evidence: {}\n   required_action: {}",
                     index + 1,
                     serialized_string(&finding.severity),
                     finding.message.trim(),
                     finding.evidence.trim(),
-                    finding.impact.trim(),
                     finding.required_action.trim()
                 )
             })
@@ -74,7 +73,6 @@ mod tests {
                 severity: ReviewFindingSeverity::MustFix,
                 message: "ProviderName 扩展遗漏 match 分支".to_string(),
                 evidence: "src/product/work_item_split_engine/types.rs:86".to_string(),
-                impact: "新增 provider 时 draft 会遗漏运行时映射。".to_string(),
                 required_action:
                     "把 provider_name_to_type 和测试 fixture provider_name 一并纳入本 work item 的写入范围。"
                         .to_string(),
@@ -104,7 +102,7 @@ mod tests {
         assert!(feedback.contains("severity: must_fix"));
         assert!(feedback.contains("message: ProviderName 扩展遗漏 match 分支"));
         assert!(feedback.contains("evidence: src/product/work_item_split_engine/types.rs:86"));
-        assert!(feedback.contains("impact: 新增 provider 时 draft 会遗漏运行时映射。"));
+        assert!(feedback.contains("message: ProviderName 扩展遗漏 match 分支\n   evidence: src/product/work_item_split_engine/types.rs:86"));
         assert!(feedback.contains("required_action: 把 provider_name_to_type"));
         assert!(feedback.contains("[work_item_plan_review]"));
         assert!(feedback.contains("review_scope: item"));

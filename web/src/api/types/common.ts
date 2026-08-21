@@ -274,13 +274,7 @@ export type AuthorDecision =
   | { revise: { feedback: string } };
 
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
-export type WorkspaceReviewFindingSeverity =
-  | "blocking"
-  | "must_fix"
-  | "strong_recommend_fix"
-  | "suggestion"
-  | "minor"
-  | "optional";
+export type WorkspaceReviewFindingSeverity = "blocking" | "must_fix" | "suggestion";
 export type ReviewGate =
   | "requires_revision"
   | "user_confirm_allowed"

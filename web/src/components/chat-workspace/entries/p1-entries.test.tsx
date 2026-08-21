@@ -82,7 +82,7 @@ describe("chat workspace p1 entries", () => {
     expect(onSelectPath).toHaveBeenCalledWith("revise-with-context", "请补充错误码说明");
   });
 
-  it("groups review findings by required and optional severity", () => {
+  it("groups review findings by required and suggestion severity", () => {
     const entry = makeEntry({
       type: "review_verdict",
       role: "reviewer",
@@ -96,14 +96,12 @@ describe("chat workspace p1 entries", () => {
             severity: "must_fix",
             message: "缺少验证命令",
             evidence: "未出现验证命令段落",
-            impact: "Coding Workspace 无法执行验收",
             required_action: "补充验证命令",
           },
           {
-            severity: "optional",
+            severity: "suggestion",
             message: "可以补充复杂度说明",
             evidence: "主体方案完整",
-            impact: "不影响下一阶段",
             required_action: "后续优化时补充",
           },
         ],
@@ -117,11 +115,11 @@ describe("chat workspace p1 entries", () => {
     expect(screen.getByText("缺少验证命令")).toBeInTheDocument();
     expect(screen.getByText("补充验证命令")).toBeInTheDocument();
     expect(screen.getByText("可选建议")).toBeInTheDocument();
-    expect(screen.getByText("低 · 可选")).toBeInTheDocument();
+    expect(screen.getByText("低 · 建议")).toBeInTheDocument();
     expect(screen.getByText("可以补充复杂度说明")).toBeInTheDocument();
   });
 
-  it("labels optional-only review verdicts as confirmable", () => {
+  it("labels suggestion-only review verdicts as confirmable", () => {
     const entry = makeEntry({
       type: "review_verdict",
       role: "reviewer",
@@ -135,7 +133,6 @@ describe("chat workspace p1 entries", () => {
             severity: "suggestion",
             message: "建议优化措辞",
             evidence: "内容已覆盖主路径",
-            impact: "不影响下一阶段",
             required_action: "可后续优化",
           },
         ],
@@ -216,10 +213,9 @@ describe("chat workspace p1 entries", () => {
         summary: "审核通过",
         findings: [
           {
-            severity: "optional",
+            severity: "suggestion",
             message: "可信建议",
             evidence: "来自已验证 findings",
-            impact: "不影响下一阶段",
             required_action: "可后续优化",
           },
         ],
@@ -339,10 +335,9 @@ describe("chat workspace p1 entries", () => {
         comments: "Reviewer 已经在后端 latest_review_verdict 中保存，不应重复进用户补充信息。",
         findings: [
           {
-            severity: "optional",
+            severity: "suggestion",
             message: "建议补充说明",
             evidence: "当前版本可用",
-            impact: "不影响下一阶段",
             required_action: "补充说明段落",
           },
         ],

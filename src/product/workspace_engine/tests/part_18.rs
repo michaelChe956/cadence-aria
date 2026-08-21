@@ -47,7 +47,6 @@ fn work_item_plan_review_derives_affected_items_from_finding_targets() {
             "target_outline_id": "outline_api",
             "message": "handoff 可以更明确",
             "evidence": "当前 handoff 缺少闭包透传说明",
-            "impact": "不影响 Draft 生成",
             "required_action": "补充 handoff 说明"
         }]
     }"#;
@@ -87,7 +86,6 @@ fn work_item_plan_review_prefers_finding_targets_over_legacy_affects_items() {
             "target_outline_id": "outline_api",
             "message": "handoff 可以更明确",
             "evidence": "当前 handoff 缺少闭包透传说明",
-            "impact": "不影响 Draft 生成",
             "required_action": "补充 handoff 说明"
         }]
     }"#;
@@ -123,7 +121,6 @@ fn outline_pass_keeps_unknown_finding_target_as_warning() {
             "target_outline_id": "outline_missing",
             "message": "可选建议引用了旧 outline id",
             "evidence": "reviewer 使用了过期名称",
-            "impact": "不影响 Outline 通过",
             "required_action": "人工定位对应 outline"
         }]
     }"#;
@@ -159,7 +156,6 @@ fn outline_effective_revise_rejects_unknown_finding_target() {
             "target_outline_id": "outline_missing",
             "message": "依赖图缺少前置节点",
             "evidence": "depends_on 为空",
-            "impact": "Draft 生成会缺少上游上下文",
             "required_action": "补充依赖"
         }]
     });
@@ -191,7 +187,6 @@ fn batch_review_keeps_legacy_affects_items_as_authoritative_source() {
             "target_outline_id": "outline_missing",
             "message": "旧版 batch finding 携带了非协议目标字段",
             "evidence": "辅助字段不应覆盖 affects_items",
-            "impact": "保持 batch 旧协议兼容",
             "required_action": "无"
         }]
     }"#;

@@ -195,13 +195,7 @@ export interface ReviewVerdict {
   structured_output_diagnostic?: StructuredOutputDiagnostic | null;
 }
 
-export type ReviewFindingSeverity =
-  | "blocking"
-  | "must_fix"
-  | "strong_recommend_fix"
-  | "suggestion"
-  | "minor"
-  | "optional";
+export type ReviewFindingSeverity = "blocking" | "must_fix" | "suggestion";
 
 export type ReviewGate =
   | "requires_revision"
@@ -212,7 +206,6 @@ export interface ReviewFinding {
   severity: ReviewFindingSeverity;
   message: string;
   evidence: string;
-  impact: string;
   required_action: string;
 }
 

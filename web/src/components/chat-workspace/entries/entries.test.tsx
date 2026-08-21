@@ -186,7 +186,7 @@ describe("chat workspace entries", () => {
       type: "provider_stream",
       role: "reviewer",
       content:
-        '发现当前 draft 仍需返修。\n\n<ARIA_STRUCTURED_OUTPUT nonce="review-nonce">\n{"verdict":"pass","review_scope":"item","target_outline_id":"outline_backend_probe","draft_id":"draft_004","summary":"需要修正写域。","findings":[{"severity":"strong_recommend_fix","message":"写域包含 installer 文件","evidence":"exclusive_write_scopes 包含 src/web/provider_installer.rs","impact":"会导致后续 item 边界漂移","required_action":"移除 installer 写域"}]}\n</ARIA_STRUCTURED_OUTPUT nonce="review-nonce">',
+        '发现当前 draft 仍需返修。\n\n<ARIA_STRUCTURED_OUTPUT nonce="review-nonce">\n{"verdict":"pass","review_scope":"item","target_outline_id":"outline_backend_probe","draft_id":"draft_004","summary":"需要修正写域。","findings":[{"severity":"must_fix","message":"写域包含 installer 文件；会导致后续 item 边界漂移","evidence":"exclusive_write_scopes 包含 src/web/provider_installer.rs","required_action":"移除 installer 写域"}]}\n</ARIA_STRUCTURED_OUTPUT nonce="review-nonce">',
     });
 
     const { container } = render(<ProviderStreamEntry entry={entry} />);
@@ -194,7 +194,7 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("发现当前 draft 仍需返修。")).toBeInTheDocument();
     expect(screen.getByText("结构化输出")).toBeInTheDocument();
     expect(screen.getByText("verdict: pass")).toBeInTheDocument();
-    expect(screen.getByText("最高严重度: strong_recommend_fix")).toBeInTheDocument();
+    expect(screen.getByText("最高严重度: must_fix")).toBeInTheDocument();
     expect(screen.getByText("需要修正写域。")).toBeInTheDocument();
     const details = container.querySelector("details");
     expect(details).not.toBeNull();

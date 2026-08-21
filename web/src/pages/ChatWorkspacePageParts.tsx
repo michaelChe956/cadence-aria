@@ -85,7 +85,7 @@ function isOptionalReviewFinding(finding: unknown): boolean {
   }
   const severity = (finding as { severity?: unknown }).severity;
   return (
-    severity === "suggestion" || severity === "minor" || severity === "optional"
+    severity === "suggestion"
   );
 }
 

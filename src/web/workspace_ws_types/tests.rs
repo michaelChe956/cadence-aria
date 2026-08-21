@@ -164,7 +164,6 @@ fn review_messages_and_session_state_serialize_as_contract() {
             severity: crate::web::workspace_ws_types::ReviewFindingSeverity::MustFix,
             message: "缺少验收标准".to_string(),
             evidence: "Artifact 未列出验收标准".to_string(),
-            impact: "无法进入下一阶段".to_string(),
             required_action: "补充验收标准".to_string(),
         }],
         review_gate: ReviewGate::UserTriageRequired,

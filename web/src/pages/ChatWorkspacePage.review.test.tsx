@@ -72,7 +72,7 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 describe("ChatWorkspacePage review decisions", () => {
   installChatWorkspacePageTestHooks();
 
-  it("renders optional review decision actions from pending decision options", async () => {
+  it("renders suggestion review decision actions from pending decision options", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -106,10 +106,9 @@ describe("ChatWorkspacePage review decisions", () => {
             review_gate: "user_confirm_allowed",
             findings: [
               {
-                severity: "optional",
+                severity: "suggestion",
                 message: "handoff 描述可以更明确",
                 evidence: "handoff_strategy 只有简短描述",
-                impact: "不影响 Draft 生成",
                 required_action: "补充上下游交接说明",
               },
             ],
@@ -148,7 +147,7 @@ describe("ChatWorkspacePage review decisions", () => {
     expect(api.sendSelectRevisionPath).not.toHaveBeenCalled();
   });
 
-  it("infers optional review decision actions from the latest work item plan verdict", async () => {
+  it("infers suggestion review decision actions from the latest work item plan verdict", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -178,10 +177,9 @@ describe("ChatWorkspacePage review decisions", () => {
             review_gate: "user_confirm_allowed",
             findings: [
               {
-                severity: "minor",
+                severity: "suggestion",
                 message: "handoff 描述可以更明确",
                 evidence: "handoff_strategy 只有简短描述",
-                impact: "不影响 Draft 生成",
                 required_action: "补充上下游交接说明",
               },
             ],
@@ -210,7 +208,7 @@ describe("ChatWorkspacePage review decisions", () => {
     );
   });
 
-  it("allows confirming the current version from human confirm after optional review findings", async () => {
+  it("allows confirming the current version from human confirm after suggestion review findings", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -241,7 +239,6 @@ describe("ChatWorkspacePage review decisions", () => {
                 severity: "suggestion",
                 message: "建议补充说明",
                 evidence: "当前版本可用",
-                impact: "不影响下一阶段",
                 required_action: "可后续优化",
               },
             ],
@@ -273,7 +270,7 @@ describe("ChatWorkspacePage review decisions", () => {
     expect(api.sendHumanConfirm).toHaveBeenCalledWith("confirm");
   });
 
-  it("sends request-change payload when adopting optional review findings", async () => {
+  it("sends request-change payload when adopting suggestion review findings", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -302,10 +299,9 @@ describe("ChatWorkspacePage review decisions", () => {
             review_gate: "user_confirm_allowed",
             findings: [
               {
-                severity: "optional",
+                severity: "suggestion",
                 message: "建议补充说明",
                 evidence: "当前版本可用",
-                impact: "不影响下一阶段",
                 required_action: "补充说明段落",
               },
             ],
@@ -324,10 +320,9 @@ describe("ChatWorkspacePage review decisions", () => {
             review_gate: "user_confirm_allowed",
             findings: [
               {
-                severity: "optional",
+                severity: "suggestion",
                 message: "建议补充说明",
                 evidence: "当前版本可用",
-                impact: "不影响下一阶段",
                 required_action: "补充说明段落",
               },
             ],

@@ -722,12 +722,12 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
         .build_work_item_draft_review_input(&draft_payload)
         .expect("draft review input");
 
-    assert!(input.prompt.contains("blocking|must_fix|strong_recommend_fix"));
-    assert!(input.prompt.contains("suggestion|minor|optional"));
+    assert!(input.prompt.contains("blocking|must_fix|suggestion"));
+    assert!(input.prompt.contains("suggestion"));
     assert!(
         input
             .prompt
-            .contains("不要输出 `verdict=pass` 同时给出 blocking/must_fix/strong_recommend_fix finding")
+            .contains("不要输出 `verdict=pass` 同时给出 blocking/must_fix finding")
     );
     assert!(
         input

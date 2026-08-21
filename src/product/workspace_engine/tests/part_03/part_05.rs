@@ -40,10 +40,9 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
   "summary": "运行时方案存在阻塞问题",
   "findings": [
 {
-  "severity": "strong_recommend_fix",
+  "severity": "must_fix",
   "message": "sync 方法在 tokio runtime 内 block_on 会 panic",
   "evidence": "snapshot 被 tokio::spawn 调用",
-  "impact": "后续实现会在运行时崩溃",
   "required_action": "当前 draft 需明确 spawn_blocking 或改为 async 方案"
 }
   ]
@@ -69,7 +68,7 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
         .expect("draft streaming input");
     assert!(input.prompt.contains("[review_findings]"));
     assert!(input.prompt.contains("evidence: snapshot 被 tokio::spawn 调用"));
-    assert!(input.prompt.contains("impact: 后续实现会在运行时崩溃"));
+    assert!(input.prompt.contains("message: sync 方法在 tokio runtime 内 block_on 会 panic"));
     assert!(input
         .prompt
         .contains("required_action: 当前 draft 需明确 spawn_blocking 或改为 async 方案"));
@@ -96,9 +95,8 @@ async fn work_item_plan_item_plan_reopen_review_decision_restarts_outline_revisi
         summary: "需要重开 Outline".to_string(),
         findings: vec![ReviewFinding {
             severity: ReviewFindingSeverity::MustFix,
-            message: "item 写入范围漏掉共享 provider match".to_string(),
+            message: "item 写入范围漏掉共享 provider match\n影响：只修当前 draft 会继续遗漏边界。".to_string(),
             evidence: "src/product/work_item_split_engine/types.rs:86".to_string(),
-            impact: "只修当前 draft 会继续遗漏边界。".to_string(),
             required_action: "回到 Outline，把 provider metadata 状态边界扩到所有 ProviderName match。"
                 .to_string(),
         }],

@@ -25,10 +25,9 @@ async fn single_review_round_strong_revise_still_pauses_for_author_decision() {
   "summary": "需要返修",
   "findings": [
 {
-  "severity": "strong_recommend_fix",
+  "severity": "must_fix",
   "message": "存在非规范正文",
   "evidence": "Artifact 包含不符合模板的正文",
-  "impact": "会影响下一阶段投影和审核",
   "required_action": "移除非规范正文"
 }
   ]
@@ -94,7 +93,6 @@ async fn strong_revise_then_author_feedback_runs_revision() {
   "severity": "must_fix",
   "message": "缺少失败路径",
   "evidence": "Artifact 未覆盖登录错误码",
-  "impact": "下一阶段无法实现和验收失败路径",
   "required_action": "补充登录错误码失败路径"
 }
   ]

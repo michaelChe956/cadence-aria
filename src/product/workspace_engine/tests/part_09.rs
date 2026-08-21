@@ -222,9 +222,8 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
         summary: "需要细化 outline".to_string(),
         findings: vec![ReviewFinding {
             severity: ReviewFindingSeverity::MustFix,
-            message: "backend outline 缺少 exclusive_write_scope".to_string(),
+            message: "backend outline 缺少 exclusive_write_scope\n影响：会导致 draft 阶段写入冲突".to_string(),
             evidence: "outline 中 backend 项 exclusive_write_scopes 为空".to_string(),
-            impact: "会导致 draft 阶段写入冲突".to_string(),
             required_action: "为 backend outline 补充 exclusive_write_scope".to_string(),
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
@@ -266,10 +265,9 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
         comments: "仅建议补充说明".to_string(),
         summary: "optional-only".to_string(),
         findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Optional,
-            message: "可补充 handoff 说明".to_string(),
+            severity: ReviewFindingSeverity::Suggestion,
+            message: "可补充 handoff 说明\n影响：不影响执行".to_string(),
             evidence: "现有说明较短".to_string(),
-            impact: "不影响执行".to_string(),
             required_action: "可后续补充".to_string(),
         }],
         review_gate: ReviewGate::UserConfirmAllowed,

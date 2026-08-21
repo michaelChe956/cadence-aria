@@ -311,13 +311,56 @@ pub(crate) fn latest_review_verdict_from_node_details(
                     | TimelineNodeType::WorkItemBatchReview
             )
         })
-        .filter_map(|node| {
-            lifecycle_store
+        .find_map(|node| {
+            let mut detail = lifecycle_store
                 .load_node_detail_for_issue_session(project_id, issue_id, session_id, &node.node_id)
-                .ok()
-                .and_then(|detail| detail.verdict)
+                .ok()?;
+            let persisted_verdict = detail.verdict.clone()?;
+            let verdict = match deserialize_historical_review_verdict(persisted_verdict.clone()) {
+                Ok(verdict) => verdict,
+                Err(error) => {
+                    tracing::warn!(
+                        node_id = %node.node_id,
+                        %error,
+                        "persisted review verdict failed normalization; entering user triage"
+                    );
+                    failed_historical_review_verdict(error.to_string())
+                }
+            };
+            let normalized_verdict =
+                serde_json::to_value(&verdict).expect("ReviewVerdict serialization must succeed");
+            if normalized_verdict != persisted_verdict {
+                detail.verdict = Some(normalized_verdict);
+                if let Err(error) =
+                    lifecycle_store.save_node_detail(session_id, &node.node_id, &detail)
+                {
+                    tracing::warn!(
+                        node_id = %node.node_id,
+                        %error,
+                        "failed to persist normalized review verdict"
+                    );
+                }
+            }
+            Some(verdict)
         })
-        .find_map(|verdict| serde_json::from_value::<ReviewVerdict>(verdict).ok())
+}
+
+fn failed_historical_review_verdict(error: String) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::NeedsHuman,
+        comments: "历史审核记录无法归一化，请人工确认。".to_string(),
+        summary: "历史审核记录需要人工确认".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserTriageRequired,
+        work_item_plan_review: None,
+        structured_output_diagnostic: Some(StructuredOutputDiagnostic {
+            code: "historical_review_normalization_failed".to_string(),
+            message: error,
+            repair_attempted: false,
+            repair_succeeded: false,
+            raw_output_preview: None,
+        }),
+    }
 }
 
 pub(crate) fn review_complete_event_from_verdict(
