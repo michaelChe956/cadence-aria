@@ -79,11 +79,7 @@ impl ClaudeCodeProvider {
         Self { command }
     }
 
-    fn build_args(
-        &self,
-        mode: ProviderPermissionMode,
-        resume_provider_session_id: Option<&str>,
-    ) -> Vec<String> {
+    fn build_args(&self, resume_provider_session_id: Option<&str>) -> Vec<String> {
         let mut args = vec![
             "-p".to_string(),
             "--verbose".to_string(),
@@ -101,9 +97,7 @@ impl ClaudeCodeProvider {
             args.push(session_id.to_string());
         }
 
-        if mode == ProviderPermissionMode::Supervised {
-            args.push("--permission-prompt-tool=stdio".to_string());
-        }
+        args.push("--permission-prompt-tool=stdio".to_string());
 
         args
     }
@@ -353,10 +347,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let args = self.build_args(
-            input.permission_mode.clone(),
-            input.resume_provider_session_id.as_deref(),
-        );
+        let args = self.build_args(input.resume_provider_session_id.as_deref());
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process = ProcessManager::spawn(

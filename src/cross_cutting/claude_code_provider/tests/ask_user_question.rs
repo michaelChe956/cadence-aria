@@ -88,6 +88,102 @@ async fn claude_provider_continues_same_session_after_ask_user_question_choice()
 }
 
 #[tokio::test]
+async fn claude_auto_mode_registers_stdio_and_waits_for_ask_user_question() {
+    let fixture = write_fixture(
+        "claude_auto_ask_user_question_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+if [[ " $* " != *" --permission-prompt-tool=stdio "* ]]; then
+  echo "missing stdio permission callback: $*" >&2
+  exit 41
+fi
+
+sent_question=0
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* || "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$sent_question" == "0" && "$line" == *'"user"'* ]]; then
+    sent_question=1
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_auto_question","name":"AskUserQuestion","input":{"questions":[{"question":"Continue?","options":[{"label":"Yes"},{"label":"No"}]}]}}]}}'
+    echo '{"type":"control_request","request_id":"ask_auto_001","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Continue?","options":[{"label":"Yes"},{"label":"No"}]}]},"tool_use_id":"toolu_auto_question"}}'
+    continue
+  fi
+  if [[ "$line" == *'"tool_result"'* ]]; then
+    echo "aria must not inject AskUserQuestion tool_result: $line" >&2
+    exit 42
+  fi
+  if [[ "$line" == *'"control_response"'* ]]; then
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_auto_question","content":"native answer accepted"}]}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"auto AskUserQuestion completed","session_id":"claude_auto_ask_session"}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let choice = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit choice")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::ChoiceRequest(choice) => break choice,
+            ProviderEvent::Failed { message } => panic!("provider failed before choice: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error before choice: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out before choice: {permission_id}")
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::Completed(_) => {}
+        }
+    };
+    assert_eq!(choice.id, "ask_auto_001");
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), session.events.recv())
+            .await
+            .is_err(),
+        "Auto mode must wait for a choice response before completing"
+    );
+
+    session
+        .commands
+        .send(ProviderCommand::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("send choice response");
+
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "auto AskUserQuestion completed"
+    );
+}
+
+#[tokio::test]
 async fn claude_provider_bridges_all_ask_user_question_questions() {
     let fixture = write_fixture(
         "claude_multi_ask_user_question_fixture.sh",
