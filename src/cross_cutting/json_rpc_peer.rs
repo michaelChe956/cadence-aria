@@ -39,12 +39,25 @@ impl Drop for PendingRequestGuard {
     }
 }
 
-#[derive(Clone)]
 pub struct JsonRpcPeer<W> {
     writer: Arc<Mutex<W>>,
     pending: PendingResponses,
     incoming_rx: Arc<Mutex<mpsc::Receiver<Value>>>,
     next_id: Arc<AtomicU64>,
+}
+
+/// Manual Clone: the writer/pending/incoming handles are all `Arc`-shared, so
+/// cloning must not require `W: Clone`. This lets concurrent client-service
+/// dispatcher tasks share one peer.
+impl<W> Clone for JsonRpcPeer<W> {
+    fn clone(&self) -> Self {
+        Self {
+            writer: Arc::clone(&self.writer),
+            pending: Arc::clone(&self.pending),
+            incoming_rx: Arc::clone(&self.incoming_rx),
+            next_id: Arc::clone(&self.next_id),
+        }
+    }
 }
 
 impl<W> JsonRpcPeer<W>

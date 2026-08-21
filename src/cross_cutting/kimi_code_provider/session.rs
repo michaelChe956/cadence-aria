@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -13,6 +14,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderToolResult, RiskLevel, StreamingProviderInput,
 };
 
+use super::client_services::{KimiClientServiceDispatcher, kimi_client_capabilities};
 use super::parse::{
     KimiPermissionOption, KimiPromptResult, KimiSessionUpdate, Parsed, parse_message,
 };
@@ -64,7 +66,10 @@ async fn run_kimi_session_inner<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
+    let bridge = Arc::new(ApprovalBridge::new(
+        input.permission_mode.clone(),
+        event_tx.clone(),
+    ));
     let bridge_commands = bridge.command_sender();
     let command_abort = CancellationToken::new();
     let relay_abort = command_abort.clone();
@@ -107,7 +112,7 @@ where
             "method": "initialize",
             "params": {
                 "protocolVersion": 1,
-                "clientCapabilities": {},
+                "clientCapabilities": kimi_client_capabilities(),
                 "clientInfo": {"name": "cadence-aria", "version": env!("CARGO_PKG_VERSION")}
             }
         }),
@@ -167,6 +172,17 @@ where
             ))
         })?;
 
+    let dispatcher = KimiClientServiceDispatcher::new(
+        peer.clone(),
+        session_id.clone(),
+        input.working_dir.clone(),
+        input.role.clone(),
+        input.permission_mode.clone(),
+        Arc::clone(&bridge),
+        event_tx.clone(),
+        cancel.clone(),
+    );
+
     let mut next_prompt_id = 4_u64;
     let prompt = peer.request_with_timeout(
         session_prompt_request(&session_id, &input.prompt, 3),
@@ -214,6 +230,7 @@ where
                         while let Some(incoming) = peer.try_next_incoming().await {
                             match handle_incoming(
                                 &peer,
+                                &dispatcher,
                                 incoming,
                                 &bridge,
                                 &event_tx,
@@ -253,6 +270,7 @@ where
                 while let Some(incoming) = peer.try_next_incoming().await {
                     match handle_incoming(
                         &peer,
+                        &dispatcher,
                         incoming,
                         &bridge,
                         &event_tx,
@@ -302,6 +320,7 @@ where
                 };
                 match handle_incoming(
                     &peer,
+                    &dispatcher,
                     incoming,
                     &bridge,
                     &event_tx,
@@ -337,8 +356,9 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn handle_incoming<W>(
     peer: &JsonRpcPeer<W>,
+    dispatcher: &KimiClientServiceDispatcher<W>,
     incoming: Value,
-    bridge: &ApprovalBridge,
+    bridge: &Arc<ApprovalBridge>,
     event_tx: &mpsc::Sender<ProviderEvent>,
     cancel: &CancellationToken,
     command_abort: &CancellationToken,
@@ -350,6 +370,19 @@ async fn handle_incoming<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Server→client client-service requests (terminal/*, fs/*) are dispatched
+    // to concurrent tasks and never processed inline, so wait_for_exit cannot
+    // block the read loop while kill/release arrive.
+    if let (Some(method), Some(id)) = (
+        incoming.get("method").and_then(Value::as_str),
+        incoming.get("id").cloned(),
+    ) {
+        let params = incoming.get("params").cloned().unwrap_or(Value::Null);
+        if dispatcher.dispatch(method, id, params) {
+            return Ok(IncomingDisposition::NotProgress);
+        }
+    }
+
     match parse_message(&incoming) {
         Parsed::SessionUpdate(update) => {
             match update {

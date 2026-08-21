@@ -15,6 +15,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod client_services;
 mod parse;
 mod session;
 
