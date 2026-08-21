@@ -525,19 +525,28 @@ async fn read_terminal_stream<R>(
         if read == 0 {
             break;
         }
-        let retained = {
-            let used = budget.load(Ordering::Relaxed);
+        let retained = loop {
+            let used = budget.load(Ordering::Acquire);
             if used >= MAX_TERMINAL_OUTPUT_BYTES {
-                truncated.store(true, Ordering::Relaxed);
-                0
-            } else {
-                let remaining = MAX_TERMINAL_OUTPUT_BYTES - used;
-                let retained = remaining.min(read);
-                budget.store(used + retained, Ordering::Relaxed);
-                if retained < read {
-                    truncated.store(true, Ordering::Relaxed);
+                truncated.store(true, Ordering::Release);
+                break 0;
+            }
+            let remaining = MAX_TERMINAL_OUTPUT_BYTES - used;
+            let take = remaining.min(read);
+            // Atomically reserve `take` bytes: a compare-exchange keeps
+            // "read budget + deduct" race-free across concurrent stdout and
+            // stderr reader tasks, so concurrent readers can never overdraw
+            // or lose updates relative to the shared cap.
+            match budget.compare_exchange(used, used + take, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    if take < read {
+                        truncated.store(true, Ordering::Release);
+                    }
+                    break take;
                 }
-                retained
+                // Another reader consumed budget concurrently; retry with
+                // the up-to-date value the CAS returned.
+                Err(_) => continue,
             }
         };
         if retained > 0 {
@@ -775,6 +784,49 @@ mod tests {
         .expect("terminal output test timed out");
         assert_eq!(result.exit_code, Some(0));
         assert!(!result.truncated);
+        assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_streams_share_budget_without_overdraw() {
+        let dir = tempfile::tempdir().expect("dir");
+        // Both stdout and stderr each emit MAX bytes concurrently. The shared
+        // cap must still be honored exactly: total retained output == MAX and
+        // truncation is flagged. With the old load/store race this could
+        // overdraw; the atomic CAS reservation keeps it exact under any
+        // interleaving.
+        let script = format!(
+            "head -c {} /dev/zero | tr '\\0' 'a' > /dev/stdout & head -c {} /dev/zero | tr '\\0' 'b' > /dev/stderr & wait",
+            MAX_TERMINAL_OUTPUT_BYTES, MAX_TERMINAL_OUTPUT_BYTES
+        );
+        let bin = write_executable(dir.path(), "dual", &script);
+        let (manager, mut output_rx) = manager(Duration::from_secs(30));
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let (result, combined) = tokio::time::timeout(Duration::from_secs(15), async {
+            let wait = manager.wait_for_exit(&id);
+            tokio::pin!(wait);
+            let mut combined = 0usize;
+            let result = loop {
+                tokio::select! {
+                    result = &mut wait => break result.expect("wait"),
+                    event = output_rx.recv() => {
+                        combined += event.expect("output channel closed").output.len();
+                    }
+                }
+            };
+            while let Ok(event) = output_rx.try_recv() {
+                combined += event.output.len();
+            }
+            (result, combined)
+        })
+        .await
+        .expect("concurrent dual-stream test timed out");
+        assert!(result.truncated);
         assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
     }
 
