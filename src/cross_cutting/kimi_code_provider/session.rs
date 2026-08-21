@@ -129,10 +129,6 @@ where
     }))
     .await?;
 
-    let permission_mode = match input.permission_mode {
-        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto => "auto",
-        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised => "default",
-    };
     let resume_id = input
         .resume_provider_session_id
         .clone()
@@ -145,12 +141,12 @@ where
     let session_request = if let Some(session_id) = resume_id.as_deref() {
         json!({
             "jsonrpc":"2.0", "id":2, "method":"session/load",
-            "params":{"sessionId":session_id,"cwd":input.working_dir,"mcpServers":[],"permissionMode":permission_mode}
+            "params":{"sessionId":session_id,"cwd":input.working_dir,"mcpServers":[]}
         })
     } else {
         json!({
             "jsonrpc":"2.0", "id":2, "method":"session/new",
-            "params":{"cwd":input.working_dir,"mcpServers":[],"permissionMode":permission_mode}
+            "params":{"cwd":input.working_dir,"mcpServers":[]}
         })
     };
     let session_response =

@@ -681,3 +681,35 @@ async fn askuser_question_multiple_questions_emits_protocol_error() {
     );
     server_task.await.expect("server task");
 }
+
+#[tokio::test]
+async fn session_new_params_omit_permission_mode() {
+    let (peer, server) = test_peer();
+    let (_commands, _events, run) = direct_session_events(peer, input(None, 10)).await;
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).await;
+        let _initialized = read_request(&mut reader).await;
+        let new = read_request(&mut reader).await;
+        assert_eq!(new["method"], "session/new");
+        assert!(
+            new["params"].get("permissionMode").is_none(),
+            "session/new params must not carry permissionMode (kimi ACP sets mode via session/set_mode): {}",
+            new["params"]
+        );
+        assert!(new["params"].get("cwd").is_some());
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"omit_mode_fixture"}})).await;
+    });
+    let err = run
+        .await
+        .expect("run join")
+        .expect_err("server task ends without completing a prompt");
+    assert!(
+        !err.to_string().contains("permissionMode"),
+        "{}",
+        err.to_string()
+    );
+    server_task.await.expect("server task");
+}
