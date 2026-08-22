@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gate-campaign/1 manifest",
+  "type": "object",
+  "required": ["schema", "run_kind", "samples"],
+  "properties": {
+    "schema": { "const": "gate-campaign/1" },
+    "run_kind": { "enum": ["baseline", "revised"] },
+    "samples": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/sample" } }
+  },
+  "definitions": {
+    "case_id": {
+      "type": "object",
+      "required": ["shape_id", "repetition_id"],
+      "properties": {
+        "shape_id": { "type": "string", "pattern": "^[0-9]{2}$" },
+        "repetition_id": { "type": "integer", "minimum": 1 },
+        "round": { "type": "integer", "minimum": 1 },
+        "strategy": { "type": "string" }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "required": [
+        "provider", "shape_id", "shape_file", "repetition", "case_id",
+        "startedAt", "issueId", "sessionId", "finished", "reviewVerdicts",
+        "elapsedSec"
+      ],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string" },
+        "model_version": { "type": "string" },
+        "strategy": { "type": "string", "enum": ["fresh", "resume"] },
+        "shape_id": { "type": "string", "pattern": "^[0-9]{2}$" },
+        "shape_file": { "type": "string" },
+        "repetition": { "type": "string", "pattern": "^[0-9]+$" },
+        "case_id": { "$ref": "#/definitions/case_id" },
+        "startedAt": { "type": "string" },
+        "finishedAt": { "type": ["string", "null"] },
+        "issueId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "storySpecId": { "type": ["string", "null"] },
+        "designSpecId": { "type": ["string", "null"] },
+        "firstArtifactSec": { "type": ["number", "null"] },
+        "authorConfirmSec": { "type": ["number", "null"] },
+        "reviewCompleteSec": { "type": ["number", "null"] },
+        "finalizeSec": { "type": ["number", "null"] },
+        "finished": { "type": "boolean" },
+        "authorConfirmed": { "type": "boolean" },
+        "choices": { "type": "array", "items": { "type": "object" } },
+        "permissionApprovals": { "type": "integer", "minimum": 0 },
+        "nodes": { "type": "array", "items": { "type": "object" } },
+        "reviewVerdicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {
+              "verdict": { "enum": ["pass", "revise", "needs_human"] },
+              "el": { "type": "number" }
+            }
+          }
+        },
+        "error": { "type": ["string", "null"] },
+        "errorCode": { "type": ["string", "null"] },
+        "failureClass": { "type": ["string", "null"] },
+        "aborted": { "type": "boolean" },
+        "artifactVersion": { "type": ["integer", "null"] },
+        "elapsedSec": { "type": "number" },
+        "usage": {
+          "type": ["object", "null"],
+          "properties": {
+            "input_tokens": { "type": "integer" },
+            "cache_read_tokens": { "type": "integer" },
+            "fresh_or_resume": { "enum": ["fresh", "resume"] }
+          }
+        },
+        "usage_unavailable": { "type": ["boolean", "null"] }
+      }
+    }
+  }
+}
