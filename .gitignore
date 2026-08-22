@@ -27,3 +27,7 @@ frontend.log
 .pi-subagents/
 .pi/subagents/
 .superpowers/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
