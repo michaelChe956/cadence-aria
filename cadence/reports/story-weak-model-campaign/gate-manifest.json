@@ -401,6 +401,103 @@
    "provider": "claude_code",
    "shape_id": "03",
    "shape_file": "03-user-choice-issue-0001.md",
+   "repetition": "1",
+   "case_id": {
+    "shape_id": "03",
+    "repetition_id": 1
+   },
+   "startedAt": "2026-08-22T05:21:21.514Z",
+   "issueId": "issue_0042",
+   "sessionId": "workspace_session_0042",
+   "storySpecId": null,
+   "firstArtifactSec": 208.1,
+   "authorConfirmSec": 208.1,
+   "reviewCompleteSec": 333.4,
+   "finalizeSec": 333.4,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [
+    {
+     "el": 153.3,
+     "prompt": "请确认 2 个问题",
+     "picked": [
+      "opt_0"
+     ]
+    }
+   ],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:21:21.727577265+00:00",
+     "completed_at": "2026-08-22T05:21:21.727577265+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:21:21.745614169+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:24:49.800266522+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:24:49.836108291+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:26:55.076694853+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:26:55.138443437+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 333.4,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:26:55.993Z",
+   "elapsedSec": 334.3
+  },
+  {
+   "provider": "claude_code",
+   "shape_id": "03",
+   "shape_file": "03-user-choice-issue-0001.md",
    "repetition": "2",
    "case_id": {
     "shape_id": "03",
@@ -873,6 +970,967 @@
    "artifactVersion": 1,
    "finishedAt": "2026-08-22T03:53:26.793Z",
    "elapsedSec": 331.5
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "01",
+   "shape_file": "01-pending-confirmation.md",
+   "repetition": "1",
+   "case_id": {
+    "shape_id": "01",
+    "repetition_id": 1
+   },
+   "startedAt": "2026-08-22T05:26:59.226Z",
+   "issueId": "issue_0043",
+   "sessionId": "workspace_session_0043",
+   "storySpecId": null,
+   "firstArtifactSec": 105.6,
+   "authorConfirmSec": 105.6,
+   "reviewCompleteSec": 133.2,
+   "finalizeSec": 133.2,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [
+    {
+     "el": 44,
+     "prompt": "已有项目迁移到新的保留期限机制时，默认保留期限应选 7 天还是 30 天？（此默认值同时用于新项目的导出文件创建）",
+     "picked": [
+      "q0_opt_0"
+     ]
+    }
+   ],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:26:59.430461932+00:00",
+     "completed_at": "2026-08-22T05:26:59.430461932+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:26:59.446009759+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:28:44.966400671+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:28:44.991005322+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:29:12.580736926+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:29:12.626148571+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 133.2,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 5,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:29:13.473Z",
+   "elapsedSec": 134.1
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "01",
+   "shape_file": "01-pending-confirmation.md",
+   "repetition": "2",
+   "case_id": {
+    "shape_id": "01",
+    "repetition_id": 2
+   },
+   "startedAt": "2026-08-22T05:29:16.698Z",
+   "issueId": "issue_0044",
+   "sessionId": "workspace_session_0044",
+   "storySpecId": null,
+   "firstArtifactSec": 127.2,
+   "authorConfirmSec": 127.2,
+   "reviewCompleteSec": 182.4,
+   "finalizeSec": 182.4,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [
+    {
+     "el": 45.3,
+     "prompt": "已有项目迁移到「可配置默认保留期限」功能时，默认保留期限应选 7 天还是 30 天？",
+     "picked": [
+      "q0_opt_0"
+     ]
+    },
+    {
+     "el": 102.8,
+     "prompt": "管理员在项目设置中变更默认保留期限（7 天 ↔ 30 天）后，对已创建、未手动设置过期时间的导出文件应如何生效？",
+     "picked": [
+      "q0_opt_0"
+     ]
+    }
+   ],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:29:16.903941501+00:00",
+     "completed_at": "2026-08-22T05:29:16.903941501+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:29:16.919636497+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:31:24.030803656+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:31:24.063893959+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:32:19.223862739+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:32:19.271927419+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 182.4,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 6,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:32:20.121Z",
+   "elapsedSec": 183.2
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "02",
+   "shape_file": "02-review-revision.md",
+   "repetition": "1",
+   "case_id": {
+    "shape_id": "02",
+    "repetition_id": 1
+   },
+   "startedAt": "2026-08-22T05:32:23.350Z",
+   "issueId": "issue_0045",
+   "sessionId": "workspace_session_0045",
+   "storySpecId": null,
+   "firstArtifactSec": 136,
+   "authorConfirmSec": 136,
+   "reviewCompleteSec": 150.1,
+   "finalizeSec": 150.1,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:32:23.564153203+00:00",
+     "completed_at": "2026-08-22T05:32:23.564153203+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:32:23.580328985+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:34:39.487754470+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:34:39.512535274+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:34:53.647227330+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:34:53.690516815+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 150.1,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 5,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:34:54.541Z",
+   "elapsedSec": 151
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "02",
+   "shape_file": "02-review-revision.md",
+   "repetition": "2",
+   "case_id": {
+    "shape_id": "02",
+    "repetition_id": 2
+   },
+   "startedAt": "2026-08-22T05:34:57.769Z",
+   "issueId": "issue_0046",
+   "sessionId": "workspace_session_0046",
+   "storySpecId": null,
+   "firstArtifactSec": 163.4,
+   "authorConfirmSec": 163.4,
+   "reviewCompleteSec": 188.5,
+   "finalizeSec": 188.5,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:34:57.986279213+00:00",
+     "completed_at": "2026-08-22T05:34:57.986279213+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:34:58.002101334+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:37:41.316422336+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:37:41.346077600+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:38:06.400768296+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:38:06.457010220+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 188.5,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 5,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:38:07.305Z",
+   "elapsedSec": 189.4
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "03",
+   "shape_file": "03-user-choice-issue-0001.md",
+   "repetition": "1",
+   "case_id": {
+    "shape_id": "03",
+    "repetition_id": 1
+   },
+   "startedAt": "2026-08-22T05:38:10.531Z",
+   "issueId": "issue_0047",
+   "sessionId": "workspace_session_0047",
+   "storySpecId": null,
+   "firstArtifactSec": 90.6,
+   "authorConfirmSec": 90.6,
+   "reviewCompleteSec": 119,
+   "finalizeSec": 119,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:38:10.758975625+00:00",
+     "completed_at": "2026-08-22T05:38:10.758975625+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:38:10.777691892+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:39:41.296005948+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:39:41.323277100+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:40:09.694131131+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:40:09.740474488+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 119,
+     "verdict": "revise"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 6,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:40:10.593Z",
+   "elapsedSec": 119.9
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "03",
+   "shape_file": "03-user-choice-issue-0001.md",
+   "repetition": "2",
+   "case_id": {
+    "shape_id": "03",
+    "repetition_id": 2
+   },
+   "startedAt": "2026-08-22T05:40:13.820Z",
+   "issueId": "issue_0048",
+   "sessionId": "workspace_session_0048",
+   "storySpecId": null,
+   "firstArtifactSec": 263.9,
+   "authorConfirmSec": 263.9,
+   "reviewCompleteSec": 300.5,
+   "finalizeSec": 300.5,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:40:14.053319756+00:00",
+     "completed_at": "2026-08-22T05:40:14.053319756+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:40:14.071665609+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:44:37.950071862+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:44:37.977356462+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:45:14.511750865+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:45:14.562679149+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 300.5,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 3,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:45:15.417Z",
+   "elapsedSec": 301.4
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "04",
+   "shape_file": "04-multiple-constraints.md",
+   "repetition": "1",
+   "case_id": {
+    "shape_id": "04",
+    "repetition_id": 1
+   },
+   "startedAt": "2026-08-22T05:45:18.645Z",
+   "issueId": "issue_0049",
+   "sessionId": "workspace_session_0049",
+   "storySpecId": null,
+   "firstArtifactSec": 130.1,
+   "authorConfirmSec": 130.1,
+   "reviewCompleteSec": 164.3,
+   "finalizeSec": 164.3,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [
+    {
+     "el": 101.1,
+     "prompt": "某个租户的预热子任务失败后，尚未启动的其他租户预热子任务应如何处置？",
+     "picked": [
+      "q0_opt_0"
+     ]
+    }
+   ],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:45:18.870410466+00:00",
+     "completed_at": "2026-08-22T05:45:18.870410466+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:45:18.886387700+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:47:28.920594804+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:47:28.948132914+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:48:03.142086236+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:48:03.191427160+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 164.3,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 3,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:48:04.045Z",
+   "elapsedSec": 165.2
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "04",
+   "shape_file": "04-multiple-constraints.md",
+   "repetition": "2",
+   "case_id": {
+    "shape_id": "04",
+    "repetition_id": 2
+   },
+   "startedAt": "2026-08-22T05:48:07.274Z",
+   "issueId": "issue_0050",
+   "sessionId": "workspace_session_0050",
+   "storySpecId": null,
+   "firstArtifactSec": 141.1,
+   "authorConfirmSec": 141.1,
+   "reviewCompleteSec": 162.7,
+   "finalizeSec": 162.7,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:48:07.510311786+00:00",
+     "completed_at": "2026-08-22T05:48:07.510311786+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:48:07.526403316+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:50:28.574815023+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:50:28.604264243+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:50:50.189842479+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:50:50.237322561+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 162.7,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 7,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:50:51.085Z",
+   "elapsedSec": 163.6
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "05",
+   "shape_file": "05-simple-pure-function.md",
+   "repetition": "1",
+   "case_id": {
+    "shape_id": "05",
+    "repetition_id": 1
+   },
+   "startedAt": "2026-08-22T05:50:54.315Z",
+   "issueId": "issue_0051",
+   "sessionId": "workspace_session_0051",
+   "storySpecId": null,
+   "firstArtifactSec": 110.9,
+   "authorConfirmSec": 110.9,
+   "reviewCompleteSec": 147.4,
+   "finalizeSec": 147.4,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [
+    {
+     "el": 49,
+     "prompt": "clampPercent 函数应归属到仓库中的哪个文件/模块？（仓库当前为空壳：无 index.js、无 src/、无测试框架）",
+     "picked": [
+      "q0_opt_0"
+     ]
+    },
+    {
+     "el": 52.5,
+     "prompt": "clampPercent 的实现语言是什么？（CLAUDE.md 中语言为待确认）",
+     "picked": [
+      "q0_opt_0"
+     ]
+    },
+    {
+     "el": 61.2,
+     "prompt": "验收要求的“自动化单元测试”用什么测试框架执行？（仓库当前无任何测试基础设施）",
+     "picked": [
+      "q0_opt_0"
+     ]
+    }
+   ],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:50:54.579325582+00:00",
+     "completed_at": "2026-08-22T05:50:54.579325582+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:50:54.594425442+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:52:45.423614512+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:52:45.455957415+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:53:21.897451932+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:53:21.947133070+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 147.4,
+     "verdict": "pass"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 4,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:53:22.797Z",
+   "elapsedSec": 148.3
+  },
+  {
+   "provider": "kimi_code",
+   "shape_id": "05",
+   "shape_file": "05-simple-pure-function.md",
+   "repetition": "2",
+   "case_id": {
+    "shape_id": "05",
+    "repetition_id": 2
+   },
+   "startedAt": "2026-08-22T05:53:26.030Z",
+   "issueId": "issue_0052",
+   "sessionId": "workspace_session_0052",
+   "storySpecId": null,
+   "firstArtifactSec": 137.8,
+   "authorConfirmSec": 137.8,
+   "reviewCompleteSec": 189,
+   "finalizeSec": 189,
+   "finished": true,
+   "authorConfirmed": true,
+   "choices": [
+    {
+     "el": 89,
+     "prompt": "Issue 只规定了有限数字输入时 clampPercent 的行为（<0→0、>100→100、其余原样）。对 NaN、±Infinity 等非有限输入，Story Spec 应如何处理？",
+     "picked": [
+      "q0_opt_0"
+     ]
+    }
+   ],
+   "permissionApprovals": 0,
+   "nodes": [
+    {
+     "node_id": "timeline_node_001",
+     "node_type": "start_generation",
+     "status": "completed",
+     "title": "开始生成",
+     "started_at": "2026-08-22T05:53:26.278785579+00:00",
+     "completed_at": "2026-08-22T05:53:26.278785579+00:00"
+    },
+    {
+     "node_id": "timeline_node_002",
+     "node_type": "author_run",
+     "status": "completed",
+     "title": "Story Spec 生成",
+     "started_at": "2026-08-22T05:53:26.294907331+00:00",
+     "completed_at": null,
+     "summary": "生成完成"
+    },
+    {
+     "node_id": "timeline_node_003",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:55:44.050464134+00:00",
+     "completed_at": null,
+     "summary": "已确认，进入 Review"
+    },
+    {
+     "node_id": "timeline_node_004",
+     "node_type": "reviewer_run",
+     "status": "completed",
+     "title": "Review Round 1",
+     "started_at": "2026-08-22T05:55:44.073301925+00:00",
+     "completed_at": null,
+     "summary": "Review 完成，报告已进入对话流"
+    },
+    {
+     "node_id": "timeline_node_005",
+     "node_type": "author_confirm",
+     "status": "completed",
+     "title": "Author 结果确认",
+     "started_at": "2026-08-22T05:56:35.178492508+00:00",
+     "completed_at": null,
+     "summary": "人工确认定稿"
+    },
+    {
+     "node_id": "timeline_node_006",
+     "node_type": "completed",
+     "status": "completed",
+     "title": "流程完成",
+     "started_at": "2026-08-22T05:56:35.220797049+00:00",
+     "completed_at": null
+    }
+   ],
+   "reviewVerdicts": [
+    {
+     "el": 189,
+     "verdict": "revise"
+    }
+   ],
+   "error": null,
+   "errorCode": null,
+   "failureClass": "completed",
+   "aborted": false,
+   "toolFailures": 4,
+   "artifactVersion": 1,
+   "finishedAt": "2026-08-22T05:56:36.069Z",
+   "elapsedSec": 189.8
   },
   {
    "provider": "pi",
