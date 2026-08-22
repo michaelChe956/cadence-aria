@@ -35,9 +35,7 @@ use self::sandbox::{
     canonical_path_of_fd, canonicalize_root, open_dir_no_follow, probe_bwrap,
     resolve_trusted_binary, validate_path_no_follow,
 };
-use self::terminal::{
-    TerminalCommand, TerminalError, TerminalIsolation, TerminalManager, TerminalOutputEvent,
-};
+use self::terminal::{TerminalCommand, TerminalError, TerminalIsolation, TerminalManager};
 
 /// Adapter-local constant: kimi's boolean client-capability dialect. It never
 /// leaks into the generic ACP layer.
@@ -164,32 +162,10 @@ where
     ) -> Self {
         let root = canonicalize_root(&working_dir).unwrap_or(working_dir);
         let bwrap = probe_bwrap();
-        let (output_tx, mut output_rx) = mpsc::channel::<TerminalOutputEvent>(64);
-        let terminal = TerminalManager::new(output_tx);
-
-        // Output pump: forwards terminal output notifications without ever
-        // blocking the terminal tasks or the main RPC read loop.
-        {
-            let peer = peer.clone();
-            let session_id = session_id.clone();
-            tokio::spawn(async move {
-                while let Some(event) = output_rx.recv().await {
-                    let message = json!({
-                        "jsonrpc": "2.0",
-                        "method": "terminal/output",
-                        "params": {
-                            "sessionId": session_id,
-                            "terminalId": event.terminal_id,
-                            "stream": event.stream.as_str(),
-                            "output": event.output,
-                        }
-                    });
-                    if peer.send(message).await.is_err() {
-                        continue;
-                    }
-                }
-            });
-        }
+        // Command output is served through `terminal/output`
+        // request/response (see `handle_terminal_output`); kimi 0.38.0
+        // ignores unsolicited `terminal/output` notifications.
+        let terminal = TerminalManager::new();
 
         let state = Arc::new(ClientServiceState {
             session_id,
@@ -234,6 +210,7 @@ fn is_client_service_method(method: &str) -> bool {
         method,
         "terminal/create"
             | "terminal/wait_for_exit"
+            | "terminal/output"
             | "terminal/kill"
             | "terminal/release"
             | "fs/read_text_file"
@@ -265,6 +242,9 @@ async fn handle_request<W>(
         "terminal/kill" => handle_terminal_kill(&state, &params)
             .await
             .map(|_| json!({})),
+        "terminal/output" => handle_terminal_output(&state, &params)
+            .await
+            .map(|output| json!({"output": output})),
         "terminal/release" => handle_terminal_release(&state, &params)
             .await
             .map(|_| json!({})),
@@ -393,27 +373,67 @@ async fn handle_terminal_create(
         .filter(|command| !command.trim().is_empty())
         .ok_or_else(|| ClientServiceError::Rejected("terminal command is required".to_string()))?;
 
-    let parsed = parse_command(command).map_err(ClientServiceError::Grammar)?;
+    // kimi 0.38.0 sends the argv form: `command` is the interpreter path
+    // (e.g. "/bin/bash") and the model's shell script rides in `args`
+    // (["-c", "cd '/root' && <script>"]). Verified by raw ACP capture.
+    let args = params.get("args").and_then(Value::as_array);
 
-    evaluate_policy(state, ClientAction::Terminal, command).await?;
+    let (script, parsed) = if let Some(args) = args {
+        let interpreter = Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if interpreter != "bash" && interpreter != "sh" {
+            return Err(ClientServiceError::Rejected(format!(
+                "terminal interpreter is not allowed: {command}"
+            )));
+        }
+        let args: Vec<&str> = args
+            .iter()
+            .map(|arg| arg.as_str().unwrap_or_default())
+            .collect();
+        if args.len() != 2 || !(args[0] == "-c" || args[0] == "-lc") {
+            return Err(ClientServiceError::Rejected(
+                "terminal args must be a single -c script".to_string(),
+            ));
+        }
+        (args[1].to_string(), None)
+    } else {
+        // Legacy single-string form: validated against the closed grammar.
+        (
+            command.to_string(),
+            Some(parse_command(command).map_err(ClientServiceError::Grammar)?),
+        )
+    };
+
+    evaluate_policy(state, ClientAction::Terminal, &script).await?;
 
     let isolation = isolation_for(state)?;
 
-    let binary = resolve_trusted_binary(parsed.binary.name()).ok_or_else(|| {
-        ClientServiceError::Internal(format!(
-            "trusted binary not found: {}",
-            parsed.binary.name()
-        ))
-    })?;
+    let (binary, final_argv) = match parsed.as_ref() {
+        Some(parsed) => {
+            let binary = resolve_trusted_binary(parsed.binary.name()).ok_or_else(|| {
+                ClientServiceError::Internal(format!(
+                    "trusted binary not found: {}",
+                    parsed.binary.name()
+                ))
+            })?;
+            (binary, build_final_argv(parsed))
+        }
+        None => resolve_trusted_binary("bash")
+            .or_else(|| resolve_trusted_binary("sh"))
+            .map(|binary| (binary, vec!["-c".to_string(), script.clone()]))
+            .ok_or_else(|| ClientServiceError::Internal("trusted shell not found".to_string()))?,
+    };
 
     let cwd = resolve_cwd(state, params.get("cwd").and_then(Value::as_str))?;
-    for operand in &parsed.path_operands {
-        validate_path_no_follow(&cwd, Path::new(operand)).map_err(|error| {
-            ClientServiceError::Rejected(format!("path operand rejected: {operand}: {error}"))
-        })?;
+    if let Some(parsed) = parsed.as_ref() {
+        for operand in &parsed.path_operands {
+            validate_path_no_follow(&cwd, Path::new(operand)).map_err(|error| {
+                ClientServiceError::Rejected(format!("path operand rejected: {operand}: {error}"))
+            })?;
+        }
     }
-
-    let final_argv = build_final_argv(&parsed);
     let terminal_command = TerminalCommand {
         argv: final_argv,
         binary,
@@ -432,7 +452,7 @@ async fn handle_terminal_create(
         state,
         ProviderExecutionEventKind::Command,
         ProviderExecutionEventStatus::Started,
-        command.to_string(),
+        script.clone(),
         Some(terminal_command.argv.join(" ")),
         Some(terminal_command.cwd.to_string_lossy().into_owned()),
         None,
@@ -485,6 +505,25 @@ async fn handle_terminal_wait(
         result.exit_code,
     );
     Ok(result)
+}
+
+/// Serve kimi's `terminal/output` request: return the retained combined
+/// output of a finished (or running) terminal. kimi 0.38.0 asks for output
+/// as a request with an id after `terminal/wait_for_exit`; it does not
+/// consume unsolicited `terminal/output` notifications.
+async fn handle_terminal_output(
+    state: &ClientServiceState,
+    params: &Value,
+) -> Result<String, ClientServiceError> {
+    check_session(state, params)?;
+    let terminal_id = params
+        .get("terminalId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ClientServiceError::Rejected("terminalId is required".to_string()))?;
+    state
+        .terminal
+        .output(terminal_id)
+        .map_err(ClientServiceError::Terminal)
 }
 
 async fn handle_terminal_kill(
@@ -629,7 +668,6 @@ mod tests {
 
     fn test_state(role: AdapterRole) -> (Arc<ClientServiceState>, mpsc::Receiver<ProviderEvent>) {
         let (event_tx, events) = mpsc::channel(512);
-        let (terminal_tx, _terminal_rx) = mpsc::channel(1);
         let state = Arc::new(ClientServiceState {
             session_id: "client-service-test".to_string(),
             root: std::env::temp_dir(),
@@ -640,7 +678,7 @@ mod tests {
                 event_tx.clone(),
             )),
             event_tx,
-            terminal: TerminalManager::new(terminal_tx),
+            terminal: TerminalManager::new(),
             bwrap: None,
             cancel: CancellationToken::new(),
         });
@@ -793,5 +831,135 @@ mod tests {
         }
         let _ = server_writer.shutdown().await;
         drop(dispatcher);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kimi_038_terminal_flow_serves_output_as_request_response() {
+        if probe_bwrap().is_none() {
+            // Auto mode requires bubblewrap for terminal execution; skip the
+            // happy path where no sandbox is installed.
+            return;
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new(
+            peer,
+            "executor-session".to_string(),
+            dir.path().to_path_buf(),
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // kimi 0.38.0 create shape: interpreter path + args (captured live).
+        let create = json!({
+            "sessionId": "executor-session",
+            "command": "/bin/bash",
+            "args": ["-c", "printf probe-output"],
+            "cwd": "",
+            "outputByteLimit": 4194304
+        });
+        assert!(dispatcher.dispatch("terminal/create", json!(10), create));
+        let reply = read_reply(&mut server_reader, 10).await;
+        let terminal_id = reply["result"]["terminalId"]
+            .as_str()
+            .expect("terminalId")
+            .to_string();
+
+        assert!(dispatcher.dispatch(
+            "terminal/wait_for_exit",
+            json!(11),
+            json!({"sessionId": "executor-session", "terminalId": terminal_id})
+        ));
+        let reply = read_reply(&mut server_reader, 11).await;
+        assert_eq!(reply["result"]["exitCode"], json!(0), "{reply}");
+
+        // terminal/output is a request with an id; the result carries the
+        // retained output (raw ACP capture, kimi 0.38.0).
+        assert!(dispatcher.dispatch(
+            "terminal/output",
+            json!(12),
+            json!({"sessionId": "executor-session", "terminalId": terminal_id})
+        ));
+        let reply = read_reply(&mut server_reader, 12).await;
+        assert_eq!(reply["result"]["output"], json!("probe-output"), "{reply}");
+
+        // Unknown terminals still fail closed with the dedicated code.
+        assert!(dispatcher.dispatch(
+            "terminal/output",
+            json!(13),
+            json!({"sessionId": "executor-session", "terminalId": "term-nope"})
+        ));
+        let reply = read_reply(&mut server_reader, 13).await;
+        assert_eq!(
+            reply["error"]["code"],
+            json!(ERROR_UNKNOWN_TERMINAL),
+            "{reply}"
+        );
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
+    }
+
+    #[tokio::test]
+    async fn kimi_038_create_rejects_unexpected_interpreter_and_args() {
+        let (state, _events) = test_state(AdapterRole::Executor);
+        // Validation of the kimi 0.38.0 argv form happens before policy and
+        // isolation, so these reject deterministically without bwrap.
+        let bad_interpreter = json!({
+            "sessionId": "client-service-test",
+            "command": "/usr/bin/python3",
+            "args": ["-c", "print('nope')"],
+            "cwd": ""
+        });
+        let error = handle_terminal_create(&state, &bad_interpreter)
+            .await
+            .expect_err("interpreter rejected");
+        assert!(error.to_string().contains("interpreter is not allowed"));
+
+        let bad_args = json!({
+            "sessionId": "client-service-test",
+            "command": "/bin/bash",
+            "args": ["-c", "echo a", "echo b"],
+            "cwd": ""
+        });
+        let error = handle_terminal_create(&state, &bad_args)
+            .await
+            .expect_err("args rejected");
+        assert!(error.to_string().contains("single -c script"));
+    }
+
+    async fn read_reply(
+        server_reader: &mut tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        id: i64,
+    ) -> Value {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                line.clear();
+                server_reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read reply");
+                if let Ok(value) = serde_json::from_str::<Value>(line.trim())
+                    && value.get("id") == Some(&json!(id))
+                {
+                    return value;
+                }
+            }
+        })
+        .await
+        .expect("reply within timeout")
     }
 }

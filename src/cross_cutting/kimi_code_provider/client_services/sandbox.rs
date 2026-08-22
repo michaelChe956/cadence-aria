@@ -279,18 +279,25 @@ pub fn build_bwrap_args(
         "--unshare-net",
         "--unshare-pid",
         "--die-with-parent",
-        "--no-new-privs",
+        // `--no-new-privs` is deliberately absent: bubblewrap 0.11 removed
+        // the option (it is always enforced) and rejects it with
+        // "Unknown option", which made every auto-mode terminal exit 1.
         "--clearenv",
     ] {
         command.push(OsString::from(value));
     }
     match cwd_fd {
         Some(fd) => {
-            command.push(OsString::from("--dir"));
+            // Bind the openat-anchored cwd directory fd read-only under the
+            // /tmp tmpfs (`--ro-bind-fd FD DEST`): the root filesystem is
+            // ro-bound, so bwrap cannot create the /work mountpoint there.
+            // (The previous `--dir FD /work` form passed an FD to an option
+            // that takes none and made bwrap abort with exit 1.)
+            command.push(OsString::from("--ro-bind-fd"));
             command.push(OsString::from(fd.to_string()));
-            command.push(OsString::from("/work"));
+            command.push(OsString::from("/tmp/work"));
             command.push(OsString::from("--chdir"));
-            command.push(OsString::from("/work"));
+            command.push(OsString::from("/tmp/work"));
         }
         None => {
             command.push(OsString::from("--chdir"));
@@ -391,9 +398,16 @@ mod tests {
         assert!(text.contains(&"--ro-bind".to_string()));
         assert!(text.contains(&"--unshare-net".to_string()));
         assert!(text.contains(&"--tmpfs".to_string()));
-        assert!(text.contains(&"--no-new-privs".to_string()));
         assert!(text.contains(&"--clearenv".to_string()));
-        assert!(text.contains(&"--dir".to_string()));
+        // The cwd anchor is bound with `--ro-bind-fd FD DEST` and executed
+        // from /work. `--no-new-privs` is intentionally absent: bubblewrap
+        // 0.11 removed the option (always enforced) and rejects it.
+        let fd_index = text
+            .iter()
+            .position(|arg| arg == "--ro-bind-fd")
+            .expect("--ro-bind-fd present");
+        assert_eq!(text[fd_index + 1], "42");
+        assert_eq!(text[fd_index + 2], "/tmp/work");
         assert!(text.contains(&"--chdir".to_string()));
         assert_eq!(text.last().map(String::as_str), Some("file"));
     }

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::sandbox::{build_bwrap_args, open_dir_no_follow_inherit, trusted_path_env};
@@ -76,28 +76,6 @@ impl std::fmt::Display for TerminalError {
 impl std::error::Error for TerminalError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputStream {
-    Stdout,
-    Stderr,
-}
-
-impl OutputStream {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            OutputStream::Stdout => "stdout",
-            OutputStream::Stderr => "stderr",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TerminalOutputEvent {
-    pub terminal_id: String,
-    pub stream: OutputStream,
-    pub output: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalState {
     Created,
     Running,
@@ -106,23 +84,26 @@ enum TerminalState {
 }
 
 struct TerminalEntry {
-    id: String,
     state: Mutex<TerminalState>,
     kill: CancellationToken,
     done: Arc<Notify>,
     result: Mutex<Option<TerminalResult>>,
     command: Mutex<Option<TerminalCommand>>,
+    /// Combined stdout+stderr retained for the server's `terminal/output`
+    /// request (kimi 0.38.0 asks for output as a request/response, after
+    /// `terminal/wait_for_exit`), capped by `MAX_TERMINAL_OUTPUT_BYTES`.
+    output: Arc<Mutex<String>>,
 }
 
 impl TerminalEntry {
-    fn new(id: String, command: TerminalCommand) -> Self {
+    fn new(command: TerminalCommand) -> Self {
         Self {
-            id,
             state: Mutex::new(TerminalState::Created),
             kill: CancellationToken::new(),
             done: Arc::new(Notify::new()),
             result: Mutex::new(None),
             command: Mutex::new(Some(command)),
+            output: Arc::new(Mutex::new(String::new())),
         }
     }
 }
@@ -136,7 +117,6 @@ struct ManagerInner {
 /// The shared terminal manager. Cheap to clone; every clone shares state.
 pub struct TerminalManager {
     inner: Arc<Mutex<ManagerInner>>,
-    output_tx: mpsc::Sender<TerminalOutputEvent>,
     timeout: Duration,
 }
 
@@ -144,17 +124,15 @@ impl Clone for TerminalManager {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            output_tx: self.output_tx.clone(),
             timeout: self.timeout,
         }
     }
 }
 
 impl TerminalManager {
-    pub fn new(output_tx: mpsc::Sender<TerminalOutputEvent>) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ManagerInner::default())),
-            output_tx,
             timeout: Duration::from_secs(TERMINAL_COMMAND_TIMEOUT_SECS),
         }
     }
@@ -183,10 +161,9 @@ impl TerminalManager {
         }
         inner.next_id += 1;
         let id = format!("term-{}", inner.next_id);
-        inner.terminals.insert(
-            id.clone(),
-            Arc::new(TerminalEntry::new(id.clone(), command)),
-        );
+        inner
+            .terminals
+            .insert(id.clone(), Arc::new(TerminalEntry::new(command)));
         Ok(id)
     }
 
@@ -237,6 +214,19 @@ impl TerminalManager {
             }
             notified.await;
         }
+    }
+
+    /// Combined retained output for a terminal (stdout + stderr, in read
+    /// order). Unknown ids are errors; released terminals keep their output
+    /// so a late `terminal/output` request after `terminal/release` still
+    /// succeeds.
+    pub fn output(&self, id: &str) -> Result<String, TerminalError> {
+        let inner = self.inner.lock().expect("terminal manager lock");
+        inner
+            .terminals
+            .get(id)
+            .map(|entry| entry.output.lock().expect("terminal output lock").clone())
+            .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))
     }
 
     /// Kill a terminal's process group. Idempotent; unknown ids are errors.
@@ -400,21 +390,17 @@ async fn run_terminal(
     let stdout_task = stdout.map(|stream| {
         tokio::spawn(read_terminal_stream(
             stream,
-            OutputStream::Stdout,
-            entry.id.clone(),
             Arc::clone(&budget),
             Arc::clone(&truncated),
-            manager.output_tx.clone(),
+            Arc::clone(&entry.output),
         ))
     });
     let stderr_task = stderr.map(|stream| {
         tokio::spawn(read_terminal_stream(
             stream,
-            OutputStream::Stderr,
-            entry.id.clone(),
             Arc::clone(&budget),
             Arc::clone(&truncated),
-            manager.output_tx.clone(),
+            Arc::clone(&entry.output),
         ))
     });
 
@@ -512,11 +498,9 @@ fn build_terminal_command(
 
 async fn read_terminal_stream<R>(
     mut reader: R,
-    stream: OutputStream,
-    terminal_id: String,
     budget: Arc<AtomicUsize>,
     truncated: Arc<AtomicBool>,
-    output_tx: mpsc::Sender<TerminalOutputEvent>,
+    retained_output: Arc<Mutex<String>>,
 ) where
     R: AsyncRead + Unpin,
 {
@@ -551,17 +535,10 @@ async fn read_terminal_stream<R>(
         };
         if retained > 0 {
             let output = String::from_utf8_lossy(&chunk[..retained]).into_owned();
-            if output_tx
-                .send(TerminalOutputEvent {
-                    terminal_id: terminal_id.clone(),
-                    stream,
-                    output,
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
+            retained_output
+                .lock()
+                .expect("terminal output lock")
+                .push_str(&output);
         }
     }
 }
@@ -570,10 +547,8 @@ async fn read_terminal_stream<R>(
 mod tests {
     use super::*;
 
-    fn manager(timeout: Duration) -> (TerminalManager, mpsc::Receiver<TerminalOutputEvent>) {
-        let (output_tx, output_rx) = mpsc::channel(64);
-        let manager = TerminalManager::new(output_tx).with_timeout(timeout);
-        (manager, output_rx)
+    fn manager(timeout: Duration) -> TerminalManager {
+        TerminalManager::new().with_timeout(timeout)
     }
 
     #[cfg(unix)]
@@ -605,7 +580,7 @@ mod tests {
     async fn full_lifecycle_create_wait_release() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "emit", "printf 'out'; printf 'err' >&2; exit 3");
-        let (manager, _output) = manager(Duration::from_secs(5));
+        let manager = manager(Duration::from_secs(5));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -624,7 +599,7 @@ mod tests {
     async fn kill_while_wait_pending_returns_killed() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let (manager, _output) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -648,7 +623,7 @@ mod tests {
     async fn fifth_terminal_is_rejected() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let (manager, _output) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let mut ids = Vec::new();
         for _ in 0..MAX_TERMINALS {
             let id = manager
@@ -672,7 +647,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn unknown_id_is_distinguishable() {
-        let (manager, _output) = manager(Duration::from_secs(5));
+        let manager = manager(Duration::from_secs(5));
         assert_eq!(
             manager.wait_for_exit("term-missing").await,
             Err(TerminalError::UnknownTerminal("term-missing".to_string()))
@@ -694,7 +669,7 @@ mod tests {
         // The child spawns a grandchild so process-group kill semantics are
         // exercised: killing only the direct child would leave the grandchild.
         let bin = write_executable(dir.path(), "slow-tree", "sleep 30 & sleep 30; exit 0");
-        let (manager, _output) = manager(Duration::from_millis(200));
+        let manager = manager(Duration::from_millis(200));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -717,27 +692,15 @@ mod tests {
             MAX_TERMINAL_OUTPUT_BYTES + 1
         );
         let bin = write_executable(dir.path(), "big", &script);
-        let (manager, mut output_rx) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
             .expect("create");
         manager.start(&id).expect("start");
         let (result, combined) = tokio::time::timeout(Duration::from_secs(10), async {
-            let wait = manager.wait_for_exit(&id);
-            tokio::pin!(wait);
-            let mut combined = 0usize;
-            let result = loop {
-                tokio::select! {
-                    result = &mut wait => break result.expect("wait"),
-                    event = output_rx.recv() => {
-                        combined += event.expect("output channel closed").output.len();
-                    }
-                }
-            };
-            while let Ok(event) = output_rx.try_recv() {
-                combined += event.output.len();
-            }
+            let result = manager.wait_for_exit(&id).await.expect("wait");
+            let combined = manager.output(&id).expect("retained output").len();
             (result, combined)
         })
         .await
@@ -757,27 +720,15 @@ mod tests {
             MAX_TERMINAL_OUTPUT_BYTES
         );
         let bin = write_executable(dir.path(), "exact", &script);
-        let (manager, mut output_rx) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
             .expect("create");
         manager.start(&id).expect("start");
         let (result, combined) = tokio::time::timeout(Duration::from_secs(10), async {
-            let wait = manager.wait_for_exit(&id);
-            tokio::pin!(wait);
-            let mut combined = 0usize;
-            let result = loop {
-                tokio::select! {
-                    result = &mut wait => break result.expect("wait"),
-                    event = output_rx.recv() => {
-                        combined += event.expect("output channel closed").output.len();
-                    }
-                }
-            };
-            while let Ok(event) = output_rx.try_recv() {
-                combined += event.output.len();
-            }
+            let result = manager.wait_for_exit(&id).await.expect("wait");
+            let combined = manager.output(&id).expect("retained output").len();
             (result, combined)
         })
         .await
@@ -801,27 +752,15 @@ mod tests {
             MAX_TERMINAL_OUTPUT_BYTES, MAX_TERMINAL_OUTPUT_BYTES
         );
         let bin = write_executable(dir.path(), "dual", &script);
-        let (manager, mut output_rx) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
             .expect("create");
         manager.start(&id).expect("start");
         let (result, combined) = tokio::time::timeout(Duration::from_secs(15), async {
-            let wait = manager.wait_for_exit(&id);
-            tokio::pin!(wait);
-            let mut combined = 0usize;
-            let result = loop {
-                tokio::select! {
-                    result = &mut wait => break result.expect("wait"),
-                    event = output_rx.recv() => {
-                        combined += event.expect("output channel closed").output.len();
-                    }
-                }
-            };
-            while let Ok(event) = output_rx.try_recv() {
-                combined += event.output.len();
-            }
+            let result = manager.wait_for_exit(&id).await.expect("wait");
+            let combined = manager.output(&id).expect("retained output").len();
             (result, combined)
         })
         .await
@@ -835,7 +774,7 @@ mod tests {
     async fn wait_after_fast_exit_returns_immediately() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "fast", "exit 0");
-        let (manager, _output) = manager(Duration::from_secs(5));
+        let manager = manager(Duration::from_secs(5));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -859,7 +798,7 @@ mod tests {
     async fn kill_after_release_is_idempotent() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let (manager, _output) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -878,7 +817,7 @@ mod tests {
     async fn failed_start_frees_concurrency_quota() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let (manager, _output) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -906,7 +845,7 @@ mod tests {
     async fn cleanup_all_kills_live_terminals() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let (manager, _output) = manager(Duration::from_secs(30));
+        let manager = manager(Duration::from_secs(30));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
