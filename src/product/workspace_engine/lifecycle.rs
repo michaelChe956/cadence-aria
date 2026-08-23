@@ -679,6 +679,9 @@ impl WorkspaceEngine {
         prompt.push_str(
             "\n请基于该回答继续生成完整候选产物；如果仍有必须由用户确认的问题，请继续发起选择请求，不要进入 reviewer。",
         );
+        if self.session.workspace_type == WorkspaceType::Design {
+            self.append_design_author_artifact_contract(&mut prompt, false);
+        }
         Ok(prompt)
     }
 

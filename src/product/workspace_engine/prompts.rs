@@ -437,6 +437,15 @@ impl WorkspaceEngine {
         }
     }
 
+    pub(crate) fn append_design_author_artifact_contract(
+        &self,
+        prompt: &mut String,
+        mentions_prior_artifact: bool,
+    ) {
+        self.append_author_artifact_output_contract(prompt, mentions_prior_artifact);
+        prompt.push_str(author_artifact_skeleton_example(&WorkspaceType::Design));
+    }
+
     pub(crate) fn append_author_artifact_output_contract(
         &self,
         prompt: &mut String,

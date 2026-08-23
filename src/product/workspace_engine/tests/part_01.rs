@@ -332,6 +332,79 @@ fn empty_provider_commands() -> mpsc::Receiver<ProviderCommand> {
     rx
 }
 
+fn pending_author_choice() -> PendingAuthorChoice {
+    PendingAuthorChoice {
+        id: "author_choice_prompt_001".to_string(),
+        prompt: "输出格式？".to_string(),
+        options: vec![ChoiceOptionData {
+            id: "json".to_string(),
+            label: "JSON".to_string(),
+            description: None,
+        }],
+        source_node_id: None,
+    }
+}
+
+#[tokio::test]
+async fn story_author_choice_followup_prompt_remains_byte_for_byte_unchanged() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let checkpoint_tmp = TempDir::new().unwrap();
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        make_session("sess_story_choice_prompt"),
+    );
+    engine.pending_author_choice = Some(pending_author_choice());
+
+    let prompt = engine
+        .take_pending_author_choice_prompt(
+            "author_choice_prompt_001",
+            vec!["json".to_string()],
+            Some("保持可读性".to_string()),
+        )
+        .await
+        .expect("Story choice followup prompt");
+
+    assert_eq!(
+        prompt,
+        "用户回答了 author 的确认问题：\n问题：输出格式？\n选择：\n- JSON\n补充：保持可读性\n\n请基于该回答继续生成完整候选产物；如果仍有必须由用户确认的问题，请继续发起选择请求，不要进入 reviewer。"
+    );
+}
+
+#[tokio::test]
+async fn design_author_choice_followup_prompt_includes_output_contract_and_decision_traceability() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let checkpoint_tmp = TempDir::new().unwrap();
+    let mut session = make_session("sess_design_choice_prompt");
+    session.workspace_type = WorkspaceType::Design;
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        session,
+    );
+    engine.pending_author_choice = Some(pending_author_choice());
+
+    let prompt = engine
+        .take_pending_author_choice_prompt(
+            "author_choice_prompt_001",
+            vec!["json".to_string()],
+            None,
+        )
+        .await
+        .expect("Design choice followup prompt");
+
+    assert!(
+        prompt.contains("原始返回必须使用完整 artifact fenced block"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
+    assert!(prompt.contains("# Design Spec 标题"), "{prompt}");
+    assert!(prompt.contains("## 设计决策"), "{prompt}");
+    assert!(prompt.contains("## 追踪关系"), "{prompt}");
+    assert!(prompt.contains("author-decision-*"), "{prompt}");
+    assert!(prompt.contains("[DEC-*]"), "{prompt}");
+}
+
 #[derive(Default)]
 struct SessionRecordingProvider {
     inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
