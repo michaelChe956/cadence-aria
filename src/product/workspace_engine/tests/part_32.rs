@@ -484,3 +484,178 @@ fn prompt_sliding_window_applies_to_author_revision_and_reviewer_entrypoints() {
         "prompt character-count decrease is a proxy metric only, not a release gate"
     );
 }
+
+#[test]
+fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_design_prompt_sliding_window");
+    session.workspace_type = WorkspaceType::Design;
+    session.messages = vec![SessionMessage {
+        id: "msg_000".to_string(),
+        role: "system".to_string(),
+        content: "Workspace 生成任务已准备\n\n[canonical_inputs]\n完整 Design canonical inputs：不得裁剪。\n\n[constraint_summary]\nDesign 历史约束。".to_string(),
+        checkpoint_id: None,
+        created_at: "2026-08-21T00:00:00Z".to_string(),
+    }];
+    let choice_audit = "结构化交互审计记录（daemon 捕获）\n- audit_kind: provider_choice_response\n- choice_id: author-decision-001\n- source: AskUserQuestion\n- provider_role: author\n- request_prompt: 请选择 Design 兼容策略。\n- answers:\n  - question_id: compatibility\n    question: API 是否保持旧客户端兼容？\n    selected: compatibility_first = 保持旧客户端兼容\n    free_text: 用户确认先保证现有调用方不受影响。\n- impacts: [DEC-002], [CMP-002], [API-002], [REQ-001], [AC-001]\n\n说明：以上记录由 daemon 捕获，是 author-decision/source claims 的可审计来源。";
+    let mut artifacts = Vec::new();
+    for round in 1..=4 {
+        let markdown = complete_design_artifact(
+            &format!(
+                "[DEC-{round:03}] Design 决策正文 {}",
+                "决策细节 ".repeat(30)
+            ),
+            &format!(
+                "[API-{round:03}] API 契约正文 {}",
+                "接口细节 ".repeat(30)
+            ),
+        )
+        .replace("[DEC-001]", &format!("[DEC-{round:03}]"))
+        .replace("[CMP-001]", &format!("[CMP-{round:03}]"))
+        .replace("[API-001]", &format!("[API-{round:03}]"));
+        session.messages.push(SessionMessage {
+            id: format!("msg_design_user_{round}"),
+            role: "user".to_string(),
+            content: format!(
+                "DESIGN-ROUND-{round}-USER-RAW {}",
+                "用户设计细节 ".repeat(30)
+            ),
+            checkpoint_id: None,
+            created_at: format!("2026-08-21T00:00:{round:02}Z"),
+        });
+        session.messages.push(SessionMessage {
+            id: format!("msg_design_author_{round}"),
+            role: "assistant".to_string(),
+            content: markdown.clone(),
+            checkpoint_id: None,
+            created_at: format!("2026-08-21T00:01:{round:02}Z"),
+        });
+        if round == 2 {
+            session.messages.push(SessionMessage {
+                id: "msg_design_choice".to_string(),
+                role: "system".to_string(),
+                content: choice_audit.to_string(),
+                checkpoint_id: None,
+                created_at: "2026-08-21T00:01:30Z".to_string(),
+            });
+        }
+        session.messages.push(SessionMessage {
+            id: format!("msg_design_reviewer_{round}"),
+            role: "reviewer".to_string(),
+            content: format!(
+                "[review_summary]\nDesign round {round} verdict\n\n[review_findings]\n1. severity: suggestion\n   message: Design round {round} suggestion\n   evidence: artifact v{round}\n   required_action: optional"
+            ),
+            checkpoint_id: None,
+            created_at: format!("2026-08-21T00:02:{round:02}Z"),
+        });
+        artifacts.push(ArtifactVersion {
+            version: round,
+            payload: ArtifactPayload::Markdown {
+                markdown,
+                diff: None,
+            },
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: Some(ProviderName::Codex),
+            review_verdict: Some(ReviewVerdictType::Revise),
+            confirmed_by: None,
+            is_current: round == 4,
+            created_at: format!("2026-08-21T00:03:{round:02}Z"),
+            source_node_id: format!("design_author_round_{round}"),
+        });
+    }
+    let latest_artifact = artifacts[3]
+        .payload
+        .markdown()
+        .expect("latest Design artifact markdown")
+        .to_string();
+    session.artifact = Some(artifacts[3].payload.clone());
+    let checkpoint_tmp = TempDir::new().unwrap();
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        session,
+    );
+    engine.artifact_versions = artifacts;
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "Design 第 1 轮必须修复仍未关闭。".to_string(),
+        summary: "Design 追踪关系未关闭".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::MustFix,
+            message: "DESIGN-R1-MUST-FIX-FULL-TEXT：DEC-001 必须追踪到 API-001。".to_string(),
+            evidence: "Design artifact v1 / DEC-001 / API-001".to_string(),
+            required_action: "补齐 DEC-001 -> CMP-001 -> API-001 trace。".to_string(),
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    });
+
+    let author = engine
+        .build_streaming_input("新的 Design author 请求", AuthorPromptMode::FullConversation)
+        .expect("author prompt")
+        .prompt;
+    let revision = engine.build_revision_full_prompt(
+        engine
+            .session
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown())
+            .expect("current Design artifact"),
+        engine.latest_review_verdict.as_ref().expect("review verdict"),
+        &engine.routing_reference_context(),
+    );
+    let reviewer = engine.build_review_input().expect("review prompt").prompt;
+
+    for (entrypoint, prompt) in [
+        ("author", &author),
+        ("revision", &revision),
+        ("reviewer", &reviewer),
+    ] {
+        assert!(
+            prompt.contains("[历史压缩摘要 round=1]")
+                && prompt.contains("[历史压缩摘要 round=2]"),
+            "{entrypoint} must summarize early Design rounds: {prompt}"
+        );
+        for raw in ["DESIGN-ROUND-1-USER-RAW", "DESIGN-ROUND-2-USER-RAW"] {
+            assert!(
+                !prompt.contains(raw),
+                "{entrypoint} must not replay early Design raw round `{raw}`: {prompt}"
+            );
+        }
+        for raw in ["DESIGN-ROUND-3-USER-RAW", "DESIGN-ROUND-4-USER-RAW"] {
+            assert!(
+                prompt.contains(raw),
+                "{entrypoint} must retain recent Design raw round `{raw}`: {prompt}"
+            );
+        }
+        assert!(
+            prompt.contains(choice_audit),
+            "{entrypoint} must retain the full author-decision choice audit: {prompt}"
+        );
+        assert!(
+            prompt.contains(&latest_artifact),
+            "{entrypoint} must retain the full latest Design artifact: {prompt}"
+        );
+        for required_finding_text in [
+            "DESIGN-R1-MUST-FIX-FULL-TEXT：DEC-001 必须追踪到 API-001。",
+            "Design artifact v1 / DEC-001 / API-001",
+            "补齐 DEC-001 -> CMP-001 -> API-001 trace。",
+        ] {
+            assert!(
+                prompt.contains(required_finding_text),
+                "{entrypoint} must retain full open must_fix finding `{required_finding_text}`: {prompt}"
+            );
+        }
+        for token in [
+            "DEC-003", "CMP-003", "API-003", "DEC-004", "CMP-004", "API-004",
+        ] {
+            assert!(
+                prompt.contains(token),
+                "{entrypoint} must retain recent Design token `{token}`: {prompt}"
+            );
+        }
+    }
+    assert!(reviewer.contains("完整 Design canonical inputs：不得裁剪。"));
+    assert!(reviewer.contains("artifact v1 -> v2 相邻版本差异摘要"));
+}
