@@ -1102,3 +1102,97 @@ async fn provider_drive_aggregate_story_missing_structured_output_records_diagno
         diagnostics[0].content
     );
 }
+
+#[test]
+fn design_artifact_constraint_negative_matrix_reports_expected_finding() {
+    #[derive(Debug)]
+    enum Violation { Heading(&'static str), Id(&'static str), SourceId, ForbiddenHeading(&'static str), ForbiddenToken(&'static str, &'static str) }
+
+    let spec = artifact_constraint_spec_for(&WorkspaceType::Design);
+    assert_eq!(
+        (spec.required_headings.len(), spec.required_id_patterns.len(), spec.required_tokens.len(), spec.forbidden_headings.len(), spec.forbidden_tokens.len()),
+        (7, 3, 1, 4, 2),
+    );
+
+    let baseline = complete_design_artifact("保留清晰的组件边界。", "公开接口保持稳定。")
+        .replacen("- [DEC-001] -> [REQ-001]", "- 设计决策映射至上游需求。", 1);
+    let baseline_report = validate_workspace_artifact_constraints(&baseline, &WorkspaceType::Design);
+    assert!(baseline_report.passed, "Design 合法基准必须通过: {baseline_report:?}");
+
+    let cases = [
+        Violation::Heading("设计范围"),
+        Violation::Heading("设计决策"),
+        Violation::Heading("公共组件"),
+        Violation::Heading("API 契约"),
+        Violation::Heading("数据模型"),
+        Violation::Heading("风险"),
+        Violation::Heading("追踪关系"),
+        Violation::Id("DEC"),
+        Violation::Id("CMP"),
+        Violation::Id("API"),
+        Violation::SourceId,
+        Violation::ForbiddenHeading("Work Item Plan"),
+        Violation::ForbiddenHeading("任务拆分"),
+        Violation::ForbiddenHeading("开发任务"),
+        Violation::ForbiddenHeading("执行 checklist"),
+        Violation::ForbiddenToken("[TASK-*]", "[TASK-001]"),
+        Violation::ForbiddenToken("WI-*", "WI-001"),
+    ];
+
+    for violation in cases {
+        let (content, field, expected) = match violation {
+            Violation::Heading(label) => (
+                baseline.replacen(&format!("## {label}"), label, 1),
+                "missing_required_headings",
+                label.to_string(),
+            ),
+            Violation::Id(prefix) => {
+                let id = format!("[{prefix}-001]");
+                (
+                    baseline.replace(&id, &format!("{prefix}-001")),
+                    "missing_required_ids",
+                    format!("[{prefix}-*]"),
+                )
+            }
+            Violation::SourceId => (
+                baseline.replacen(
+                    "source ids: Story Spec story_spec_0001, Issue issue_0001。",
+                    "上游来源已关联。",
+                    1,
+                ),
+                "missing_required_ids",
+                "source id".to_string(),
+            ),
+            Violation::ForbiddenHeading(heading) => (
+                format!("{baseline}\n## {heading}\n不应出现在 Design artifact 中。\n"),
+                "forbidden_headings",
+                heading.to_string(),
+            ),
+            Violation::ForbiddenToken(label, token) => (
+                baseline.replacen(
+                    "## 数据模型\n",
+                    &format!("## 数据模型\n- {token}\n"),
+                    1,
+                ),
+                "forbidden_tokens",
+                format!("{label}: {token}"),
+            ),
+        };
+        let report = validate_workspace_artifact_constraints(&content, &WorkspaceType::Design);
+        let findings = match field {
+            "missing_required_headings" => &report.missing_required_headings,
+            "missing_required_ids" => &report.missing_required_ids,
+            "forbidden_headings" => &report.forbidden_headings,
+            "forbidden_tokens" => &report.forbidden_tokens,
+            _ => unreachable!("unknown finding field: {field}"),
+        };
+
+        assert!(!report.passed, "{violation:?}: {report:?}");
+        assert_eq!(findings.as_slice(), &[expected], "{violation:?}: {report:?}");
+        let finding_count = report.missing_required_headings.len()
+            + report.missing_required_ids.len()
+            + report.forbidden_headings.len()
+            + report.forbidden_tokens.len();
+        assert_eq!(finding_count, 1, "{violation:?}: {report:?}");
+    }
+}
