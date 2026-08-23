@@ -6,11 +6,12 @@ Story 链路的弱模型加固（harden-story-pipeline-weak-models）已完成�
 
 ## What Changes
 
-- **Reviewer 边界判例 few-shot**：新增 3 条去 sentinel 封装的轻量对照判例（抽象追踪→最高 suggestion；可执行测试越界→must_fix；风险章节合法提及验证→pass），仅在 Design 的 `build_review_input` 单点注入；配套防照抄与防误伤回归断言。
+- **Reviewer 边界判例 few-shot**：新增 3 条去 sentinel 封装的轻量对照判例（抽象追踪→最高 suggestion；可执行测试越界→must_fix；风险章节合法提及验证→pass），仅在 Design 的 `build_review_input` 单点注入（位于 reviewer_output_contract 结果之前）；配套防照抄与防误伤回归断言。
 - **Repair 纵深防御**：`is_repairable` 增加载荷内容指纹判据（示例 ID 组合命中即不可修复，覆盖 JsonNonceMismatch/MissingJsonNonce）；删除恒不可达的 NonceMismatch 死分支；repair prompt 增加 nonce 排除提示且回灌改用剥离 sentinel 后的 readable 文本。
 - **用户反馈返修入口补全（仅 Design 分支）**：注入 parser schema、artifact 输出 fence 契约（含当前产物输入 fence 三反引号改四反引号）、Design skeleton、missing context notes；compact_history 暂缓（待 campaign usage 数据决定）；Story/WorkItem 分支字节不变。
+- **Choice followup 续写入口契约（第四入口，会审 A 级遗漏）**：用户回答 author 的确认问题后的续写 prompt 当前零契约注入（裸文本透传），弱模型以对话体作答将直接 gate 失败且决策不落章；Design 分支补 artifact 输出 fence 契约、Design skeleton 与结构化决策落章 contract（复用上一条注入件），Story 分支字节不变。
 - **结构契约回归矩阵**：Design candidate→finding 表驱动负例（单失败原因基准）；Design 多轮滑动窗口 fixture；skeleton 防照抄提示语从 REQ/AC 修正为 DEC/CMP/API + source id；新增单仓确认红线测试（pass 不自动 Completed、确认后才 Confirmed、无 aggregate contract）。
-- **Design corpus/golden/campaign**：6 形态冻结语料各配冻结上游 Story Spec fixture；design golden normalizer（DEC/CMP-API 集、dec_req_links、source 覆盖、双章节 decision 抽取，不要求 ID 集合与 golden 完全一致）；强化版 manifest 校验器；baseline 先于 prompt 改造采集，revised campaign 以 12 样本/组合 × 3 provider 组合判定（full-chain 一次成功 gate + 边界分类独立最低门槛：抽象追踪假阳=0、测试越界假阴=0）。
+- **Design corpus/golden/campaign**：6 形态冻结语料各配冻结上游 Story Spec fixture；design golden normalizer（DEC/CMP-API 集、dec_req_links、source 覆盖、双章节 decision 抽取，不要求 ID 集合与 golden 完全一致）；强化版 manifest 校验器；baseline 先于 prompt 改造采集，revised 主 gate 以 12 样本/组合 × 3 provider 组合判定（fresh full-chain 全数通过，测试越界反例的 full-chain 成功定义为含一次正确返修的全链走通且首轮边界判定正确）；边界分类另立 mini-campaign（抽象追踪正例与测试越界反例各 5 重复 × 3 provider = 各 15 观测，假阳/假阴为 0 方可通过，报告按置信上界如实表述）。
 
 ## Capabilities
 
@@ -40,4 +41,11 @@ Story 链路的弱模型加固（harden-story-pipeline-weak-models）已完成�
 
 ## 范围声明
 
-本 change 仅覆盖 legacy 单仓 Design。验收结论只声称「单仓 Design 链路可用」，不声称全量 Design 链路（含 aggregate）可用。
+本 change 仅覆盖 legacy 单仓 Design。验收结论只声称「单仓 Design 链路可用」，不声称全量 Design 链路（含 aggregate）可用；campaign 报告对成功率类结论 SHALL 附样本量与置信上界（如 0/36 → 95% 上界 <8.3%），不得以零失败直接声称可用率百分比。
+
+## Known Residual Risks（会审 B 级留白，有意不在本 change 处理）
+
+1. 用户反馈返修在无 provider resume 会话时（切换/fallback 重建），上游 Story Spec 上下文缺失——campaign manifest 记录 `resume_available` 维度作为 compact_history 启用决策输入。
+2. Kimi/Pi 无 artifact retry（provider_allows_artifact_retry 排除），一次结构失败即 run Failed——依赖失败报告引导用户重发。
+3. 占位 ID（如字面 `[DEC-*]`）与非二级 heading 可通过 deterministic gate——靠 reviewer 判例与 schema review gate 兑底，grammar 收紧另立项。
+4. Reviewer 未关闭强 finding 双重重放的 token 冗余——等 usage 数据后另立共享优化。

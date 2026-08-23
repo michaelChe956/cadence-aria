@@ -40,15 +40,24 @@ Workspace reviewer 结构化输出的 envelope repair 路径 SHALL 将携带判�
 - **WHEN** reviewer 输出仅封装层损坏且载荷不含判例指纹
 - **THEN** 既有的 envelope-only repair 行为保持不变
 
-### Requirement: 用户反馈修订入口契约（Design 分支）（SHALL）
+### Requirement: 用户反馈返修与 choice 续写入口契约（Design 分支）（SHALL）
 
 系统 SHALL 满足本 requirement 的全部场景约束。
 
-单仓 Design 用户在确认阶段提交自由反馈返修时，对应 prompt SHALL 注入：parser-derived artifact schema 契约、artifact 输出 fence 契约、Design skeleton（防照抄提示使用 DEC/CMP/API + source id 表述）、缺失上下文 note。当前产物作为输入嵌入时 SHALL 使用四反引号围栏以容忍产物内代码块。Story/WorkItem 分支的 prompt 内容 SHALL 保持不变。历史压缩在该入口暂缓注入，待 campaign usage 数据支持后再评估。
+单仓 Design 的两类非初次生成 author 入口 SHALL 注入结构契约：
+
+1. **用户自由反馈返修**（AuthorConfirm 提交自由文本）：prompt SHALL 注入 parser-derived artifact schema 契约、artifact 输出 fence 契约、Design skeleton（防照抄提示使用 DEC/CMP/API + source id 表述）、缺失上下文 note；当前产物作为输入嵌入时 SHALL 使用四反引号围栏以容忍产物内代码块。
+2. **Choice followup 续写**（用户回答 author 确认问题后的续写）：prompt SHALL 注入 artifact 输出 fence 契约、Design skeleton 与结构化决策落章 contract（决策写入「设计决策/追踪关系」并映射 DEC），防止对话体作答与决策不落章。
+
+Story/WorkItem 分支的 prompt 内容 SHALL 保持不变。历史压缩在上述入口暂缓注入，待 campaign usage 数据支持后再评估。
 
 #### Scenario: 反馈返修携带完整结构契约
 - **WHEN** 单仓 Design 用户提交自由反馈触发返修 prompt 构建
 - **THEN** prompt 含 artifact schema、输出 fence 契约、Design skeleton 与 missing context notes，当前产物以四反引号围栏包裹
+
+#### Scenario: Choice followup 不再裸奍
+- **WHEN** 用户回答 Design 生成过程中的确认问题触发续写 prompt
+- **THEN** prompt 含输出 fence 契约、Design skeleton 与决策落章 contract，模型续写被引导产出合规 artifact 且决策落入指定章节
 
 #### Scenario: 非 Design 分支零变化
 - **WHEN** Story 或 WorkItem 用户提交自由反馈返修
@@ -72,11 +81,11 @@ Workspace reviewer 结构化输出的 envelope repair 路径 SHALL 将携带判�
 
 系统 SHALL 满足本 requirement 的全部场景约束。
 
-Design campaign SHALL 使用冻结语料（≥6 形态，每形态配冻结上游已确认 Story Spec fixture 与 SHA-256 digest）：至少覆盖单仓 API 设计、数据模型设计、用户 choice 映射 DEC、抽象追踪正例、测试越界反例、多约束返修。golden 规范化比对 SHALL 覆盖必需 heading 集、DEC/CMP/API ID 集、上游 REQ/AC 引用不丢失、dec_req_links、source 覆盖与用户决策不反转/不改绑；SHALL NOT 要求 DEC/CMP/API 集合与 golden 完全一致。manifest SHALL 分开记录 author/reviewer 的 provider/model/version、fresh/resume strategy、usage（input 与 cache_read）、retry、超时分类与 choice；校验器按 case_id 去重并拒绝矛盾样本。验收 gate：3 provider 组合 × 12 样本（6 形态 × 2 重复），fresh full-chain 一次成功全数通过；边界分类独立最低门槛为抽象追踪假阳性 = 0 且测试越界假阴性 = 0。baseline SHALL 在任何 prompt 改造前采集。
+Design campaign SHALL 使用冻结语料（≥6 形态，每形态配冻结上游已确认 Story Spec fixture 与 SHA-256 digest）：至少覆盖单仓 API 设计、数据模型设计、用户 choice 映射 DEC、抽象追踪正例、测试越界反例、多约束返修。golden 规范化比对 SHALL 覆盖必需 heading 集、DEC/CMP/API ID 集、上游 REQ/AC 引用不丢失、dec_req_links、source 覆盖与用户决策不反转/不改绑；SHALL NOT 要求 DEC/CMP/API 集合与 golden 完全一致。manifest SHALL 分开记录 author/reviewer 的 provider/model/version、fresh/resume strategy、usage（input 与 cache_read）、retry、超时分类与 choice；校验器按 case_id 去重并拒绝矛盾样本。验收 gate：主 gate 为 3 provider 组合 × 12 样本（6 形态 × 2 重复），fresh full-chain 全数通过；测试越界反例（D05）的 full-chain 成功定义为含一次正确 must_fix 返修的全链走通且首轮边界判定正确，不按「首轮 pass」计；边界分类另立 mini-campaign：抽象追踪正例与测试越界反例各 5 重复 × 3 provider = 各 15 观测，假阳/假阴均为 0 方可通过。所有成功率类结论 SHALL 附样本量与置信上界。baseline SHALL 在任何 prompt 改造前采集。manifest SHALL 记录 `resume_available` 维度供 compact_history 启用决策。
 
 #### Scenario: gate 达标
-- **WHEN** 三组合 revised campaign 完成
-- **THEN** full-chain 一次成功 36/36 且边界假阳/假阴均为 0，报告含 usage（或如实记录不可用原因）
+- **WHEN** 三组合 revised 主 campaign 完成
+- **THEN** fresh full-chain 36/36 通过（D05 按特例口径计），边界 mini-campaign 假阳/假阴均 0/15，报告附样本量与置信上界并含 usage（或如实记录不可用原因）
 
 #### Scenario: baseline 先行
 - **WHEN** 任一 prompt 改造合并前

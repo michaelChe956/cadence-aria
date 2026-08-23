@@ -19,7 +19,7 @@ Non-goals 见 proposal（aggregate 分支、共享层重写、关键词 pre-gate
 
 ### D1 判例注入：单点拼接而非共享签名增参
 
-在 `build_review_input` 内、`reviewer_output_contract(...)` 结果之后追加判例串（Design 时），而非给 `reviewer_output_contract` 增参改 6 处调用。理由：Design 只有这一个 review 入口；WorkItemPlan 家族传空串是无谓的签名污染；单点注入使「判例位置」测试锚定在一个 builder 上。
+在 `build_review_input` 内、`reviewer_output_contract(...)` 结果**之前**追加判例串（Design 时；与修改清单及 opus 评审推荐一致，判例先于输出格式/nonce 模板语义更连贯），而非给 `reviewer_output_contract` 增参改 6 处调用。理由：Design 只有这一个 review 入口；WorkItemPlan 家族传空串是无谓的签名污染；单点注入使「判例位置」测试锚定在一个 builder 上，并配排序锚定断言（判例串出现在实际输出模板之前）。
 
 判例物理形态：纯文本三段式（产物状态摘录 + 正确判定 + 错误判定），**不含 sentinel/nonce/完整 JSON**——这是安全设计而非风格选择：带封装的判例会把「照抄载荷 + 正确 nonce」从不可能变为可能（B-1 主路径），且任何 repair 层防护都拦不住该路径。固定 ID 组（DEC-001/CMP-002/API-002/REQ-003）兼作照抄指纹。
 
@@ -42,6 +42,14 @@ Non-goals 见 proposal（aggregate 分支、共享层重写、关键词 pre-gate
 ### D6 manifest 字段必填化与 author/reviewer 分离
 
 design 版 validator 不复制 story 弱版：author/reviewer 各自记录 provider/model/version；strategy/usage/retry/超时分类/choice 必填；digest 校验 corpus 与 golden；`--paired` 实现配对校验供 baseline↔revised 对比。story 的 gate-manifest.json 因历史数据缺字段只能过 warning 版校验器，两版并存（story 版已回填，见 5bf2a31a）。
+
+### D7 Choice followup 第四入口契约（会审 A 级补充）
+
+用户回答 author 确认问题后的续写 prompt 当前零契约注入（`lifecycle.rs:615-678` 裸文本 → `provider_drive.rs:30-45` DeltaOnly → `prompts.rs:214-216` 原样透传）：弱模型以对话体作答将 gate 失败且决策不落章，直接击穿 golden「用户决策不丢失」。修法：在 choice followup 的 Design 分支复用 WP-2 注入件（artifact 输出 fence 契约 + Design skeleton + 结构化决策落章 contract），Story 分支字节不变负例同款；滑窗/入口覆盖测试补第四入口断言。
+
+### D8 边界观测策略：主 gate + mini-campaign 分离
+
+主 gate 维持 12 样本/组合（6 形态 × 2）；边界分类（抽象追踪假阳/测试越界假阴）另立 mini-campaign：D04/D05 各 5 重复 × 3 provider = 各 15 观测（0/15 的 95% 上界 <20%），只跑单轮 review 判定不跑全链，可与主 gate 分时跑。所有成功率类结论附样本量与置信上界，不以零失败直接声称可用率百分比。
 
 ## 失败处理
 
