@@ -44,7 +44,7 @@ impl WorkspaceEngine {
         // T5/M-1：谓词提取为共享 helper is_author_feedback_revision（decisions.rs），与 provider_drive.rs 同语义。
         let prompt = if self.is_author_feedback_revision() {
             let feedback = self.pending_revision_context.as_deref().unwrap_or_default();
-            self.build_author_revision_prompt(feedback)
+            self.build_author_revision_prompt(feedback, resume_provider_session_id.is_some())
         } else {
             let review =
                 review.ok_or_else(|| "review verdict is unavailable for revision".to_string())?;

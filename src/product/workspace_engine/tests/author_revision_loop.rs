@@ -472,9 +472,53 @@ pub(super) fn prompt_engine_with_artifact(markdown: &str) -> WorkspaceEngine {
 }
 
 #[test]
+fn author_revision_prompt_story_and_work_item_remain_byte_for_byte_unchanged() {
+    let story = prompt_engine_with_artifact("# Story Spec\n\n旧内容");
+    let story_expected = "请作为 author 基于用户反馈对当前 Workspace 产物做增量修订。\n\n\
+## 修订规则\n\
+- 只修改与反馈相关的部分，保持其余章节原样（增量修订，不是重写）。\n\
+- 若反馈要求全部重写（如方向调整），保留仍然有效的事实性内容并整体重组。\n\
+- 输出修订后的完整产物正文（markdown），并在文末追加「## 改动摘要」小节：逐条列出本次改动的位置与原因。\n\n\
+## 当前产物\n\n\
+```\n\
+# Story Spec\n\n\
+旧内容\n\
+```\n\n\
+## 用户反馈\n\n\
+补充异常场景与回滚策略\n";
+    for resumed_session in [false, true] {
+        assert_eq!(
+            story.build_author_revision_prompt("补充异常场景与回滚策略", resumed_session),
+            story_expected
+        );
+    }
+
+    let mut work_item = prompt_engine_with_artifact("# Work Item\n\n旧内容");
+    work_item.session.workspace_type = WorkspaceType::WorkItem;
+    let work_item_expected = "请作为 author 基于用户反馈对当前 Workspace 产物做增量修订。\n\n\
+## 修订规则\n\
+- 只修改与反馈相关的部分，保持其余章节原样（增量修订，不是重写）。\n\
+- 若反馈要求全部重写（如方向调整），保留仍然有效的事实性内容并整体重组。\n\
+- 输出修订后的完整产物正文（markdown），并在文末追加「## 改动摘要」小节：逐条列出本次改动的位置与原因。\n\n\
+## 当前产物\n\n\
+```\n\
+# Work Item\n\n\
+旧内容\n\
+```\n\n\
+## 用户反馈\n\n\
+补充验证命令\n";
+    for resumed_session in [false, true] {
+        assert_eq!(
+            work_item.build_author_revision_prompt("补充验证命令", resumed_session),
+            work_item_expected
+        );
+    }
+}
+
+#[test]
 fn author_revision_prompt_includes_feedback_and_changelog_section() {
     let engine = prompt_engine_with_artifact("# Story Spec\n\n旧内容");
-    let prompt = engine.build_author_revision_prompt("补充异常场景与回滚策略");
+    let prompt = engine.build_author_revision_prompt("补充异常场景与回滚策略", false);
     assert!(prompt.contains("补充异常场景与回滚策略"));
     assert!(prompt.contains("# Story Spec"));
     assert!(
@@ -482,6 +526,83 @@ fn author_revision_prompt_includes_feedback_and_changelog_section() {
         "必须要求输出改动摘要小节: {prompt}"
     );
     assert!(prompt.contains("增量修订"), "约束不得整体重写无关章节");
+}
+
+#[tokio::test]
+async fn design_author_revision_prompt_includes_output_contract_skeleton_and_context_note() {
+    let mut engine = prompt_engine_with_artifact("# Design Spec\n\n旧内容");
+    engine.session.workspace_type = WorkspaceType::Design;
+    engine
+        .append_completed_timeline_event(
+            TimelineNodeType::ContextNote,
+            WorkspaceStage::PrepareContext,
+            "上下文补充".to_string(),
+            Some("补充上下文：保留现有 API 兼容性。".to_string()),
+            TimelineNodeStatus::Completed,
+            false,
+        )
+        .await;
+
+    for resumed_session in [false, true] {
+        let prompt = engine.build_author_revision_prompt("补充失败路径的设计决策", resumed_session);
+
+        assert!(prompt.contains("[artifact_schema_contract]"), "{prompt}");
+        assert!(
+            prompt.contains("原始返回必须使用完整 artifact fenced block"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("上一版 Artifact 是 daemon 已提取的 markdown"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
+        assert!(prompt.contains("# Design Spec 标题"), "{prompt}");
+        assert!(prompt.contains("## 设计决策"), "{prompt}");
+        assert!(prompt.contains("准备阶段用户补充上下文"), "{prompt}");
+        assert!(
+            prompt.contains("补充上下文：保留现有 API 兼容性。"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("输入围栏仅用于界定材料，输出请按 artifact fence 契约重新包裹"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("````\n# Design Spec\n\n旧内容\n````"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("会话上下文（滑动窗口压缩"),
+            "反馈返修入口本期不得注入 compact_history: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn design_author_revision_four_backtick_input_fence_keeps_embedded_code_and_feedback_separate() {
+    let artifact =
+        "# Design Spec\n\n## 代码示例\n```rust\nlet retained = true;\n```\n\n## 仍属于产物的章节";
+    let mut engine = prompt_engine_with_artifact(artifact);
+    engine.session.workspace_type = WorkspaceType::Design;
+
+    let prompt = engine.build_author_revision_prompt("反馈必须位于当前产物边界外", false);
+    let artifact_start = prompt
+        .find("````\n")
+        .expect("Design current artifact must begin with a four-backtick fence");
+    let artifact_end = prompt[artifact_start + 5..]
+        .find("\n````\n\n## 用户反馈\n\n")
+        .map(|offset| artifact_start + 5 + offset)
+        .expect("Design current artifact must end before user feedback");
+    let artifact_region = &prompt[artifact_start..artifact_end];
+
+    assert!(artifact_region.contains("```rust\nlet retained = true;\n```"));
+    assert!(artifact_region.contains("## 仍属于产物的章节"));
+    assert_eq!(
+        prompt[artifact_end + "\n````\n\n## 用户反馈\n\n".len()..]
+            .lines()
+            .next(),
+        Some("反馈必须位于当前产物边界外")
+    );
 }
 
 // T4 分流：pending_revision_context 存在且无 review verdict（author 反馈路径）时，
