@@ -1,6 +1,15 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputErrorCode;
 
+const EXAMPLE_FINGERPRINT_IDS: [&str; 4] = ["DEC-001", "CMP-002", "API-002", "REQ-003"];
+
+fn carries_boundary_example_payload(value: &serde_json::Value) -> bool {
+    let serialized = value.to_string();
+    EXAMPLE_FINGERPRINT_IDS
+        .iter()
+        .all(|id| serialized.contains(id))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReviewCompletionError {
     Syntax(StructuredOutputError),
@@ -36,18 +45,23 @@ impl ReviewCompletionError {
     }
 
     pub(crate) fn is_repairable(&self) -> bool {
+        let Some(recoverable_value) = self.recoverable_value() else {
+            return false;
+        };
+        if carries_boundary_example_payload(recoverable_value) {
+            return false;
+        }
+
         matches!(
             self,
             Self::Syntax(error)
-                if error.recoverable_value.is_some()
-                    && matches!(
-                        error.code,
-                        StructuredOutputErrorCode::MissingEndTag
-                            | StructuredOutputErrorCode::InvalidEndTag
-                            | StructuredOutputErrorCode::NonceMismatch
-                            | StructuredOutputErrorCode::MissingJsonNonce
-                            | StructuredOutputErrorCode::JsonNonceMismatch
-                    )
+                if matches!(
+                    error.code,
+                    StructuredOutputErrorCode::MissingEndTag
+                        | StructuredOutputErrorCode::InvalidEndTag
+                        | StructuredOutputErrorCode::MissingJsonNonce
+                        | StructuredOutputErrorCode::JsonNonceMismatch
+                )
         )
     }
 }
@@ -151,5 +165,70 @@ pub(crate) fn fallback_review_verdict(
             repair_succeeded: false,
             raw_output_preview: Some(preview(&completion.full_output)),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn syntax_error(
+        code: StructuredOutputErrorCode,
+        recoverable_value: serde_json::Value,
+    ) -> ReviewCompletionError {
+        ReviewCompletionError::Syntax(StructuredOutputError {
+            code,
+            message: "structured output failure".to_string(),
+            expected_nonce: Some("expected-nonce".to_string()),
+            observed_nonce: Some("observed-nonce".to_string()),
+            recoverable_value: Some(recoverable_value),
+        })
+    }
+
+    fn example_fingerprint_payload() -> serde_json::Value {
+        json!({
+            "findings": ["DEC-001", "CMP-002", "API-002", "REQ-003"]
+        })
+    }
+
+    #[test]
+    fn json_nonce_mismatch_with_example_fingerprint_is_not_repairable() {
+        let error = syntax_error(
+            StructuredOutputErrorCode::JsonNonceMismatch,
+            example_fingerprint_payload(),
+        );
+
+        assert!(!error.is_repairable());
+    }
+
+    #[test]
+    fn missing_json_nonce_with_example_fingerprint_is_not_repairable() {
+        let error = syntax_error(
+            StructuredOutputErrorCode::MissingJsonNonce,
+            example_fingerprint_payload(),
+        );
+
+        assert!(!error.is_repairable());
+    }
+
+    #[test]
+    fn envelope_only_repairs_without_fingerprint_remain_repairable() {
+        let error = syntax_error(
+            StructuredOutputErrorCode::JsonNonceMismatch,
+            json!({"verdict": "revise", "findings": []}),
+        );
+
+        assert!(error.is_repairable());
+    }
+
+    #[test]
+    fn nonce_mismatch_arm_is_gone() {
+        let error = syntax_error(
+            StructuredOutputErrorCode::NonceMismatch,
+            json!({"verdict": "revise", "findings": []}),
+        );
+
+        assert!(!error.is_repairable());
     }
 }
