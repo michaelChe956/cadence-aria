@@ -33,5 +33,6 @@ include!("tests/part_30.rs");
 include!("tests/part_31.rs");
 include!("tests/part_32.rs");
 include!("tests/severity_three_tier.rs");
+include!("tests/design_reviewer_boundary.rs");
 mod author_revision_loop;
 mod author_revision_review_routing;

@@ -74,6 +74,11 @@ impl WorkspaceEngine {
              不要因为当前 Artifact 未包含外层 artifact fence 判定返修；只审核 markdown 内部一级标题、必需 heading、稳定 ID、追踪关系、内容完整性和设计质量。\
              如果 markdown 正文内部的代码块未闭合或内容结构不合规，仍可按实际问题要求返修。\n",
         );
+        if self.session.workspace_type == WorkspaceType::Design {
+            prompt.push_str(
+                crate::product::workspace_engine::prompts::reviewer_boundary_examples::design_reviewer_boundary_examples(),
+            );
+        }
         let nonce = structured_output_nonce();
         let structured_output_contract = StructuredOutputContract {
             nonce: nonce.clone(),

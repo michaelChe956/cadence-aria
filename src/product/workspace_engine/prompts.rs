@@ -9,6 +9,7 @@ mod history_compaction;
 mod review;
 mod review_context;
 mod review_repair;
+mod reviewer_boundary_examples;
 mod reviewer_context_filter;
 mod revision;
 
