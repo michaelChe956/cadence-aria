@@ -1,0 +1,71 @@
+{
+  "api_ids": [
+    "API-001"
+  ],
+  "cmp_ids": [
+    "CMP-001"
+  ],
+  "dec_ids": [
+    "DEC-001"
+  ],
+  "dec_req_links": {
+    "DEC-001": [
+      "AC-001",
+      "AC-002",
+      "REQ-002",
+      "REQ-003",
+      "REQ-004"
+    ]
+  },
+  "heading_set": [
+    "API 契约",
+    "公共组件",
+    "数据模型",
+    "设计决策",
+    "设计范围",
+    "追踪关系",
+    "风险"
+  ],
+  "referenced_ac_ids": [
+    "AC-001",
+    "AC-002"
+  ],
+  "referenced_req_ids": [
+    "REQ-002",
+    "REQ-003",
+    "REQ-004"
+  ],
+  "schema_version": 1,
+  "source_id_coverage": {
+    "API-001": [
+      "issue_design_0003#兼容性"
+    ],
+    "CMP-001": [
+      "issue_design_0003#选型"
+    ],
+    "DEC-001": [
+      "issue_design_0003#选型"
+    ]
+  },
+  "user_decisions": {
+    "author-decision-001": {
+      "answer": "MessagePack",
+      "bindings": {
+        "ac_ids": [
+          "AC-001",
+          "AC-002"
+        ],
+        "dec_ids": [
+          "DEC-001"
+        ],
+        "req_ids": [
+          "REQ-002",
+          "REQ-003",
+          "REQ-004"
+        ]
+      },
+      "dec_id": "DEC-001"
+    }
+  },
+  "workspace_type": "design"
+}
