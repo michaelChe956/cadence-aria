@@ -476,7 +476,7 @@ fn author_artifact_skeleton_example(workspace_type: &WorkspaceType) -> &'static 
             "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Story Spec 标题\n\n## 范围\n\n## 用户故事\n\n## 功能需求\n\n## 成功标准\n\n## 待确认项\n\n## 非功能需求\n```\n"
         }
         WorkspaceType::Design => {
-            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Design Spec 标题\n\n## 设计范围\n\n## 设计决策\n\n## 公共组件\n\n## API 契约\n\n## 数据模型\n\n## 风险\n\n## 追踪关系\n```\n"
+            "\n\n最小结构骨架示例（仅示意 heading，缺少稳定 ID（[DEC-*]/[CMP-*]/[API-*]）与 source id 追踪 token，不能照抄）：\n```artifact\n# Design Spec 标题\n\n## 设计范围\n\n## 设计决策\n\n## 公共组件\n\n## API 契约\n\n## 数据模型\n\n## 风险\n\n## 追踪关系\n```\n"
         }
         WorkspaceType::WorkItem => {
             "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Work Item 标题\n\n## 目标\n\n## 范围\n\n## 实现步骤\n\n## 依赖\n\n## 验证命令\n\n## 风险\n\n## 追踪关系\n```\n"
@@ -787,8 +787,16 @@ mod routing_reference_prompt_tests {
             WorkspaceType::WorkItem,
             WorkspaceType::WorkItemPlan,
         ] {
+            let expected_prefix = match workspace_type {
+                WorkspaceType::Design => {
+                    "\n\n最小结构骨架示例（仅示意 heading，缺少稳定 ID（[DEC-*]/[CMP-*]/[API-*]）与 source id 追踪 token，不能照抄）：\n```artifact\n"
+                }
+                _ => {
+                    "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n"
+                }
+            };
             let skeleton = author_artifact_skeleton_example(&workspace_type)
-                .strip_prefix("\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n")
+                .strip_prefix(expected_prefix)
                 .and_then(|value| value.strip_suffix("```\n"))
                 .expect("skeleton has the expected artifact fence");
             assert!(
