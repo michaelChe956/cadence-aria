@@ -6,6 +6,54 @@
 use super::author_revision_loop::prompt_engine_with_artifact;
 use super::*;
 
+/// 真实 LifecycleStore 的单仓 Design fixture：Design record 不含 aggregate scope，确保
+/// Author/Revision 输入走单仓分支；session 同样经持久化路径恢复。
+fn persistent_single_repo_design_test_engine() -> (TempDir, LifecycleStore, String, WorkspaceEngine)
+{
+    let (tmp, checkpoint_store) = setup();
+    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "单仓 Story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("seed single-repo Story record");
+    let design = lifecycle_store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id],
+            title: "单仓 Design".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("seed single-repo Design record");
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: design.id.clone(),
+            workspace_type: WorkspaceType::Design,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("seed Design workspace session");
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle_store.clone(),
+        tx,
+        WorkspaceSession::from_record(session_record),
+    );
+
+    (tmp, lifecycle_store, design.id, engine)
+}
+
 fn revise_review_verdict(summary: &str, comments: &str) -> ReviewVerdict {
     ReviewVerdict {
         verdict: ReviewVerdictType::Revise,
@@ -16,6 +64,109 @@ fn revise_review_verdict(summary: &str, comments: &str) -> ReviewVerdict {
         work_item_plan_review: None,
         structured_output_diagnostic: None,
     }
+}
+
+#[tokio::test]
+async fn single_repo_design_review_pass_waits_for_author_finalize_and_keeps_inputs_unstructured() {
+    let (_tmp, lifecycle_store, design_id, mut engine) =
+        persistent_single_repo_design_test_engine();
+
+    let author_input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("single-repo Design author input");
+    assert!(
+        author_input.structured_output_contract.is_none(),
+        "single-repo Design author input must not carry aggregate structured-output contract"
+    );
+    assert!(
+        !author_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"),
+        "single-repo Design author prompt must not inject aggregate output instructions"
+    );
+
+    create_reviewer_run_node(&mut engine).await;
+    let pass_verdict = ReviewVerdict {
+        verdict: ReviewVerdictType::Pass,
+        comments: "可以确认。".to_string(),
+        summary: "可以确认".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserConfirmAllowed,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    };
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain("可以确认。", None),
+            pass_verdict,
+        )
+        .await;
+
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::AuthorConfirm,
+        "single-repo Design reviewer pass must wait for the author to confirm"
+    );
+    assert!(
+        !engine
+            .timeline_nodes
+            .iter()
+            .any(|node| node.node_type == TimelineNodeType::Completed),
+        "reviewer pass must not automatically create a Completed node"
+    );
+    match lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &design_id)
+        .expect("load Design record after reviewer pass")
+    {
+        ExistingSpecRecord::Design { record, .. } => assert_eq!(
+            record.confirmation_status,
+            LifecycleConfirmationStatus::Draft,
+            "reviewer pass alone must not confirm the single-repo Design record"
+        ),
+        ExistingSpecRecord::Story { .. } => panic!("expected single-repo Design record"),
+    }
+
+    let revision_input = engine
+        .build_revision_input()
+        .expect("single-repo Design revision input after reviewer pass");
+    assert!(
+        revision_input.structured_output_contract.is_none(),
+        "single-repo Design revision input must not carry aggregate structured-output contract"
+    );
+    assert!(
+        !revision_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"),
+        "single-repo Design revision prompt must not inject aggregate output instructions"
+    );
+
+    let outcome = engine
+        .handle_author_decision(AuthorDecision::AcceptFinalize)
+        .await
+        .expect("author finalization");
+    assert_eq!(outcome, AuthorDecisionOutcome::Finalized);
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+
+    let record = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &design_id)
+        .expect("load finalized Design record");
+    match record {
+        ExistingSpecRecord::Design { record, .. } => assert_eq!(
+            record.confirmation_status,
+            LifecycleConfirmationStatus::Confirmed,
+            "only AcceptFinalize may confirm the single-repo Design record"
+        ),
+        ExistingSpecRecord::Story { .. } => panic!("expected single-repo Design record"),
+    }
+    let persisted_timeline = lifecycle_store
+        .load_timeline_nodes_for_issue_session(
+            "project_0001",
+            "issue_0001",
+            &engine.session().session_id,
+        )
+        .expect("load finalized Design timeline");
+    assert!(
+        persisted_timeline
+            .iter()
+            .any(|node| node.node_type == TimelineNodeType::Completed),
+        "AcceptFinalize must persist a Completed timeline node"
+    );
 }
 
 #[tokio::test]
