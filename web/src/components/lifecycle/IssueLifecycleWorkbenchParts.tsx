@@ -224,7 +224,7 @@ export function IssueLifecycleDetail({
         </div>
       </div>
       {/* Task 6：单阶段面板——同一时刻只渲染当前阶段区域，内容占满工作区宽度。 */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div id={`stage-panel-${activeStage}`} className="min-h-0 flex-1 overflow-y-auto p-3">
         {activeStage === "story" ? (
           <LifecycleContentSection
             title="Story Spec"

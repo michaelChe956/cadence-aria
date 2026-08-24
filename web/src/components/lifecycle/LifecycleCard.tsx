@@ -47,7 +47,7 @@ export function LifecycleCard({
       data-color-token={visual.token}
       data-delete-state={deleting ? "deleting" : "idle"}
       aria-current={selected ? "true" : undefined}
-      aria-busy={deleting}
+      aria-busy={deleting || undefined}
       className={[
         "flex w-full items-start gap-2 rounded-md border border-l-4 p-3 text-left transition-colors focus-within:ring-2 focus-within:ring-[var(--aria-primary)]",
         visual.cardClassName,

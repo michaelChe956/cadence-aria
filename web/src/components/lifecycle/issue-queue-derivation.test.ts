@@ -235,6 +235,24 @@ const GROUP_BOUNDARY_CASES: GroupBoundaryCase[] = [
     },
   },
   {
+    name: "attempt 自身 status=blocked -> blocked（无需依赖等待）",
+    lifecycle: lifecycleRecord({
+      workItems: [
+        workItemRecord({
+          depends_on: [],
+          latest_attempt: attemptRecord("work_item_0001", "blocked"),
+        }),
+      ],
+    }),
+    expectedGroup: "blocked",
+    expectedPips: {
+      story: "done",
+      design: "done",
+      work_item: "blocked",
+      coding: "blocked",
+    },
+  },
+  {
     name: "attempt running（正在编码）-> blocked",
     lifecycle: lifecycleRecord({
       workItems: [

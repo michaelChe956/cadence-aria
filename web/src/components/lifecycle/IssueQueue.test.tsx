@@ -451,7 +451,7 @@ describe("IssueQueue 行接线", () => {
 
     await user.click(
       within(groupSection("needs_story")).getByRole("button", {
-        name: "生成 Story Spec",
+        name: "生成 Story Spec 会话过期提示",
       }),
     );
     expect(onGenerateStorySpec).toHaveBeenCalledTimes(1);

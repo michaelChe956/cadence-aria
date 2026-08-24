@@ -148,7 +148,8 @@ function deriveIssueQueueRow(
 // 1. story_specs.length === 0 -> needs_story
 // 2. design_specs.length === 0 -> needs_design
 // 3. work_items.length === 0 -> needs_work_item
-// 4. 任一 work item 使 workItemWaitingReason(item, allItems) 非 null -> blocked
+// 4. 任一 work item 等待未完成依赖（workItemWaitingReason 非 null），或其
+//    latest_attempt.status === "blocked"（尝试自身被阻塞）-> blocked
 // 5. 所有 work item 的 latest_attempt 均存在且 status 属于终态成功集 -> completed
 // 6. 其余 -> coding
 function deriveIssueQueueGroup(
@@ -165,7 +166,11 @@ function deriveIssueQueueGroup(
     return "needs_work_item";
   }
   if (
-    workItems.some((item) => workItemWaitingReason(item, workItems) !== null)
+    workItems.some(
+      (item) =>
+        workItemWaitingReason(item, workItems) !== null ||
+        item.latest_attempt?.status === "blocked",
+    )
   ) {
     return "blocked";
   }

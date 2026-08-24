@@ -1253,7 +1253,7 @@ describe("IssueLifecycleWorkbench 队列折叠双密度 (Task 7)", () => {
     ).toHaveTextContent("登录会话过期");
 
     await user.click(
-      within(queueRegion()).getByRole("button", { name: "生成 Story Spec" }),
+      within(queueRegion()).getByRole("button", { name: "生成 Story Spec 登录会话过期" }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/story-specs:generate",

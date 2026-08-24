@@ -77,7 +77,7 @@ export function IssueQueueRow(props: {
       data-testid="issue-queue-row"
       data-issue-id={row.issueId}
       aria-current={focused ? "true" : undefined}
-      aria-busy={deleting}
+      aria-busy={deleting || undefined}
       className={[
         "group flex h-11 items-center gap-2 border-l-[3px] pr-1 pl-2 transition-colors duration-200",
         focused
@@ -100,7 +100,7 @@ export function IssueQueueRow(props: {
       {onGenerateStorySpec ? (
         <button
           type="button"
-          aria-label="生成 Story Spec"
+          aria-label={`生成 Story Spec ${row.title}`}
           disabled={deleting}
           onClick={onGenerateStorySpec}
           className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] opacity-0 transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] group-hover:opacity-100 group-focus-within:opacity-100"

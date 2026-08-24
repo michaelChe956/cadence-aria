@@ -77,6 +77,19 @@ describe("LifecycleCard", () => {
     );
   });
 
+  it("正常态不渲染 aria-busy（ARIA 惯例：省略即不忙）", () => {
+    render(
+      <LifecycleCard
+        card={lifecycleCard("story_spec", "会话过期提示")}
+        selected={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("lifecycle-card-story_spec")).not.toHaveAttribute(
+      "aria-busy",
+    );
+  });
+
   it("uses a restrained deleting state without leaving controls active", () => {
     render(
       <LifecycleCard

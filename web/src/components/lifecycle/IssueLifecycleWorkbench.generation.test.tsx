@@ -69,7 +69,7 @@ describe("IssueLifecycleWorkbench generation actions", () => {
     await user.click(
       within(
         screen.getByRole("region", { name: "Issue 卡片列表" }),
-      ).getByRole("button", { name: "生成 Story Spec" }),
+      ).getByRole("button", { name: "生成 Story Spec 登录会话过期" }),
     );
 
     expect(
@@ -101,13 +101,13 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     const header = screen.getAllByRole("banner")[0];
     expect(
-      within(header).queryByRole("button", { name: "生成 Story Spec" }),
+      within(header).queryByRole("button", { name: "生成 Story Spec 登录会话过期" }),
     ).not.toBeInTheDocument();
     // Task 6：除 Issue 卡入口外，空 story 阶段面板也常驻提供该动作。
     expect(
       within(
         screen.getByRole("region", { name: "Issue 卡片列表" }),
-      ).getByRole("button", { name: "生成 Story Spec" }),
+      ).getByRole("button", { name: "生成 Story Spec 登录会话过期" }),
     ).toBeInTheDocument();
     expect(
       within(

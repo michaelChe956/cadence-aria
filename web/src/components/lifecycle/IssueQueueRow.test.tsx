@@ -155,7 +155,7 @@ describe("IssueQueueRow", () => {
       />,
     );
 
-    const generate = screen.getByRole("button", { name: "生成 Story Spec" });
+    const generate = screen.getByRole("button", { name: "生成 Story Spec 会话过期提示" });
     expect(generate).toHaveClass("opacity-0");
     expect(generate).toHaveClass("group-hover:opacity-100");
     expect(generate).toHaveClass("group-focus-within:opacity-100");
@@ -169,8 +169,13 @@ describe("IssueQueueRow", () => {
   it("未传回调时不渲染操作按钮", () => {
     render(<IssueQueueRow row={queueRow()} focused={false} onSelect={vi.fn()} />);
 
-    expect(screen.queryByRole("button", { name: "生成 Story Spec" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "生成 Story Spec 会话过期提示" })).toBeNull();
     expect(screen.queryByRole("button", { name: /删除/ })).toBeNull();
+  });
+
+  it("正常态不渲染 aria-busy（ARIA 惯例：省略即不忙）", () => {
+    render(<IssueQueueRow row={queueRow()} focused={false} onSelect={vi.fn()} />);
+    expect(screen.getByTestId("issue-queue-row")).not.toHaveAttribute("aria-busy");
   });
 
   it("deleting 时操作按钮禁用且行 aria-busy", () => {
@@ -189,7 +194,7 @@ describe("IssueQueueRow", () => {
       "aria-busy",
       "true",
     );
-    expect(screen.getByRole("button", { name: "生成 Story Spec" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成 Story Spec 会话过期提示" })).toBeDisabled();
     expect(screen.getByRole("button", { name: /删除/ })).toBeDisabled();
   });
 
@@ -220,7 +225,7 @@ describe("IssueQueueRow", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "生成 Story Spec" }));
+    await user.click(screen.getByRole("button", { name: "生成 Story Spec 会话过期提示" }));
     expect(onGenerateStorySpec).toHaveBeenCalledTimes(1);
     expect(onSelect).not.toHaveBeenCalled();
 

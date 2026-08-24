@@ -275,3 +275,25 @@ describe("StageStepper", () => {
     expect(inactive).not.toHaveClass("bg-[var(--aria-primary-soft)]");
   });
 });
+
+describe("StageStepper tab 与面板关联", () => {
+  it("每个 tab 通过 aria-controls 指向对应面板 id", () => {
+    render(
+      <StageStepper
+        stages={[
+          { key: "story", label: "Story", count: 1, state: "done" },
+          { key: "design", label: "Design", count: 0, state: "active" },
+          { key: "work_item", label: "Work Item", count: 0, state: "pending" },
+        ]}
+        activeStage="design"
+        onSelect={vi.fn()}
+      />,
+    );
+    for (const key of ["story", "design", "work_item"] as const) {
+      expect(screen.getByTestId(`stage-tab-${key}`)).toHaveAttribute(
+        "aria-controls",
+        `stage-panel-${key}`,
+      );
+    }
+  });
+});

@@ -487,3 +487,20 @@ describe("IssueLifecycleDetail 阶段标签工作区 (Task 6)", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("IssueLifecycleDetail 阶段面板 id 关联", () => {
+  it("当前阶段面板 id 为 stage-panel-{activeStage}（供 StageStepper aria-controls 指向），切换标签同步切换", async () => {
+    const user = userEvent.setup();
+    const { view } = renderDetail({
+      storySpecs: [stageSpecCard("story_spec", "issue_0001")],
+      designSpecs: [],
+      workItems: [],
+    });
+    // 默认 design 阶段
+    expect(view.container.querySelector("#stage-panel-design")).not.toBeNull();
+    expect(view.container.querySelector("#stage-panel-story")).toBeNull();
+    await user.click(screen.getByTestId("stage-tab-story"));
+    expect(view.container.querySelector("#stage-panel-story")).not.toBeNull();
+    expect(view.container.querySelector("#stage-panel-design")).toBeNull();
+  });
+});

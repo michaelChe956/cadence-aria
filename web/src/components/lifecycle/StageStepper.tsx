@@ -62,6 +62,7 @@ export function StageStepper(props: {
               role="tab"
               data-testid={`stage-tab-${stage.key}`}
               aria-selected={selected}
+              aria-controls={`stage-panel-${stage.key}`}
               onClick={() => onSelect(stage.key)}
               className={[
                 "inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 text-sm font-medium",
