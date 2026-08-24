@@ -7,6 +7,7 @@ Story 链路的弱模型加固（harden-story-pipeline-weak-models）已完成�
 ## What Changes
 
 - **Reviewer 边界判例 few-shot**：新增 3 条去 sentinel 封装的轻量对照判例（抽象追踪→最高 suggestion；可执行测试越界→must_fix；风险章节合法提及验证→pass），仅在 Design 的 `build_review_input` 单点注入（位于 reviewer_output_contract 结果之前）；配套防照抄与防误伤回归断言。
+- **kimi 客户端服务角色授权扩展（会审后真机实测触发的范围扩展）**：planning/author 场景的 Orchestrator 角色授予 FsRead + Terminal 只读执行（auto 模式仍强制 bwrap 沙箱与命令白名单、fs write 仍拒绝），消除「项目规则 read-gate 要求读文件 ↔ 客户端服务对 Orchestrator 全拒」的死锁；reviewer/coding 角色矩阵不变。
 - **Repair 纵深防御**：`is_repairable` 增加载荷内容指纹判据（示例 ID 组合命中即不可修复，覆盖 JsonNonceMismatch/MissingJsonNonce）；删除恒不可达的 NonceMismatch 死分支；repair prompt 增加 nonce 排除提示且回灌改用剥离 sentinel 后的 readable 文本。
 - **用户反馈返修入口补全（仅 Design 分支）**：注入 parser schema、artifact 输出 fence 契约（含当前产物输入 fence 三反引号改四反引号）、Design skeleton、missing context notes；compact_history 暂缓（待 campaign usage 数据决定）；Story/WorkItem 分支字节不变。
 - **Choice followup 续写入口契约（第四入口，会审 A 级遗漏）**：用户回答 author 的确认问题后的续写 prompt 当前零契约注入（裸文本透传），弱模型以对话体作答将直接 gate 失败且决策不落章；Design 分支补 artifact 输出 fence 契约、Design skeleton 与结构化决策落章 contract（复用上一条注入件），Story 分支字节不变。
@@ -22,6 +23,7 @@ Story 链路的弱模型加固（harden-story-pipeline-weak-models）已完成�
 ### Modified Capabilities
 
 - `story-pipeline-weak-model-hardening`: 在既有「few-shot 示例（防照抄）」要求旁追加 reviewer 结构化输出 repair 层的防照抄约束（示例载荷不得经 envelope repair 复活；NonceMismatch 死分支清理）。该约束作用于全部 workspace reviewer（Story 同受益）。
+- `kimi-acp-client-services`: 修改「权限与路径沙箱（角色与 fs）」的角色矩阵：新增 planning/author（Orchestrator）角色 FsRead + Terminal 授权（沙箱与白名单不变，FsWrite 拒绝）。
 
 ## Impact
 

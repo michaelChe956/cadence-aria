@@ -33,3 +33,9 @@
 - [ ] 6.1 四件套全量验证 + `openspec validate --strict`。验证：fmt/clippy/check/test 与 web pnpm test/tsc -b 全绿。
 - [ ] 6.2 revised 主 campaign（12 样本/组合 × 3 组合真机）+ 边界 mini-campaign（D04/D05 各 15 观测）：主 gate full-chain（D05 按特例口径）、mini-campaign 假阳/假阴零判定、usage fresh/resume 分列（不可用如实记录）、golden 规范化 diff、retry/超时分类。验证：manifest 通过强化校验器；gate-report 达标或如实记录失败归因，全部成功率类结论附置信上界。
 - [ ] 6.3 改造收益对比报告（baseline vs revised）+ compact_history 启用决策记录（依据 usage 数据）。验证：报告落盘 cadence/reports/design-weak-model-campaign/。
+
+## 8. M6 kimi 客户端服务角色授权扩展（会审后范围扩展）
+
+- [ ] 8.1 policy.rs TDD：Orchestrator 角色 FsRead+Terminal 授权（auto=bwrap 沙箱/supervised=ApprovalBridge）、FsWrite 拒绝；reviewer/coding 矩阵不变。验证：四象限新用例 + 既有 policy 测试全绿。
+- [ ] 8.2 story 链路回归：kimi story 样本重采（每形态 1 个），确认工具可用、无 read-gate 死锁、通过率不降。验证：样本 finished 且记录工具可用性。
+- [ ] 8.3 kimi design revised 重采（18 样本）并更新 gate-report。验证：manifest 校验通过，D05/D04 边界数据并入对比。
