@@ -610,8 +610,8 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
       result.failureClass ??= 'driver_transport_error';
       note(`WS ERROR ${result.error}`);
     };
-    ws.onclose = () => {
-      note('ws closed');
+    ws.onclose = (ev) => {
+      note(`ws closed code=${ev?.code} reason=${JSON.stringify(ev?.reason ?? '')} wasClean=${ev?.wasClean}`);
       if (!finished) setTimeout(() => finish(false, result.finished ? 0 : 1), 100);
     };
   } catch (error) {
