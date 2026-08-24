@@ -65,6 +65,16 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       await user.click(
         await screen.findByRole("button", { name: "Issue Two" }),
       );
+      // Task 6：单阶段面板——先切到目标阶段，再在该阶段区域内取卡片。
+      await user.click(
+        screen.getByTestId(
+          regionName === "Story Spec"
+            ? "stage-tab-story"
+            : regionName === "Design Spec"
+              ? "stage-tab-design"
+              : "stage-tab-work_item",
+        ),
+      );
       const region = screen.getByRole("region", {
         name: `${regionName} 内容`,
       });

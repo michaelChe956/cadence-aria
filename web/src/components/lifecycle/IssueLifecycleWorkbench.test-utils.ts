@@ -85,6 +85,8 @@ export function lifecycleFetch(options?: {
   >;
   // REQ-TGT-05：后端 work_item_repository_groups 的 mock 值；缺省空数组（单仓扁平兼容）。
   workItemRepositoryGroups?: Array<Record<string, unknown>>;
+  // Task 6：构造“有 story 无 design”的阶段 fixture（默认阶段应落在 design）。
+  emptyDesignSpecs?: boolean;
 }) {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
@@ -206,6 +208,9 @@ export function lifecycleFetch(options?: {
           options?.skippedIntegrationRisk,
           options?.codingAttempts,
         );
+    if (options?.emptyDesignSpecs) {
+      initial.design_specs = [];
+    }
     lifecycleByIssue.set(issueId, initial);
     return initial;
   }

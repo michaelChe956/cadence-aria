@@ -438,6 +438,8 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await screen.findByRole("button", { name: "登录会话过期" }),
     );
 
+    // Task 6：单阶段面板——每个阶段的删除入口在对应阶段页内。
+    await user.click(screen.getByTestId("stage-tab-story"));
     await user.click(
       within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
         "button",
@@ -454,6 +456,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       ).not.toHaveTextContent("会话过期提示"),
     );
 
+    await user.click(screen.getByTestId("stage-tab-design"));
     await user.click(
       within(
         screen.getByRole("region", { name: "Design Spec 内容" }),
@@ -469,6 +472,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       ).not.toHaveTextContent("前端提示设计"),
     );
 
+    await user.click(screen.getByTestId("stage-tab-work_item"));
     await user.click(
       within(screen.getByRole("region", { name: "Work Item 内容" })).getByRole(
         "button",
@@ -579,6 +583,8 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     expect(
       screen.getByRole("button", { name: "重复 ID Issue" }),
     ).toHaveAttribute("aria-pressed", "true");
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(screen.getByTestId("stage-tab-story"));
     expect(
       screen.getByRole("button", { name: "重复 ID Story" }),
     ).toHaveAttribute("aria-pressed", "false");
@@ -592,7 +598,8 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await screen.findByRole("button", { name: "会话过期提示" });
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(await screen.findByTestId("stage-tab-story"));
     await user.click(screen.getByRole("button", { name: "会话过期提示" }));
 
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
@@ -620,9 +627,9 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(
-      await screen.findByRole("button", { name: "会话过期提示" }),
-    );
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
 
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
       "会话过期提示",

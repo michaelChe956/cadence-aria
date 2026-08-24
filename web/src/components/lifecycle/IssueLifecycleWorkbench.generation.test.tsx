@@ -29,10 +29,13 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
   it("shows spec version badges on lifecycle cards when generated content exists", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
-    const storyColumn = await screen.findByRole("region", {
+    // Task 6：单阶段面板——完整生命周期默认落在 work_item，先切到 Story 阶段。
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    const storyColumn = screen.getByRole("region", {
       name: "Story Spec 内容",
     });
 
@@ -41,10 +44,12 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
   it("shows generated spec markdown previews on lifecycle cards", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
-    const storyColumn = await screen.findByRole("region", {
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    const storyColumn = screen.getByRole("region", {
       name: "Story Spec 内容",
     });
     expect(storyColumn).toHaveTextContent("[REQ-001] 显示会话过期提示");
@@ -59,7 +64,12 @@ describe("IssueLifecycleWorkbench generation actions", () => {
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
     await screen.findByRole("button", { name: "登录会话过期" });
-    await user.click(screen.getByRole("button", { name: "生成 Story Spec" }));
+    // Task 6：空 story 阶段面板也有同名主按钮，本例验证 Issue 卡入口，故限定在卡片列表内。
+    await user.click(
+      within(
+        screen.getByRole("region", { name: "Issue 卡片列表" }),
+      ).getByRole("button", { name: "生成 Story Spec" }),
+    );
 
     expect(
       await screen.findByRole("button", { name: "登录会话过期 Story Spec" }),
@@ -92,8 +102,16 @@ describe("IssueLifecycleWorkbench generation actions", () => {
     expect(
       within(header).queryByRole("button", { name: "生成 Story Spec" }),
     ).not.toBeInTheDocument();
+    // Task 6：除 Issue 卡入口外，空 story 阶段面板也常驻提供该动作。
     expect(
-      screen.getByRole("button", { name: "生成 Story Spec" }),
+      within(
+        screen.getByRole("region", { name: "Issue 卡片列表" }),
+      ).getByRole("button", { name: "生成 Story Spec" }),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByRole("region", { name: "Story Spec 内容" }),
+      ).getByRole("button", { name: "生成 Story Spec" }),
     ).toBeInTheDocument();
   });
 
@@ -105,9 +123,9 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(
-      await screen.findByRole("button", { name: "前端提示设计" }),
-    );
+    // Task 6：Design 卡片在 Design 阶段页内。
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByRole("button", { name: "前端提示设计" }));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
     const dialog = await screen.findByRole("dialog", {
       name: "Work Item Plan 配置",
@@ -121,6 +139,7 @@ describe("IssueLifecycleWorkbench generation actions", () => {
         "workspace_session_plan_group_0001",
       ),
     );
+    await user.click(screen.getByTestId("stage-tab-work_item"));
     expect(
       screen.getByRole("region", { name: "Work Item 内容" }),
     ).toHaveTextContent("0 个 Work Item");
@@ -172,11 +191,13 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(
-      await screen.findByRole("button", { name: "会话过期提示" }),
-    );
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
     await user.click(screen.getByRole("button", { name: "生成 Design Spec" }));
 
+    // Task 6：新生成的 Design 卡片属于 Design 阶段页，切过去断言它已入列。
+    await user.click(await screen.findByTestId("stage-tab-design"));
     expect(
       await screen.findByRole("button", { name: "会话过期提示 Design Spec" }),
     ).toBeInTheDocument();
@@ -211,7 +232,8 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench />);
 
-    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByText("前端提示设计"));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
 
     expect(
@@ -232,7 +254,8 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByText("前端提示设计"));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
     const dialog = await screen.findByRole("dialog", {
       name: "Work Item Plan 配置",
@@ -275,7 +298,8 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByText("前端提示设计"));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
     const dialog = await screen.findByRole("dialog", {
       name: "Work Item Plan 配置",
@@ -317,7 +341,8 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench />);
 
-    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByText("前端提示设计"));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
     const dialog = await screen.findByRole("dialog", {
       name: "Work Item Plan 配置",

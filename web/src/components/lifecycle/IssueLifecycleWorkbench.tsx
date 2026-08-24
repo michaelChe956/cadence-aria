@@ -89,6 +89,7 @@ import {
   toDrawerEntity,
   waitForDeleteExitAnimation,
 } from "./IssueLifecycleWorkbenchParts";
+import type { WorkbenchStageKey } from "./StageStepper";
 export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 type PendingWorkItemPlanLaunch = {
@@ -470,6 +471,32 @@ export function IssueLifecycleWorkbench({
     }
 
     setError("当前实体不支持生成下一阶段");
+  }
+
+  // Task 6：阶段工作区空阶段主按钮接线——复用现有生成链路，不新增 API：
+  // story -> 用当前 Issue 卡走 handleLaunchWorkspace("story")；
+  // design -> 用最新 Story 卡走 handleGenerateNext（内部走 generateDesignSpecs）；
+  // work_item -> 用最新 Design 卡走 handleGenerateNext（打开 Work Item Plan 配置弹窗）。
+  function handleGenerateForStage(stage: WorkbenchStageKey) {
+    if (stage === "story") {
+      const issueCard = selectedIssueColumns.issue[0];
+      if (!issueCard) {
+        setError("缺少 Issue");
+        return;
+      }
+      void handleLaunchWorkspace("story", issueCard);
+      return;
+    }
+
+    const sourceCard =
+      stage === "design"
+        ? selectedIssueColumns.story_spec.at(-1)
+        : selectedIssueColumns.design_spec.at(-1);
+    if (!sourceCard) {
+      setError(stage === "design" ? "缺少 Story Spec" : "缺少 Design Spec");
+      return;
+    }
+    void handleGenerateNext(sourceCard);
   }
 
   async function handleCreateIssue(payload: CreateLifecycleIssuePayload) {
@@ -1048,6 +1075,7 @@ export function IssueLifecycleWorkbench({
                   onSelect={handleSelectCard}
                   onOpenFullIssue={handleOpenFullIssue}
                   onDelete={handleDeleteLifecycleCard}
+                  onGenerateForStage={handleGenerateForStage}
                   deletingKey={deletingCardKey}
                 />
               </div>

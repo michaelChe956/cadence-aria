@@ -337,18 +337,147 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     expect(
       screen.getByRole("region", { name: "Issue 生命周期详情" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Story Spec 内容" }),
-    ).toHaveTextContent("会话过期提示");
-    expect(
-      screen.getByRole("region", { name: "Design Spec 内容" }),
-    ).toHaveTextContent("前端提示设计");
+    // Task 6：单阶段面板一次只渲染当前阶段区域；story/design 均有产物 -> 默认 work_item。
+    expect(screen.getByTestId("stage-tab-work_item")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(
       screen.getByRole("region", { name: "Work Item 内容" }),
     ).toHaveTextContent("Work Item Group");
     expect(
       screen.getByRole("region", { name: "Work Item 内容" }),
     ).not.toHaveTextContent("实现提示组件");
+    expect(
+      screen.queryByRole("region", { name: "Story Spec 内容" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("stage-tab-story"));
+    expect(
+      screen.getByRole("region", { name: "Story Spec 内容" }),
+    ).toHaveTextContent("会话过期提示");
+
+    await user.click(screen.getByTestId("stage-tab-design"));
+    expect(
+      screen.getByRole("region", { name: "Design Spec 内容" }),
+    ).toHaveTextContent("前端提示设计");
+  });
+
+  it("generates a story spec from the empty story stage panel action", async () => {
+    const fetchMock = lifecycleFetch({ emptyLifecycle: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await screen.findByTestId("stage-stepper");
+    // 全空生命周期 -> 默认 story 阶段，空面板提供生成入口。
+    expect(screen.getByTestId("stage-tab-story")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const storyRegion = screen.getByRole("region", {
+      name: "Story Spec 内容",
+    });
+    await user.click(
+      within(storyRegion).getByRole("button", { name: "生成 Story Spec" }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          title: "登录会话过期 Story Spec",
+        }),
+      }),
+    );
+    expect(onOpenWorkspace).toHaveBeenCalledWith(
+      "workspace_session_story_0001",
+    );
+  });
+
+  it("generates a design spec from the empty design stage panel via the latest story card", async () => {
+    const fetchMock = lifecycleFetch({ emptyDesignSpecs: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("stage-stepper");
+    // 有 story 无 design -> 默认 design 阶段。
+    expect(screen.getByTestId("stage-tab-design")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const designRegion = screen.getByRole("region", {
+      name: "Design Spec 内容",
+    });
+    await user.click(
+      within(designRegion).getByRole("button", { name: "生成 Design Spec" }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          title: "会话过期提示 Design Spec",
+          story_spec_ids: ["story_spec_0001"],
+        }),
+      }),
+    );
+    // 生成后 design 阶段不再为空：主按钮消失、新卡片可见。
+    await waitFor(() =>
+      expect(designRegion).toHaveTextContent("会话过期提示 Design Spec"),
+    );
+    expect(
+      within(designRegion).queryByRole("button", {
+        name: "生成 Design Spec",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the work item plan options from the empty work item stage panel via the latest design card", async () => {
+    const fetchMock = lifecycleFetch({ workItemPlans: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await screen.findByTestId("stage-stepper");
+    // story/design 均有产物且无 plan -> 默认 work_item 阶段，空面板提供准备入口。
+    expect(screen.getByTestId("stage-tab-work_item")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const workItemRegion = screen.getByRole("region", {
+      name: "Work Item 内容",
+    });
+    await user.click(
+      within(workItemRegion).getByRole("button", {
+        name: "准备 Work Item Plan",
+      }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
+
+    const prepareCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/work-item-plans:prepare"),
+    );
+    expect(prepareCall).toBeDefined();
+    expect(JSON.parse(String(prepareCall?.[1]?.body))).toMatchObject({
+      title: "前端提示设计 Work Item",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+    });
   });
 
   it("keeps the issue card highlighted while a derived story card is selected", async () => {
@@ -358,6 +487,8 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     render(<IssueLifecycleWorkbench />);
 
     await user.click(await screen.findByRole("button", { name: "登录会话过期" }));
+    // Task 6：story 卡片在 story 阶段页内可见。
+    await user.click(screen.getByTestId("stage-tab-story"));
     await user.click(screen.getByRole("button", { name: "会话过期提示" }));
 
     expect(

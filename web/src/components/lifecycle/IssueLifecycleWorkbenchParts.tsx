@@ -1,4 +1,5 @@
-import { PanelRightOpen } from "lucide-react";
+import { PanelRightOpen, Sparkles } from "lucide-react";
+import { useState } from "react";
 import type {
   CodingAttempt,
   CodingAttemptAddress,
@@ -12,12 +13,33 @@ import type {
   LifecycleCard as LifecycleCardData,
   LifecycleColumns,
 } from "../../state/lifecycle-workbench-store";
+import { workItemWaitingReason } from "../../state/lifecycle-workbench-store";
+import type { StagePipState } from "./issue-queue-derivation";
 import { LifecycleCard } from "./LifecycleCard";
 import type { DrawerEntity } from "./LifecycleCardDrawer";
+import {
+  StageStepper,
+  type StageStepperStage,
+  type WorkbenchStageKey,
+} from "./StageStepper";
 
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 
 const DELETE_EXIT_ANIMATION_MS = 220;
+
+// Task 6：阶段步进器标签与空阶段主按钮文案（与 Plan 逐字一致）。
+const STAGE_LABEL: Record<WorkbenchStageKey, string> = {
+  story: "Story",
+  design: "Design",
+  work_item: "Work Item",
+};
+
+const STAGE_EMPTY_ACTION_LABEL: Record<WorkbenchStageKey, string> = {
+  story: "生成 Story Spec",
+  design: "生成 Design Spec",
+  work_item: "准备 Work Item Plan",
+};
+
 export function resolveGroupCodingAttempt(
   raw: unknown,
   codingAttempts: CodingAttempt[],
@@ -113,6 +135,7 @@ export function IssueLifecycleDetail({
   onSelect,
   onOpenFullIssue,
   onDelete,
+  onGenerateForStage,
 }: {
   issue: LifecycleCardData | null;
   storySpecs: LifecycleCardData[];
@@ -124,10 +147,32 @@ export function IssueLifecycleDetail({
   onSelect: (card: LifecycleCardData) => void;
   onOpenFullIssue: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
+  onGenerateForStage: (stage: WorkbenchStageKey) => void;
 }) {
+  // Task 6：默认阶段 = 「需要动作的最早阶段」，在 Issue 成为当前 Issue 的那一刻锁定；
+  // 之后仅用户点击阶段标签或 issue.id 变化（重置为新 Issue 的默认阶段）会改变它。
+  // 不每次 render 重算默认值：否则在当前阶段生成产物后面板会自行跳转，用户看不到刚生成的内容。
+  const defaultStage = defaultWorkbenchStage(storySpecs, designSpecs);
+  const issueId = issue?.id ?? null;
+  const [stageSelection, setStageSelection] = useState<{
+    issueId: string | null;
+    stage: WorkbenchStageKey;
+  }>({ issueId, stage: defaultStage });
+  if (stageSelection.issueId !== issueId) {
+    // props 派生 state 的 render 阶段调整（React 推荐写法，无额外提交）。
+    setStageSelection({ issueId, stage: defaultStage });
+  }
+  const activeStage =
+    stageSelection.issueId === issueId ? stageSelection.stage : defaultStage;
+
   const allWorkItems = workItems.flatMap((card) =>
     card.kind === "work_item" ? [card.raw] : [],
   );
+  // 阻塞判定的候选集合：扁平 Work Item 卡 + 仓库分组内的 Work Item。
+  const stageWorkItems = [
+    ...allWorkItems,
+    ...workItemRepositoryGroups.flatMap((group) => group.items ?? []),
+  ];
   if (!issue) {
     return (
       <section
@@ -151,13 +196,39 @@ export function IssueLifecycleDetail({
     ? shouldShowFullIssueAction(issue.preview)
     : false;
 
+  const stages: StageStepperStage[] = [
+    {
+      key: "story",
+      label: STAGE_LABEL.story,
+      count: storySpecs.length,
+      state: stagePipState("story", storySpecs.length, defaultStage, false),
+    },
+    {
+      key: "design",
+      label: STAGE_LABEL.design,
+      count: designSpecs.length,
+      state: stagePipState("design", designSpecs.length, defaultStage, false),
+    },
+    {
+      key: "work_item",
+      label: STAGE_LABEL.work_item,
+      count: workItems.length,
+      state: stagePipState(
+        "work_item",
+        workItems.length,
+        defaultStage,
+        hasWaitingWorkItem(stageWorkItems),
+      ),
+    },
+  ];
+
   return (
     <section
       role="region"
       aria-label="Issue 生命周期详情"
-      className="min-h-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+      className="flex min-h-0 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
     >
-      <div className="border-b border-[var(--aria-line)] px-4 py-3">
+      <div className="sticky top-0 z-10 shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3">
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
@@ -202,49 +273,115 @@ export function IssueLifecycleDetail({
             {issue.status}
           </span>
         </div>
+        <div className="mt-3 overflow-x-auto">
+          <StageStepper
+            stages={stages}
+            activeStage={activeStage}
+            onSelect={(stage) => setStageSelection({ issueId, stage })}
+          />
+        </div>
       </div>
-      <div className="grid gap-3 p-3 xl:grid-cols-3">
-        <LifecycleContentSection
-          title="Story Spec"
-          ariaLabel="Story Spec 内容"
-          cards={storySpecs}
-          selectedKey={selectedKey}
-          deletingKey={deletingKey}
-          onSelect={onSelect}
-          onDelete={onDelete}
-        />
-        <LifecycleContentSection
-          title="Design Spec"
-          ariaLabel="Design Spec 内容"
-          cards={designSpecs}
-          selectedKey={selectedKey}
-          deletingKey={deletingKey}
-          onSelect={onSelect}
-          onDelete={onDelete}
-        />
-        {workItemRepositoryGroups.length > 0 ? (
-          <WorkItemRepositoryGroupSection
-            groups={workItemRepositoryGroups}
-            selectedKey={selectedKey}
-            deletingKey={deletingKey}
-            onSelect={onSelect}
-            onDelete={onDelete}
-          />
-        ) : (
+      {/* Task 6：单阶段面板——同一时刻只渲染当前阶段区域，内容占满工作区宽度。 */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {activeStage === "story" ? (
           <LifecycleContentSection
-            title="Work Item"
-            ariaLabel="Work Item 内容"
-            cards={workItems}
+            title="Story Spec"
+            ariaLabel="Story Spec 内容"
+            cards={storySpecs}
             selectedKey={selectedKey}
             deletingKey={deletingKey}
             onSelect={onSelect}
             onDelete={onDelete}
-            allWorkItems={allWorkItems}
+            emptyAction={{
+              label: STAGE_EMPTY_ACTION_LABEL.story,
+              onClick: () => onGenerateForStage("story"),
+            }}
           />
-        )}
+        ) : null}
+        {activeStage === "design" ? (
+          <LifecycleContentSection
+            title="Design Spec"
+            ariaLabel="Design Spec 内容"
+            cards={designSpecs}
+            selectedKey={selectedKey}
+            deletingKey={deletingKey}
+            onSelect={onSelect}
+            onDelete={onDelete}
+            emptyAction={{
+              label: STAGE_EMPTY_ACTION_LABEL.design,
+              onClick: () => onGenerateForStage("design"),
+            }}
+          />
+        ) : null}
+        {activeStage === "work_item" ? (
+          workItemRepositoryGroups.length > 0 ? (
+            <WorkItemRepositoryGroupSection
+              groups={workItemRepositoryGroups}
+              selectedKey={selectedKey}
+              deletingKey={deletingKey}
+              onSelect={onSelect}
+              onDelete={onDelete}
+            />
+          ) : (
+            <LifecycleContentSection
+              title="Work Item"
+              ariaLabel="Work Item 内容"
+              cards={workItems}
+              selectedKey={selectedKey}
+              deletingKey={deletingKey}
+              onSelect={onSelect}
+              onDelete={onDelete}
+              allWorkItems={allWorkItems}
+              emptyAction={{
+                label: STAGE_EMPTY_ACTION_LABEL.work_item,
+                onClick: () => onGenerateForStage("work_item"),
+              }}
+            />
+          )
+        ) : null}
       </div>
     </section>
   );
+}
+
+// Task 6 默认阶段规则：「需要动作的最早阶段」——无 Story -> story；
+// 有 Story 无 Design -> design；其余 -> work_item。
+function defaultWorkbenchStage(
+  storySpecs: LifecycleCardData[],
+  designSpecs: LifecycleCardData[],
+): WorkbenchStageKey {
+  if (storySpecs.length === 0) {
+    return "story";
+  }
+  if (designSpecs.length === 0) {
+    return "design";
+  }
+  return "work_item";
+}
+
+// Task 6 pip 状态规则：work_item 存在等待依赖 -> blocked（与 Task 1 派生层的
+// blocked 优先于 done 语义一致）；count > 0 -> done；需要动作的默认阶段 -> active；
+// 其余 -> pending。
+function stagePipState(
+  stage: WorkbenchStageKey,
+  count: number,
+  defaultStage: WorkbenchStageKey,
+  hasWaitingDependency: boolean,
+): StagePipState {
+  if (stage === "work_item" && hasWaitingDependency) {
+    return "blocked";
+  }
+  if (count > 0) {
+    return "done";
+  }
+  if (stage === defaultStage) {
+    return "active";
+  }
+  return "pending";
+}
+
+function hasWaitingWorkItem(items: LifecycleWorkItem[]) {
+  return items.some((item) => workItemWaitingReason(item, items) !== null);
 }
 
 function shouldShowFullIssueAction(preview: string) {
@@ -372,6 +509,7 @@ function LifecycleContentSection({
   onSelect,
   onDelete,
   allWorkItems,
+  emptyAction,
 }: {
   title: string;
   ariaLabel: string;
@@ -381,6 +519,8 @@ function LifecycleContentSection({
   onSelect: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
   allWorkItems?: LifecycleWorkItem[];
+  // Task 6：空阶段面板的「触发下一阶段」主按钮；缺省不渲染（抽屉等复用场景）。
+  emptyAction?: { label: string; onClick: () => void };
 }) {
   return (
     <section
@@ -397,8 +537,18 @@ function LifecycleContentSection({
         </span>
       </div>
       {cards.length === 0 ? (
-        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
-          暂无内容
+        <div className="flex flex-col items-start gap-3 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
+          <span>暂无内容</span>
+          {emptyAction ? (
+            <button
+              type="button"
+              onClick={emptyAction.onClick}
+              className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white transition-colors duration-200 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] motion-reduce:transition-none"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {emptyAction.label}
+            </button>
+          ) : null}
         </div>
       ) : (
         <ul className="space-y-2">
