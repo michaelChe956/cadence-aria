@@ -18,9 +18,11 @@ import {
   installIssueLifecycleWorkbenchTestHooks,
   issueWorkItemPlanRecord,
   jsonResponse,
+  jsonResponseValue,
   lifecycleCardTitle,
   lifecycleFetch,
   projectRecord,
+  projectsBody,
   repositoryRecord,
 } from "./IssueLifecycleWorkbench.test-utils";
 
@@ -1134,6 +1136,107 @@ describe("IssueLifecycleWorkbench 队列折叠双密度 (Task 7)", () => {
     expect(
       screen.getByRole("region", { name: "Issue 生命周期详情" }),
     ).toHaveTextContent("登录会话过期");
+  });
+
+  it("refresh（deferred）冻结聚焦 Issue、抽屉、分组折叠与过滤文本", async () => {
+    const firstProjects = deferred<Response>();
+    const secondProjects = deferred<Response>();
+    const baseFetch = lifecycleFetch({
+      projectResponses: [firstProjects.promise, secondProjects.promise],
+    });
+    // 双 Issue fixture：issue_0001（coding 组，完整生命周期）与 issue_0002
+    // （needs_story 组，空生命周期）。这样可同时断言「被折叠的分组」与「聚焦
+    // Issue 行」（若折叠唯一分组会连聚焦行一起隐藏，无法验证 aria-current 保留）。
+    const issueOne = {
+      issue_id: "issue_0001",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "登录会话过期",
+      description: "描述",
+      change_id: null,
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-05-16T00:00:00Z",
+      updated_at: "2026-05-16T00:00:00Z",
+    };
+    const issueTwo = { ...issueOne, issue_id: "issue_0002", title: "缺少 Story" };
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/projects/project_0001/issues") {
+          return jsonResponse({ issues: [issueOne, issueTwo] });
+        }
+        if (url === "/api/issues/issue_0002/lifecycle?project_id=project_0001") {
+          return jsonResponse({
+            issue: issueTwo,
+            story_specs: [],
+            design_specs: [],
+            work_item_plans: [],
+            work_items: [],
+            work_item_repository_groups: [],
+            workspace_sessions: [],
+            coding_attempts: [],
+          });
+        }
+        return baseFetch(input, init);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // 首次加载：放行 /api/projects（与后续 refresh 返回相同数据）。
+    await act(async () => {
+      firstProjects.resolve(jsonResponseValue(projectsBody()));
+    });
+
+    await user.click(
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+    expect(
+      screen
+        .getAllByTestId("issue-queue-row")
+        .find((row) => row.getAttribute("data-issue-id") === "issue_0001"),
+    ).toHaveAttribute("aria-current", "true");
+
+    // 折叠不含聚焦 Issue 的分组（needs_story）+ 输入过滤文本（仍命中两个 Issue）。
+    const header = screen.getAllByTestId("issue-queue-group-header")[0];
+    const groupKey = header.getAttribute("data-group-key");
+    await user.click(header);
+    await user.type(screen.getByLabelText("过滤 Issues"), "issue");
+
+    // Task 6：Story 卡在 Story 阶段页内；切到 Story 阶段后点击打开抽屉。
+    await user.click(screen.getByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
+    expect(screen.getByTestId("lifecycle-card-drawer")).toBeInTheDocument();
+
+    // 触发一次 refresh（与 2s 轮询同一条 refresh() 链路），用 deferred
+    // 控制 /api/projects 返回相同数据。
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await act(async () => {
+      secondProjects.resolve(jsonResponseValue(projectsBody()));
+    });
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+
+    // 上下文冻结：聚焦 Issue（aria-current）、抽屉、分组折叠、过滤文本全部保持。
+    expect(
+      screen
+        .getAllByTestId("issue-queue-row")
+        .find((row) => row.getAttribute("data-issue-id") === "issue_0001"),
+    ).toHaveAttribute("aria-current", "true");
+    expect(screen.getByTestId("lifecycle-card-drawer")).toBeInTheDocument();
+    expect(
+      screen
+        .getAllByTestId("issue-queue-group-header")
+        .find((node) => node.getAttribute("data-group-key") === groupKey),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByLabelText("过滤 Issues")).toHaveValue("issue");
   });
 
   it("队列行动作复用既有 handler：选择、生成 Story Spec、删除 Issue", async () => {
