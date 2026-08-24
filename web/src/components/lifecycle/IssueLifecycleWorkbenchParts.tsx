@@ -66,64 +66,6 @@ export function resolveGroupCodingAttempt(
   );
 }
 
-export function IssueCardList({
-  cards,
-  focusedIssueId,
-  deletingKey,
-  onSelect,
-  onGenerateStorySpec,
-  onDeleteIssue,
-}: {
-  cards: LifecycleCardData[];
-  focusedIssueId: string | null;
-  deletingKey: string | null;
-  onSelect: (card: LifecycleCardData) => void;
-  onGenerateStorySpec: (card: LifecycleCardData) => void;
-  onDeleteIssue: (issueId: string) => void;
-}) {
-  return (
-    <section
-      role="region"
-      aria-label="Issue 卡片列表"
-      className="min-h-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3"
-    >
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
-            Issues
-          </h2>
-          <p className="mt-0.5 text-xs text-[var(--aria-ink-muted)]">
-            选择 Issue 后查看它的 Story、Design 和 Work Item。
-          </p>
-        </div>
-        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-          {cards.length}
-        </span>
-      </div>
-      {cards.length === 0 ? (
-        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 text-sm text-[var(--aria-ink-muted)]">
-          当前 Project 还没有 Issue。
-        </div>
-      ) : (
-        <ul className="space-y-2">
-          {cards.map((card) => (
-            <li key={lifecycleCardKey(card)}>
-              <LifecycleCard
-                card={card}
-                selected={card.issueId === focusedIssueId}
-                deleting={deletingKey === lifecycleCardKey(card)}
-                onSelect={() => onSelect(card)}
-                onGenerateStorySpec={() => onGenerateStorySpec(card)}
-                onDelete={() => onDeleteIssue(card.id)}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
 export function IssueLifecycleDetail({
   issue,
   storySpecs,
