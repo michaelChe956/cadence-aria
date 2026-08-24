@@ -53,8 +53,16 @@ impl ClientServicePolicy {
                     self.evaluate_permission_mode()
                 }
             },
-            // Orchestrator, WorkItemSplitter, Handoff and future roles do not
-            // receive host execution from the weak-model kimi client.
+            // The planning agent may inspect its workspace and use the constrained,
+            // sandboxed terminal, but may never modify files through client services.
+            AdapterRole::Orchestrator => match action {
+                ClientAction::FsRead | ClientAction::Terminal => self.evaluate_permission_mode(),
+                ClientAction::FsWrite => {
+                    PolicyDecision::Deny("planning role is not permitted to write files")
+                }
+            },
+            // WorkItemSplitter, Handoff and future roles do not receive host execution
+            // from the weak-model kimi client.
             _ => PolicyDecision::Deny("role is not permitted to use kimi client services"),
         }
     }
@@ -128,16 +136,79 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_never_receives_client_services() {
+    fn orchestrator_fs_read_allowed_in_auto() {
+        let policy =
+            ClientServicePolicy::new(AdapterRole::Orchestrator, ProviderPermissionMode::Auto);
+        assert_eq!(policy.evaluate(ClientAction::FsRead), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn orchestrator_terminal_routes_through_permission_mode() {
+        let policy = ClientServicePolicy::new(
+            AdapterRole::Orchestrator,
+            ProviderPermissionMode::Supervised,
+        );
+        assert_eq!(
+            policy.evaluate(ClientAction::Terminal),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            policy.evaluate(ClientAction::Terminal),
+            policy.evaluate(ClientAction::FsRead)
+        );
+    }
+
+    #[test]
+    fn orchestrator_fs_write_denied() {
         let policy =
             ClientServicePolicy::new(AdapterRole::Orchestrator, ProviderPermissionMode::Auto);
         assert!(matches!(
-            policy.evaluate(ClientAction::Terminal),
+            policy.evaluate(ClientAction::FsWrite),
+            PolicyDecision::Deny(message) if message.contains("planning")
+        ));
+    }
+
+    #[test]
+    fn reviewer_and_executor_unchanged() {
+        let reviewer =
+            ClientServicePolicy::new(AdapterRole::Reviewer, ProviderPermissionMode::Auto);
+        assert!(matches!(
+            reviewer.evaluate(ClientAction::Terminal),
             PolicyDecision::Deny(_)
         ));
         assert!(matches!(
-            policy.evaluate(ClientAction::FsWrite),
+            reviewer.evaluate(ClientAction::FsWrite),
             PolicyDecision::Deny(_)
         ));
+
+        let executor =
+            ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Supervised);
+        assert_eq!(
+            executor.evaluate(ClientAction::Terminal),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            executor.evaluate(ClientAction::FsWrite),
+            PolicyDecision::RequireApproval
+        );
+    }
+
+    #[test]
+    fn work_item_splitter_and_handoff_still_denied() {
+        for role in [AdapterRole::WorkItemSplitter, AdapterRole::Handoff] {
+            let policy = ClientServicePolicy::new(role, ProviderPermissionMode::Auto);
+            assert!(matches!(
+                policy.evaluate(ClientAction::FsRead),
+                PolicyDecision::Deny(_)
+            ));
+            assert!(matches!(
+                policy.evaluate(ClientAction::Terminal),
+                PolicyDecision::Deny(_)
+            ));
+            assert!(matches!(
+                policy.evaluate(ClientAction::FsWrite),
+                PolicyDecision::Deny(_)
+            ));
+        }
     }
 }
