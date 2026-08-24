@@ -553,12 +553,15 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
           break;
         case 'choice_request': {
           const options = message.options ?? [];
+          // 工具阻塞类 choice：优先选「跳过/继续」语义选项，避免自动重试死循环（D03 设计选型无此字样仍选首项）
+          const skipish = (o) => /跳过|继续|忽略|skip|continue/i.test(`${o.label ?? ''}${o.description ?? ''}`);
+          const preferred = options.find(skipish);
           const answers = (message.questions ?? []).map((question) => ({
             question_id: question.question_id ?? question.id,
             selected_option_ids: question.options?.[0]?.id ? [question.options[0].id] : [],
             free_text: null,
           }));
-          const selected = options[0]?.id ? [options[0].id] : answers.flatMap((answer) => answer.selected_option_ids);
+          const selected = preferred?.id ? [preferred.id] : options[0]?.id ? [options[0].id] : answers.flatMap((answer) => answer.selected_option_ids);
           result.choices.push({ elapsedSec: elapsedSec(), picked: selected });
           note(`choice -> ${JSON.stringify(selected)}`);
           send({
