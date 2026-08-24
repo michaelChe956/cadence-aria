@@ -21,3 +21,7 @@
 
 - [ ] 5.1 轮询上下文冻结回归测试（焦点/滚动/折叠/过滤不变）+ 深链 `scrollIntoView`。验证：回归测试通过。
 - [ ] 5.2 视觉打磨走查（胶囊 chip、hover 无位移、150–300ms 过渡、`prefers-reduced-motion`、focus 可见、对比度 AA、无 emoji 图标）+ `pnpm test` + `pnpm tsc -b` + `openspec validate --strict` 全绿。验证：命令输出留证。
+
+## Deferred（最终评审裁定，非本 change 验收阻塞）
+
+- 深链 scrollIntoView（「轮询刷新保持上下文」requirement 后半句）：当前深链路径 focusEntityKey 仅打开抽屉、不设置 focusedIssueId，无「焦点行」可滚动，该 SHALL 前置条件未激活；补齐需 focusEntityKey → focusedIssueId 映射与过滤/折叠/截断下的滚动策略，另开 change 处理。
