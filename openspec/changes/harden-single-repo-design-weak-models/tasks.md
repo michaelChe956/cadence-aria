@@ -39,3 +39,4 @@
 - [ ] 8.1 policy.rs TDD：Orchestrator 角色 FsRead+Terminal 授权（auto=bwrap 沙箱/supervised=ApprovalBridge）、FsWrite 拒绝；reviewer/coding 矩阵不变。验证：四象限新用例 + 既有 policy 测试全绿。
 - [ ] 8.2 story 链路回归：kimi story 样本重采（每形态 1 个），确认工具可用、无 read-gate 死锁、通过率不降。验证：样本 finished 且记录工具可用性。
 - [ ] 8.3 kimi design revised 重采（18 样本）并更新 gate-report。验证：manifest 校验通过，D05/D04 边界数据并入对比。
+- [ ] 8.4 fs 服务绝对路径修复（TDD）：validate_relative 对「授权根内的绝对路径」剥离根前缀放行（组件级前缀比对防前缀混淆），根外/含 .. 仍拒绝；相对路径语义不变。验证：新用例（根内绝对路径可读/root 外拒绝/../拒绝/前缀混淆拒绝/相对路径回归）+ client_services 全量测试绿。
