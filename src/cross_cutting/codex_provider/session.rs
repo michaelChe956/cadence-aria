@@ -11,15 +11,15 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, ChoiceRequestSource, ProviderCompletion, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput,
+    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput, UsageReportData,
 };
 
 use super::{
     CODEX_DEFAULT_SANDBOX_MODE, CODEX_RESUME_STALL_ERROR, CODEX_RESUME_STALL_TIMEOUT,
     CODEX_RPC_REQUEST_TIMEOUT, emit_request_user_input_protocol_error, is_turn_completed,
-    parse_agent_message_text, parse_approval_request, parse_execution_event, parse_failure,
-    parse_user_input_request, provider_error, send_provider_event, write_approval_response,
-    write_user_input_response,
+    parse_agent_message_text, parse_approval_request, parse_codex_usage, parse_execution_event,
+    parse_failure, parse_user_input_request, provider_error, send_provider_event,
+    write_approval_response, write_user_input_response,
 };
 
 pub(crate) async fn run_codex_session<W>(
@@ -273,6 +273,13 @@ where
         }
 
         if is_turn_completed(&incoming) {
+            // turn/completed 通知在部分 codex 版本会附带 usage 计数——best-effort 采集，
+            // 缺失则不上报（不视为错误）。
+            if let Some(report) =
+                parse_codex_usage(&incoming, UsageReportData::role_text(&input.role))
+            {
+                send_provider_event(&event_tx, ProviderEvent::UsageReport(report), &cancel).await?;
+            }
             send_provider_event(
                 &event_tx,
                 ProviderEvent::Execution(ProviderExecutionEvent {

@@ -655,3 +655,114 @@ async fn finish_active_run_with_failed_node_marks_outline_node_failed() {
         .expect("node detail");
     assert_eq!(detail.status, TimelineNodeStatus::Failed);
 }
+
+fn usage_report_provider_session() -> ProviderSession {
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (command_tx, _command_rx) = mpsc::channel(8);
+    event_tx
+        .try_send(ProviderEvent::UsageReport(
+            crate::cross_cutting::streaming_provider::UsageReportData {
+                role: "author".to_string(),
+                input_tokens: Some(1200),
+                output_tokens: Some(80),
+                cache_read_tokens: Some(600),
+                cache_creation_tokens: None,
+            },
+        ))
+        .expect("send usage report");
+    event_tx
+        .try_send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "# Draft".to_string(),
+                None,
+            ),
+        ))
+        .expect("send completed");
+    ProviderSession {
+        events: event_rx,
+        commands: command_tx,
+    }
+}
+
+#[tokio::test]
+async fn provider_session_maps_usage_report_to_usage_execution_event() {
+    let (tmp, checkpoint_store) = setup();
+    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+    let (tx, mut rx) = mpsc::channel(64);
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+    let node_id = create_author_run_node(&mut engine).await;
+
+    engine
+        .drive_provider_session(ProviderSessionDriveInput {
+            session: Ok(usage_report_provider_session()),
+            command_rx: empty_provider_commands(),
+            node_id: Some(node_id.clone()),
+            agent: Some(ProviderName::ClaudeCode),
+            role: ProviderConversationRole::Author,
+            artifact_retry: None,
+            revision_resume_fallback: None,
+        })
+        .await;
+
+    let events = drain_engine_events(&mut rx);
+    let usage_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EngineEvent::ExecutionEvent { event, .. }
+                    if event.kind == ProviderExecutionEventKind::Usage
+                        && event.event_id == "usage_author"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        usage_events.len(),
+        1,
+        "UsageReport should map to exactly one usage execution event"
+    );
+    let EngineEvent::ExecutionEvent { event, .. } = &usage_events[0] else {
+        unreachable!("filtered to ExecutionEvent above");
+    };
+    assert_eq!(event.title, "author token usage");
+    let output = event.output.as_deref().expect("usage output json");
+    let parsed: serde_json::Value = serde_json::from_str(output).expect("usage output parses");
+    assert_eq!(parsed["role"], "author");
+    assert_eq!(parsed["input_tokens"], 1200);
+    assert_eq!(parsed["output_tokens"], 80);
+    assert_eq!(parsed["cache_read_tokens"], 600);
+    assert_eq!(parsed["cache_creation_tokens"], serde_json::Value::Null);
+
+    // timeline 落盘：node detail 的 execution_events 里 upsert kind=usage 记录。
+    let detail = lifecycle_store
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    let persisted = detail
+        .execution_events
+        .iter()
+        .filter(|event| event["event_id"] == "usage_author")
+        .collect::<Vec<_>>();
+    assert_eq!(persisted.len(), 1, "usage event should be persisted once");
+    assert_eq!(persisted[0]["kind"], "usage");
+    assert_eq!(persisted[0]["title"], "author token usage");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(persisted[0]["output"].as_str().unwrap())
+            .unwrap()["input_tokens"],
+        1200
+    );
+}

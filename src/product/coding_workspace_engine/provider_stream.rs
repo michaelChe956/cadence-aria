@@ -781,6 +781,9 @@ impl CodingWorkspaceEngine {
                                     )
                                     .await;
                             }
+                            // token 用量采集当前仅覆盖 workspace_engine 主事件循环；coding
+                            // workspace 链路暂不消费 usage（best-effort，缺失不报错）。
+                            ProviderEvent::UsageReport(_) => {}
                         }
                     }
                 }

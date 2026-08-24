@@ -207,6 +207,8 @@ pub enum ProviderExecutionEventKind {
     Command,
     Output,
     Artifact,
+    /// Provider 上报的 token 用量事件（best-effort，见 `UsageReportData`）。
+    Usage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +308,47 @@ pub enum ProviderEvent {
     PermissionTimeout {
         permission_id: String,
     },
+    /// Provider 完成时上报的 token 用量（best-effort）。
+    ///
+    /// 数据源因 provider 而异（claude stream-json result.usage、pi get_state cost 等）；
+    /// 任一字段不可得时为 `None`，不视为错误。
+    UsageReport(UsageReportData),
+}
+
+/// 一次 provider 会话的 token 用量快照。
+///
+/// `role` 为投放侧角色（`author` / `reviewer`，由 adapter 依据 `AdapterRole` 归一化）；
+/// 其余字段与 Anthropic 风格 usage 命名对齐，serde 使用 snake_case。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UsageReportData {
+    pub role: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
+}
+
+impl UsageReportData {
+    /// 将 adapter role 归一化为 usage 角色：Reviewer → `reviewer`，其余（Orchestrator/
+    /// Executor/WorkItemSplitter/Handoff）在 story/design 链路上均为产出侧 → `author`。
+    pub fn role_text(role: &AdapterRole) -> &'static str {
+        match role {
+            AdapterRole::Reviewer => "reviewer",
+            AdapterRole::Orchestrator
+            | AdapterRole::Executor
+            | AdapterRole::WorkItemSplitter
+            | AdapterRole::Handoff => "author",
+        }
+    }
+
+    /// 全部 token 字段均缺失时视为无可上报用量。
+    pub fn has_any_tokens(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cache_read_tokens.is_some()
+            || self.cache_creation_tokens.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,7 +485,8 @@ pub trait StreamingProviderAdapter: Send + Sync {
                     ProviderEvent::StatusChanged(_)
                     | ProviderEvent::Execution(_)
                     | ProviderEvent::ToolCall(_)
-                    | ProviderEvent::ToolResult(_) => {
+                    | ProviderEvent::ToolResult(_)
+                    | ProviderEvent::UsageReport(_) => {
                         continue;
                     }
                 };

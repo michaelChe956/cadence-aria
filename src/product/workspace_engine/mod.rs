@@ -14,7 +14,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
     ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
-    StreamingProviderAdapter, StreamingProviderInput,
+    StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputError, StructuredOutputState};
 use crate::product::artifact_extraction::extract_artifact_content;

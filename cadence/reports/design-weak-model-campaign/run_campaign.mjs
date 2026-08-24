@@ -246,6 +246,35 @@ function usageDisclosure(observations) {
   };
 }
 
+// §usage-collection：从 WS execution_event（kind=usage）提取 per-role token 用量。
+// usage 事件由 provider 完成时上报（claude result.usage / pi get_state cost / codex
+// turn usage），output 为 UsageReportData JSON；缺失字段保留 null（「不可用如实记录」）。
+// 注意：写入 usage_by_role 而非覆盖 result.usage——后者受 manifest 契约约束
+// （usage.input_tokens / usage.cache_read_tokens 聚合形状，validate_manifest.py 校验）。
+function collectUsageByRole(value, byRole) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectUsageByRole(item, byRole);
+    return;
+  }
+  if (value.kind === 'usage' && typeof value.output === 'string') {
+    try {
+      const report = JSON.parse(value.output);
+      const role = String(report.role ?? 'unknown');
+      byRole[role] = {
+        input_tokens: report.input_tokens ?? null,
+        output_tokens: report.output_tokens ?? null,
+        cache_read_tokens: report.cache_read_tokens ?? null,
+        cache_creation_tokens: report.cache_creation_tokens ?? null,
+      };
+    } catch {
+      // malformed usage output——best-effort，忽略
+    }
+    return;
+  }
+  for (const nested of Object.values(value)) collectUsageByRole(nested, byRole);
+}
+
 function createResult({ provider, shapeId, rep, designFile, storyFile }) {
   const identity = modelIdentity(provider);
   const result = {
@@ -308,6 +337,7 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
   const elapsedMs = () => Date.now() - t0;
   const elapsedSec = () => Number((elapsedMs() / 1_000).toFixed(3));
   const usageObservations = [];
+  const usageByRole = {};
   let ws = null;
   let finished = false;
   let hardTimer = null;
@@ -353,6 +383,9 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
       result.failureClass = result.error ? 'driver_error' : 'incomplete';
     }
     Object.assign(result, usageDisclosure(usageObservations));
+    result.usage_by_role = Object.keys(usageByRole).length
+      ? usageByRole
+      : { usage_unavailable: true };
     result.finishedAt = isoNow();
     result.elapsedSec = elapsedSec();
     writeArtifact();
@@ -542,6 +575,7 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
         return;
       }
       findTokenUsage(message, usageObservations, message.type ?? 'unknown');
+      collectUsageByRole(message, usageByRole);
       const markdown = firstMarkdown(message);
       if (markdown) {
         result.artifactMarkdown = markdown;

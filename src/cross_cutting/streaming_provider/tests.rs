@@ -490,3 +490,60 @@ fn fake_launch_for_test_panics_on_non_fake_provider_type() {
         "disguised",
     );
 }
+
+#[test]
+fn usage_report_serde_roundtrip_snake_case() {
+    use super::UsageReportData;
+
+    let report = UsageReportData {
+        role: "author".to_string(),
+        input_tokens: Some(120),
+        output_tokens: Some(34),
+        cache_read_tokens: Some(0),
+        cache_creation_tokens: None,
+    };
+    let json = serde_json::to_value(&report).expect("serialize usage report");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "role": "author",
+            "input_tokens": 120,
+            "output_tokens": 34,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": null,
+        })
+    );
+    let parsed: UsageReportData = serde_json::from_value(json).expect("deserialize usage report");
+    assert_eq!(parsed, report);
+    assert!(parsed.has_any_tokens());
+}
+
+#[test]
+fn usage_report_role_text_maps_reviewer_and_author() {
+    use super::UsageReportData;
+    use crate::protocol::contracts::AdapterRole;
+
+    assert_eq!(
+        UsageReportData::role_text(&AdapterRole::Reviewer),
+        "reviewer"
+    );
+    assert_eq!(UsageReportData::role_text(&AdapterRole::Executor), "author");
+    assert_eq!(
+        UsageReportData::role_text(&AdapterRole::Orchestrator),
+        "author"
+    );
+}
+
+#[test]
+fn usage_report_without_any_tokens_is_not_reportable() {
+    use super::UsageReportData;
+
+    let empty = UsageReportData {
+        role: "reviewer".to_string(),
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
+    };
+    assert!(!empty.has_any_tokens());
+}

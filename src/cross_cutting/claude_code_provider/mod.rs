@@ -16,7 +16,7 @@ use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
+    RiskLevel, StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
 };
 
 mod ask_user_question;
@@ -455,6 +455,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 event_tx.clone(),
                 cancel,
                 structured_output_contract,
+                UsageReportData::role_text(&input.role),
             )
             .await;
             match result {

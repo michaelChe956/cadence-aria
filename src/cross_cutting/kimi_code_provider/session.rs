@@ -525,6 +525,10 @@ where
                 KimiSessionUpdate::SessionInfoUpdate { title } => {
                     tracing::debug!(target: "kimi_code_provider", %title, "Kimi session info update")
                 }
+                // usage 数据源勘察（kimi ACP 0.38.0）：session/update 的 usage_update 仅携带
+                // `used`/`size`（上下文窗口占用字节数/条数计数），没有 per-turn 的
+                // input/output/cache token 计数，也无法映射到 UsageReportData 的字段——
+                // 如实记录为「不可用」，不构造 UsageReport 事件。
                 KimiSessionUpdate::UsageUpdate { used, size } => {
                     tracing::debug!(target: "kimi_code_provider", used, size, "Kimi usage update")
                 }

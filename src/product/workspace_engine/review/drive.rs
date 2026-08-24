@@ -741,6 +741,15 @@ impl WorkspaceEngine {
                                 .send(EngineEvent::ProviderStatus { status })
                                 .await;
                         }
+                        // token 用量（best-effort）：reviewer 侧同样落盘为 kind=usage。
+                        ProviderEvent::UsageReport(report) => {
+                            self.emit_execution_event(
+                                execution_event_from_usage_report(report),
+                                node_id.clone(),
+                                Some(reviewer.clone()),
+                            )
+                            .await;
+                        }
                         ProviderEvent::Execution(event) => {
                             self
                                 .emit_execution_event(

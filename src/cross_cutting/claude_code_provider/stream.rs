@@ -30,6 +30,7 @@ pub(crate) async fn read_claude_stream(
     event_tx: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
     structured_output_contract: Option<StructuredOutputContract>,
+    usage_role: &'static str,
 ) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
@@ -339,6 +340,11 @@ pub(crate) async fn read_claude_stream(
                 .get("session_id")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            // stream-json result 自带 usage（input/output/cache 计数）——best-effort 采集：
+            // 字段缺失记 None，整体缺失则不上报。
+            if let Some(report) = parse_claude_result_usage(&value, usage_role) {
+                send_provider_event(&event_tx, ProviderEvent::UsageReport(report), &cancel).await?;
+            }
             send_provider_event(
                 &event_tx,
                 ProviderEvent::Execution(ProviderExecutionEvent {
@@ -372,6 +378,29 @@ pub(crate) async fn read_claude_stream(
         }
     }
 }
+/// 解析 stream-json 终态 result 行的 `usage` 字段。
+///
+/// Claude Code CLI 的 result 事件（`--output-format stream-json`）附带：
+/// `usage.input_tokens` / `usage.output_tokens` /
+/// `usage.cache_creation_input_tokens` / `usage.cache_read_input_tokens`。
+/// 任一字段缺失记 `None`；整个 `usage` 对象缺失返回 `None`（best-effort）。
+pub(crate) fn parse_claude_result_usage(
+    value: &Value,
+    role: &'static str,
+) -> Option<UsageReportData> {
+    let usage = value.get("usage")?;
+    let report = UsageReportData {
+        role: role.to_string(),
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cache_read_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64),
+    };
+    report.has_any_tokens().then_some(report)
+}
+
 pub(crate) async fn send_provider_event(
     event_tx: &mpsc::Sender<ProviderEvent>,
     event: ProviderEvent,

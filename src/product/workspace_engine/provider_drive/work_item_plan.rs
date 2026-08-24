@@ -273,6 +273,9 @@ impl WorkspaceEngine {
                                 .await;
                             return Err(format!("permission timeout: {permission_id}"));
                         }
+                        // token 用量采集仅覆盖 workspace_engine 主事件循环；计划拆分链路
+                        // 暂不消费 usage（best-effort，缺失不报错）。
+                        ProviderEvent::UsageReport(_) => {}
                     }
                 }
             }

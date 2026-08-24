@@ -10,11 +10,13 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderCompletion,
     ProviderEvent, ProviderStatus, ProviderToolCall, ProviderToolResult, StreamingProviderInput,
+    UsageReportData,
 };
 
 use super::{
     PiSelectRequest, is_pi_terminal, parse_pi_failure, parse_pi_select_request,
     parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end, parse_pi_tool_start,
+    parse_pi_usage,
 };
 
 const PI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -126,6 +128,17 @@ where
     )
     .await?;
     if settled_while_waiting {
+        emit_pi_usage(
+            &peer,
+            &mut pending_by_id,
+            &event_tx,
+            &mut full_output,
+            &mut command_rx,
+            &mut next_id,
+            &cancel,
+            UsageReportData::role_text(&input.role),
+        )
+        .await;
         complete_pi_session(
             &event_tx,
             full_output,
@@ -176,6 +189,17 @@ where
                     return Err(provider_error(error));
                 }
                 if is_pi_terminal(&incoming) {
+                    emit_pi_usage(
+                        &peer,
+                        &mut pending_by_id,
+                        &event_tx,
+                        &mut full_output,
+                        &mut command_rx,
+                        &mut next_id,
+                        &cancel,
+                        UsageReportData::role_text(&input.role),
+                    )
+                    .await;
                     complete_pi_session(
                         &event_tx,
                         full_output,
@@ -467,6 +491,60 @@ async fn handle_pi_event(
         .await?;
     }
     Ok(())
+}
+
+/// 会话结束后刷新一次 get_state，提取累计 token 用量并上报（best-effort）。
+///
+/// pi 没有逐 turn 的 usage 事件，`data.cost` 只能在 get_state 响应中观察；任何失败
+/// （超时/中断/响应缺 cost）都仅记录 warning，不影响会话完成路径。
+#[allow(clippy::too_many_arguments)]
+async fn emit_pi_usage<W>(
+    peer: &JsonRpcPeer<W>,
+    pending_by_id: &mut HashMap<String, oneshot::Sender<Value>>,
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    full_output: &mut String,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    next_id: &mut u64,
+    cancel: &CancellationToken,
+    role: &'static str,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let get_state =
+        match send_pi_command(peer, pending_by_id, next_id, json!({ "type": "get_state" })).await {
+            Ok(get_state) => get_state,
+            Err(error) => {
+                tracing::warn!(target: "pi_provider", %error, "usage get_state send failed");
+                return;
+            }
+        };
+    let response = match await_pi_response(
+        get_state,
+        PiResponseWaitContext {
+            peer,
+            pending_by_id,
+            event_tx,
+            full_output,
+            command_rx,
+            next_id,
+            cancel,
+        },
+    )
+    .await
+    {
+        Ok(PiResponseWait::Response(response, _)) => response,
+        _ => {
+            tracing::warn!(target: "pi_provider", "usage get_state did not complete");
+            return;
+        }
+    };
+    if let Some(report) = parse_pi_usage(&response, role)
+        && send_event(event_tx, ProviderEvent::UsageReport(report))
+            .await
+            .is_err()
+    {
+        tracing::warn!(target: "pi_provider", "usage event receiver closed");
+    }
 }
 
 async fn complete_pi_session(

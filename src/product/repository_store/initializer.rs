@@ -316,7 +316,9 @@ impl ClaudeRepositoryInitializer {
                         "Run the initialization command manually and resolve the requested interaction before retrying.",
                     ));
                 }
-                Some(ProviderEvent::StatusChanged(_)) | Some(ProviderEvent::ToolCall(_)) => {}
+                Some(ProviderEvent::StatusChanged(_))
+                | Some(ProviderEvent::ToolCall(_))
+                | Some(ProviderEvent::UsageReport(_)) => {}
                 None => {
                     return Err(command_failure_with_output(
                         command_index,

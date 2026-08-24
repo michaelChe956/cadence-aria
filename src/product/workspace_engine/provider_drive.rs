@@ -412,6 +412,16 @@ impl WorkspaceEngine {
                         ProviderEvent::Execution(event) => {
                             self.emit_execution_event(event, node_id.clone(), agent.clone()).await;
                         }
+                        // token 用量（best-effort）：映射为 kind=usage 的 execution event，
+                        // 经既有管道写入 timeline node detail 与 WS 事件流。
+                        ProviderEvent::UsageReport(report) => {
+                            self.emit_execution_event(
+                                execution_event_from_usage_report(report),
+                                node_id.clone(),
+                                agent.clone(),
+                            )
+                            .await;
+                        }
                         ProviderEvent::ToolCall(call) => {
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {

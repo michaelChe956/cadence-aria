@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceQuestionData, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus,
+    ProviderExecutionEventStatus, UsageReportData,
 };
 
 #[derive(Debug, Clone)]
@@ -320,6 +320,34 @@ pub(crate) fn rpc_id_string(value: &Value) -> Option<String> {
         .as_u64()
         .map(|id| id.to_string())
         .or_else(|| value.as_str().map(ToString::to_string))
+}
+
+/// 解析 codex `turn/completed`（或 legacy `codex/event` 的 `turn_completed`）附带的 usage。
+///
+/// app-server 新协议字段为 camelCase（`inputTokens` / `outputTokens` /
+/// `cachedInputTokens`），legacy codex/event 为 snake_case（`input_tokens` / ...）。
+/// 两种形状都尝试；任一字段缺失记 `None`，整个 usage 缺失返回 `None`（best-effort）。
+pub(crate) fn parse_codex_usage(value: &Value, role: &'static str) -> Option<UsageReportData> {
+    let usage = value
+        .pointer("/params/usage")
+        .or_else(|| value.pointer("/params/msg/usage"))?;
+    let field = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| usage.get(*name).and_then(Value::as_u64))
+    };
+    let report = UsageReportData {
+        role: role.to_string(),
+        input_tokens: field(&[
+            "inputTokens",
+            "input_tokens",
+            "total_token_usage.prompt_tokens",
+        ]),
+        output_tokens: field(&["outputTokens", "output_tokens"]),
+        cache_read_tokens: field(&["cachedInputTokens", "cached_input_tokens"]),
+        cache_creation_tokens: field(&["cacheWriteTokens", "cache_write_tokens"]),
+    };
+    report.has_any_tokens().then_some(report)
 }
 
 pub(crate) fn is_turn_completed(value: &Value) -> bool {

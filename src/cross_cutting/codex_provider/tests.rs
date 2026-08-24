@@ -15,6 +15,7 @@ use crate::cross_cutting::structured_output::{StructuredOutputContract, Structur
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::CodexProvider;
+use super::parse_codex_usage;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -71,6 +72,7 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -97,6 +99,7 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -297,6 +300,7 @@ async fn codex_provider_responds_to_current_command_approval_with_json_rpc_resul
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -352,6 +356,7 @@ async fn codex_provider_streams_completed_only_agent_messages() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -394,6 +399,7 @@ async fn codex_provider_bridges_request_user_input_and_completes() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -452,6 +458,7 @@ async fn codex_provider_bridges_all_request_user_input_questions() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -584,6 +591,7 @@ async fn codex_provider_times_out_when_turn_stops_emitting_events() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -631,6 +639,7 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -784,4 +793,46 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
         saw_protocol_error,
         "expected request_user_input_unresolved protocol error when JSON-RPC response write fails"
     );
+}
+
+#[test]
+fn parse_codex_usage_reads_camel_case_turn_completed_usage() {
+    let notification = serde_json::json!({
+        "method": "turn/completed",
+        "params": {
+            "usage": {
+                "inputTokens": 210,
+                "outputTokens": 58,
+                "cachedInputTokens": 64
+            }
+        }
+    });
+    let report = parse_codex_usage(&notification, "reviewer").expect("usage should parse");
+    assert_eq!(report.role, "reviewer");
+    assert_eq!(report.input_tokens, Some(210));
+    assert_eq!(report.output_tokens, Some(58));
+    assert_eq!(report.cache_read_tokens, Some(64));
+    assert_eq!(report.cache_creation_tokens, None);
+}
+
+#[test]
+fn parse_codex_usage_reads_snake_case_legacy_usage() {
+    let notification = serde_json::json!({
+        "method": "codex/event",
+        "params": {
+            "msg": {
+                "type": "turn_completed",
+                "usage": { "input_tokens": 11, "output_tokens": 5 }
+            }
+        }
+    });
+    let report = parse_codex_usage(&notification, "author").expect("usage should parse");
+    assert_eq!(report.input_tokens, Some(11));
+    assert_eq!(report.output_tokens, Some(5));
+}
+
+#[test]
+fn parse_codex_usage_returns_none_when_usage_missing() {
+    let notification = serde_json::json!({ "method": "turn/completed", "params": {} });
+    assert!(parse_codex_usage(&notification, "author").is_none());
 }

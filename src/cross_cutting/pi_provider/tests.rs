@@ -1179,3 +1179,34 @@ async fn session_demultiplexes_response_by_id() {
         )
     );
 }
+
+#[test]
+fn parse_pi_usage_extracts_cost_snapshot_from_get_state_response() {
+    let response = serde_json::json!({
+        "type": "response",
+        "command": "get_state",
+        "success": true,
+        "data": {
+            "sessionId": "pi_session_1",
+            "cost": {
+                "input": 100.5,
+                "output": 42,
+                "cacheRead": 7,
+                "cacheWrite": 9
+            }
+        }
+    });
+    let report = parse_pi_usage(&response, "author").expect("usage should parse");
+    assert_eq!(report.role, "author");
+    assert_eq!(report.input_tokens, Some(100));
+    assert_eq!(report.output_tokens, Some(42));
+    assert_eq!(report.cache_read_tokens, Some(7));
+    assert_eq!(report.cache_creation_tokens, Some(9));
+}
+
+#[test]
+fn parse_pi_usage_returns_none_without_cost() {
+    let response =
+        serde_json::json!({ "type": "response", "command": "get_state", "success": true });
+    assert!(parse_pi_usage(&response, "reviewer").is_none());
+}

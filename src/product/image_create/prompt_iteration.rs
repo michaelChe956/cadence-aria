@@ -207,7 +207,8 @@ async fn consume_iteration_events(
             Some(ProviderEvent::StatusChanged(_))
             | Some(ProviderEvent::Execution(_))
             | Some(ProviderEvent::ToolCall(_))
-            | Some(ProviderEvent::ToolResult(_)) => {}
+            | Some(ProviderEvent::ToolResult(_))
+            | Some(ProviderEvent::UsageReport(_)) => {}
             None => {
                 return Err(IterationRunError::Runtime(
                     "image iteration provider stream closed before completion".to_string(),

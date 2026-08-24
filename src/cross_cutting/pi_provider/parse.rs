@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::cross_cutting::streaming_provider::UsageReportData;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PiToolStart {
     pub(crate) tool_call_id: String,
@@ -83,6 +85,32 @@ pub(crate) fn parse_pi_session_id(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|session_id| !session_id.is_empty())
         .map(ToString::to_string)
+}
+
+/// 解析 pi RPC `get_state` 响应中的 `data.cost` 用量快照。
+///
+/// pi 的 get_state 响应见过 `cost: { input, output, cacheRead, cacheWrite }`（数值，
+/// 可能为浮点）；此处统一取整为 u64。任一字段缺失记 `None`，整个 cost 缺失返回
+/// `None`（best-effort，不视为错误）。注意：该计数为会话累计值。
+pub(crate) fn parse_pi_usage(value: &Value, role: &str) -> Option<UsageReportData> {
+    let cost = value.pointer("/data/cost")?;
+    let number = |name: &str| -> Option<u64> {
+        cost.get(name)
+            .and_then(Value::as_number)
+            .and_then(|number| {
+                number
+                    .as_u64()
+                    .or_else(|| number.as_f64().map(|float| float as u64))
+            })
+    };
+    let report = UsageReportData {
+        role: role.to_string(),
+        input_tokens: number("input"),
+        output_tokens: number("output"),
+        cache_read_tokens: number("cacheRead"),
+        cache_creation_tokens: number("cacheWrite"),
+    };
+    report.has_any_tokens().then_some(report)
 }
 
 pub(crate) fn parse_pi_failure(value: &Value) -> Option<String> {

@@ -83,6 +83,7 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }

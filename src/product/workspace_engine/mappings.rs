@@ -164,6 +164,26 @@ pub(crate) fn execution_event_from_tool_result(
     }
 }
 
+/// 将 provider 上报的 token 用量映射为可落盘的 execution event（kind=usage）。
+///
+/// `event_id` 固定为 `usage_{role}`，同 role 多次上报时 upsert 覆盖为最新快照；
+/// `output` 为 `UsageReportData` 的 JSON 序列化，供 campaign driver 提取。
+pub(crate) fn execution_event_from_usage_report(report: UsageReportData) -> ProviderExecutionEvent {
+    let role = report.role.clone();
+    let output = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
+    ProviderExecutionEvent {
+        event_id: format!("usage_{role}"),
+        kind: ProviderExecutionEventKind::Usage,
+        status: ProviderExecutionEventStatus::Completed,
+        title: format!("{role} token usage"),
+        detail: None,
+        command: None,
+        cwd: None,
+        output: Some(output),
+        exit_code: None,
+    }
+}
+
 pub(crate) fn format_tool_call_input(input: &serde_json::Value) -> String {
     serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string())
 }
@@ -190,6 +210,7 @@ pub(crate) fn execution_event_kind_text(kind: &ProviderExecutionEventKind) -> &'
         ProviderExecutionEventKind::Command => "command",
         ProviderExecutionEventKind::Output => "output",
         ProviderExecutionEventKind::Artifact => "artifact",
+        ProviderExecutionEventKind::Usage => "usage",
     }
 }
 

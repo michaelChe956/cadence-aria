@@ -117,6 +117,7 @@ pub(crate) fn ws_execution_event_kind(kind: ProviderExecutionEventKind) -> WsExe
         ProviderExecutionEventKind::Command => WsExecutionEventKind::Command,
         ProviderExecutionEventKind::Output => WsExecutionEventKind::Output,
         ProviderExecutionEventKind::Artifact => WsExecutionEventKind::Artifact,
+        ProviderExecutionEventKind::Usage => WsExecutionEventKind::Usage,
     }
 }
 

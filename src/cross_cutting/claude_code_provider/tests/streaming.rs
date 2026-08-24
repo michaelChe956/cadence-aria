@@ -27,6 +27,7 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -128,6 +129,7 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -252,6 +254,7 @@ async fn claude_provider_truncates_multibyte_tool_result_preview_without_panicki
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -301,4 +304,89 @@ async fn claude_provider_run_streaming_cancel_closes_backpressured_bridge() {
     tokio::time::timeout(TEST_TIMEOUT, wait_for_receiver_closed(&rx))
         .await
         .expect("stream receiver should close after cancellation");
+}
+
+#[test]
+fn parse_claude_result_usage_extracts_usage_fields() {
+    let result = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "# Draft",
+        "session_id": "sess_usage",
+        "usage": {
+            "input_tokens": 1000,
+            "output_tokens": 250,
+            "cache_read_input_tokens": 300,
+            "cache_creation_input_tokens": 40
+        }
+    });
+    let report = crate::cross_cutting::claude_code_provider::stream::parse_claude_result_usage(
+        &result, "author",
+    )
+    .expect("usage should parse");
+    assert_eq!(report.role, "author");
+    assert_eq!(report.input_tokens, Some(1000));
+    assert_eq!(report.output_tokens, Some(250));
+    assert_eq!(report.cache_read_tokens, Some(300));
+    assert_eq!(report.cache_creation_tokens, Some(40));
+}
+
+#[test]
+fn parse_claude_result_usage_returns_none_without_usage_object() {
+    let result = serde_json::json!({ "type": "result", "is_error": false, "result": "# Draft" });
+    assert!(
+        crate::cross_cutting::claude_code_provider::stream::parse_claude_result_usage(
+            &result, "author"
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn claude_provider_emits_usage_report_before_completion() {
+    let fixture = write_fixture(
+        "claude_usage_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"# Draft","session_id":"claude_usage_session","usage":{"input_tokens":1000,"output_tokens":250,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let mut usage = None;
+    loop {
+        let event = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel open");
+        match event {
+            ProviderEvent::UsageReport(report) => usage = Some(report),
+            ProviderEvent::Completed(_) => break,
+            _ => {}
+        }
+    }
+
+    let report = usage.expect("provider should emit UsageReport before Completed");
+    assert_eq!(report.role, "author");
+    assert_eq!(report.input_tokens, Some(1000));
+    assert_eq!(report.output_tokens, Some(250));
+    assert_eq!(report.cache_read_tokens, Some(300));
+    assert_eq!(report.cache_creation_tokens, Some(40));
 }
