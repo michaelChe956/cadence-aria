@@ -303,6 +303,33 @@ describe("IssueLifecycleWorkbench 运维摘要条接线", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // 先等聚合索引加载完成（state 变为 stale），避免 null 阶段的警示被误判。
+    await waitFor(() =>
+      expect(screen.getByTestId("lc-summary-index")).toHaveAttribute(
+        "data-state",
+        "stale",
+      ),
+    );
+    expect(screen.getByTestId("lc-summary-bar")).toHaveAttribute(
+      "data-warning",
+      "true",
+    );
+    expect(screen.getByTestId("lc-summary-warning")).toBeInTheDocument();
+  });
+
+  it("聚合索引缺失（aggregateIndex 为 null，尚未建立）时摘要条进入警示态", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 0 }],
+        // 无成员 → 尚未建立聚合索引 → aggregateIndex 保持 null。
+        logicalCodebaseMembers: [],
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
     await waitFor(() =>
       expect(screen.getByTestId("lc-summary-bar")).toHaveAttribute(
         "data-warning",
@@ -311,7 +338,7 @@ describe("IssueLifecycleWorkbench 运维摘要条接线", () => {
     );
     expect(screen.getByTestId("lc-summary-index")).toHaveAttribute(
       "data-state",
-      "stale",
+      "unknown",
     );
     expect(screen.getByTestId("lc-summary-warning")).toBeInTheDocument();
   });

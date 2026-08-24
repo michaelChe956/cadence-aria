@@ -470,8 +470,8 @@ export function IssueLifecycleWorkbench({
     selectedProjectId,
     activeLogicalCodebaseId,
   });
-  // Task 8：运维摘要条的派生值。异常口径逐字按 Plan：存在聚合索引时 state !== "active"，
-  // 或最近一次指针发布 status 含 failed/partial。
+  // Task 8：运维摘要条的派生值。异常口径：聚合索引缺失（null，尚未建立）或
+  // state !== "active"，或最近一次指针发布 status 含 failed/partial。
   const lcSummaryExpandedForProject = selectedProjectId
     ? (lcSummaryExpanded[selectedProjectId] ??
       readStoredLcSummaryExpanded(selectedProjectId))
@@ -481,7 +481,7 @@ export function IssueLifecycleWorkbench({
       (codebase) => codebase.logical_codebase_id === activeLogicalCodebaseId,
     )?.name ?? null;
   const lcSummaryHasWarning =
-    (aggregateIndex !== null && aggregateIndex.state !== "active") ||
+    (aggregateIndex === null || aggregateIndex.state !== "active") ||
     (latestPointerPublication !== null &&
       (latestPointerPublication.status.includes("failed") ||
         latestPointerPublication.status.includes("partial")));
