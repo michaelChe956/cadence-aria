@@ -27,6 +27,7 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
         logicalCodebases: [{ id: "lc_0001", name: "monorepo", member_count: 3 }],
       }),
     );
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
@@ -35,8 +36,10 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
     expect(screen.getByTestId("codebase-kind-Aria Repo")).toHaveTextContent("单仓");
     expect(screen.getByTestId("codebase-kind-monorepo")).toHaveTextContent("逻辑");
     expect(screen.getByText("成员：3")).toBeInTheDocument();
+    // Task 8：「登记成员」位于运维面板内，默认折叠，先点展开。
+    await user.click(screen.getByTestId("lc-summary-toggle"));
     expect(
-      screen.getByRole("button", { name: "登记成员" }),
+      await screen.findByRole("button", { name: "登记成员" }),
     ).toBeEnabled();
   });
 
@@ -160,6 +163,8 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：先展开运维面板（默认折叠为摘要条）才能点「登记成员」。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
     await user.click(await screen.findByRole("button", { name: "登记成员" }));
     expect(
       await screen.findByRole("dialog", { name: "登记成员" }),

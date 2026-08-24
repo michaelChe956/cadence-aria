@@ -67,6 +67,7 @@ import {
 } from "./CreateLifecycleIssueDialog";
 import { IssueLifecycleWorkbenchHeader } from "./IssueLifecycleWorkbenchHeader";
 import { LogicalCodebaseManagementPanel } from "./LogicalCodebaseManagementPanel";
+import { LogicalCodebaseSummaryBar } from "./LogicalCodebaseSummaryBar";
 import { IssueLifecycleWorkbenchDrawer } from "./IssueLifecycleWorkbenchDrawer";
 import { ProjectSidebar } from "./ProjectSidebar";
 import {
@@ -122,6 +123,11 @@ function queueGroupsStorageKey(projectId: string) {
   return `aria.workbench.groups.${projectId}`;
 }
 
+// Task 8：运维摘要条展开状态的持久化键（按 projectId 记忆）。
+function lcSummaryStorageKey(projectId: string) {
+  return `aria.workbench.lcSummary.${projectId}`;
+}
+
 // localStorage 不可用（隐私模式/配额超限）时静默降级为仅内存记忆。
 function readStoredValue(key: string): string | null {
   try {
@@ -141,6 +147,11 @@ function writeStoredValue(key: string, value: string) {
 
 function readStoredQueueCollapsed(projectId: string): boolean {
   return readStoredValue(queueCollapsedStorageKey(projectId)) === "1";
+}
+
+// Task 8：摘要条默认折叠——仅显式写入 "1" 才回填为展开。
+function readStoredLcSummaryExpanded(projectId: string): boolean {
+  return readStoredValue(lcSummaryStorageKey(projectId)) === "1";
 }
 
 function readStoredCollapsedGroups(projectId: string): IssueQueueGroupKey[] {
@@ -216,6 +227,10 @@ export function IssueLifecycleWorkbench({
   >({});
   const [showMoreGroupsByProject, setShowMoreGroupsByProject] = useState<
     Record<string, IssueQueueGroupKey[]>
+  >({});
+  // Task 8：运维摘要条展开态，同样按 projectId 记忆（内存 Map 优先，缺失时读 localStorage）。
+  const [lcSummaryExpanded, setLcSummaryExpanded] = useState<
+    Record<string, boolean>
   >({});
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
@@ -455,6 +470,34 @@ export function IssueLifecycleWorkbench({
     selectedProjectId,
     activeLogicalCodebaseId,
   });
+  // Task 8：运维摘要条的派生值。异常口径逐字按 Plan：存在聚合索引时 state !== "active"，
+  // 或最近一次指针发布 status 含 failed/partial。
+  const lcSummaryExpandedForProject = selectedProjectId
+    ? (lcSummaryExpanded[selectedProjectId] ??
+      readStoredLcSummaryExpanded(selectedProjectId))
+    : false;
+  const activeLogicalCodebaseName =
+    logicalCodebases.find(
+      (codebase) => codebase.logical_codebase_id === activeLogicalCodebaseId,
+    )?.name ?? null;
+  const lcSummaryHasWarning =
+    (aggregateIndex !== null && aggregateIndex.state !== "active") ||
+    (latestPointerPublication !== null &&
+      (latestPointerPublication.status.includes("failed") ||
+        latestPointerPublication.status.includes("partial")));
+
+  // Task 8：展开/折叠仅切换运维面板可见性——不发请求、不动选中态。
+  function handleToggleLcSummary() {
+    if (!selectedProjectId) {
+      return;
+    }
+    const next = !lcSummaryExpandedForProject;
+    setLcSummaryExpanded((existing) => ({
+      ...existing,
+      [selectedProjectId]: next,
+    }));
+    writeStoredValue(lcSummaryStorageKey(selectedProjectId), next ? "1" : "0");
+  }
 
   async function handleSelectProject(projectId: string) {
     if (projectId === selectedProjectId) {
@@ -1235,35 +1278,53 @@ export function IssueLifecycleWorkbench({
           main={
             <div className="space-y-3">
               {selectedProjectId && logicalCodebases.length > 0 ? (
-                <LogicalCodebaseManagementPanel
-                  logicalCodebases={logicalCodebases}
-                  activeLogicalCodebaseId={activeLogicalCodebaseId}
-                  onSelectLogicalCodebase={setSelectedLogicalCodebaseId}
-                  onOpenRegistration={() => setRegistrationDialogOpen(true)}
-                  logicalCodebaseMembers={logicalCodebaseMembers}
-                  aggregateInitialization={aggregateInitialization}
-                  aggregateInitializationBusy={aggregateInitializationBusy}
-                  onStartAggregateInitialization={() =>
-                    void handleStartAggregateInitialization()
-                  }
-                  onCancelAggregateInitialization={() =>
-                    void handleCancelAggregateInitialization()
-                  }
-                  aggregateIndex={aggregateIndex}
-                  aggregateIndexRebuilding={aggregateIndexRebuilding}
-                  onRebuildAggregateIndex={() =>
-                    void handleRebuildAggregateIndex()
-                  }
-                  latestPointerPublication={latestPointerPublication}
-                  pointerPublicationBusy={pointerPublicationBusy}
-                  showIncrementalHint={showIncrementalHint}
-                  onPublishFull={() => void handlePublishFull()}
-                  onPublishIncremental={() => void handlePublishIncremental()}
-                  onRetryRepo={(memberRepoId) =>
-                    void handleRetryRepo(memberRepoId)
-                  }
-                  onRevoke={() => void handleRevokePublication()}
-                />
+                <div className="space-y-2">
+                  {/* Task 8：默认仅一行摘要条；展开后原样渲染既有管理面板（面板内部零改动）。 */}
+                  <LogicalCodebaseSummaryBar
+                    summary={{
+                      lcName: activeLogicalCodebaseName,
+                      indexState: aggregateIndex?.state ?? null,
+                      publicationStatus:
+                        latestPointerPublication?.status ?? null,
+                      hasWarning: lcSummaryHasWarning,
+                    }}
+                    expanded={lcSummaryExpandedForProject}
+                    onToggle={handleToggleLcSummary}
+                  />
+                  {lcSummaryExpandedForProject ? (
+                    <LogicalCodebaseManagementPanel
+                      logicalCodebases={logicalCodebases}
+                      activeLogicalCodebaseId={activeLogicalCodebaseId}
+                      onSelectLogicalCodebase={setSelectedLogicalCodebaseId}
+                      onOpenRegistration={() => setRegistrationDialogOpen(true)}
+                      logicalCodebaseMembers={logicalCodebaseMembers}
+                      aggregateInitialization={aggregateInitialization}
+                      aggregateInitializationBusy={aggregateInitializationBusy}
+                      onStartAggregateInitialization={() =>
+                        void handleStartAggregateInitialization()
+                      }
+                      onCancelAggregateInitialization={() =>
+                        void handleCancelAggregateInitialization()
+                      }
+                      aggregateIndex={aggregateIndex}
+                      aggregateIndexRebuilding={aggregateIndexRebuilding}
+                      onRebuildAggregateIndex={() =>
+                        void handleRebuildAggregateIndex()
+                      }
+                      latestPointerPublication={latestPointerPublication}
+                      pointerPublicationBusy={pointerPublicationBusy}
+                      showIncrementalHint={showIncrementalHint}
+                      onPublishFull={() => void handlePublishFull()}
+                      onPublishIncremental={() =>
+                        void handlePublishIncremental()
+                      }
+                      onRetryRepo={(memberRepoId) =>
+                        void handleRetryRepo(memberRepoId)
+                      }
+                      onRevoke={() => void handleRevokePublication()}
+                    />
+                  ) : null}
+                </div>
               ) : null}
               {/* Task 7：双密度布局——队列固定 w-72（折叠为 w-10 细轨），工作区弹性充满；
                   两侧各自 min-h-0 + 内部 overflow-y-auto，不产生页面级双滚动条。 */}

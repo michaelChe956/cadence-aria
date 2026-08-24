@@ -60,6 +60,9 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：运维面板默认折叠为摘要条，先展开再断言面板内容。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
     // 默认选中首个 LC：其成员驱动的初始化卡片可见
     expect(
       await screen.findByTestId("aggregate-initialization-card"),
@@ -111,6 +114,9 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板（默认为摘要条）。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
 
     // LC A：启动初始化，卡片显示 A 的 operation
     await screen.findByTestId("aggregate-initialization-card");
@@ -173,6 +179,9 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板才能触及 LC 切换 tab 与「登记成员」。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
 
     await screen.findByTestId("lc-selector-web");
     await user.click(screen.getByTestId("lc-selector-web"));

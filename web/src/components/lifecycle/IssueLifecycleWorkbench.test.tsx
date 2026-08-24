@@ -149,6 +149,9 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：运维面板默认折叠为摘要条，先点「管理」展开。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
     expect(await screen.findByTestId("aggregate-index-status")).toHaveTextContent(
       "missing",
     );
@@ -199,6 +202,8 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：先展开运维面板才能触及「重建索引」。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
     await user.click(await screen.findByRole("button", { name: "重建索引" }));
 
     expect(await screen.findByText("sync failed")).toBeInTheDocument();
@@ -229,6 +234,8 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：先展开运维面板。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
     // R8：LC 作用域数据（成员/发布）异步加载，先等面板数据就绪再操作。
     await screen.findByTestId("pointer-publication-badge");
     await user.click(screen.getByRole("button", { name: "全量发布" }));
@@ -319,6 +326,8 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：先展开运维面板。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
     const hint = await screen.findByTestId(
       "pointer-publication-new-members-hint",
     );
@@ -366,9 +375,12 @@ describe("IssueLifecycleWorkbench base workflow", () => {
         ],
       }),
     );
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 8：先展开运维面板。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
     await screen.findByTestId("pointer-publication-panel");
     expect(
       screen.queryByTestId("pointer-publication-new-members-hint"),
@@ -721,6 +733,8 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
+    // Task 8：「登记成员」位于运维面板内，先点摘要条展开。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
     await user.click(await screen.findByRole("button", { name: "登记成员" }));
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
     await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
