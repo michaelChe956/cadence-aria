@@ -99,7 +99,10 @@ struct ClientServiceState {
     event_tx: mpsc::Sender<ProviderEvent>,
     terminal: TerminalManager,
     bwrap: Option<PathBuf>,
-    cancel: CancellationToken,
+    /// 会话私有清理 token：随引擎 run token（父）取消而取消；dispatcher Drop 时
+    /// 只取消它，绝不反噬父 token——否则 kimi 正常完成后会 cancel 引擎 run，
+    /// biased select 的 cancel 分支会吞掉已入队的 Completed 事件（真机 issue_0035）。
+    cleanup_cancel: CancellationToken,
 }
 
 pub struct KimiClientServiceDispatcher<W> {
@@ -176,7 +179,7 @@ where
             event_tx,
             terminal,
             bwrap,
-            cancel,
+            cleanup_cancel: cancel.child_token(),
         });
 
         Self { peer, state }
@@ -201,7 +204,9 @@ where
 impl<W> Drop for KimiClientServiceDispatcher<W> {
     fn drop(&mut self) {
         self.state.terminal.cleanup_all();
-        self.state.cancel.cancel();
+        // 只取消会话私有 child token：解除仍在等待权限的派发 task，但不得取消
+        // 引擎 run token（父），否则正常完成会被误判为中止。
+        self.state.cleanup_cancel.cancel();
     }
 }
 
@@ -300,7 +305,7 @@ async fn evaluate_policy(
             };
             let decision = state
                 .bridge
-                .request_tool(tool_name, description, risk, state.cancel.clone())
+                .request_tool(tool_name, description, risk, state.cleanup_cancel.clone())
                 .await
                 .map_err(|error| ClientServiceError::Internal(error.details))?;
             if decision.approved {
@@ -680,7 +685,7 @@ mod tests {
             event_tx,
             terminal: TerminalManager::new(),
             bwrap: None,
-            cancel: CancellationToken::new(),
+            cleanup_cancel: CancellationToken::new().child_token(),
         });
         (state, events)
     }
