@@ -62,8 +62,9 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
         <IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />,
       );
 
+      // Task 7：队列改为 IssueQueue，行选择按钮名为「选择 Issue <标题>」。
       await user.click(
-        await screen.findByRole("button", { name: "Issue Two" }),
+        await screen.findByRole("button", { name: "选择 Issue Issue Two" }),
       );
       // Task 6：单阶段面板——先切到目标阶段，再在该阶段区域内取卡片。
       await user.click(
@@ -405,7 +406,9 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
-    await user.click(await screen.findByRole("button", { name: "登录会话过期" }));
+    await user.click(
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
 
     const workItemRegion = screen.getByRole("region", { name: "Work Item 内容" });
     expect(workItemRegion).toHaveTextContent("Work Item Group");

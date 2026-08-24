@@ -92,6 +92,7 @@ function renderQueue(
     onSelectIssue?: ReturnType<typeof vi.fn>;
     onGenerateStorySpec?: ReturnType<typeof vi.fn>;
     onDeleteIssue?: ReturnType<typeof vi.fn>;
+    onShowMoreGroup?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   const props = {
@@ -105,6 +106,9 @@ function renderQueue(
     onGenerateStorySpec: overrides.onGenerateStorySpec ?? vi.fn(),
     onDeleteIssue: overrides.onDeleteIssue ?? vi.fn(),
     deletingIssueId: overrides.deletingIssueId ?? null,
+    ...(overrides.onShowMoreGroup
+      ? { onShowMoreGroup: overrides.onShowMoreGroup }
+      : {}),
   };
   render(<IssueQueue {...props} />);
   return props;
@@ -298,6 +302,113 @@ describe("IssueQueue 显示更多", () => {
 
     expect(screen.queryByTestId("issue-queue-show-more")).toBeNull();
     expect(groupHeader("coding")).toHaveTextContent("2/5");
+  });
+
+  // Task 4 评审遗留 Important-1：受控模式下「显示更多」必须交给父层真正追加渲染。
+  it("传入 onShowMoreGroup 时点击回调组 key，且不靠本地 state 隐藏入口", async () => {
+    const user = userEvent.setup();
+    const onShowMoreGroup = vi.fn();
+    renderQueue({ onShowMoreGroup });
+
+    await user.click(
+      within(groupSection("coding")).getByTestId("issue-queue-show-more"),
+    );
+
+    expect(onShowMoreGroup).toHaveBeenCalledTimes(1);
+    expect(onShowMoreGroup).toHaveBeenCalledWith("coding");
+    // 受控模式：父层未重派生前入口仍在（隐藏由 rows.length === total 决定，而非本地 state）。
+    expect(
+      within(groupSection("coding")).getByTestId("issue-queue-show-more"),
+    ).toBeInTheDocument();
+  });
+
+  it("受控模式下父层重派生补齐 rows 后入口自然消失", async () => {
+    const user = userEvent.setup();
+    // 父层 harness：命中组用更高 perGroupLimit 的结果（rows 补齐到 total）替换。
+    function ShowMoreHarness() {
+      const [expanded, setExpanded] = useState<IssueQueueGroupKey[]>([]);
+      const groups = defaultGroups().map((group) =>
+        expanded.includes(group.key)
+          ? queueGroup(
+              group.key,
+              [
+                ...group.rows,
+                queueRow({ issueId: "issue_0008", group: group.key }),
+                queueRow({ issueId: "issue_0009", group: group.key }),
+                queueRow({ issueId: "issue_0010", group: group.key }),
+              ],
+              group.total,
+            )
+          : group,
+      );
+      return (
+        <IssueQueue
+          groups={groups}
+          focusedIssueId={null}
+          collapsedGroups={[]}
+          onToggleGroup={vi.fn()}
+          filterText=""
+          onFilterTextChange={vi.fn()}
+          onSelectIssue={vi.fn()}
+          onGenerateStorySpec={vi.fn()}
+          onDeleteIssue={vi.fn()}
+          onShowMoreGroup={(key) => setExpanded((prev) => [...prev, key])}
+        />
+      );
+    }
+    render(<ShowMoreHarness />);
+
+    expect(
+      within(groupSection("coding")).getAllByTestId("issue-queue-row"),
+    ).toHaveLength(2);
+
+    await user.click(
+      within(groupSection("coding")).getByTestId("issue-queue-show-more"),
+    );
+
+    expect(
+      within(groupSection("coding")).getAllByTestId("issue-queue-row"),
+    ).toHaveLength(5);
+    expect(groupHeader("coding")).toHaveTextContent("5/5");
+    expect(
+      within(groupSection("coding")).queryByTestId("issue-queue-show-more"),
+    ).toBeNull();
+  });
+
+  // Task 4 评审遗留 Important-2：非受控模式下本地「已追加」state 必须随过滤文本复位。
+  it("非受控模式下 filterText 变化复位本地已追加 state", async () => {
+    const user = userEvent.setup();
+    function FilterResetHarness() {
+      const [text, setText] = useState("");
+      return (
+        <IssueQueue
+          groups={defaultGroups()}
+          focusedIssueId={null}
+          collapsedGroups={[]}
+          onToggleGroup={vi.fn()}
+          filterText={text}
+          onFilterTextChange={setText}
+          onSelectIssue={vi.fn()}
+          onGenerateStorySpec={vi.fn()}
+          onDeleteIssue={vi.fn()}
+        />
+      );
+    }
+    render(<FilterResetHarness />);
+
+    await user.click(
+      within(groupSection("coding")).getByTestId("issue-queue-show-more"),
+    );
+    expect(
+      within(groupSection("coding")).queryByTestId("issue-queue-show-more"),
+    ).toBeNull();
+
+    // 过滤文本变化 -> 组已重派生，本地已追加标记必须复位，入口重新出现。
+    await user.type(screen.getByLabelText("过滤 Issues"), "登录");
+
+    expect(
+      within(groupSection("coding")).getByTestId("issue-queue-show-more"),
+    ).toHaveTextContent("显示更多（+3）");
   });
 });
 

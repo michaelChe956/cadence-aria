@@ -1,7 +1,12 @@
 // Task 4（容器组件）：workbench Issue 队列的分组容器。
 // 消费 Task 1 的派生分组与 Task 3 的行组件：吸顶过滤条（受控输入，过滤本身在
 // deriveIssueQueue 前置完成）、组折叠（collapsedGroups 受控，折叠态不渲染 rows）、
-// 「显示更多（+N）」本地 state 记录已追加的组。零派生、零请求。
+// 「显示更多（+N）」。零派生、零请求。
+// Task 7 修订（闭合 Task 4 评审 2 个 Important）：
+// 1. 传入 onShowMoreGroup 时进入受控模式——点击只上报组 key，由父层用更高 perGroupLimit
+//    重派生该组 rows；入口的显示/隐藏完全由 rows.length < total 决定，不再依赖本地 state。
+// 2. 未传 onShowMoreGroup 的非受控回退模式下，本地「已追加」state 随 filterText 变化复位，
+//    避免过滤重派生后入口被旧标记永久隐藏。
 // 契约：外层必须是 <section role="region" aria-label="Issue 卡片列表">（既有 E2E/单测定位）。
 import { useState } from "react";
 import type { JSX } from "react";
@@ -34,6 +39,8 @@ export function IssueQueue(props: {
   onGenerateStorySpec: (issueId: string) => void;
   onDeleteIssue: (issueId: string) => void;
   deletingIssueId?: string | null;
+  // 受控「显示更多」：父层收到组 key 后以更高 perGroupLimit 重派生该组 rows。
+  onShowMoreGroup?: (key: IssueQueueGroupKey) => void;
 }): JSX.Element {
   const {
     groups,
@@ -46,12 +53,22 @@ export function IssueQueue(props: {
     onGenerateStorySpec,
     onDeleteIssue,
     deletingIssueId = null,
+    onShowMoreGroup,
   } = props;
 
-  // 「显示更多」本地 state：记录已追加（点击过显示更多）的组，点击后该组入口消失。
-  const [appendedGroups, setAppendedGroups] = useState<
-    ReadonlySet<IssueQueueGroupKey>
-  >(() => new Set());
+  // 非受控回退模式的「已追加」本地 state：与产生它的 filterText 绑定，
+  // filterText 变化即视为复位（render 阶段调整，React 推荐写法）。
+  const [appended, setAppended] = useState<{
+    filterText: string;
+    keys: ReadonlySet<IssueQueueGroupKey>;
+  }>(() => ({ filterText, keys: new Set() }));
+  if (appended.filterText !== filterText) {
+    setAppended({ filterText, keys: new Set() });
+  }
+  const appendedGroups =
+    appended.filterText === filterText
+      ? appended.keys
+      : (new Set<IssueQueueGroupKey>() as ReadonlySet<IssueQueueGroupKey>);
 
   // 防御性排序：无论传入顺序如何，组一律按 ISSUE_QUEUE_GROUP_ORDER 渲染。
   const groupsByKey = new Map(groups.map((group) => [group.key, group]));
@@ -111,9 +128,11 @@ export function IssueQueue(props: {
         ) : (
           orderedGroups.map((group) => {
             const collapsed = collapsedGroups.includes(group.key);
+            // 受控模式：入口只看 rows 是否已补齐；非受控模式：额外看本地已追加标记。
             const showMoreVisible =
               group.rows.length < group.total &&
-              !appendedGroups.has(group.key);
+              (onShowMoreGroup !== undefined ||
+                !appendedGroups.has(group.key));
             return (
               <div
                 key={group.key}
@@ -169,13 +188,17 @@ export function IssueQueue(props: {
                         type="button"
                         data-testid="issue-queue-show-more"
                         data-group-key={group.key}
-                        onClick={() =>
-                          setAppendedGroups((prev) => {
-                            const next = new Set(prev);
+                        onClick={() => {
+                          if (onShowMoreGroup) {
+                            onShowMoreGroup(group.key);
+                            return;
+                          }
+                          setAppended((prev) => {
+                            const next = new Set(prev.keys);
                             next.add(group.key);
-                            return next;
-                          })
-                        }
+                            return { filterText, keys: next };
+                          });
+                        }}
                         className="flex w-full cursor-pointer items-center justify-center border-b border-[var(--aria-line)] py-1.5 text-[11px] text-[var(--aria-ink-muted)] transition-colors duration-200 hover:bg-[var(--aria-panel)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aria-primary)]"
                       >
                         显示更多（+{group.total - group.rows.length}）

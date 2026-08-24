@@ -63,8 +63,9 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await screen.findByRole("button", { name: "登录会话过期" });
-    // Task 6：空 story 阶段面板也有同名主按钮，本例验证 Issue 卡入口，故限定在卡片列表内。
+    // Task 7：队列改为 IssueQueue（行选择按钮名为「选择 Issue <标题>」，
+    // 生成入口仍在同名 region 内，aria-label 保持「生成 Story Spec」）。
+    await screen.findByRole("button", { name: "选择 Issue 登录会话过期" });
     await user.click(
       within(
         screen.getByRole("region", { name: "Issue 卡片列表" }),
@@ -95,7 +96,7 @@ describe("IssueLifecycleWorkbench generation actions", () => {
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
     const header = screen.getAllByRole("banner")[0];
@@ -165,7 +166,9 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       expect.anything(),
     );
 
-    await user.click(screen.getByRole("button", { name: "登录会话过期" }));
+    await user.click(
+      screen.getByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
     const workItemRegion = screen.getByRole("region", {
       name: "Work Item 内容",
     });

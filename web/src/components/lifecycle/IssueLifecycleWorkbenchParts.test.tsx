@@ -67,8 +67,9 @@ describe("IssueLifecycleWorkbenchParts work item repository grouping (REQ-TGT-05
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 7：队列改为 IssueQueue，行选择按钮名为「选择 Issue <标题>」。
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
     const workItemRegion = screen.getByRole("region", {
@@ -113,7 +114,7 @@ describe("IssueLifecycleWorkbenchParts work item repository grouping (REQ-TGT-05
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
     const workItemRegion = screen.getByRole("region", {
@@ -135,7 +136,7 @@ describe("IssueLifecycleWorkbenchParts work item repository grouping (REQ-TGT-05
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
     const workItemRegion = screen.getByRole("region", {

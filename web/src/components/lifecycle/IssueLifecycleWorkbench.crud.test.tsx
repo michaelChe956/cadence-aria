@@ -390,8 +390,9 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 7：队列改为 IssueQueue，行选择按钮名为「选择 Issue <标题>」。
     expect(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     ).toBeInTheDocument();
 
     await user.click(
@@ -414,7 +415,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     );
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "登录会话过期" }),
+        screen.queryByRole("button", { name: "选择 Issue 登录会话过期" }),
       ).not.toBeInTheDocument(),
     );
 
@@ -435,7 +436,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
     // Task 6：单阶段面板——每个阶段的删除入口在对应阶段页内。
@@ -560,13 +561,13 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     secondProjects.resolve(jsonResponseValue(projectsBody()));
     expect(
-      await screen.findByRole("button", { name: "最新 Issue" }),
+      await screen.findByRole("button", { name: "选择 Issue 最新 Issue" }),
     ).toBeInTheDocument();
 
     firstProjects.resolve(jsonResponseValue(projectsBody()));
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(
-      screen.queryByRole("button", { name: "旧 Issue" }),
+      screen.queryByRole("button", { name: "选择 Issue 旧 Issue" }),
     ).not.toBeInTheDocument();
   });
 
@@ -577,12 +578,16 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "重复 ID Issue" }),
+      await screen.findByRole("button", { name: "选择 Issue 重复 ID Issue" }),
     );
 
+    // Task 7：Issue 焦点高亮载体为 IssueQueueRow（aria-current），
+    // 契约不变——同名 id 的派生卡片不得被标记为选中。
     expect(
-      screen.getByRole("button", { name: "重复 ID Issue" }),
-    ).toHaveAttribute("aria-pressed", "true");
+      screen
+        .getAllByTestId("issue-queue-row")
+        .find((row) => row.getAttribute("data-issue-id") === "shared_id"),
+    ).toHaveAttribute("aria-current", "true");
     // Task 6：Story 卡片在 Story 阶段页内。
     await user.click(screen.getByTestId("stage-tab-story"));
     expect(

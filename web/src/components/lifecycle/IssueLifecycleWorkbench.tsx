@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import {
   ApiRequestError,
   createCodingAttempt,
@@ -72,8 +73,14 @@ import {
   WorkItemPlanOptionsDialog,
   type WorkItemPlanOptionsFormValue,
 } from "./WorkItemPlanOptionsDialog";
+import { IssueQueue } from "./IssueQueue";
 import {
-  IssueCardList,
+  defaultCollapsedGroups,
+  deriveIssueQueue,
+  ISSUE_QUEUE_GROUP_ORDER,
+  type IssueQueueGroupKey,
+} from "./issue-queue-derivation";
+import {
   IssueLifecycleDetail,
   defaultLaunchTitle,
   defaultOpenCodingWorkspace,
@@ -102,6 +109,57 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
 const POLL_INTERVAL_MS = 2_000;
+
+// 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
+const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
+
+// Task 7：双密度外壳的持久化键（按 projectId 记忆）。
+function queueCollapsedStorageKey(projectId: string) {
+  return `aria.workbench.queueCollapsed.${projectId}`;
+}
+
+function queueGroupsStorageKey(projectId: string) {
+  return `aria.workbench.groups.${projectId}`;
+}
+
+// localStorage 不可用（隐私模式/配额超限）时静默降级为仅内存记忆。
+function readStoredValue(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredValue(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* localStorage 不可用：静默降级 */
+  }
+}
+
+function readStoredQueueCollapsed(projectId: string): boolean {
+  return readStoredValue(queueCollapsedStorageKey(projectId)) === "1";
+}
+
+function readStoredCollapsedGroups(projectId: string): IssueQueueGroupKey[] {
+  const raw = readStoredValue(queueGroupsStorageKey(projectId));
+  if (raw === null) {
+    return defaultCollapsedGroups();
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return defaultCollapsedGroups();
+    }
+    return parsed.filter((value): value is IssueQueueGroupKey =>
+      ISSUE_QUEUE_GROUP_ORDER.includes(value as IssueQueueGroupKey),
+    );
+  } catch {
+    return defaultCollapsedGroups();
+  }
+}
 export function IssueLifecycleWorkbench({
   focusEntityKey,
   onDrawerFocusChange,
@@ -144,6 +202,21 @@ export function IssueLifecycleWorkbench({
     useState(false);
   const [aggregateInitializationBusy, setAggregateInitializationBusy] =
     useState(false);
+  // Task 7：双密度外壳的队列状态。全部按 projectId 记忆，仅在首次遇到该 Project 时
+  // 从 localStorage 回填；后续以内存 Map 为权威（2s 轮询不会重置这些 Map）。
+  const [queueCollapsedByProject, setQueueCollapsedByProject] = useState<
+    Record<string, boolean>
+  >({});
+  const [collapsedGroupsByProject, setCollapsedGroupsByProject] = useState<
+    Record<string, IssueQueueGroupKey[]>
+  >({});
+  // 过滤文本与「已追加」组也按 projectId 隔离，避免切 Project 后沿用上一个的过滤态。
+  const [queueFilterByProject, setQueueFilterByProject] = useState<
+    Record<string, string>
+  >({});
+  const [showMoreGroupsByProject, setShowMoreGroupsByProject] = useState<
+    Record<string, IssueQueueGroupKey[]>
+  >({});
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
@@ -314,6 +387,57 @@ export function IssueLifecycleWorkbench({
     (project) => project.project_id === selectedProjectId,
   );
   const issueCount = allColumns.issue.length;
+  // Task 7：队列派生与双密度状态的有效值。内存 Map 优先，缺失时从 localStorage 回填
+  // （分组折叠缺省 defaultCollapsedGroups()）。轮询只写 lifecycles，不碰这些 Map。
+  const queueCollapsed = selectedProjectId
+    ? (queueCollapsedByProject[selectedProjectId] ??
+      readStoredQueueCollapsed(selectedProjectId))
+    : false;
+  const collapsedQueueGroups = useMemo<IssueQueueGroupKey[]>(
+    () =>
+      selectedProjectId
+        ? (collapsedGroupsByProject[selectedProjectId] ??
+          readStoredCollapsedGroups(selectedProjectId))
+        : defaultCollapsedGroups(),
+    [collapsedGroupsByProject, selectedProjectId],
+  );
+  const queueFilterText = selectedProjectId
+    ? (queueFilterByProject[selectedProjectId] ?? "")
+    : "";
+  const showMoreQueueGroups = selectedProjectId
+    ? (showMoreGroupsByProject[selectedProjectId] ?? EMPTY_GROUP_KEYS)
+    : EMPTY_GROUP_KEYS;
+  // 「显示更多」受控实现（闭合 Task 4 评审 Important-1）：命中组用无上限 perGroupLimit
+  // 重派生后替换该组 rows，于是 rows.length === total，入口自然消失。
+  const issueQueueGroups = useMemo(() => {
+    const baseGroups = deriveIssueQueue(lifecycles, {
+      filterText: queueFilterText,
+    });
+    if (showMoreQueueGroups.length === 0) {
+      return baseGroups;
+    }
+    const expandedByKey = new Map(
+      deriveIssueQueue(lifecycles, {
+        filterText: queueFilterText,
+        perGroupLimit: Number.MAX_SAFE_INTEGER,
+      }).map((group) => [group.key, group]),
+    );
+    return baseGroups.map((group) =>
+      showMoreQueueGroups.includes(group.key)
+        ? (expandedByKey.get(group.key) ?? group)
+        : group,
+    );
+  }, [lifecycles, queueFilterText, showMoreQueueGroups]);
+  const queueTotalCount = issueQueueGroups.reduce(
+    (sum, group) => sum + group.total,
+    0,
+  );
+  // 队列行的 aria-busy 需要 issueId；页面只维护 cardKey（issue 卡的 key 形如
+  // "issue:<issueId>:<issueId>"），这里反向取回当前正在删除的 Issue。
+  const deletingIssueId =
+    allColumns.issue.find(
+      (card) => lifecycleCardKey(card) === deletingCardKey,
+    )?.issueId ?? null;
   // R9 fix round 1【Important-2】：LC 作用域数据（成员/指针发布/聚合索引/轮询）抽取为
   // 独立 hook（纯搬运，无行为改动）。
   const {
@@ -351,6 +475,90 @@ export function IssueLifecycleWorkbench({
       return;
     }
     openDrawer(cardKey);
+  }
+
+  // Task 7：队列行选择——找到对应 Issue 卡后复用 handleSelectCard（选择语义单一入口）。
+  function handleSelectIssueFromQueue(issueId: string) {
+    const card = allColumns.issue.find(
+      (candidate) => candidate.issueId === issueId,
+    );
+    if (!card) {
+      return;
+    }
+    handleSelectCard(card);
+  }
+
+  function handleGenerateStorySpecFromQueue(issueId: string) {
+    const card = allColumns.issue.find(
+      (candidate) => candidate.issueId === issueId,
+    );
+    if (!card) {
+      setError("缺少 Issue");
+      return;
+    }
+    void handleLaunchWorkspace("story", card);
+  }
+
+  // Task 7：折叠/展开仅切换密度——不动 focusedIssueId/selectedCardKey，不发请求。
+  function handleToggleQueueCollapsed() {
+    if (!selectedProjectId) {
+      return;
+    }
+    const next = !queueCollapsed;
+    setQueueCollapsedByProject((existing) => ({
+      ...existing,
+      [selectedProjectId]: next,
+    }));
+    writeStoredValue(
+      queueCollapsedStorageKey(selectedProjectId),
+      next ? "1" : "0",
+    );
+  }
+
+  function handleToggleQueueGroup(key: IssueQueueGroupKey) {
+    if (!selectedProjectId) {
+      return;
+    }
+    const next = collapsedQueueGroups.includes(key)
+      ? collapsedQueueGroups.filter((candidate) => candidate !== key)
+      : [...collapsedQueueGroups, key];
+    setCollapsedGroupsByProject((existing) => ({
+      ...existing,
+      [selectedProjectId]: next,
+    }));
+    writeStoredValue(
+      queueGroupsStorageKey(selectedProjectId),
+      JSON.stringify(next),
+    );
+  }
+
+  function handleQueueFilterTextChange(text: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    setQueueFilterByProject((existing) => ({
+      ...existing,
+      [selectedProjectId]: text,
+    }));
+    // 过滤变化即重派生：「已追加」组复位（闭合 Task 4 评审 Important-2）。
+    setShowMoreGroupsByProject((existing) =>
+      (existing[selectedProjectId] ?? EMPTY_GROUP_KEYS).length === 0
+        ? existing
+        : { ...existing, [selectedProjectId]: [] },
+    );
+  }
+
+  function handleShowMoreQueueGroup(key: IssueQueueGroupKey) {
+    if (!selectedProjectId) {
+      return;
+    }
+    setShowMoreGroupsByProject((existing) => {
+      const current = existing[selectedProjectId] ?? EMPTY_GROUP_KEYS;
+      if (current.includes(key)) {
+        return existing;
+      }
+      return { ...existing, [selectedProjectId]: [...current, key] };
+    });
   }
 
   function handleOpenFullIssue(card: LifecycleCardData) {
@@ -980,7 +1188,10 @@ export function IssueLifecycleWorkbench({
 
   return (
     <>
-      <div className="grid min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <div
+        data-testid="workbench-shell"
+        className="grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]"
+      >
         <ProjectSidebar
           projects={projects}
           codebases={codebases}
@@ -1054,30 +1265,79 @@ export function IssueLifecycleWorkbench({
                   onRevoke={() => void handleRevokePublication()}
                 />
               ) : null}
-              <div className="grid min-h-[calc(100vh-6rem)] gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
-                <IssueCardList
-                  cards={allColumns.issue}
-                  focusedIssueId={focusedIssueId}
-                  onSelect={handleSelectCard}
-                  onGenerateStorySpec={(card) =>
-                    void handleLaunchWorkspace("story", card)
-                  }
-                  onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
-                  deletingKey={deletingCardKey}
-                />
-                <IssueLifecycleDetail
-                  issue={selectedIssueColumns.issue[0] ?? null}
-                  storySpecs={selectedIssueColumns.story_spec}
-                  designSpecs={selectedIssueColumns.design_spec}
-                  workItems={selectedIssueColumns.work_item}
-                  workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
-                  selectedKey={selectedCardKey}
-                  onSelect={handleSelectCard}
-                  onOpenFullIssue={handleOpenFullIssue}
-                  onDelete={handleDeleteLifecycleCard}
-                  onGenerateForStage={handleGenerateForStage}
-                  deletingKey={deletingCardKey}
-                />
+              {/* Task 7：双密度布局——队列固定 w-72（折叠为 w-10 细轨），工作区弹性充满；
+                  两侧各自 min-h-0 + 内部 overflow-y-auto，不产生页面级双滚动条。 */}
+              <div className="flex h-[calc(100dvh-6rem)] min-h-0 gap-3">
+                {queueCollapsed ? (
+                  <div
+                    data-testid="issue-queue-collapsed-rail"
+                    className="flex w-10 shrink-0 flex-col items-center gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] py-2"
+                  >
+                    <button
+                      type="button"
+                      aria-label="展开 Issue 队列"
+                      aria-expanded={false}
+                      onClick={handleToggleQueueCollapsed}
+                      className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                    >
+                      <PanelLeftOpen className="h-4 w-4" />
+                    </button>
+                    <span
+                      data-testid="issue-queue-rail-count"
+                      className="shrink-0 rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]"
+                    >
+                      {queueTotalCount}
+                    </span>
+                  </div>
+                ) : (
+                  <div
+                    data-testid="issue-queue-column"
+                    className="grid w-72 min-h-0 shrink-0 grid-rows-[auto_minmax(0,1fr)] gap-2"
+                  >
+                    <button
+                      type="button"
+                      aria-label="折叠 Issue 队列"
+                      aria-expanded
+                      onClick={handleToggleQueueCollapsed}
+                      className="inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                    >
+                      <PanelLeftClose className="h-3.5 w-3.5" />
+                      折叠队列
+                    </button>
+                    <IssueQueue
+                      groups={issueQueueGroups}
+                      focusedIssueId={focusedIssueId}
+                      collapsedGroups={collapsedQueueGroups}
+                      onToggleGroup={handleToggleQueueGroup}
+                      filterText={queueFilterText}
+                      onFilterTextChange={handleQueueFilterTextChange}
+                      onSelectIssue={handleSelectIssueFromQueue}
+                      onGenerateStorySpec={handleGenerateStorySpecFromQueue}
+                      onDeleteIssue={(issueId) =>
+                        void handleDeleteIssue(issueId)
+                      }
+                      onShowMoreGroup={handleShowMoreQueueGroup}
+                      deletingIssueId={deletingIssueId}
+                    />
+                  </div>
+                )}
+                {/* flex 行容器默认 align-items:stretch：工作区得到确定高度，其内部
+                    overflow-y-auto 才能生效（而非把页面撑高）。 */}
+                <div className="flex min-h-0 min-w-0 flex-1">
+                  <IssueLifecycleDetail
+                    issue={selectedIssueColumns.issue[0] ?? null}
+                    storySpecs={selectedIssueColumns.story_spec}
+                    designSpecs={selectedIssueColumns.design_spec}
+                    workItems={selectedIssueColumns.work_item}
+                    workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
+                    selectedKey={selectedCardKey}
+                    onSelect={handleSelectCard}
+                    onOpenFullIssue={handleOpenFullIssue}
+                    onDelete={handleDeleteLifecycleCard}
+                    onGenerateForStage={handleGenerateForStage}
+                    deletingKey={deletingCardKey}
+                  />
+                </div>
               </div>
             </div>
           }
