@@ -27,7 +27,7 @@ const HARD_LIMIT_MS = 1_200_000;
 const AUTHOR_LIMIT_MS = 600_000;
 const REVIEWER_LIMIT_MS = 600_000;
 const FINALIZE_LIMIT_MS = 60_000;
-const PROVIDERS = new Set(['claude_code', 'kimi_code', 'pi']);
+const PROVIDERS = new Set(['claude_code', 'kimi_code', 'pi', 'codex']);
 const FEEDBACK = '请根据评审意见修订设计';
 
 function usageAndExit(message, code = 2) {
@@ -356,6 +356,23 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
     result.finishedAt = isoNow();
     result.elapsedSec = elapsedSec();
     writeArtifact();
+    // D05 判例送达取证：从 timeline detail 读 reviewer prompt，断言含判例 marker（§1b 归因）
+    if (shapeId === '05') {
+      try {
+        const detDir = path.join(ARIA_ROOT, 'projects', PROJECT_ID, 'issues', result.issueId,
+          'workspace-timelines', result.sessionId, 'timeline_node_details');
+        let delivered = false; let reviewerNode = null;
+        for (const f of fs.readdirSync(detDir)) {
+          const d = JSON.parse(fs.readFileSync(path.join(detDir, f), 'utf8'));
+          if (d.node_type === 'reviewer_run') { reviewerNode = d; break; }
+        }
+        const prompt = String(reviewerNode?.prompt ?? '');
+        delivered = prompt.includes('[design_reviewer_boundary_examples]');
+        result.boundary_example_delivered = delivered;
+        result.reviewer_prompt_chars = prompt.length;
+        if (!delivered) note(`判例未送达! reviewer prompt ${prompt.length} 字符不含 marker`);
+      } catch (e) { result.boundary_example_delivered = null; note(`判例取证失败: ${e.message}`); }
+    }
     fs.writeFileSync(path.join(outDir, 'result.json'), json(result));
     log.end();
     try { ws?.close(); } catch { /* socket may already be closed */ }
@@ -562,7 +579,8 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
             free_text: null,
           }));
           const selected = preferred?.id ? [preferred.id] : options[0]?.id ? [options[0].id] : answers.flatMap((answer) => answer.selected_option_ids);
-          result.choices.push({ elapsedSec: elapsedSec(), picked: selected });
+          const preferredLabels = options.map((o) => o.label ?? '').filter(Boolean);
+          result.choices.push({ elapsedSec: elapsedSec(), picked: selected, labels: preferredLabels });
           note(`choice -> ${JSON.stringify(selected)}`);
           send({
             type: 'choice_response',
