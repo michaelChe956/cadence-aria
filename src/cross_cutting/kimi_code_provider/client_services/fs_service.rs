@@ -43,22 +43,40 @@ impl std::fmt::Display for FsError {
 
 impl std::error::Error for FsError {}
 
-/// Verify the path is a relative path that stays inside the authorized root
-/// lexically (absolute paths and `..` are rejected before any syscall).
-fn validate_relative(_root: &Path, path: &str) -> Result<PathBuf, FsError> {
-    let rel = Path::new(path);
-    for component in rel.components() {
-        match component {
-            Component::ParentDir => {
-                return Err(FsError::SymlinkOrTraversal(path.to_string()));
+/// Verify the path stays inside the authorized root lexically before any
+/// syscall. Absolute paths inside the root are converted to relative paths.
+fn validate_relative(root: &Path, path: &str) -> Result<PathBuf, FsError> {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        let root_canonical = root
+            .canonicalize()
+            .map_err(|_| FsError::OutOfRoot(path.to_string()))?;
+        if !p.starts_with(&root_canonical) {
+            return Err(FsError::OutOfRoot(path.to_string()));
+        }
+        let rel = p
+            .strip_prefix(&root_canonical)
+            .map_err(|_| FsError::OutOfRoot(path.to_string()))?;
+        for component in rel.components() {
+            match component {
+                Component::ParentDir => return Err(FsError::SymlinkOrTraversal(path.to_string())),
+                Component::CurDir | Component::Normal(_) => {}
+                Component::RootDir | Component::Prefix(_) => unreachable!(),
             }
+        }
+        return Ok(rel.to_path_buf());
+    }
+
+    for component in p.components() {
+        match component {
+            Component::ParentDir => return Err(FsError::SymlinkOrTraversal(path.to_string())),
             Component::RootDir | Component::Prefix(_) => {
                 return Err(FsError::OutOfRoot(path.to_string()));
             }
             Component::CurDir | Component::Normal(_) => {}
         }
     }
-    Ok(rel.to_path_buf())
+    Ok(p.to_path_buf())
 }
 
 pub fn read_text_file(root: &Path, path: &str) -> Result<String, FsError> {
@@ -111,6 +129,60 @@ mod tests {
     }
 
     #[test]
+    fn absolute_path_inside_root_reads() {
+        let root = tempfile::tempdir().expect("root");
+        let file = root.path().join("a/b.txt");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, "inside").expect("write");
+
+        assert_eq!(
+            read_text_file(root.path(), file.to_str().expect("utf-8 path")).expect("read"),
+            "inside"
+        );
+    }
+
+    #[test]
+    fn absolute_path_outside_root_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+
+        assert!(matches!(
+            read_text_file(root.path(), outside.path().to_str().expect("utf-8 path")),
+            Err(FsError::OutOfRoot(_))
+        ));
+    }
+
+    #[test]
+    fn absolute_path_with_parent_dir_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let directory = root.path().join("a");
+        std::fs::create_dir(&directory).expect("mkdir");
+        std::fs::write(root.path().join("b.txt"), "inside").expect("write");
+        let path_with_parent = format!("{}/../b.txt", directory.display());
+
+        assert!(matches!(
+            read_text_file(root.path(), &path_with_parent),
+            Err(FsError::SymlinkOrTraversal(_))
+        ));
+    }
+
+    #[test]
+    fn prefix_confusion_rejected() {
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("xxx_root");
+        let evil = parent.path().join("xxx_root_evil");
+        std::fs::create_dir_all(&root).expect("root mkdir");
+        std::fs::create_dir_all(&evil).expect("evil mkdir");
+        let evil_file = evil.join("secret.txt");
+        std::fs::write(&evil_file, "secret").expect("write");
+
+        assert!(matches!(
+            read_text_file(&root, evil_file.to_str().expect("utf-8 path")),
+            Err(FsError::OutOfRoot(_))
+        ));
+    }
+
+    #[test]
     fn rejects_absolute_and_traversal_paths() {
         let root = tempfile::tempdir().expect("root");
         assert!(matches!(
@@ -124,6 +196,21 @@ mod tests {
         assert!(matches!(
             write_text_file(root.path(), "../outside.txt", "x"),
             Err(FsError::SymlinkOrTraversal(_)) | Err(FsError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn relative_path_regression() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::write(root.path().join("relative.txt"), "relative").expect("write");
+
+        assert_eq!(
+            read_text_file(root.path(), "./relative.txt").expect("read"),
+            "relative"
+        );
+        assert!(matches!(
+            read_text_file(root.path(), "../outside"),
+            Err(FsError::SymlinkOrTraversal(_))
         ));
     }
 
