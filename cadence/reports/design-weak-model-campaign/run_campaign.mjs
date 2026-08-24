@@ -570,9 +570,11 @@ async function runCampaign({ provider, shapeId, rep, outRoot, corpus }) {
           break;
         case 'choice_request': {
           const options = message.options ?? [];
-          // 工具阻塞类 choice：优先选「跳过/继续」语义选项，避免自动重试死循环（D03 设计选型无此字样仍选首项）
+          // 工具阻塞类 choice：优先选「跳过/继续」语义选项（仅当问题含工具/权限/阻塞特征）；设计选型类 choice（如 JSON vs MessagePack）正常选首项
           const skipish = (o) => /跳过|继续|忽略|skip|continue/i.test(`${o.label ?? ''}${o.description ?? ''}`);
-          const preferred = options.find(skipish);
+          const questionText = `${message.prompt ?? ''}${JSON.stringify(message.questions ?? [])}`;
+          const isBlockerChoice = /工具|权限|阻塞|读取|read|gate|门禁/i.test(questionText);
+          const preferred = isBlockerChoice ? options.find(skipish) : undefined;
           const answers = (message.questions ?? []).map((question) => ({
             question_id: question.question_id ?? question.id,
             selected_option_ids: question.options?.[0]?.id ? [question.options[0].id] : [],
