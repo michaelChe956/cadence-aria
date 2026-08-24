@@ -46,14 +46,14 @@ export function resolveGroupCodingAttempt(
 
 export function IssueCardList({
   cards,
-  selectedKey,
+  focusedIssueId,
   deletingKey,
   onSelect,
   onGenerateStorySpec,
   onDeleteIssue,
 }: {
   cards: LifecycleCardData[];
-  selectedKey: string | null;
+  focusedIssueId: string | null;
   deletingKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
   onGenerateStorySpec: (card: LifecycleCardData) => void;
@@ -88,7 +88,7 @@ export function IssueCardList({
             <li key={lifecycleCardKey(card)}>
               <LifecycleCard
                 card={card}
-                selected={selectedKey === lifecycleCardKey(card)}
+                selected={card.issueId === focusedIssueId}
                 deleting={deletingKey === lifecycleCardKey(card)}
                 onSelect={() => onSelect(card)}
                 onGenerateStorySpec={() => onGenerateStorySpec(card)}

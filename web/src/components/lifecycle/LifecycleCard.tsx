@@ -46,6 +46,7 @@ export function LifecycleCard({
       data-testid={`lifecycle-card-${card.kind}`}
       data-color-token={visual.token}
       data-delete-state={deleting ? "deleting" : "idle"}
+      aria-current={selected ? "true" : undefined}
       aria-busy={deleting}
       className={[
         "flex w-full items-start gap-2 rounded-md border border-l-4 p-3 text-left transition-colors focus-within:ring-2 focus-within:ring-[var(--aria-primary)]",

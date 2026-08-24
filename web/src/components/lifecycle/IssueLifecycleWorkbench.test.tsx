@@ -351,6 +351,24 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     ).not.toHaveTextContent("实现提示组件");
   });
 
+  it("keeps the issue card highlighted while a derived story card is selected", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByRole("button", { name: "登录会话过期" }));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
+
+    expect(
+      screen.getByRole("button", { name: "登录会话过期" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("lifecycle-card-issue")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
   it("keeps long selected issue descriptions compact and opens the full content in the drawer", async () => {
     vi.stubGlobal(
       "fetch",

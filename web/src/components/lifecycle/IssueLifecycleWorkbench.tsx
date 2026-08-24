@@ -342,8 +342,10 @@ export function IssueLifecycleWorkbench({
   function handleSelectCard(card: LifecycleCardData) {
     const cardKey = lifecycleCardKey(card);
     setSelectedCardKey(cardKey);
+    // Task 2：选中任何子实体时同步聚焦其所属 Issue，
+    // 保证左侧 Issue 卡高亮（selected = card.issueId === focusedIssueId）不丢失。
+    setFocusedIssueId(card.issueId);
     if (card.kind === "issue") {
-      setFocusedIssueId(card.issueId);
       closeDrawer();
       return;
     }
@@ -1028,7 +1030,7 @@ export function IssueLifecycleWorkbench({
               <div className="grid min-h-[calc(100vh-6rem)] gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
                 <IssueCardList
                   cards={allColumns.issue}
-                  selectedKey={selectedCardKey}
+                  focusedIssueId={focusedIssueId}
                   onSelect={handleSelectCard}
                   onGenerateStorySpec={(card) =>
                     void handleLaunchWorkspace("story", card)
