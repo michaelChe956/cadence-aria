@@ -31,6 +31,8 @@ mod session;
 
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+pub mod usage_tests;
 
 pub(crate) use parse::*;
 

@@ -13,3 +13,7 @@ mod session_tests;
 #[cfg(unix)]
 #[path = "tests/live_kimi_tests.rs"]
 mod live_kimi_tests;
+
+#[cfg(unix)]
+#[path = "tests/local_usage_tests.rs"]
+mod local_usage_tests;
