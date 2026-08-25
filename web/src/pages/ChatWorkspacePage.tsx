@@ -304,9 +304,18 @@ export function ChatWorkspacePage({
     if (!sessionReady) {
       return;
     }
-    const nodeIds = [selectedNodeId, activeNodeId].filter(
-      (nodeId): nodeId is string =>
-        typeof nodeId === "string" && nodeId.length > 0,
+    // 拉取全部已完成节点的 detail（气泡 usage 行依赖 detail.execution_events；
+    // 仅拉 selected/active 会导致未选中节点气泡缺失 token 数据）
+    const completedNodeIds = timelineNodes
+      .filter((node) => node.status === "completed")
+      .map((node) => node.node_id);
+    const nodeIds = Array.from(
+      new Set(
+        [selectedNodeId, activeNodeId, ...completedNodeIds].filter(
+          (nodeId): nodeId is string =>
+            typeof nodeId === "string" && nodeId.length > 0,
+        ),
+      ),
     );
     for (const nodeId of nodeIds) {
       if (hydratedNodeIdsRef.current.has(nodeId)) {
@@ -329,7 +338,7 @@ export function ChatWorkspacePage({
           hydratedNodeIdsRef.current.delete(nodeId);
         });
     }
-  }, [activeNodeId, selectedNodeId, sessionId, sessionReady]);
+  }, [activeNodeId, selectedNodeId, sessionId, sessionReady, timelineNodes]);
 
   useEffect(() => {
     if (
