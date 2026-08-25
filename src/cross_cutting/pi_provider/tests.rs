@@ -270,6 +270,28 @@ fn parse_session_id_from_get_state_response() {
 }
 
 #[test]
+fn parse_session_file_from_get_state_response_requires_absolute_path() {
+    let absolute = serde_json::json!({
+        "type": "response",
+        "command": "get_state",
+        "success": true,
+        "data": { "sessionFile": "/home/user/.pi/agent/sessions/session.jsonl" }
+    });
+    assert_eq!(
+        parse_pi_session_file(&absolute),
+        Some(PathBuf::from("/home/user/.pi/agent/sessions/session.jsonl"))
+    );
+
+    let relative = serde_json::json!({
+        "type": "response",
+        "command": "get_state",
+        "success": true,
+        "data": { "sessionFile": "sessions/session.jsonl" }
+    });
+    assert!(parse_pi_session_file(&relative).is_none());
+}
+
+#[test]
 fn build_args_rpc_mode_auto_only() {
     let cache = tempfile::tempdir().expect("temporary cache");
     let provider = PiProvider::new("pi".into());

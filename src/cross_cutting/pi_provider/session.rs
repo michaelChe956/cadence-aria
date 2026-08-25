@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_pi_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderCompletion,
@@ -15,8 +16,8 @@ use crate::cross_cutting::streaming_provider::{
 
 use super::{
     PiSelectRequest, is_pi_terminal, parse_pi_failure, parse_pi_select_request,
-    parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end, parse_pi_tool_start,
-    parse_pi_usage,
+    parse_pi_session_file, parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end,
+    parse_pi_tool_start, parse_pi_usage,
 };
 
 const PI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -538,7 +539,12 @@ async fn emit_pi_usage<W>(
             return;
         }
     };
-    if let Some(report) = parse_pi_usage(&response, role)
+    // 优先使用 Pi 协议层 cost；当前版本通常为 null，才读 get_state 明示的
+    // sessionFile 尾部。任何本地读取失败均降级为无 usage，不影响完成路径。
+    let report = parse_pi_usage(&response, role).or_else(|| {
+        parse_pi_session_file(&response).and_then(|session_file| read_pi_usage(&session_file, role))
+    });
+    if let Some(report) = report
         && send_event(event_tx, ProviderEvent::UsageReport(report))
             .await
             .is_err()

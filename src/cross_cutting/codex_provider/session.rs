@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_default_codex_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, ChoiceRequestSource, ProviderCompletion, ProviderEvent,
@@ -273,11 +274,15 @@ where
         }
 
         if is_turn_completed(&incoming) {
-            // turn/completed 通知在部分 codex 版本会附带 usage 计数——best-effort 采集，
-            // 缺失则不上报（不视为错误）。
-            if let Some(report) =
-                parse_codex_usage(&incoming, UsageReportData::role_text(&input.role))
-            {
+            // 协议层 usage 优先；当前 Codex 版本不携带时，以 threadId 精确匹配
+            // ~/.codex/sessions 的 rollout 并读取最近 token_count。读取失败不影响 turn。
+            let usage_role = UsageReportData::role_text(&input.role);
+            let report = parse_codex_usage(&incoming, usage_role).or_else(|| {
+                (!turn_thread_id.is_empty())
+                    .then(|| read_default_codex_usage(&turn_thread_id, usage_role))
+                    .flatten()
+            });
+            if let Some(report) = report {
                 send_provider_event(&event_tx, ProviderEvent::UsageReport(report), &cancel).await?;
             }
             send_provider_event(

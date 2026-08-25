@@ -17,6 +17,7 @@ pub mod image_reference_validation;
 pub mod integration_queue;
 pub mod json_rpc_peer;
 pub mod kimi_code_provider;
+pub mod local_usage;
 pub mod manual_intervention;
 pub mod openspec_constraints;
 pub mod pi_provider;

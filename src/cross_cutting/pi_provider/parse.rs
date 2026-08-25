@@ -77,13 +77,25 @@ pub(crate) fn is_pi_terminal(value: &Value) -> bool {
 }
 
 pub(crate) fn parse_pi_session_id(value: &Value) -> Option<String> {
+    pi_get_state_data(value, "sessionId")
+}
+
+/// Pi RPC `get_state` 返回的绝对本地会话记录路径。该文件由 Pi CLI 管理，仅在
+/// 协议 `data.cost` 缺失时用作 usage fallback；缺失或非绝对路径时不读取。
+pub(crate) fn parse_pi_session_file(value: &Value) -> Option<std::path::PathBuf> {
+    let path = pi_get_state_data(value, "sessionFile")?;
+    let path = std::path::PathBuf::from(path);
+    path.is_absolute().then_some(path)
+}
+
+fn pi_get_state_data(value: &Value, field: &str) -> Option<String> {
     (value.get("type").and_then(Value::as_str) == Some("response")).then_some(())?;
     (value.get("command").and_then(Value::as_str) == Some("get_state")).then_some(())?;
     (value.get("success").and_then(Value::as_bool) == Some(true)).then_some(())?;
     value
-        .pointer("/data/sessionId")
+        .pointer(&format!("/data/{field}"))
         .and_then(Value::as_str)
-        .filter(|session_id| !session_id.is_empty())
+        .filter(|value| !value.is_empty())
         .map(ToString::to_string)
 }
 

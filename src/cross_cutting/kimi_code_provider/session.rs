@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_default_kimi_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, ProviderToolCall,
-    ProviderToolResult, RiskLevel, StreamingProviderInput,
+    ProviderToolResult, RiskLevel, StreamingProviderInput, UsageReportData,
 };
 
 use super::client_services::{KimiClientServiceDispatcher, kimi_client_capabilities};
@@ -383,6 +384,12 @@ where
                 }
                 match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
                     Parsed::PromptResult(KimiPromptResult::StopReason(reason)) if reason == "end_turn" => {
+                        // Kimi ACP 当前不填 PromptResponse.usage；仅在正常 turn 终止后，
+                        // 汇总当前 session 的所有 agent wire.jsonl 记录。失败仅代表无数据。
+                        let usage_role = UsageReportData::role_text(&input.role);
+                        if let Some(report) = read_default_kimi_usage(&input.working_dir, &session_id, usage_role) {
+                            let _ = event_tx.send(ProviderEvent::UsageReport(report)).await;
+                        }
                         let completion = ProviderCompletion::from_output(full_output, input.structured_output_contract.as_ref(), Some(session_id));
                         let _ = event_tx.send(ProviderEvent::StatusChanged(ProviderStatus::Completed)).await;
                         let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
