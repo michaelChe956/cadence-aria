@@ -44,6 +44,14 @@ export function MessageGroupView({
     <ChatEntryContainer
       role={group.role}
       title={groupTitle(group)}
+      titleSuffix={group.primaryEntry && entryUsage(group.primaryEntry) ? (
+        <span
+          data-testid="provider-stream-usage"
+          className="ml-2 border-l border-gray-300 pl-2 text-[11px] font-normal text-amber-600"
+        >
+          {entryUsage(group.primaryEntry)}
+        </span>
+      ) : null}
       testId="message-group"
     >
       <div className="space-y-3">
@@ -119,13 +127,11 @@ function groupTitle(group: MessageGroup) {
   const runNo = runNoForGroup(group);
   const retry = retryForGroup(group);
   const duration = durationForGroup(group);
-  const usage = group.primaryEntry ? entryUsage(group.primaryEntry) : null;
   return [
     base,
     provider ? providerLabel(provider) : null,
     runNo ? `Run #${runNo}` : null,
     duration ? `耗时 ${duration}` : null,
-    usage,
     retry ? `自动重跑 #${retry.retry_attempt}` : null,
   ]
     .filter(Boolean)

@@ -4,6 +4,7 @@ import type { ChatEntryRole } from "../../state/chat-entries";
 interface ChatEntryContainerProps {
   role: ChatEntryRole;
   title: string;
+  titleSuffix?: ReactNode;
   children: ReactNode;
   className?: string;
   testId?: string;
@@ -54,6 +55,7 @@ const ROLE_STYLES: Record<
 export function ChatEntryContainer({
   role,
   title,
+  titleSuffix,
   children,
   className = "",
   testId,
@@ -76,8 +78,9 @@ export function ChatEntryContainer({
       >
         <div className="flex min-w-0 items-center justify-between gap-3">
           <span className={`truncate text-xs font-semibold ${styles.title}`}>{title}</span>
+          {titleSuffix}
         </div>
-        <div className="mt-2 min-w-0">{children}</div>
+      <div className="mt-2 min-w-0">{children}</div>
       </article>
     </div>
   );
