@@ -57,14 +57,7 @@ export function MessageGroupView({
       <div className="space-y-3">
         {retry ? <AutoRetryNotice retry={retry} /> : null}
         {group.primaryEntry ? (
-          <div>
-            <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
-            {entryUsage(group.primaryEntry) ? (
-              <p data-testid="provider-stream-usage" className="mt-2 text-[11px] leading-4 text-gray-400">
-                {entryUsage(group.primaryEntry)}
-              </p>
-            ) : null}
-          </div>
+          <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
         ) : null}
         {group.inlineEvents.length > 0 ? (
           <div className="space-y-2">

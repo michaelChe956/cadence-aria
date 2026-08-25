@@ -225,3 +225,24 @@ function makeEntry(
     metadata,
   };
 }
+
+describe("MessageGroupView usage", () => {
+  it("shows usage tag in title row when primary entry carries usage metadata", () => {
+    render(
+      <MessageGroupView
+        group={{
+          id: "g1",
+          nodeId: "n1",
+          role: "author",
+          primaryEntry: makeEntry("stream-1", "provider_stream", "author", "# Story", {
+            usage: { role: "author", input_tokens: 6406, output_tokens: 4797, cache_read_tokens: 43392 },
+          }),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+        onPermissionResponse={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Tokens 输入 6,406/)).toBeInTheDocument();
+  });
+});
