@@ -836,3 +836,24 @@ fn parse_codex_usage_returns_none_when_usage_missing() {
     let notification = serde_json::json!({ "method": "turn/completed", "params": {} });
     assert!(parse_codex_usage(&notification, "author").is_none());
 }
+
+#[test]
+fn parse_codex_usage_reads_nested_total_token_usage_object() {
+    // 嵌套形状（~/.codex/sessions 实测）：total_token_usage 为对象，非扁平 key
+    let notification = serde_json::json!({
+        "method": "turn/completed",
+        "params": {
+            "usage": {
+                "total_token_usage": {
+                    "input_tokens": 16190,
+                    "cached_input_tokens": 2432,
+                    "output_tokens": 482
+                }
+            }
+        }
+    });
+    let report = parse_codex_usage(&notification, "author").expect("usage should parse");
+    assert_eq!(report.input_tokens, Some(16190));
+    assert_eq!(report.output_tokens, Some(482));
+    assert_eq!(report.cache_read_tokens, Some(2432));
+}

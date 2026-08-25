@@ -29,3 +29,9 @@
 
 ## 结论
 单仓 Design 链路在修正环境下达到与 story 同级可用性（100% 全链、结构零失败、边界判定零误杀零漏报、判例与落章契约全部生效）。成功率类结论附样本量：48 样本 0 失败，95% 置信上界 <6.2%。
+
+## 遗留跟踪：kimi per-turn usage 采集（等官方修复）
+- 性质：kimi CLI 官方已知缺陷——ACP `PromptResponse.usage` 可选字段未填充（内部已计算，仅写本地 wire.jsonl）
+- 官方 issue：kimi-cli#2394、kimi-code#1855
+- 过渡方案（已调研验证可行，暂缓实施）：读 ~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/*\/wire.jsonl 的 usage.record（usageScope=="turn"，字段 inputOther/inputCacheRead/inputCacheCreation/output；官方文档+3 个社区实现交叉验证）
+- 切换条件：kimi ACP 上报 usage 后切协议途径

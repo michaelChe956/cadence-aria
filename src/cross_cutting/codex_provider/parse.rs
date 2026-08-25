@@ -336,15 +336,17 @@ pub(crate) fn parse_codex_usage(value: &Value, role: &'static str) -> Option<Usa
             .iter()
             .find_map(|name| usage.get(*name).and_then(Value::as_u64))
     };
+    // 嵌套兑底：部分版本把用量包在 total_token_usage 对象里（JSON pointer 访问，非扁平 key）
+    let nested = |pointer: &str| usage.pointer(pointer).and_then(Value::as_u64);
     let report = UsageReportData {
         role: role.to_string(),
-        input_tokens: field(&[
-            "inputTokens",
-            "input_tokens",
-            "total_token_usage.prompt_tokens",
-        ]),
-        output_tokens: field(&["outputTokens", "output_tokens"]),
-        cache_read_tokens: field(&["cachedInputTokens", "cached_input_tokens"]),
+        input_tokens: field(&["inputTokens", "input_tokens"])
+            .or_else(|| nested("/total_token_usage/input_tokens"))
+            .or_else(|| nested("/total_token_usage/prompt_tokens")),
+        output_tokens: field(&["outputTokens", "output_tokens"])
+            .or_else(|| nested("/total_token_usage/output_tokens")),
+        cache_read_tokens: field(&["cachedInputTokens", "cached_input_tokens"])
+            .or_else(|| nested("/total_token_usage/cached_input_tokens")),
         cache_creation_tokens: field(&["cacheWriteTokens", "cache_write_tokens"]),
     };
     report.has_any_tokens().then_some(report)
