@@ -13,6 +13,7 @@ import type {
   WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
+  UsageReportPayload,
   WsOutMessage,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
@@ -270,6 +271,10 @@ const store = useWorkspaceStore.getState();
     case "execution_event":
       {
         const event = msg.event as ExecutionEvent;
+        if (event.kind === "usage") {
+          applyUsageEvent(store, event);
+          break;
+        }
         const provider = providerNameForNode(store, event.node_id ?? null, event.agent ?? null);
         store.upsertExecutionEvent(event);
         if (isProviderPromptEvent(event)) {
@@ -467,6 +472,41 @@ function resolveStreamEntryNodeId(
   nodeId?: string | null,
 ) {
   return nodeId ?? store.activeNodeId ?? "global";
+}
+
+function applyUsageEvent(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  event: ExecutionEvent,
+) {
+  const usage = parseUsagePayload(event.output);
+  if (!usage) {
+    return;
+  }
+  const nodeId = event.node_id ?? store.activeNodeId ?? null;
+  const entryId = `${nodeId ?? "global"}:stream-active`;
+  store.setEntryUsage(entryId, usage);
+}
+
+export function parseUsagePayload(output: string | null | undefined): UsageReportPayload | null {
+  if (typeof output !== "string" || output.length === 0) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(output) as Record<string, unknown>;
+    const numberOrNull = (key: string) => {
+      const raw = value[key];
+      return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    };
+    return {
+      role: typeof value.role === "string" ? value.role : null,
+      input_tokens: numberOrNull("input_tokens"),
+      output_tokens: numberOrNull("output_tokens"),
+      cache_read_tokens: numberOrNull("cache_read_tokens"),
+      cache_creation_tokens: numberOrNull("cache_creation_tokens"),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function streamEntryId(nodeId: string | null | undefined) {

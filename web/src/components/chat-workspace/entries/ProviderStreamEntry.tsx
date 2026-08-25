@@ -1,17 +1,27 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { lexer, type Token, type Tokens } from "marked";
 import type { ChatEntry } from "../../../state/chat-entries";
+import type { UsageReportPayload } from "../../../api/types/workspace";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 import { normalizeDisplayText } from "../text-display";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   const content = normalizeProviderStreamEntryContent(entry);
+  const usage = entryUsage(entry);
   return (
     <ChatEntryContainer
       role={entry.role}
       title={entryTitle(entry)}
     >
       <MarkdownContent content={content} />
+      {usage ? (
+        <p
+          data-testid="provider-stream-usage"
+          className="mt-2 text-[11px] leading-4 text-gray-400"
+        >
+          {usage}
+        </p>
+      ) : null}
     </ChatEntryContainer>
   );
 }
@@ -62,6 +72,27 @@ const ROLE_LABELS: Record<string, string> = {
   internal_reviewer: "Internal Reviewer",
   system: "系统",
 };
+
+function entryUsage(entry: ChatEntry): string | null {
+  const usage = entry.metadata?.usage as UsageReportPayload | undefined;
+  if (!usage) {
+    return null;
+  }
+  const segments: string[] = [];
+  if (typeof usage.input_tokens === "number" && usage.input_tokens > 0) {
+    segments.push(`输入 ${usage.input_tokens.toLocaleString("en-US")}`);
+  }
+  if (typeof usage.output_tokens === "number" && usage.output_tokens > 0) {
+    segments.push(`输出 ${usage.output_tokens.toLocaleString("en-US")}`);
+  }
+  if (typeof usage.cache_read_tokens === "number" && usage.cache_read_tokens > 0) {
+    segments.push(`缓存 ${usage.cache_read_tokens.toLocaleString("en-US")}`);
+  }
+  if (segments.length === 0) {
+    return null;
+  }
+  return `Tokens ${segments.join(" · ")}`;
+}
 
 function metadataProvider(metadata: ChatEntry["metadata"]) {
   const provider = metadata?.provider ?? metadata?.agent;

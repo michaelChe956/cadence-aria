@@ -79,6 +79,61 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
+  it("renders usage line with thousands separators when usage metadata present", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "author",
+          content: "设计内容",
+          metadata: {
+            usage: {
+              role: "author",
+              input_tokens: 89035,
+              output_tokens: 8896,
+              cache_read_tokens: 230976,
+              cache_creation_tokens: null,
+            },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByTestId("provider-stream-usage")).toHaveTextContent(
+      "Tokens 输入 89,035 · 输出 8,896 · 缓存 230,976",
+    );
+  });
+
+  it("omits usage line entirely when metadata absent", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "author",
+          content: "无用量内容",
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("provider-stream-usage")).not.toBeInTheDocument();
+  });
+
+  it("omits zero/missing usage segments", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "reviewer",
+          content: "部分用量",
+          metadata: {
+            usage: { input_tokens: 12, output_tokens: null, cache_read_tokens: 0 },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByTestId("provider-stream-usage")).toHaveTextContent(
+      "Tokens 输入 12",
+    );
+  });
+
   it("labels code reviewer provider stream entries by role", () => {
     render(
       <ProviderStreamEntry

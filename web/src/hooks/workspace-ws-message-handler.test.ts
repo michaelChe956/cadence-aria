@@ -133,3 +133,76 @@ describe("workspace websocket live stage_change gate prompt", () => {
     },
   );
 });
+
+// usage 事件按 role 关联到对应 stream 气泡（usage-transparency 契约）
+describe("workspace websocket usage event", () => {
+  installWorkspaceStoreTestHooks();
+
+  const handlerOptions = () => ({
+    invalidatedPreStageNodeIds: new Set<string>(),
+    scheduleFlush: vi.fn(),
+    streamFlushTimeouts: {},
+  });
+
+  it("maps usage execution_event onto the node's stream entry metadata", () => {
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_usage_map",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    handleWorkspaceWsMessage(
+      { type: "stream_chunk", node_id: "timeline_node_002", role: "author", content: "段落" } as WsServerMessage,
+      handlerOptions(),
+    );
+    useWorkspaceStore.getState().flushBufferedStream("timeline_node_002");
+    handleWorkspaceWsMessage(
+      {
+        type: "execution_event",
+        event: {
+          event_id: "usage_author",
+          node_id: "timeline_node_002",
+          agent: "author",
+          kind: "usage",
+          status: "completed",
+          title: "Usage",
+          output:
+            '{"role":"author","input_tokens":89035,"output_tokens":8896,"cache_read_tokens":230976}',
+        },
+      } as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+
+    const entry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((e) => e.id === "timeline_node_002:stream-active");
+    expect(entry?.metadata?.usage).toMatchObject({
+      input_tokens: 89035,
+      output_tokens: 8896,
+      cache_read_tokens: 230976,
+    });
+  });
+
+  it("ignores malformed usage output without touching other entries", () => {
+    const before = useWorkspaceStore.getState().chatEntries.length;
+    handleWorkspaceWsMessage(
+      {
+        type: "execution_event",
+        event: {
+          event_id: "usage_bad",
+          node_id: "timeline_node_002",
+          kind: "usage",
+          status: "completed",
+          title: "Usage",
+          output: "not-json",
+        },
+      } as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(useWorkspaceStore.getState().chatEntries.length).toBe(before);
+  });
+});

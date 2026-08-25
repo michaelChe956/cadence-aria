@@ -1,3 +1,4 @@
+import type { UsageReportPayload } from "../api/types/workspace";
 import type {
   ProviderPermissionMode,
   WorkspaceProviderName,
@@ -64,7 +65,7 @@ export type ProviderStatus =
   | "completed"
   | "failed"
   | "aborted";
-export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact";
+export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact" | "usage";
 export type ExecutionEventStatus =
   | "started"
   | "running"
@@ -350,6 +351,7 @@ export interface WorkspaceWsActions {
   appendChatEntry: (entry: ChatEntry) => void;
   resolveGateEntry: (resolution: ChatEntryResolution) => void;
   updateStreamingEntry: (entryId: string, content: string) => void;
+  setEntryUsage: (entryId: string, usage: UsageReportPayload) => void;
   finalizeStreamingEntry: (entryId: string) => void;
   rebuildChatEntries: () => void;
   setStage: (stage: string) => void;

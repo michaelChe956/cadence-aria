@@ -236,7 +236,7 @@ export type ProviderStatus =
   | "completed"
   | "failed"
   | "aborted";
-export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact";
+export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact" | "usage";
 export type ExecutionEventStatus =
   | "started"
   | "running"
@@ -326,6 +326,14 @@ export type ReviewVerdict = {
   findings?: WorkspaceReviewFinding[];
   review_gate?: ReviewGate;
   structured_output_diagnostic?: StructuredOutputDiagnostic | null;
+};
+
+export type UsageReportPayload = {
+  role?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
 };
 
 export type ExecutionEvent = {

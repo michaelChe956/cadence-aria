@@ -405,6 +405,18 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
+  setEntryUsage: (entryId, usage) =>
+    set((prev) => {
+      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
+      if (index === -1) {
+        return {};
+      }
+      const next = [...prev.chatEntries];
+      const current = next[index];
+      next[index] = { ...current, metadata: { ...current.metadata, usage } };
+      return { chatEntries: next };
+    }),
+
   finalizeStreamingEntry: (entryId) =>
     set((prev) =>
       prev.activeStreamEntryId === entryId
