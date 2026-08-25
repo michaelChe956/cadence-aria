@@ -48,6 +48,21 @@ pub(crate) fn read_kimi_usage(
     session_id: &str,
     role: &str,
 ) -> Option<UsageReportData> {
+    // kimi CLI 在 turn 响应后 ~10-50ms 才异步落盘 usage.record（其后还可能追加
+    // staleGuard.cleared 等行）。首次读不到时短等重试，避免时序竞争静默丢数据。
+    if let Some(report) = read_kimi_usage_once(sessions_root, working_dir, session_id, role) {
+        return Some(report);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    read_kimi_usage_once(sessions_root, working_dir, session_id, role)
+}
+
+fn read_kimi_usage_once(
+    sessions_root: &Path,
+    working_dir: &Path,
+    session_id: &str,
+    role: &str,
+) -> Option<UsageReportData> {
     if !is_safe_session_id(session_id) {
         return None;
     }
