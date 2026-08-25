@@ -2,6 +2,15 @@
 
 > **Cadence 产物文档必须存放在 `cadence` 目录下；Claude Code 框架规则保留在 `.claude/rules` 目录下。**
 
+### 产物路径覆盖（强制）
+
+| Skill 默认路径 | 本项目强制路径 |
+|---|---|
+| `docs/superpowers/specs/`（design/spec） | `cadence/designs/` |
+| `docs/superpowers/plans/`（plan） | `cadence/plans/` |
+
+本表优先级高于任何 Skill 正文中的路径指示；OpenSpec 产物仍放 `openspec/` 目录。
+
 ### 文档分类存储规范
 
 | 文档类型 | 存储路径 | 说明 |
@@ -133,9 +142,6 @@ cadence/plans/2025-12-01_计划文档_版本发布_v2.0.0发布计划.md
 - [ ] 版本号正确（首次为 v1.0）
 - [ ] 文档存放在 `cadence/` 对应子目录
 - [ ] **Plan 文档**：确认存储在 `cadence/plans/` 目录
-- [ ] **README 文档路径**：
-  - [ ] 项目介绍类 → 根目录 `README.md` 或 `readmes/`
-  - [ ] 开发相关类 → `cadence/readmes/`
 
 ### 路径映射（跨平台）
 

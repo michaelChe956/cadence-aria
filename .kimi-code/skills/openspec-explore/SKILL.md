@@ -220,7 +220,7 @@ You: [reads codebase]
 
 **User is stuck mid-implementation:**
 ```
-User: /openspec-explore add-auth-system
+User: /skill:openspec-explore add-auth-system
       The OAuth integration is more complex than expected
 
 You: [reads change artifacts]
