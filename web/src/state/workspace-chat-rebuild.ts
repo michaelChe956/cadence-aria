@@ -118,6 +118,8 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     ]);
     if (streamContent) {
       const provider = providerNameForNode(node, detail);
+      // 历史回放：从节点 timeline 的 usage 事件恢复 token 用量（与实时链路对齐）
+      const replayUsage = lastUsageEvent(detail.execution_events);
       entries.push({
         id: chatEntryId(node.node_id, "stream"),
         type: "provider_stream",
@@ -125,7 +127,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         content: streamContent,
         timestamp: detail.started_at || node.started_at,
         node_id: node.node_id,
-        metadata: providerEntryMetadata(node, provider),
+        metadata: {
+          ...providerEntryMetadata(node, provider),
+          ...(replayUsage ? { usage: replayUsage } : {}),
+        },
       });
     }
 
@@ -798,4 +803,27 @@ function getArrayField(value: unknown, key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+// 从节点 execution_events 中提取最后一个 usage 事件的负载（历史回放用）。
+// 与实时链路的 parseUsagePayload 字段契约一致；无 usage 事件或负载非法时返回 null。
+function lastUsageEvent(events: Array<{ kind?: string; output?: string | null }>): unknown | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind !== "usage") {
+      continue;
+    }
+    if (typeof event.output !== "string" || event.output.length === 0) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(event.output);
+      if (parsed && typeof parsed === "object" && ("input_tokens" in parsed || "output_tokens" in parsed)) {
+        return parsed;
+      }
+    } catch {
+      // 非法 JSON 忽略，继续向前找
+    }
+  }
+  return null;
 }
