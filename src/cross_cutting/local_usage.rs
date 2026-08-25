@@ -63,6 +63,9 @@ fn read_kimi_usage_once(
     session_id: &str,
     role: &str,
 ) -> Option<UsageReportData> {
+    // ACP 返回/存储的 id 可能已携带目录前缀（"session_<uuid>"），统一剥掉再拼接，
+    // 避免双重前缀；同时 is_safe_session_id 不接受下划线，前缀必须先剥。
+    let session_id = session_id.strip_prefix("session_").unwrap_or(session_id);
     if !is_safe_session_id(session_id) {
         return None;
     }
