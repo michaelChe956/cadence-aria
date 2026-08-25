@@ -73,7 +73,7 @@ const ROLE_LABELS: Record<string, string> = {
   system: "系统",
 };
 
-function entryUsage(entry: ChatEntry): string | null {
+export function entryUsage(entry: ChatEntry): string | null {
   const usage = entry.metadata?.usage as UsageReportPayload | undefined;
   if (!usage) {
     return null;

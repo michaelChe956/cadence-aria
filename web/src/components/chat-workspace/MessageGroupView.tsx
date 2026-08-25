@@ -8,6 +8,7 @@ import { PermissionRequestEntry } from "./entries/PermissionRequestEntry";
 import {
   MarkdownContent,
   normalizeProviderStreamEntryContent,
+  entryUsage,
 } from "./entries/ProviderStreamEntry";
 import type { MessageGroup } from "./message-grouping";
 import { elapsedDurationText } from "../shared/duration";
@@ -48,7 +49,14 @@ export function MessageGroupView({
       <div className="space-y-3">
         {retry ? <AutoRetryNotice retry={retry} /> : null}
         {group.primaryEntry ? (
-          <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
+          <div>
+            <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
+            {entryUsage(group.primaryEntry) ? (
+              <p data-testid="provider-stream-usage" className="mt-2 text-[11px] leading-4 text-gray-400">
+                {entryUsage(group.primaryEntry)}
+              </p>
+            ) : null}
+          </div>
         ) : null}
         {group.inlineEvents.length > 0 ? (
           <div className="space-y-2">
