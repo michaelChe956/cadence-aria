@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import {
   ApiRequestError,
@@ -32,6 +32,7 @@ import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { deleteLogicalCodebase, listCodebases } from "../../api/codebases";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import { useLogicalCodebaseScopeData } from "./useLogicalCodebaseScopeData";
+import { useIssueLifecycleWorkbenchActions } from "./useIssueLifecycleWorkbenchActions";
 import {
   createPointerPublication,
   retryPointerPublicationRepo,
@@ -78,9 +79,17 @@ import { IssueQueue } from "./IssueQueue";
 import {
   defaultCollapsedGroups,
   deriveIssueQueue,
-  ISSUE_QUEUE_GROUP_ORDER,
   type IssueQueueGroupKey,
 } from "./issue-queue-derivation";
+import {
+  lcSummaryStorageKey,
+  queueCollapsedStorageKey,
+  queueGroupsStorageKey,
+  readStoredCollapsedGroups,
+  readStoredLcSummaryExpanded,
+  readStoredQueueCollapsed,
+  writeStoredValue,
+} from "./IssueLifecycleWorkbenchStorage";
 import {
   IssueLifecycleDetail,
   defaultLaunchTitle,
@@ -98,6 +107,7 @@ import {
   waitForDeleteExitAnimation,
 } from "./IssueLifecycleWorkbenchParts";
 import type { WorkbenchStageKey } from "./StageStepper";
+import { IssueLifecycleWorkbenchView } from "./IssueLifecycleWorkbenchView";
 export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 type PendingWorkItemPlanLaunch = {
@@ -114,63 +124,6 @@ const POLL_INTERVAL_MS = 2_000;
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
 
-// Task 7：双密度外壳的持久化键（按 projectId 记忆）。
-function queueCollapsedStorageKey(projectId: string) {
-  return `aria.workbench.queueCollapsed.${projectId}`;
-}
-
-function queueGroupsStorageKey(projectId: string) {
-  return `aria.workbench.groups.${projectId}`;
-}
-
-// Task 8：运维摘要条展开状态的持久化键（按 projectId 记忆）。
-function lcSummaryStorageKey(projectId: string) {
-  return `aria.workbench.lcSummary.${projectId}`;
-}
-
-// localStorage 不可用（隐私模式/配额超限）时静默降级为仅内存记忆。
-function readStoredValue(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredValue(key: string, value: string) {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    /* localStorage 不可用：静默降级 */
-  }
-}
-
-function readStoredQueueCollapsed(projectId: string): boolean {
-  return readStoredValue(queueCollapsedStorageKey(projectId)) === "1";
-}
-
-// Task 8：摘要条默认折叠——仅显式写入 "1" 才回填为展开。
-function readStoredLcSummaryExpanded(projectId: string): boolean {
-  return readStoredValue(lcSummaryStorageKey(projectId)) === "1";
-}
-
-function readStoredCollapsedGroups(projectId: string): IssueQueueGroupKey[] {
-  const raw = readStoredValue(queueGroupsStorageKey(projectId));
-  if (raw === null) {
-    return defaultCollapsedGroups();
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return defaultCollapsedGroups();
-    }
-    return parsed.filter((value): value is IssueQueueGroupKey =>
-      ISSUE_QUEUE_GROUP_ORDER.includes(value as IssueQueueGroupKey),
-    );
-  } catch {
-    return defaultCollapsedGroups();
-  }
-}
 export function IssueLifecycleWorkbench({
   focusEntityKey,
   onDrawerFocusChange,
@@ -469,6 +422,36 @@ export function IssueLifecycleWorkbench({
   } = useLogicalCodebaseScopeData({
     selectedProjectId,
     activeLogicalCodebaseId,
+  });
+  const {
+    handlePublishFull,
+    handlePublishIncremental,
+    handleRetryRepo,
+    handleRevokePublication,
+    handleRebuildAggregateIndex,
+    handleStartAggregateInitialization,
+    handleCancelAggregateInitialization,
+    handleDeleteProject,
+    handleDeleteRepository,
+    handleDeleteLogicalCodebase,
+  } = useIssueLifecycleWorkbenchActions({
+    selectedProjectId,
+    activeLogicalCodebaseId,
+    latestPointerPublication,
+    aggregateInitialization,
+    selectedLogicalCodebaseId,
+    setSelectedProjectId,
+    setFocusedIssueId,
+    setSelectedCardKey,
+    setSelectedLogicalCodebaseId,
+    setError,
+    setPointerPublicationBusy,
+    setPointerPublications,
+    setAggregateIndex,
+    setAggregateIndexRebuilding,
+    setAggregateInitialization,
+    setAggregateInitializationBusy,
+    refresh,
   });
   // Task 8：运维摘要条的派生值。异常口径：聚合索引缺失（null，尚未建立）或
   // state !== "active"，或最近一次指针发布 status 含 failed/partial。
@@ -813,242 +796,6 @@ export function IssueLifecycleWorkbench({
     }
   }
 
-  function upsertPointerPublication(publication: PointerPublicationDto) {
-    setPointerPublications((existing) => [
-      ...existing.filter((item) => item.id !== publication.id),
-      publication,
-    ]);
-  }
-
-  async function handlePublishFull() {
-    if (!selectedProjectId || !activeLogicalCodebaseId) {
-      setError("缺少 Project 或逻辑代码库");
-      return;
-    }
-
-    setPointerPublicationBusy(true);
-    setError(null);
-    try {
-      const publication = await createPointerPublication(
-        selectedProjectId,
-        activeLogicalCodebaseId,
-        "full",
-      );
-      upsertPointerPublication(publication);
-    } catch (reason) {
-      setError(errorMessage(reason, "全量发布失败"));
-    } finally {
-      setPointerPublicationBusy(false);
-    }
-  }
-
-  async function handlePublishIncremental() {
-    if (!selectedProjectId || !activeLogicalCodebaseId) {
-      setError("缺少 Project 或逻辑代码库");
-      return;
-    }
-
-    setPointerPublicationBusy(true);
-    setError(null);
-    try {
-      const publication = await createPointerPublication(
-        selectedProjectId,
-        activeLogicalCodebaseId,
-        "incremental",
-      );
-      upsertPointerPublication(publication);
-    } catch (reason) {
-      setError(errorMessage(reason, "增量发布失败"));
-    } finally {
-      setPointerPublicationBusy(false);
-    }
-  }
-
-  async function handleRetryRepo(memberRepoId: string) {
-    if (
-      !selectedProjectId ||
-      !activeLogicalCodebaseId ||
-      !latestPointerPublication
-    ) {
-      setError("缺少 Project 或发布批次");
-      return;
-    }
-
-    setPointerPublicationBusy(true);
-    setError(null);
-    try {
-      const publication = await retryPointerPublicationRepo(
-        selectedProjectId,
-        activeLogicalCodebaseId,
-        latestPointerPublication.id,
-        memberRepoId,
-      );
-      upsertPointerPublication(publication);
-    } catch (reason) {
-      setError(errorMessage(reason, "重试失败"));
-    } finally {
-      setPointerPublicationBusy(false);
-    }
-  }
-
-  async function handleRevokePublication() {
-    if (
-      !selectedProjectId ||
-      !activeLogicalCodebaseId ||
-      !latestPointerPublication
-    ) {
-      setError("缺少 Project 或发布批次");
-      return;
-    }
-
-    setPointerPublicationBusy(true);
-    setError(null);
-    try {
-      const publication = await revokePointerPublication(
-        selectedProjectId,
-        activeLogicalCodebaseId,
-        latestPointerPublication.id,
-      );
-      upsertPointerPublication(publication);
-    } catch (reason) {
-      setError(errorMessage(reason, "撤回失败"));
-    } finally {
-      setPointerPublicationBusy(false);
-    }
-  }
-
-  async function handleRebuildAggregateIndex() {
-    if (!selectedProjectId || !activeLogicalCodebaseId) {
-      setError("缺少 Project 或逻辑代码库");
-      return;
-    }
-
-    setAggregateIndexRebuilding(true);
-    setError(null);
-    try {
-      setAggregateIndex(
-        await rebuildAggregateIndex(selectedProjectId, activeLogicalCodebaseId),
-      );
-    } catch (reason) {
-      setError(
-        reason instanceof ApiRequestError
-          ? reason.message
-          : errorMessage(reason, "重建聚合索引失败"),
-      );
-    } finally {
-      setAggregateIndexRebuilding(false);
-    }
-  }
-
-  async function handleStartAggregateInitialization() {
-    if (!selectedProjectId || !activeLogicalCodebaseId) {
-      setError("缺少 Project 或逻辑代码库");
-      return;
-    }
-
-    setAggregateInitializationBusy(true);
-    setError(null);
-    try {
-      const operation = await startAggregateInitialization(
-        selectedProjectId,
-        activeLogicalCodebaseId,
-        crypto.randomUUID(),
-      );
-      setAggregateInitialization(operation);
-    } catch (reason) {
-      setError(
-        reason instanceof ApiRequestError
-          ? reason.message
-          : errorMessage(reason, "启动聚合初始化失败"),
-      );
-    } finally {
-      setAggregateInitializationBusy(false);
-    }
-  }
-
-  async function handleCancelAggregateInitialization() {
-    if (
-      !selectedProjectId ||
-      !activeLogicalCodebaseId ||
-      !aggregateInitialization
-    ) {
-      setError("缺少 Project 或初始化操作");
-      return;
-    }
-
-    setAggregateInitializationBusy(true);
-    setError(null);
-    try {
-      const operation = await cancelAggregateInitialization(
-        selectedProjectId,
-        activeLogicalCodebaseId,
-        aggregateInitialization.operation_id,
-        { reason: "user_cancelled", detail: null },
-      );
-      setAggregateInitialization(operation);
-    } catch (reason) {
-      setError(
-        reason instanceof ApiRequestError
-          ? reason.message
-          : errorMessage(reason, "取消聚合初始化失败"),
-      );
-    } finally {
-      setAggregateInitializationBusy(false);
-    }
-  }
-
-  async function handleDeleteProject(projectId: string) {
-    setError(null);
-    await deleteProject(projectId);
-    if (projectId === selectedProjectId) {
-      setSelectedProjectId(null);
-      setFocusedIssueId(null);
-      setSelectedCardKey(null);
-    }
-    await refresh(null);
-  }
-
-  async function handleDeleteRepository(repositoryId: string) {
-    if (!selectedProjectId) {
-      setError("缺少 Project");
-      return;
-    }
-
-    setError(null);
-    await deleteRepository(
-      selectedProjectId,
-      repositoryId,
-      `delete-repository-${crypto.randomUUID()}`,
-    );
-    setSelectedCardKey(null);
-    await refresh(selectedProjectId);
-  }
-
-  // R8：逻辑条目软删入口（二次确认；软删后刷新混合列表）。
-  async function handleDeleteLogicalCodebase(logicalCodebaseId: string) {
-    if (!selectedProjectId) {
-      setError("缺少 Project");
-      return;
-    }
-
-    const confirmed = window.confirm(
-      "删除逻辑代码库将软删除其登记成员、聚合索引与指针发布上下文，且无法在界面内撤销。确认删除？",
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    setError(null);
-    try {
-      await deleteLogicalCodebase(selectedProjectId, logicalCodebaseId);
-      if (selectedLogicalCodebaseId === logicalCodebaseId) {
-        setSelectedLogicalCodebaseId(null);
-      }
-      await refresh(selectedProjectId);
-    } catch (reason) {
-      setError(errorMessage(reason, "删除逻辑代码库失败"));
-    }
-  }
 
   async function handleDeleteIssue(issueId: string) {
     if (!selectedProjectId) {
@@ -1229,213 +976,8 @@ export function IssueLifecycleWorkbench({
     onOpenWorkspace(response.workspace_session.workspace_session_id);
   }
 
-  return (
+  const dialogs: ReactNode = (
     <>
-      <div
-        data-testid="workbench-shell"
-        className="grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]"
-      >
-        <ProjectSidebar
-          projects={projects}
-          codebases={codebases}
-          repositories={repositories}
-          selectedProjectId={selectedProjectId}
-          issueCount={issueCount}
-          busy={busy}
-          onSelectProject={(projectId) => void handleSelectProject(projectId)}
-          onCreateProject={() => setProjectDialogOpen(true)}
-          onAddCodebase={() => setAddCodebaseDialogOpen(true)}
-          onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
-          onDeleteRepository={(repositoryId) =>
-            void handleDeleteRepository(repositoryId)
-          }
-          onDeleteLogicalCodebase={(logicalCodebaseId) =>
-            void handleDeleteLogicalCodebase(logicalCodebaseId)
-          }
-        />
-        <WorkbenchSurface
-          mainLabel="Issue 生命周期工作台"
-          statusBar={
-            busy ? (
-              <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">
-                加载中
-              </span>
-            ) : null
-          }
-          alert={error}
-          header={
-            <IssueLifecycleWorkbenchHeader
-              projectName={selectedProject?.name}
-              focusedIssueId={focusedIssueId}
-              canCreateIssue={
-                Boolean(selectedProjectId) && repositories.length > 0
-              }
-              onShowAll={() => setFocusedIssueId(null)}
-              onRefresh={() => void refresh()}
-              onCreateIssue={() => setDialogOpen(true)}
-            />
-          }
-          main={
-            <div className="space-y-3">
-              {selectedProjectId && logicalCodebases.length > 0 ? (
-                <div className="space-y-2">
-                  {/* Task 8：默认仅一行摘要条；展开后原样渲染既有管理面板（面板内部零改动）。 */}
-                  <LogicalCodebaseSummaryBar
-                    summary={{
-                      lcName: activeLogicalCodebaseName,
-                      indexState: aggregateIndex?.state ?? null,
-                      publicationStatus:
-                        latestPointerPublication?.status ?? null,
-                      hasWarning: lcSummaryHasWarning,
-                    }}
-                    expanded={lcSummaryExpandedForProject}
-                    onToggle={handleToggleLcSummary}
-                  />
-                  {lcSummaryExpandedForProject ? (
-                    <LogicalCodebaseManagementPanel
-                      logicalCodebases={logicalCodebases}
-                      activeLogicalCodebaseId={activeLogicalCodebaseId}
-                      onSelectLogicalCodebase={setSelectedLogicalCodebaseId}
-                      onOpenRegistration={() => setRegistrationDialogOpen(true)}
-                      logicalCodebaseMembers={logicalCodebaseMembers}
-                      aggregateInitialization={aggregateInitialization}
-                      aggregateInitializationBusy={aggregateInitializationBusy}
-                      onStartAggregateInitialization={() =>
-                        void handleStartAggregateInitialization()
-                      }
-                      onCancelAggregateInitialization={() =>
-                        void handleCancelAggregateInitialization()
-                      }
-                      aggregateIndex={aggregateIndex}
-                      aggregateIndexRebuilding={aggregateIndexRebuilding}
-                      onRebuildAggregateIndex={() =>
-                        void handleRebuildAggregateIndex()
-                      }
-                      latestPointerPublication={latestPointerPublication}
-                      pointerPublicationBusy={pointerPublicationBusy}
-                      showIncrementalHint={showIncrementalHint}
-                      onPublishFull={() => void handlePublishFull()}
-                      onPublishIncremental={() =>
-                        void handlePublishIncremental()
-                      }
-                      onRetryRepo={(memberRepoId) =>
-                        void handleRetryRepo(memberRepoId)
-                      }
-                      onRevoke={() => void handleRevokePublication()}
-                    />
-                  ) : null}
-                </div>
-              ) : null}
-              {/* Task 7：双密度布局——队列固定 w-72（折叠为 w-10 细轨），工作区弹性充满；
-                  两侧各自 min-h-0 + 内部 overflow-y-auto，不产生页面级双滚动条。 */}
-              <div className="flex h-[calc(100dvh-6rem)] min-h-0 gap-3">
-                {queueCollapsed ? (
-                  <div
-                    data-testid="issue-queue-collapsed-rail"
-                    className="flex w-10 shrink-0 flex-col items-center gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] py-2"
-                  >
-                    <button
-                      type="button"
-                      aria-label="展开 Issue 队列"
-                      aria-expanded={false}
-                      onClick={handleToggleQueueCollapsed}
-                      className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                    >
-                      <PanelLeftOpen className="h-4 w-4" />
-                    </button>
-                    <span
-                      data-testid="issue-queue-rail-count"
-                      className="shrink-0 rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]"
-                    >
-                      {queueTotalCount}
-                    </span>
-                  </div>
-                ) : (
-                  <div
-                    data-testid="issue-queue-column"
-                    className="grid w-72 min-h-0 shrink-0 grid-rows-[auto_minmax(0,1fr)] gap-2"
-                  >
-                    <button
-                      type="button"
-                      aria-label="折叠 Issue 队列"
-                      aria-expanded
-                      onClick={handleToggleQueueCollapsed}
-                      className="inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                    >
-                      <PanelLeftClose className="h-3.5 w-3.5" />
-                      折叠队列
-                    </button>
-                    <IssueQueue
-                      groups={issueQueueGroups}
-                      focusedIssueId={focusedIssueId}
-                      collapsedGroups={collapsedQueueGroups}
-                      onToggleGroup={handleToggleQueueGroup}
-                      filterText={queueFilterText}
-                      onFilterTextChange={handleQueueFilterTextChange}
-                      onSelectIssue={handleSelectIssueFromQueue}
-                      onGenerateStorySpec={handleGenerateStorySpecFromQueue}
-                      onDeleteIssue={(issueId) =>
-                        void handleDeleteIssue(issueId)
-                      }
-                      onShowMoreGroup={handleShowMoreQueueGroup}
-                      deletingIssueId={deletingIssueId}
-                    />
-                  </div>
-                )}
-                {/* flex 行容器默认 align-items:stretch：工作区得到确定高度，其内部
-                    overflow-y-auto 才能生效（而非把页面撑高）。 */}
-                <div className="flex min-h-0 min-w-0 flex-1">
-                  <IssueLifecycleDetail
-                    issue={selectedIssueColumns.issue[0] ?? null}
-                    storySpecs={selectedIssueColumns.story_spec}
-                    designSpecs={selectedIssueColumns.design_spec}
-                    workItems={selectedIssueColumns.work_item}
-                    workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
-                    selectedKey={selectedCardKey}
-                    onSelect={handleSelectCard}
-                    onOpenFullIssue={handleOpenFullIssue}
-                    onDelete={handleDeleteLifecycleCard}
-                    onGenerateForStage={handleGenerateForStage}
-                    deletingKey={deletingCardKey}
-                  />
-                </div>
-              </div>
-            </div>
-          }
-        />
-      </div>
-      {isDrawerOpen && focusedEntity ? (
-        <IssueLifecycleWorkbenchDrawer
-          focusedEntity={focusedEntity}
-          workItems={
-            lifecycles.find(
-              (lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId,
-            )?.work_items ?? []
-          }
-          codingAttempts={
-            lifecycles.find(
-              (lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId,
-            )?.coding_attempts ?? []
-          }
-          deliverySummary={
-            focusedEntity.kind === "issue"
-              ? lifecycles.find(
-                  (lifecycle) =>
-                    lifecycle.issue.issue_id === focusedEntity.issueId,
-                )?.delivery_summary
-              : undefined
-          }
-          onClose={closeDrawer}
-          onOpenWorkspace={() =>
-            void handleOpenWorkspaceFromDrawer(focusedEntity)
-          }
-          onOpenCodingWorkspace={() =>
-            void handleOpenCodingWorkspaceFromDrawer(focusedEntity)
-          }
-          onGenerateNext={() => void handleGenerateNext(focusedEntity)}
-          onDelete={() => handleDeleteLifecycleCardFromDrawer(focusedEntity)}
-        />
-      ) : null}
       {projectDialogOpen ? (
         <CreateProjectDialog
           onCreate={handleCreateProject}
@@ -1497,5 +1039,87 @@ export function IssueLifecycleWorkbench({
         />
       ) : null}
     </>
+  );
+
+  return (
+    <IssueLifecycleWorkbenchView
+      projects={projects}
+      codebases={codebases}
+      repositories={repositories}
+      selectedProjectId={selectedProjectId}
+      issueCount={issueCount}
+      busy={busy}
+      error={error}
+      selectedProject={selectedProject}
+      focusedIssueId={focusedIssueId}
+      selectedCardKey={selectedCardKey}
+      deletingCardKey={deletingCardKey}
+      selectedIssue={selectedIssueColumns.issue[0] ?? null}
+      storySpecs={selectedIssueColumns.story_spec}
+      designSpecs={selectedIssueColumns.design_spec}
+      workItems={selectedIssueColumns.work_item}
+      workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
+      issueQueueGroups={issueQueueGroups}
+      queueCollapsed={queueCollapsed}
+      queueTotalCount={queueTotalCount}
+      collapsedQueueGroups={collapsedQueueGroups}
+      queueFilterText={queueFilterText}
+      logicalCodebases={logicalCodebases}
+      activeLogicalCodebaseId={activeLogicalCodebaseId}
+      activeLogicalCodebaseName={activeLogicalCodebaseName}
+      lcSummaryExpanded={lcSummaryExpandedForProject}
+      lcSummaryHasWarning={lcSummaryHasWarning}
+      logicalCodebaseMembers={logicalCodebaseMembers}
+      aggregateInitialization={aggregateInitialization}
+      aggregateInitializationBusy={aggregateInitializationBusy}
+      aggregateIndex={aggregateIndex}
+      aggregateIndexRebuilding={aggregateIndexRebuilding}
+      latestPointerPublication={latestPointerPublication}
+      pointerPublicationBusy={pointerPublicationBusy}
+      showIncrementalHint={showIncrementalHint}
+      focusedEntity={focusedEntity}
+      isDrawerOpen={isDrawerOpen}
+      drawerWorkItems={focusedEntity ? lifecycles.find((lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId)?.work_items ?? [] : []}
+      codingAttempts={focusedEntity ? lifecycles.find((lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId)?.coding_attempts ?? [] : []}
+      deliverySummary={focusedEntity?.kind === "issue" ? lifecycles.find((lifecycle) => lifecycle.issue.issue_id === focusedEntity.issueId)?.delivery_summary : undefined}
+      pendingWorkItemPlanLaunch={Boolean(pendingWorkItemPlanLaunch)}
+      onSelectProject={(projectId) => void handleSelectProject(projectId)}
+      onCreateProject={() => setProjectDialogOpen(true)}
+      onAddCodebase={() => setAddCodebaseDialogOpen(true)}
+      onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
+      onDeleteRepository={(repositoryId) => void handleDeleteRepository(repositoryId)}
+      onDeleteLogicalCodebase={(logicalCodebaseId) => void handleDeleteLogicalCodebase(logicalCodebaseId)}
+      onShowAll={() => setFocusedIssueId(null)}
+      onRefresh={() => void refresh()}
+      onCreateIssue={() => setDialogOpen(true)}
+      onToggleLcSummary={handleToggleLcSummary}
+      onSelectLogicalCodebase={setSelectedLogicalCodebaseId}
+      onOpenRegistration={() => setRegistrationDialogOpen(true)}
+      onStartAggregateInitialization={() => void handleStartAggregateInitialization()}
+      onCancelAggregateInitialization={() => void handleCancelAggregateInitialization()}
+      onRebuildAggregateIndex={() => void handleRebuildAggregateIndex()}
+      onPublishFull={() => void handlePublishFull()}
+      onPublishIncremental={() => void handlePublishIncremental()}
+      onRetryRepo={(memberRepoId) => void handleRetryRepo(memberRepoId)}
+      onRevoke={() => void handleRevokePublication()}
+      onToggleQueueCollapsed={handleToggleQueueCollapsed}
+      onToggleQueueGroup={handleToggleQueueGroup}
+      onQueueFilterTextChange={handleQueueFilterTextChange}
+      onSelectIssue={handleSelectIssueFromQueue}
+      onGenerateStorySpec={handleGenerateStorySpecFromQueue}
+      onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
+      onShowMoreQueueGroup={handleShowMoreQueueGroup}
+      deletingIssueId={deletingIssueId}
+      onSelectCard={handleSelectCard}
+      onOpenFullIssue={handleOpenFullIssue}
+      onDeleteCard={handleDeleteLifecycleCard}
+      onGenerateForStage={handleGenerateForStage}
+      onCloseDrawer={closeDrawer}
+      onOpenWorkspaceFromDrawer={() => void handleOpenWorkspaceFromDrawer(focusedEntity!)}
+      onOpenCodingWorkspaceFromDrawer={() => void handleOpenCodingWorkspaceFromDrawer(focusedEntity!)}
+      onGenerateNext={() => void handleGenerateNext(focusedEntity!)}
+      onDeleteFromDrawer={() => handleDeleteLifecycleCardFromDrawer(focusedEntity!)}
+      dialogs={dialogs}
+    />
   );
 }

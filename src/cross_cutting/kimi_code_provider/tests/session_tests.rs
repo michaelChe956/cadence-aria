@@ -120,24 +120,6 @@ where
     (commands, events, run)
 }
 
-async fn direct_session_events_with_cancel<W>(
-    peer: JsonRpcPeer<W>,
-    input: StreamingProviderInput,
-    cancel: CancellationToken,
-) -> (
-    mpsc::Sender<ProviderCommand>,
-    mpsc::Receiver<ProviderEvent>,
-    tokio::task::JoinHandle<Result<(), ProviderAdapterError>>,
-)
-where
-    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let (commands, command_rx) = mpsc::channel(8);
-    let (event_tx, events) = mpsc::channel(32);
-    let run = tokio::spawn(run_kimi_session(peer, command_rx, event_tx, input, cancel));
-    (commands, events, run)
-}
-
 struct ToggleFailWriter<W> {
     inner: W,
     fail_writes: Arc<AtomicBool>,
