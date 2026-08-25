@@ -11,17 +11,9 @@ export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   return (
     <ChatEntryContainer
       role={entry.role}
-      title={entryTitle(entry)}
+      title={usage ? `${entryTitle(entry)} (${usage})` : entryTitle(entry)}
     >
       <MarkdownContent content={content} />
-      {usage ? (
-        <p
-          data-testid="provider-stream-usage"
-          className="mt-2 text-[11px] leading-4 text-gray-400"
-        >
-          {usage}
-        </p>
-      ) : null}
     </ChatEntryContainer>
   );
 }

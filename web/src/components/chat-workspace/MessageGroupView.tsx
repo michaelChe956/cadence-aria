@@ -119,11 +119,13 @@ function groupTitle(group: MessageGroup) {
   const runNo = runNoForGroup(group);
   const retry = retryForGroup(group);
   const duration = durationForGroup(group);
+  const usage = group.primaryEntry ? entryUsage(group.primaryEntry) : null;
   return [
     base,
     provider ? providerLabel(provider) : null,
     runNo ? `Run #${runNo}` : null,
     duration ? `耗时 ${duration}` : null,
+    usage,
     retry ? `自动重跑 #${retry.retry_attempt}` : null,
   ]
     .filter(Boolean)

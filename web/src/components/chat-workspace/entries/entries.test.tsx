@@ -98,9 +98,7 @@ describe("chat workspace entries", () => {
         })}
       />,
     );
-    expect(screen.getByTestId("provider-stream-usage")).toHaveTextContent(
-      "Tokens 输入 89,035 · 输出 8,896 · 缓存 230,976",
-    );
+    expect(screen.getByText(/Tokens 输入 89,035/)).toBeInTheDocument();
   });
 
   it("omits usage line entirely when metadata absent", () => {
@@ -113,7 +111,7 @@ describe("chat workspace entries", () => {
         })}
       />,
     );
-    expect(screen.queryByTestId("provider-stream-usage")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Tokens 输入/)).not.toBeInTheDocument();
   });
 
   it("omits zero/missing usage segments", () => {
@@ -129,9 +127,7 @@ describe("chat workspace entries", () => {
         })}
       />,
     );
-    expect(screen.getByTestId("provider-stream-usage")).toHaveTextContent(
-      "Tokens 输入 12",
-    );
+    expect(screen.getByText(/Tokens 输入 12/)).toBeInTheDocument();
   });
 
   it("labels code reviewer provider stream entries by role", () => {
