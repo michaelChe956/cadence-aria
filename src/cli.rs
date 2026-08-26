@@ -237,7 +237,13 @@ fn parse_workspace(args: &[String]) -> Result<PathBuf, CliError> {
                 code: "invalid_cli_args".to_string(),
                 message: "--workspace requires a path".to_string(),
             })?;
-            return Ok(Path::new(value).to_path_buf());
+            let workspace = Path::new(value);
+            if workspace.is_absolute() {
+                return Ok(workspace.to_path_buf());
+            }
+            return std::env::current_dir()
+                .map(|current_dir| current_dir.join(workspace))
+                .map_err(internal_error);
         }
         index += 1;
     }
@@ -275,5 +281,37 @@ fn task_status_text(status: &TaskRunStatus) -> &'static str {
         TaskRunStatus::Completed => "completed",
         TaskRunStatus::Failed => "failed",
         TaskRunStatus::BlockedByGate => "blocked_by_gate",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_workspace;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_workspace_makes_relative_workspace_absolute() {
+        let workspace = parse_workspace(&["--workspace".to_string(), ".".to_string()]).unwrap();
+        let current_dir = std::env::current_dir().unwrap();
+
+        assert!(workspace.is_absolute());
+        assert_eq!(
+            workspace.canonicalize().unwrap(),
+            current_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_workspace_preserves_absolute_workspace() {
+        let workspace = parse_workspace(&["--workspace".to_string(), "/tmp".to_string()]).unwrap();
+
+        assert_eq!(workspace, PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn parse_workspace_without_workspace_uses_current_directory() {
+        let workspace = parse_workspace(&[]).unwrap();
+
+        assert_eq!(workspace, std::env::current_dir().unwrap());
     }
 }
