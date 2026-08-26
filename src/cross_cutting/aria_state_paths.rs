@@ -50,6 +50,22 @@ impl AriaStatePaths {
     pub fn image_create_session_scratch_dir(&self, id: &str) -> PathBuf {
         self.aria_root.join("image_create/scratch").join(id)
     }
+
+    pub fn image_create_images_dir(&self) -> PathBuf {
+        self.aria_root.join("image_create/images")
+    }
+
+    pub fn image_create_image_file(&self, image_id: &str, media_type: &str) -> Option<PathBuf> {
+        let extension =
+            crate::product::image_create::image_files::media_type_extension(media_type)?;
+        if !crate::product::image_create::image_files::valid_image_id(image_id) {
+            return None;
+        }
+        Some(
+            self.image_create_images_dir()
+                .join(format!("{image_id}.{extension}")),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +130,32 @@ mod tests {
         assert_eq!(
             paths.image_create_session_scratch_dir("session-1"),
             workspace_root.join(".aria/image_create/scratch/session-1")
+        );
+    }
+
+    #[test]
+    fn aria_state_paths_resolves_image_create_image_locations() {
+        let workspace_root = PathBuf::from("/tmp/workspace-root");
+        let paths = AriaStatePaths::from_workspace_root(&workspace_root);
+
+        assert_eq!(
+            paths.image_create_images_dir(),
+            workspace_root.join(".aria/image_create/images")
+        );
+        assert_eq!(
+            paths.image_create_image_file("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "image/png"),
+            Some(
+                workspace_root
+                    .join(".aria/image_create/images/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0.png")
+            )
+        );
+        assert_eq!(
+            paths.image_create_image_file("../escape", "image/png"),
+            None
+        );
+        assert_eq!(
+            paths.image_create_image_file("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "image/gif"),
+            None
         );
     }
 }

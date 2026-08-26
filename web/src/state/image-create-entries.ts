@@ -34,7 +34,7 @@ export type GenerationImage = ImageChatEntryBase & {
   role: "provider";
   prompt: string;
   mediaType: string;
-  base64: string;
+  imageUrl: string;
 };
 
 export type GenerationError = ImageChatEntryBase & {

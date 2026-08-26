@@ -17,9 +17,9 @@ beforeEach(() => {
 
 describe("ChatPane", () => {
   it.each([
-    ["image/png", "data:image/png;base64,cG5n"],
-    ["image/webp", "data:image/webp;base64,d2VicA=="],
-  ])("renders generation images using their media type", (mediaType, expectedSrc) => {
+    ["image/png", "/api/image-create/sessions/session-1/images/png-image"],
+    ["image/webp", "/api/image-create/sessions/session-1/images/webp-image"],
+  ])("renders generation images using their endpoint URL", (mediaType, expectedSrc) => {
     useImageCreateStore.setState({
       entries: [
         {
@@ -29,7 +29,7 @@ describe("ChatPane", () => {
           content: "生成的图片",
           prompt: "商务插画",
           mediaType,
-          base64: mediaType === "image/png" ? "cG5n" : "d2VicA==",
+          imageUrl: expectedSrc,
           timestamp: "2026-08-03T10:00:00Z",
         },
       ],
@@ -41,6 +41,36 @@ describe("ChatPane", () => {
       "src",
       expectedSrc,
     );
+    expect(screen.getByRole("link", { name: "下载原图" })).toHaveAttribute(
+      "href",
+      expectedSrc,
+    );
+    expect(screen.getByRole("link", { name: "下载原图" })).toHaveAttribute(
+      "download",
+      `image-create-image-1.${mediaType.split("/")[1]}`,
+    );
+  });
+
+  it("shows a readable placeholder when an image endpoint fails", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "image-1",
+          type: "generation_image",
+          role: "provider",
+          content: "生成的图片",
+          prompt: "商务插画",
+          mediaType: "image/png",
+          imageUrl: "/api/image-create/sessions/session-1/images/missing-image",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+    fireEvent.error(screen.getByRole("img", { name: "商务插画" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("图片文件缺失");
   });
 
   it("shows readable generation errors", () => {

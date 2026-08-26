@@ -120,6 +120,8 @@ mod web_event_taxonomy;
 mod web_events;
 #[path = "it_web/web_hard_gate.rs"]
 mod web_hard_gate;
+#[path = "it_web/web_image_create_file_storage.rs"]
+mod web_image_create_file_storage;
 #[path = "it_web/web_lifecycle_api.rs"]
 mod web_lifecycle_api;
 #[path = "it_web/web_listening_line.rs"]

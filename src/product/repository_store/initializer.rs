@@ -37,6 +37,8 @@ impl ClaudeRepositoryInitializer {
         }
     }
 
+    // 存量大 Err 签名，待后续统一 Box 化重构；新代码不得新增此豁免
+    #[allow(clippy::result_large_err)]
     pub async fn initialize(
         &self,
         git_root: &Path,
@@ -106,6 +108,7 @@ impl ClaudeRepositoryInitializer {
         Ok(summaries)
     }
 
+    #[allow(clippy::result_large_err)]
     async fn run_turn(
         &self,
         adapter: Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,
@@ -142,6 +145,7 @@ impl ClaudeRepositoryInitializer {
             .await
     }
 
+    #[allow(clippy::result_large_err)]
     async fn consume_session(
         &self,
         mut session: ProviderSession,

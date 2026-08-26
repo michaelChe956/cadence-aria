@@ -65,6 +65,10 @@ function sessionPath(sessionId: string): string {
   return `${API_ROOT}/sessions/${encodeURIComponent(sessionId)}`;
 }
 
+export function imageUrl(sessionId: string, imageId: string): string {
+  return `${sessionPath(sessionId)}/images/${encodeURIComponent(imageId)}`;
+}
+
 export function listImageCreateSessions(): Promise<SessionSummary[]> {
   return requestJson<SessionSummary[]>(`${API_ROOT}/sessions`);
 }

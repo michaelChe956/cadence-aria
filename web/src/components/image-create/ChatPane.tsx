@@ -222,6 +222,50 @@ function PromptBlockEntry({ content, version }: { content: string; version?: num
   );
 }
 
+function GenerationImageEntry({
+  entry,
+}: {
+  entry: Extract<ImageChatEntry, { type: "generation_image" }>;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <div
+        role="alert"
+        className="rounded-xl border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-4 py-3 text-sm font-semibold text-[var(--aria-ink)] shadow-sm"
+      >
+        图片文件缺失
+      </div>
+    );
+  }
+
+  const extension = entry.mediaType.split("/")[1] ?? "png";
+  return (
+    <article className="overflow-hidden rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-[0_4px_16px_rgba(15,23,42,0.08),0_16px_36px_rgba(15,23,42,0.08)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg">
+      <div className="bg-[var(--aria-panel-subtle)] p-2">
+        <img
+          src={entry.imageUrl}
+          alt={entry.prompt || "生成图片"}
+          className="max-h-[32rem] w-full rounded-xl object-contain"
+          onError={() => setFailed(true)}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t border-[var(--aria-line)] px-4 py-3">
+        <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
+        <a
+          href={entry.imageUrl}
+          download={`image-create-${entry.id}.${extension}`}
+          className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-3 py-2 text-xs font-semibold text-white shadow-[0_3px_10px_rgba(8,145,178,0.22)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+        >
+          <Download aria-hidden="true" className="h-3.5 w-3.5" />
+          下载原图
+        </a>
+      </div>
+    </article>
+  );
+}
+
 function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
   switch (entry.type) {
     case "user_message":
@@ -234,32 +278,8 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
       return <ProviderTextEntry content={entry.content} />;
     case "prompt_block":
       return <PromptBlockEntry content={entry.content} version={entry.version} />;
-    case "generation_image": {
-      const extension = entry.mediaType.split("/")[1] ?? "png";
-      const dataUri = `data:${entry.mediaType};base64,${entry.base64}`;
-      return (
-        <article className="overflow-hidden rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-[0_4px_16px_rgba(15,23,42,0.08),0_16px_36px_rgba(15,23,42,0.08)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg">
-          <div className="bg-[var(--aria-panel-subtle)] p-2">
-            <img
-              src={dataUri}
-              alt={entry.prompt || "生成图片"}
-              className="max-h-[32rem] w-full rounded-xl object-contain"
-            />
-          </div>
-          <div className="flex items-center justify-between gap-3 border-t border-[var(--aria-line)] px-4 py-3">
-            <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
-            <a
-              href={dataUri}
-              download={`image-create-${Date.now()}.${extension}`}
-              className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-3 py-2 text-xs font-semibold text-white shadow-[0_3px_10px_rgba(8,145,178,0.22)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
-            >
-              <Download aria-hidden="true" className="h-3.5 w-3.5" />
-              下载原图
-            </a>
-          </div>
-        </article>
-      );
-    }
+    case "generation_image":
+      return <GenerationImageEntry entry={entry} />;
     case "generation_error":
       return (
         <div

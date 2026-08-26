@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CHANGELOG, CURRENT_VERSION, type ChangelogEntry } from "./changelog";
+import { CURRENT_VERSION, recentEntries, type ChangelogEntry } from "./changelog";
 
 export const WHATS_NEW_SEEN_KEY = "aria-whats-new-seen";
 
@@ -23,14 +23,15 @@ function writeSeenVersion(version: string): void {
 
 export function useWhatsNew(): {
   open: boolean;
-  entry: ChangelogEntry | null;
+  entries: ChangelogEntry[];
   close: () => void;
 } {
-  const entry = CHANGELOG.find((item) => item.version === CURRENT_VERSION) ?? null;
+  const entries = recentEntries(CURRENT_VERSION);
+  const currentEntry = entries[0] ?? null;
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    if (!entry) {
+    if (!currentEntry) {
       return;
     }
     const seen = readSeenVersion();
@@ -39,12 +40,12 @@ export function useWhatsNew(): {
       return;
     }
     setOpen(seen !== CURRENT_VERSION);
-  }, [entry]);
+  }, [currentEntry]);
 
   const close = () => {
     writeSeenVersion(CURRENT_VERSION);
     setOpen(false);
   };
 
-  return { open, entry, close };
+  return { open, entries, close };
 }

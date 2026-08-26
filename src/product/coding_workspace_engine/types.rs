@@ -227,6 +227,8 @@ impl CancellableCodingEventSender {
         }
     }
 
+    // 存量大 Err 签名，待后续统一 Box 化重构；新代码不得新增此豁免
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn send(
         &self,
         event: CodingWsOutMessage,

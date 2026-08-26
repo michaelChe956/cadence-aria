@@ -162,6 +162,79 @@ pub struct SessionSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GenerationResultDto {
+    pub prompt: String,
+    pub params: DefaultParams,
+    pub media_type: String,
+    pub image_id: Option<String>,
+    pub legacy_pending: bool,
+    pub ts: DateTime<Utc>,
+}
+
+impl From<GenerationResult> for GenerationResultDto {
+    fn from(result: GenerationResult) -> Self {
+        Self {
+            prompt: result.prompt,
+            params: result.params,
+            media_type: result.media_type,
+            image_id: result.image_id,
+            legacy_pending: result.b64.is_some(),
+            ts: result.ts,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionRecordDto {
+    pub session: ImageCreateSession,
+    pub messages: Vec<ChatMessage>,
+    pub prompt_blocks: Vec<PromptBlock>,
+    pub generation_results: Vec<GenerationResultDto>,
+    pub events: Vec<SessionEvent>,
+    pub generation: u64,
+}
+
+impl From<SessionRecord> for SessionRecordDto {
+    fn from(record: SessionRecord) -> Self {
+        Self {
+            session: record.session,
+            messages: record.messages,
+            prompt_blocks: record.prompt_blocks,
+            generation_results: record
+                .generation_results
+                .into_iter()
+                .map(GenerationResultDto::from)
+                .collect(),
+            events: record.events,
+            generation: record.generation,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionSummaryDto {
+    pub id: String,
+    pub provider_name: ProviderName,
+    pub template: TemplateChoice,
+    pub status: SessionStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<SessionSummary> for SessionSummaryDto {
+    fn from(summary: SessionSummary) -> Self {
+        Self {
+            id: summary.id,
+            provider_name: summary.provider_name,
+            template: summary.template,
+            status: summary.status,
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -180,7 +253,10 @@ pub struct GenerationResult {
     pub prompt: String,
     pub params: DefaultParams,
     pub media_type: String,
-    pub b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b64: Option<String>,
     pub ts: DateTime<Utc>,
 }
 
@@ -372,5 +448,34 @@ mod tests {
         assert!(validate_session_id("a/b").is_err());
         assert!(validate_session_id("a\\b").is_err());
         assert!(validate_session_id("valid-id-1").is_ok());
+    }
+
+    #[test]
+    fn generation_result_serializes_reference_form_without_b64() {
+        let result = GenerationResult {
+            prompt: "p".to_string(),
+            params: DefaultParams::default(),
+            media_type: "image/png".to_string(),
+            image_id: Some("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".to_string()),
+            b64: None,
+            ts: Utc::now(),
+        };
+        let json = serde_json::to_string(&result).expect("serialize");
+        assert!(json.contains("image_id"));
+        assert!(!json.contains("b64"));
+    }
+
+    #[test]
+    fn generation_result_deserializes_legacy_inline_b64() {
+        let legacy = r#"{
+            "prompt": "p",
+            "params": {"size": "auto", "quality": "auto", "background": "auto", "output_format": "png"},
+            "media_type": "image/png",
+            "b64": "aGVsbG8=",
+            "ts": "2026-08-26T00:00:00Z"
+        }"#;
+        let result: GenerationResult = serde_json::from_str(legacy).expect("deserialize legacy");
+        assert_eq!(result.b64.as_deref(), Some("aGVsbG8="));
+        assert_eq!(result.image_id, None);
     }
 }

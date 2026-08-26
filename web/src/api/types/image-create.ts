@@ -107,7 +107,8 @@ export type ImageGenerationResult = {
   prompt: string;
   params: DefaultImageParams;
   media_type: string;
-  b64: string;
+  image_id: string | null;
+  legacy_pending: boolean;
   ts: string;
 };
 
@@ -141,7 +142,7 @@ export type IterationEvent = {
 
 export type ImageGenerationResponse = {
   media_type: string;
-  b64: string;
+  image_id: string;
 };
 
 export type GenerateImageRequest = ImageCreateParams & {

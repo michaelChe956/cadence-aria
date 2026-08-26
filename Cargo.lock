@@ -437,6 +437,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "codex-app-server-protocol",
  "codex-protocol",
