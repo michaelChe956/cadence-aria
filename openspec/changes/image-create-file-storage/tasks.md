@@ -33,5 +33,5 @@
 
 ## 7. 端到端验证
 
-- [ ] 7.1 集成测试：旧版含 b64 会话 JSON → 新代码打开 → 响应无 base64、图片端点可取、磁盘文件生成；多图旧会话加载
+- [x] 7.1 集成测试：旧版含 b64 会话 JSON → 新代码打开 → 响应无 base64、图片端点可取、磁盘文件生成；多图旧会话加载
 - [ ] 7.2 手动验证：`pnpm dev` 前端连后端，生成新图、回看历史会话（含迁移后的旧会话）、删除会话后确认图片 404 与文件清理；`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked`、`cd web && pnpm test` 全绿
