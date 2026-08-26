@@ -347,7 +347,8 @@ impl ImageCreateEngine {
                         output_format: req.output_format,
                     },
                     media_type: outcome.media_type,
-                    b64: outcome.b64,
+                    image_id: None,
+                    b64: Some(outcome.b64),
                     ts: Utc::now(),
                 };
                 if let Err(error) = self
@@ -824,7 +825,7 @@ mod tests {
                 .generate("session", request("draw"), reference.clone())
                 .await
                 .expect("generate");
-            assert_eq!(result.b64, "AAAA");
+            assert_eq!(result.b64.as_deref(), Some("AAAA"));
             assert_eq!(
                 client.references.lock().await[0].is_some(),
                 reference.is_some()

@@ -406,7 +406,8 @@ mod tests {
                 output_format: ImageOutputFormat::Png,
             },
             media_type: "image/png".to_string(),
-            b64: "aW1hZ2U=".to_string(),
+            image_id: None,
+            b64: Some("aW1hZ2U=".to_string()),
             ts: Utc::now(),
         }
     }
