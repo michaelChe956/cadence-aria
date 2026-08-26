@@ -2,10 +2,10 @@ import { Sparkles, X } from "lucide-react";
 import type { ChangelogEntry } from "../../whats-new/changelog";
 
 export function WhatsNewDialog({
-  entry,
+  entries,
   onClose,
 }: {
-  entry: ChangelogEntry;
+  entries: ChangelogEntry[];
   onClose: () => void;
 }) {
   return (
@@ -21,12 +21,7 @@ export function WhatsNewDialog({
             <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)] shadow-sm">
               <Sparkles aria-hidden="true" className="h-5 w-5" />
             </span>
-            <div>
-              <h2 className="text-base font-semibold text-[var(--aria-ink)]">
-                {entry.title}
-              </h2>
-              <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">{entry.date}</p>
-            </div>
+            <h2 className="text-base font-semibold text-[var(--aria-ink)]">版本更新说明</h2>
           </div>
           <button
             type="button"
@@ -38,20 +33,34 @@ export function WhatsNewDialog({
           </button>
         </div>
 
-        <ul className="space-y-2.5">
-          {entry.highlights.map((item, index) => (
-            <li
-              key={index}
-              className="flex items-start gap-2.5 text-sm text-[var(--aria-ink)]"
+        <div className="divide-y divide-[var(--aria-line)]">
+          {entries.map((entry) => (
+            <section
+              key={entry.version}
+              aria-label={`${entry.version} · ${entry.date}`}
+              className="py-5 first:pt-0 last:pb-0"
             >
-              <span
-                aria-hidden="true"
-                className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--aria-primary)]"
-              />
-              <span>{item}</span>
-            </li>
+              <h3 className="text-base font-semibold text-[var(--aria-ink)]">
+                v{entry.version} · {entry.date}
+              </h3>
+              <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">{entry.title}</p>
+              <ul className="mt-3 space-y-2.5">
+                {entry.highlights.map((item) => (
+                  <li
+                    key={item}
+                    className="flex items-start gap-2.5 text-sm text-[var(--aria-ink)]"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--aria-primary)]"
+                    />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
 
         <div className="mt-6 flex justify-end">
           <button

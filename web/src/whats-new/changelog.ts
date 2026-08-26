@@ -7,7 +7,18 @@ export interface ChangelogEntry {
 
 export const CURRENT_VERSION = "0.0.8";
 
+// 发布升版本时请裁剪数组，仅保留最新 4 条。
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.0.9",
+    // TODO: 发布时替换为真实日期
+    date: "2026-08-XX",
+    title: "图片创作提速与修复",
+    highlights: [
+      "图片创作生成图片改为本地文件存储，历史会话打开不再受 base64 拖累",
+      "修复 kimi code 提示词迭代失败问题",
+    ],
+  },
   {
     version: "0.0.8",
     date: "2026-08-17",
@@ -54,3 +65,12 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
 ];
+
+export function recentEntries(currentVersion: string, limit = 4): ChangelogEntry[] {
+  const currentVersionIndex = CHANGELOG.findIndex((item) => item.version === currentVersion);
+  if (currentVersionIndex === -1) {
+    return [];
+  }
+
+  return CHANGELOG.slice(currentVersionIndex, currentVersionIndex + limit);
+}

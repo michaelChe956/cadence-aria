@@ -10,10 +10,11 @@ describe("useWhatsNew", () => {
     window.localStorage.clear();
   });
 
-  it("未读当前版本时 open 为 true 并提供对应 entry", () => {
+  it("未读当前版本时 open 为 true 并提供从当前版本起的四条 entries", () => {
     const { result } = renderHook(() => useWhatsNew());
     expect(result.current.open).toBe(true);
-    expect(result.current.entry?.version).toBe(CURRENT_VERSION);
+    expect(result.current.entries).toHaveLength(4);
+    expect(result.current.entries[0]?.version).toBe(CURRENT_VERSION);
   });
 
   it("已读当前版本时 open 为 false", () => {
@@ -54,7 +55,7 @@ describe("useWhatsNew", () => {
       throw new Error("renderHook did not return a result");
     }
     expect(result.current.open).toBe(false);
-    expect(result.current.entry?.version).toBe(CURRENT_VERSION);
+    expect(result.current.entries[0]?.version).toBe(CURRENT_VERSION);
 
     if (original) {
       Object.defineProperty(window, "localStorage", original);
