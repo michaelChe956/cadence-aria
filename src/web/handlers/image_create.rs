@@ -158,8 +158,8 @@ pub async fn generate_image(
     let (request, reference) = parse_generate_multipart(multipart).await?;
     let result = engine(&state)?.generate(&id, request, reference).await?;
     Ok(Json(json!({
+        "image_id": result.image_id,
         "media_type": result.media_type,
-        "b64": result.b64,
     })))
 }
 
@@ -792,10 +792,10 @@ mod tests {
             .await
             .expect("generate response");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response_json::<Value>(response).await,
-            json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
-        );
+        let result = response_json::<Value>(response).await;
+        assert!(result["image_id"].as_str().is_some());
+        assert_eq!(result["media_type"], "image/png");
+        assert!(result.get("b64").is_none());
     }
 
     #[tokio::test]
@@ -992,10 +992,10 @@ mod tests {
             .expect("generate response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response_json::<Value>(response).await,
-            json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
-        );
+        let result = response_json::<Value>(response).await;
+        assert!(result["image_id"].as_str().is_some());
+        assert_eq!(result["media_type"], "image/png");
+        assert!(result.get("b64").is_none());
     }
 
     #[tokio::test]
