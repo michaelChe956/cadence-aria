@@ -436,7 +436,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::engine::general_purpose;
     use image::codecs::png::PngEncoder;
     use image::{ExtendedColorType, ImageEncoder};
     use tokio::sync::Notify;
