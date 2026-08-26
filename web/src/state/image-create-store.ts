@@ -6,6 +6,7 @@ import {
   getImageCreateSession,
   getImageCreateSettings,
   imageCreateChatWebSocketUrl,
+  imageUrl,
   listImageCreateSessions,
   updateImageCreateSettings,
 } from "../api/image-create";
@@ -120,16 +121,36 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
       version: block.version,
       timestamp: record.session.created_at,
     })),
-    ...record.generation_results.map<ImageChatEntry>((result) => ({
-      id: entryId("image"),
-      type: "generation_image",
-      role: "provider",
-      content: result.prompt,
-      prompt: result.prompt,
-      mediaType: result.media_type,
-      base64: result.b64,
-      timestamp: result.ts,
-    })),
+    ...record.generation_results.map<ImageChatEntry>((result) => {
+      if (result.image_id) {
+        return {
+          id: entryId("image"),
+          type: "generation_image",
+          role: "provider",
+          content: result.prompt,
+          prompt: result.prompt,
+          mediaType: result.media_type,
+          imageUrl: imageUrl(record.session.id, result.image_id),
+          timestamp: result.ts,
+        };
+      }
+      if (result.legacy_pending) {
+        return {
+          id: entryId("event"),
+          type: "system_notice",
+          role: "system",
+          content: "历史图片正在迁移，请稍后刷新",
+          timestamp: result.ts,
+        };
+      }
+      return {
+        id: entryId("error"),
+        type: "generation_error",
+        role: "system",
+        content: "图片引用缺失",
+        timestamp: result.ts,
+      };
+    }),
     ...record.events.map<ImageChatEntry>((event) => ({
       id: entryId("event"),
       type:
@@ -493,7 +514,7 @@ export const useImageCreateStore = create<
         content: params.prompt,
         prompt: params.prompt,
         mediaType: result.media_type,
-        base64: result.b64,
+        imageUrl: imageUrl(sessionId, result.image_id),
         timestamp: new Date().toISOString(),
       });
       set({ isBusy: false });

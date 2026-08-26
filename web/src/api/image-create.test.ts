@@ -3,6 +3,7 @@ import {
   createImageCreateSession,
   generateImage,
   getImageCreateSettings,
+  imageUrl,
   listImageCreateSessions,
   updateImageCreateSettings,
 } from "./image-create";
@@ -91,14 +92,14 @@ describe("image create api", () => {
 
   it("sends generate as FormData without overriding its multipart boundary", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse({ media_type: "image/png", b64: "aW1hZ2U=" }),
+      jsonResponse({ media_type: "image/png", image_id: "image-1" }),
     );
     vi.stubGlobal("fetch", fetchMock);
     const reference = new File(["reference"], "reference.png", {
       type: "image/png",
     });
 
-    await generateImage("session/with space", {
+    const result = await generateImage("session/with space", {
       prompt: "draw a launch diagram",
       size: "1536x1024",
       quality: "high",
@@ -123,11 +124,12 @@ describe("image create api", () => {
     expect(form.get("output_format")).toBe("png");
     expect(form.get("input_fidelity")).toBe("high");
     expect(form.get("reference")).toBe(reference);
+    expect(result).toEqual({ media_type: "image/png", image_id: "image-1" });
   });
 
   it("omits input_fidelity when generate has no reference image", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse({ media_type: "image/png", b64: "aW1hZ2U=" }),
+      jsonResponse({ media_type: "image/png", image_id: "image-1" }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -144,6 +146,12 @@ describe("image create api", () => {
     const form = fetchMock.mock.calls[0][1]?.body as FormData;
     expect(form.has("reference")).toBe(false);
     expect(form.has("input_fidelity")).toBe(false);
+  });
+
+  it("builds encoded session image endpoint URLs", () => {
+    expect(imageUrl("session/with space", "image/id & value")).toBe(
+      "/api/image-create/sessions/session%2Fwith%20space/images/image%2Fid%20%26%20value",
+    );
   });
 
   it.each([
