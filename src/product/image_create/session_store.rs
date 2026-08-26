@@ -343,6 +343,34 @@ impl SessionStoreApi for SessionStore {
             ));
         }
 
+        for result in &record.generation_results {
+            let Some(image_id) = result.image_id.as_deref() else {
+                continue;
+            };
+            let Some(image_path) = self
+                .paths
+                .image_create_image_file(image_id, &result.media_type)
+            else {
+                tracing::warn!(
+                    session_id = %lease.id,
+                    image_id,
+                    media_type = %result.media_type,
+                    "failed to resolve session image file for deletion"
+                );
+                continue;
+            };
+            match tokio::fs::remove_file(&image_path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    session_id = %lease.id,
+                    image_id,
+                    error = %error,
+                    "failed to remove session image file"
+                ),
+            }
+        }
+
         let scratch_dir = self.paths.image_create_session_scratch_dir(&lease.id);
         match tokio::fs::remove_dir_all(&scratch_dir).await {
             Ok(()) => {}
@@ -958,6 +986,124 @@ mod tests {
                 !fixture
                     .paths
                     .image_create_session_scratch_dir(&session.id)
+                    .exists()
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_session_removes_its_image_files() {
+            let fixture = Fixture::new();
+            let session = fixture.create().await;
+            let image_ids = [
+                "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+                "1f2e3d4c-5b6a-7980-8997-b6c5d4e3f2a1",
+            ];
+            let media_types = ["image/png", "image/jpeg"];
+
+            for ((image_id, media_type), contents) in image_ids
+                .iter()
+                .zip(media_types)
+                .zip([b"first image".as_slice(), b"second image".as_slice()])
+            {
+                fixture
+                    .store
+                    .append_generation_result(
+                        &session.id,
+                        GenerationResult {
+                            prompt: "migrated".to_string(),
+                            params: DefaultParams::default(),
+                            media_type: media_type.to_string(),
+                            image_id: Some((*image_id).to_string()),
+                            b64: None,
+                            ts: Utc::now(),
+                        },
+                    )
+                    .await
+                    .expect("append migrated result");
+                write_image_atomic(&fixture.paths, image_id, media_type, contents)
+                    .await
+                    .expect("write image file");
+            }
+
+            let image_files: Vec<_> = image_ids
+                .iter()
+                .zip(media_types)
+                .map(|(image_id, media_type)| {
+                    fixture
+                        .paths
+                        .image_create_image_file(image_id, media_type)
+                        .expect("image path")
+                })
+                .collect();
+            assert!(image_files.iter().all(|path| path.exists()));
+
+            let lease = fixture
+                .store
+                .begin_delete(&session.id)
+                .await
+                .expect("begin delete")
+                .expect("lease");
+            fixture
+                .store
+                .finish_delete(lease)
+                .await
+                .expect("finish delete");
+
+            assert!(image_files.iter().all(|path| !path.exists()));
+            assert!(
+                !fixture
+                    .paths
+                    .image_create_session_file(&session.id)
+                    .exists()
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_session_continues_when_an_image_file_cannot_be_removed() {
+            let fixture = Fixture::new();
+            let session = fixture.create().await;
+            let image_id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+            let media_type = "image/png";
+            fixture
+                .store
+                .append_generation_result(
+                    &session.id,
+                    GenerationResult {
+                        prompt: "migrated".to_string(),
+                        params: DefaultParams::default(),
+                        media_type: media_type.to_string(),
+                        image_id: Some(image_id.to_string()),
+                        b64: None,
+                        ts: Utc::now(),
+                    },
+                )
+                .await
+                .expect("append migrated result");
+            let image_path = fixture
+                .paths
+                .image_create_image_file(image_id, media_type)
+                .expect("image path");
+            tokio::fs::create_dir_all(&image_path)
+                .await
+                .expect("create non-removable image-file path");
+
+            let lease = fixture
+                .store
+                .begin_delete(&session.id)
+                .await
+                .expect("begin delete")
+                .expect("lease");
+            fixture
+                .store
+                .finish_delete(lease)
+                .await
+                .expect("finish delete despite image cleanup failure");
+
+            assert!(image_path.is_dir());
+            assert!(
+                !fixture
+                    .paths
+                    .image_create_session_file(&session.id)
                     .exists()
             );
         }
