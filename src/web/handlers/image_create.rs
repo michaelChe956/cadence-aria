@@ -15,8 +15,8 @@ use crate::cross_cutting::image_client::{ImageGenRequest, ImageRefImage};
 use crate::cross_cutting::image_reference_validation::validate_reference_image;
 use crate::product::image_create::models::{
     CreateSessionRequest, ImageBackground, ImageCreateError, ImageOutputFormat, ImageQuality,
-    ImageSize, IterationEvent, SessionStoreApi, SettingsStoreApi, SettingsUpdateRequest,
-    validate_session_id,
+    ImageSize, IterationEvent, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
+    SettingsStoreApi, SettingsUpdateRequest, validate_session_id,
 };
 use crate::product::image_create::{ImageCreateEngine, SessionStore, SettingsStore};
 use crate::web::state::WebAppState;
@@ -96,6 +96,10 @@ fn checked_session_id(id: String) -> HandlerResult<String> {
 
 pub async fn list_sessions(State(state): State<WebAppState>) -> HandlerResult<impl IntoResponse> {
     let sessions = session_store(&state).list().await?;
+    let sessions = sessions
+        .into_iter()
+        .map(SessionSummaryDto::from)
+        .collect::<Vec<_>>();
     Ok(Json(sessions))
 }
 
@@ -116,7 +120,7 @@ pub async fn get_session(
         .get(&id)
         .await?
         .ok_or(ImageCreateError::SessionNotFound)?;
-    Ok(Json(record))
+    Ok(Json(SessionRecordDto::from(record)))
 }
 
 pub async fn delete_session(
@@ -346,6 +350,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
+    use chrono::Utc;
     use futures_util::{SinkExt, StreamExt};
     use image::ImageEncoder;
     use image::codecs::png::PngEncoder;
@@ -646,6 +651,59 @@ mod tests {
             .await
             .expect("invalid response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn session_response_strips_legacy_inline_b64() {
+        let root = tempdir().expect("root");
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+        let store = SessionStore::new(paths.clone());
+        let session = store
+            .create(
+                serde_json::from_value(json!({
+                    "template": {"preset": "ppt_business_illustration", "custom": null},
+                    "provider_name": "fake"
+                }))
+                .expect("create request"),
+            )
+            .await
+            .expect("session");
+        let path = paths.image_create_session_file(&session.id);
+        let bytes = tokio::fs::read(&path).await.expect("read record");
+        let mut record: Value = serde_json::from_slice(&bytes).expect("record json");
+        record["generation_results"] = json!([{
+            "prompt": "legacy prompt",
+            "params": {
+                "size": "auto",
+                "quality": "auto",
+                "background": "auto",
+                "output_format": "png"
+            },
+            "media_type": "image/png",
+            "b64": "not-base64",
+            "ts": Utc::now().to_rfc3339()
+        }]);
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap())
+            .await
+            .expect("inject legacy record");
+
+        let app = build_web_router(state(root.path()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/image-create/sessions/{}", session.id))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("get response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(!body.contains("\"b64\""));
+        assert!(body.contains("\"legacy_pending\":true"));
     }
 
     #[tokio::test]

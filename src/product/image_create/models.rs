@@ -162,6 +162,79 @@ pub struct SessionSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GenerationResultDto {
+    pub prompt: String,
+    pub params: DefaultParams,
+    pub media_type: String,
+    pub image_id: Option<String>,
+    pub legacy_pending: bool,
+    pub ts: DateTime<Utc>,
+}
+
+impl From<GenerationResult> for GenerationResultDto {
+    fn from(result: GenerationResult) -> Self {
+        Self {
+            prompt: result.prompt,
+            params: result.params,
+            media_type: result.media_type,
+            image_id: result.image_id,
+            legacy_pending: result.b64.is_some(),
+            ts: result.ts,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionRecordDto {
+    pub session: ImageCreateSession,
+    pub messages: Vec<ChatMessage>,
+    pub prompt_blocks: Vec<PromptBlock>,
+    pub generation_results: Vec<GenerationResultDto>,
+    pub events: Vec<SessionEvent>,
+    pub generation: u64,
+}
+
+impl From<SessionRecord> for SessionRecordDto {
+    fn from(record: SessionRecord) -> Self {
+        Self {
+            session: record.session,
+            messages: record.messages,
+            prompt_blocks: record.prompt_blocks,
+            generation_results: record
+                .generation_results
+                .into_iter()
+                .map(GenerationResultDto::from)
+                .collect(),
+            events: record.events,
+            generation: record.generation,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionSummaryDto {
+    pub id: String,
+    pub provider_name: ProviderName,
+    pub template: TemplateChoice,
+    pub status: SessionStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<SessionSummary> for SessionSummaryDto {
+    fn from(summary: SessionSummary) -> Self {
+        Self {
+            id: summary.id,
+            provider_name: summary.provider_name,
+            template: summary.template,
+            status: summary.status,
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,

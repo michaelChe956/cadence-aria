@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -11,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+use crate::product::image_create::image_files::write_image_atomic;
 
 use super::models::{
     ChatMessage, CreateSessionRequest, DeleteLease, GenerationResult, ImageCreateError,
@@ -64,6 +66,70 @@ impl SessionStore {
         } else {
             Ok(())
         }
+    }
+
+    async fn migrate_legacy_results(
+        &self,
+        id: &str,
+        mut record: SessionRecord,
+    ) -> Result<SessionRecord, ImageCreateError> {
+        if record.session.status == SessionStatus::Deleting {
+            return Ok(record);
+        }
+
+        let mut changed = false;
+        for result in &mut record.generation_results {
+            let Some(b64) = result.b64.as_deref() else {
+                continue;
+            };
+            let image_id = result
+                .image_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            result.image_id = Some(image_id.clone());
+            changed = true;
+
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = id,
+                        image_id,
+                        error = %error,
+                        "failed to decode legacy inline image"
+                    );
+                    break;
+                }
+            };
+            if let Err(error) =
+                write_image_atomic(&self.paths, &image_id, &result.media_type, &bytes).await
+            {
+                tracing::warn!(
+                    session_id = id,
+                    image_id,
+                    error = %error,
+                    "failed to migrate legacy inline image"
+                );
+                break;
+            }
+            result.b64 = None;
+        }
+
+        if !changed {
+            return Ok(record);
+        }
+        if let Err(error) = self.write_record(&record).await {
+            tracing::warn!(
+                session_id = id,
+                error = %error,
+                "failed to persist legacy image migration; returning disk record"
+            );
+            return self
+                .read_record(id)
+                .await?
+                .ok_or(ImageCreateError::SessionNotFound);
+        }
+        Ok(record)
     }
 }
 
@@ -151,7 +217,12 @@ impl SessionStoreApi for SessionStore {
 
     async fn get(&self, id: &str) -> Result<Option<SessionRecord>, ImageCreateError> {
         validate_session_id(id)?;
-        self.read_record(id).await
+        let session_lock = self.session_lock(id).await;
+        let _guard = session_lock.lock().await;
+        let Some(record) = self.read_record(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.migrate_legacy_results(id, record).await?))
     }
 
     async fn append_message(&self, id: &str, msg: ChatMessage) -> Result<(), ImageCreateError> {
@@ -409,6 +480,187 @@ mod tests {
             image_id: None,
             b64: Some("aW1hZ2U=".to_string()),
             ts: Utc::now(),
+        }
+    }
+
+    async fn inject_legacy_result(
+        fixture: &Fixture,
+        session_id: &str,
+        b64: &str,
+        media_type: &str,
+    ) {
+        let record = fixture.store.get(session_id).await.unwrap().unwrap();
+        let result = GenerationResult {
+            prompt: "legacy prompt".to_string(),
+            params: DefaultParams::default(),
+            media_type: media_type.to_string(),
+            image_id: None,
+            b64: Some(b64.to_string()),
+            ts: Utc::now(),
+        };
+        let mut value = serde_json::to_value(&record).unwrap();
+        let mut result_value = serde_json::to_value(result).unwrap();
+        result_value.as_object_mut().unwrap().remove("image_id");
+        value["generation_results"] = serde_json::json!([result_value]);
+        tokio::fs::write(
+            fixture.paths.image_create_session_file(session_id),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    mod migration {
+        use super::*;
+
+        #[tokio::test]
+        async fn get_migrates_legacy_inline_b64_to_image_file() {
+            let fixture = Fixture::new();
+            let session = fixture.create().await;
+            inject_legacy_result(&fixture, &session.id, "aGVsbG8=", "image/png").await;
+
+            let record = fixture.store.get(&session.id).await.unwrap().unwrap();
+            let migrated = &record.generation_results[0];
+            assert!(migrated.b64.is_none());
+            let id = migrated.image_id.as_deref().expect("id assigned");
+            let file = fixture
+                .paths
+                .image_create_image_file(id, "image/png")
+                .expect("image path");
+            assert_eq!(tokio::fs::read(file).await.unwrap(), b"hello");
+            assert_eq!(record.generation, 0);
+
+            let persisted = fixture.store.get(&session.id).await.unwrap().unwrap();
+            assert_eq!(persisted, record);
+        }
+
+        #[tokio::test]
+        async fn get_migration_reuses_existing_image_id_and_stops_after_failure() {
+            let fixture = Fixture::new();
+            let session = fixture.create().await;
+            let mut record = fixture.store.get(&session.id).await.unwrap().unwrap();
+            let existing_id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".to_string();
+            record.generation_results = vec![
+                GenerationResult {
+                    prompt: "first".to_string(),
+                    params: DefaultParams::default(),
+                    media_type: "image/png".to_string(),
+                    image_id: Some(existing_id.clone()),
+                    b64: Some("Zmlyc3Q=".to_string()),
+                    ts: Utc::now(),
+                },
+                GenerationResult {
+                    prompt: "invalid".to_string(),
+                    params: DefaultParams::default(),
+                    media_type: "image/png".to_string(),
+                    image_id: None,
+                    b64: Some("not-base64".to_string()),
+                    ts: Utc::now(),
+                },
+                GenerationResult {
+                    prompt: "third".to_string(),
+                    params: DefaultParams::default(),
+                    media_type: "image/png".to_string(),
+                    image_id: None,
+                    b64: Some("dGhpcmQ=".to_string()),
+                    ts: Utc::now(),
+                },
+            ];
+            fixture.store.write_record(&record).await.unwrap();
+
+            let migrated = fixture.store.get(&session.id).await.unwrap().unwrap();
+            assert_eq!(
+                migrated.generation_results[0].image_id.as_deref(),
+                Some(existing_id.as_str())
+            );
+            assert!(migrated.generation_results[0].b64.is_none());
+            assert!(migrated.generation_results[1].b64.is_some());
+            assert!(migrated.generation_results[1].image_id.is_some());
+            assert!(migrated.generation_results[2].b64.is_some());
+            assert_eq!(
+                tokio::fs::read(
+                    fixture
+                        .paths
+                        .image_create_image_file(&existing_id, "image/png")
+                        .unwrap()
+                )
+                .await
+                .unwrap(),
+                b"first"
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn get_migration_write_failure_returns_disk_record_and_is_retryable() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let fixture = Fixture::new();
+            let session = fixture.create().await;
+            inject_legacy_result(&fixture, &session.id, "aGVsbG8=", "image/png").await;
+            let original = fixture
+                .store
+                .read_record(&session.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                original.generation_results[0].b64.as_deref(),
+                Some("aGVsbG8=")
+            );
+
+            let sessions_dir = fixture.paths.image_create_sessions_dir();
+            let original_permissions = std::fs::metadata(&sessions_dir).unwrap().permissions();
+            let mut read_only = original_permissions.clone();
+            read_only.set_mode(0o555);
+            std::fs::set_permissions(&sessions_dir, read_only).unwrap();
+            let failed = fixture.store.get(&session.id).await.unwrap().unwrap();
+            std::fs::set_permissions(&sessions_dir, original_permissions).unwrap();
+
+            assert_eq!(failed, original);
+            assert!(failed.generation_results[0].image_id.is_none());
+            assert!(failed.generation_results[0].b64.is_some());
+
+            let retried = fixture.store.get(&session.id).await.unwrap().unwrap();
+            assert!(retried.generation_results[0].image_id.is_some());
+            assert!(retried.generation_results[0].b64.is_none());
+            let id = retried.generation_results[0].image_id.as_deref().unwrap();
+            assert_eq!(
+                tokio::fs::read(
+                    fixture
+                        .paths
+                        .image_create_image_file(id, "image/png")
+                        .unwrap()
+                )
+                .await
+                .unwrap(),
+                b"hello"
+            );
+        }
+
+        #[tokio::test]
+        async fn get_skips_migration_for_deleting_session() {
+            let fixture = Fixture::new();
+            let session = fixture.create().await;
+            fixture
+                .store
+                .append_generation_result(&session.id, generation_result("legacy"))
+                .await
+                .unwrap();
+            let lease = fixture
+                .store
+                .begin_delete(&session.id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let record = fixture.store.get(&session.id).await.unwrap().unwrap();
+            assert_eq!(
+                record.generation_results[0].b64.as_deref(),
+                Some("aW1hZ2U=")
+            );
+            assert!(record.generation_results[0].image_id.is_none());
+            assert_eq!(record.generation, lease.token);
         }
     }
 
