@@ -52,13 +52,13 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
         session_id,
     } = context;
 
-    let scope_submission_error = {
-        let engine = engine.lock().await;
-        single_candidate_scope_submission_error(
-            engine.session().flow_kind,
-            &envelope.submitted_fields,
-        )
-    };
+    // `ProviderRunContext.session_record` is the immutable session snapshot captured
+    // when the websocket was established; reading flow_kind here must not wait for
+    // the engine mutex held by a provider run.
+    let scope_submission_error = single_candidate_scope_submission_error(
+        run_context.session_record.flow_kind,
+        &envelope.submitted_fields,
+    );
     if let Some(err) = scope_submission_error {
         let _ = send_json_outbound(&outbound_tx, &err).await;
         return;

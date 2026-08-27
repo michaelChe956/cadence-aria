@@ -500,17 +500,6 @@ pub(crate) async fn handle_workspace_socket(
             }
         };
         let in_msg = &envelope.message;
-        let scope_submission_error = {
-            let engine = engine.lock().await;
-            single_candidate_scope_submission_error(
-                engine.session().flow_kind,
-                &envelope.submitted_fields,
-            )
-        };
-        if let Some(err) = scope_submission_error {
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-            continue;
-        }
         *last_client_message_at.lock().await = tokio::time::Instant::now();
 
         let stage_type_and_cancel_replay = if requires_stage_validation(in_msg) {

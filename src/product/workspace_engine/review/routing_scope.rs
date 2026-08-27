@@ -4,7 +4,73 @@ use crate::product::work_item_plan_policy::{
     FatalReason, PolicyDiagnostic, ReviewInvocationScope, ReviewPhase, WorkItemPlanFlowKind,
 };
 
+fn scope_for_action(
+    durable_scope: Option<&ReviewInvocationScope>,
+    invocation: &ReviewInvocationScope,
+    action: &RoutingAction,
+) -> Option<ReviewInvocationScope> {
+    if matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ) {
+        return durable_scope.cloned();
+    }
+    Some(invocation.clone())
+}
+
+fn validate_single_candidate_scope(
+    scope: ReviewInvocationScope,
+    phase: ReviewPhase,
+) -> Result<ReviewInvocationScope, RoutingAction> {
+    let phase_matches = matches!(
+        (phase, &scope),
+        (ReviewPhase::Initial, ReviewInvocationScope::Initial { .. })
+            | (
+                ReviewPhase::Verification,
+                ReviewInvocationScope::Verification { .. }
+            )
+    );
+    if !phase_matches {
+        return Err(RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: vec![PolicyDiagnostic {
+                code: "verification_scope_violation".to_string(),
+                message: "review invocation scope phase does not match review cycle phase"
+                    .to_string(),
+                field: Some("phase".to_string()),
+            }],
+        });
+    }
+    if let Err(error) = scope.validate_digest() {
+        return Err(RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: vec![PolicyDiagnostic {
+                code: "verification_scope_violation".to_string(),
+                message: format!("review invocation scope digest invalid: {error}"),
+                field: Some("scope_digest".to_string()),
+            }],
+        });
+    }
+    Ok(scope)
+}
+
 impl WorkspaceEngine {
+    pub(super) fn policy_scope_for_action(
+        &self,
+        invocation: &ReviewInvocationScope,
+        action: &RoutingAction,
+        durable_scope: Option<&ReviewInvocationScope>,
+    ) -> Option<ReviewInvocationScope> {
+        scope_for_action(
+            durable_scope.or(self.session.review_invocation_scope.as_ref()),
+            invocation,
+            action,
+        )
+    }
+
     pub(super) fn policy_invocation(
         &self,
         phase: ReviewPhase,
@@ -48,17 +114,7 @@ impl WorkspaceEngine {
                 });
             }
         };
-        if let Err(error) = scope.validate_digest() {
-            return Err(RoutingAction::AbortFatal {
-                reason: FatalReason::ProtocolViolation,
-                diagnostics: vec![PolicyDiagnostic {
-                    code: "verification_scope_violation".to_string(),
-                    message: format!("review invocation scope digest invalid: {error}"),
-                    field: Some("scope_digest".to_string()),
-                }],
-            });
-        }
-        Ok(scope)
+        validate_single_candidate_scope(scope, phase)
     }
 
     /// 在 reviewer provider 启动前为 SingleCandidate 建立服务端 scope，并以
@@ -193,5 +249,59 @@ impl WorkspaceEngine {
                 .unwrap_or_else(|_| format!("draft:{node_id}")),
             _ => format!("review:{node_id}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_candidate_scope_rejects_initial_scope_during_verification() {
+        let result = validate_single_candidate_scope(
+            ReviewInvocationScope::initial("revision-001"),
+            ReviewPhase::Verification,
+        );
+        assert!(matches!(
+            result,
+            Err(RoutingAction::AbortFatal {
+                reason: FatalReason::ProtocolViolation,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn single_candidate_scope_preserves_existing_scope_on_protocol_fatal() {
+        let durable_scope = ReviewInvocationScope::initial("durable-revision");
+        let replacement_scope = ReviewInvocationScope::initial("replacement-revision");
+        let action = RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: Vec::new(),
+        };
+        assert_eq!(
+            scope_for_action(Some(&durable_scope), &replacement_scope, &action),
+            Some(durable_scope)
+        );
+        assert_eq!(scope_for_action(None, &replacement_scope, &action), None);
+    }
+
+    #[test]
+    fn single_candidate_scope_rejects_verification_scope_during_initial() {
+        let result = validate_single_candidate_scope(
+            ReviewInvocationScope::verification(
+                std::collections::BTreeSet::new(),
+                "revision-001",
+                "report-001",
+            ),
+            ReviewPhase::Initial,
+        );
+        assert!(matches!(
+            result,
+            Err(RoutingAction::AbortFatal {
+                reason: FatalReason::ProtocolViolation,
+                ..
+            })
+        ));
     }
 }

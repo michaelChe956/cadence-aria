@@ -136,7 +136,6 @@ impl WorkspaceEngine {
         }
         unreachable!("the bounded CAS retry loop always returns")
     }
-
     fn evaluate_work_item_policy_route(
         &self,
         node_id: &str,
@@ -159,11 +158,12 @@ impl WorkspaceEngine {
         let invocation = match self.policy_invocation(phase, &cycle_key) {
             Ok(scope) => scope,
             Err(action) => {
-                return Some((
-                    ReviewInvocationScope::initial(cycle_key.clone()),
-                    action,
-                    self.session.run_history.clone(),
-                ));
+                let scope = self
+                    .session
+                    .review_invocation_scope
+                    .clone()
+                    .unwrap_or_else(|| ReviewInvocationScope::initial(cycle_key.clone()));
+                return Some((scope, action, self.session.run_history.clone()));
             }
         };
         if let Some(diagnostic) = verdict.structured_output_diagnostic.as_ref()
@@ -335,7 +335,6 @@ impl WorkspaceEngine {
         }
         Some((invocation, action, history))
     }
-
     fn review_cycle_key(&self, node_id: &str, verdict: &ReviewVerdict) -> String {
         match self.active_node_type() {
             Some(TimelineNodeType::WorkItemPlanOutlineReview) => self
@@ -359,7 +358,6 @@ impl WorkspaceEngine {
             _ => format!("review:{node_id}"),
         }
     }
-
     fn persist_policy_route(
         &self,
         expected: Option<&WorkspaceSessionRecord>,
@@ -368,6 +366,11 @@ impl WorkspaceEngine {
         history: &RunHistory,
     ) -> Result<Option<WorkspaceSessionRecord>, ProductStoreError> {
         let (status, gate, diagnostics) = policy_route_record_values(action);
+        let scope = self.policy_scope_for_action(
+            invocation,
+            action,
+            expected.and_then(|record| record.review_invocation_scope.as_ref()),
+        );
         let Some(store) = &self.lifecycle_store else {
             return Ok(None);
         };
@@ -380,7 +383,7 @@ impl WorkspaceEngine {
                 PolicyRoutePersist {
                     status,
                     run_history: history.clone(),
-                    scope: Some(invocation.clone()),
+                    scope,
                     gate,
                     diagnostics,
                     repair_reservation: expected.repair_reservation.clone(),
@@ -389,7 +392,6 @@ impl WorkspaceEngine {
             )
             .map(Some)
     }
-
     fn apply_policy_route_state(
         &mut self,
         invocation: &ReviewInvocationScope,
@@ -398,12 +400,12 @@ impl WorkspaceEngine {
     ) {
         let (status, gate, diagnostics) = policy_route_record_values(action);
         self.session.run_history = history;
-        self.session.review_invocation_scope = Some(invocation.clone());
+        self.session.review_invocation_scope =
+            self.policy_scope_for_action(invocation, action, None);
         self.session.human_gate_snapshot = gate;
         self.session.policy_diagnostics = diagnostics;
         self.session.session_status = status;
     }
-
     pub(super) fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {
         self.session.session_status = record.status.clone();
         self.session.run_history = record.run_history.clone();
@@ -413,7 +415,6 @@ impl WorkspaceEngine {
         self.session.policy_diagnostics = record.policy_diagnostics.clone();
         self.session.provider_start_ledger = record.provider_start_ledger.clone();
     }
-
     async fn apply_policy_route(
         &mut self,
         action: RoutingAction,
@@ -455,7 +456,6 @@ impl WorkspaceEngine {
             let _ = self.record_policy_transition();
         }
     }
-
     fn is_legacy_work_item_plan_repair(&self, verdict: &ReviewVerdict) -> bool {
         self.session.workspace_type == WorkspaceType::WorkItemPlan
             && verdict
@@ -469,7 +469,6 @@ impl WorkspaceEngine {
                     )
                 })
     }
-
     async fn request_provider_run(&mut self, kind: ProviderRunKind) {
         let _ = self
             .event_tx
@@ -479,7 +478,6 @@ impl WorkspaceEngine {
             })
             .await;
     }
-
     async fn run_legacy_work_item_plan_repair(&mut self, verdict: ReviewVerdict) {
         let Some(review) = verdict.work_item_plan_review.as_ref() else {
             return;
@@ -523,7 +521,6 @@ impl WorkspaceEngine {
             Ok(())
         })
     }
-
     fn record_policy_transition(&mut self) -> Result<(), String> {
         if self.session.run_history.transitions_used >= RunBudgets::default().max_transitions {
             return Err("stage transition budget is exhausted".to_string());
@@ -536,7 +533,6 @@ impl WorkspaceEngine {
             Ok(())
         })
     }
-
     fn update_policy_history(
         &mut self,
         update: impl Fn(&mut RunHistory) -> Result<(), String>,
@@ -569,7 +565,6 @@ impl WorkspaceEngine {
         self.refresh_policy_state(&saved);
         Ok(())
     }
-
     async fn route_legacy_review(
         &mut self,
         verdict: ReviewVerdict,
@@ -723,7 +718,6 @@ impl WorkspaceEngine {
         self.route_work_item_draft_review_with_policy_valid(verdict, false)
             .await;
     }
-
     async fn route_work_item_draft_review_with_policy_valid(
         &mut self,
         verdict: ReviewVerdict,
@@ -820,7 +814,6 @@ impl WorkspaceEngine {
         self.route_work_item_batch_review_with_policy_valid(verdict, false)
             .await;
     }
-
     async fn route_work_item_batch_review_with_policy_valid(
         &mut self,
         verdict: ReviewVerdict,

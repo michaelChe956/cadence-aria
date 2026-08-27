@@ -3,6 +3,8 @@ use crate::product::models::{
     WorkspaceRolePermissionModes, WorkspaceSessionRecord, WorkspaceSessionStatus,
 };
 use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
+use std::time::Duration;
+use tokio::time::timeout;
 
 #[test]
 fn single_candidate_scope_rejection_parser_preserves_scope_marker() {
@@ -64,6 +66,50 @@ async fn single_candidate_scope_rejection_rejects_all_forbidden_markers_without_
         assert_eq!(scope_test_snapshot(&engine).await, before, "field={field}");
         assert!(events.try_recv().is_err(), "field={field}");
     }
+}
+
+#[tokio::test]
+async fn single_candidate_scope_rejection_does_not_wait_for_provider_engine_lock() {
+    let (context, engine, mut outbound_rx, _events) =
+        scope_test_context(WorkItemPlanFlowKind::SingleCandidate);
+    let envelope =
+        parse_workspace_inbound_text(r#"{"type":"abort"}"#).expect("raw envelope should parse");
+    let (command_tx, mut command_rx) = mpsc::channel(1);
+    context
+        .current_run
+        .lock()
+        .await
+        .replace(WorkspaceActiveRun {
+            id: 1,
+            token: 1,
+            node_id: None,
+            cancel: CancellationToken::new(),
+            command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        });
+    let engine_guard = engine.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_workspace_inbound_message(context, envelope),
+    )
+    .await
+    .expect("running abort must not await provider-held engine lock");
+    drop(engine_guard);
+
+    assert!(matches!(
+        timeout(Duration::from_millis(100), command_rx.recv())
+            .await
+            .expect("abort command timeout"),
+        Some(ProviderCommand::Abort)
+    ));
+    let outbound = outbound_rx.recv().await.expect("aborted status outbound");
+    let OutboundControl::Text(json) = outbound else {
+        panic!("expected provider status text");
+    };
+    let value: serde_json::Value = serde_json::from_str(&json).expect("provider status json");
+    assert_eq!(value["type"], "provider_status");
+    assert_eq!(value["status"], "aborted");
 }
 
 #[tokio::test]
