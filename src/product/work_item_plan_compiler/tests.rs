@@ -1,6 +1,8 @@
 use super::{
-    grammar, types, {lint_work_item_plan_source, parse_work_item_plan},
+    WorkItemPlanSourceContext, grammar, types,
+    {compile_work_item_plan, lint_work_item_plan_source, parse_work_item_plan},
 };
+use crate::product::models::TrustedDraftVerificationCommand;
 use serde_json::Value;
 
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
@@ -877,6 +879,97 @@ fn source_linter_sorts_complete_diagnostics_stably() {
             && !diagnostic.message.is_empty()
             && !diagnostic.repair_example.is_empty()
     }));
+}
+
+#[test]
+fn lower_typed_ir() {
+    let catalog = vec![
+        TrustedDraftVerificationCommand {
+            command: "cargo test --locked --lib levels_api".to_string(),
+            cwd: "backend".to_string(),
+            purpose: "backend checks".to_string(),
+            source_ref: "cargo test --locked --lib levels_api".to_string(),
+        },
+        TrustedDraftVerificationCommand {
+            command: "pnpm test level-select".to_string(),
+            cwd: "frontend".to_string(),
+            purpose: "frontend checks".to_string(),
+            source_ref: "pnpm test level-select".to_string(),
+        },
+        TrustedDraftVerificationCommand {
+            command: "cargo test --locked --test levels_integration".to_string(),
+            cwd: "integration".to_string(),
+            purpose: "integration checks".to_string(),
+            source_ref: "cargo test --locked --test levels_integration".to_string(),
+        },
+    ];
+    let context = WorkItemPlanSourceContext {
+        target_repository_id: "repo-levels".to_string(),
+        trusted_command_catalog: catalog.clone(),
+    };
+    let ir = compile_work_item_plan(REP4_FIXTURE, &context).expect("rep4 应 lower 为 typed IR");
+
+    assert_eq!(ir.items.len(), 3);
+    assert_eq!(
+        ir.items
+            .iter()
+            .map(|item| item.target_repository_id.as_str())
+            .collect::<Vec<_>>(),
+        ["repo-levels", "repo-levels", "repo-levels"]
+    );
+    assert_eq!(ir.items[0].contract.depends_on, Vec::<String>::new());
+    assert_eq!(ir.items[1].contract.depends_on, vec!["WI-001"]);
+    assert_eq!(ir.items[2].contract.depends_on, vec!["WI-001", "WI-002"]);
+    assert_eq!(
+        ir.items
+            .iter()
+            .map(|item| item.verification_plan.checks.clone())
+            .collect::<Vec<_>>(),
+        ir.items
+            .iter()
+            .map(|item| item.contract.verification_checks.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(ir.items[0].trusted_commands, vec![catalog[0].clone()]);
+    assert_eq!(ir.items[1].trusted_commands, vec![catalog[1].clone()]);
+    assert_eq!(ir.items[2].trusted_commands, vec![catalog[2].clone()]);
+
+    let json = serde_json::to_value(&ir).expect("IR 必须可序列化");
+    assert_eq!(
+        json.as_object().unwrap().keys().collect::<Vec<_>>(),
+        [&"compiler_version", &"items", &"source_revision_hash"]
+    );
+    for item in json["items"].as_array().unwrap() {
+        assert!(
+            !item
+                .as_object()
+                .unwrap()
+                .contains_key("source_revision_hash")
+        );
+        assert!(!item.as_object().unwrap().contains_key("compiler_version"));
+    }
+
+    let unknown = compile_work_item_plan(
+        &REP4_FIXTURE.replacen(
+            "cargo test --locked --lib levels_api",
+            "unknown-command-ref",
+            1,
+        ),
+        &context,
+    )
+    .expect_err("未知 command ref 必须失败关闭");
+    assert!(
+        unknown
+            .iter()
+            .any(|diagnostic| diagnostic.field == "trusted_commands")
+    );
+
+    let markdown_owned = REP4_FIXTURE.replacen(
+        "- logical_work_item_id: WI-001",
+        "- target_repository_id: repo-evil\n- logical_work_item_id: WI-001",
+        1,
+    );
+    assert!(compile_work_item_plan(&markdown_owned, &context).is_err());
 }
 
 #[test]

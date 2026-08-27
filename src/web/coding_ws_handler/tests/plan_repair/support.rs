@@ -565,6 +565,7 @@ fn contract(logical_id: &str) -> CanonicalWorkItemContract {
             summary: logical_id.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts: Vec::new(),
         output_contracts: Vec::new(),
         tasks: Vec::new(),

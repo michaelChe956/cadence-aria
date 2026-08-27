@@ -730,6 +730,7 @@ fn contract(
             summary: logical_id.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts,
         output_contracts: vec![PromisedOutputContract {
             contract_id: output_contract_id.to_string(),

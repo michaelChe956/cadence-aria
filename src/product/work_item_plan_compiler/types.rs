@@ -56,8 +56,7 @@ pub struct WorkItemPlanAst {
 
 /// compiler 对 source grammar 或 lowering 输入返回的稳定诊断形状。
 ///
-/// 本任务只定义公开字段，不负责填写真实的行号、字段路径或修复示例；这些
-/// 值必须由后续 parser/linter 根据实际输入生成。
+/// parser/linter 与 lowering 均使用此形状返回真实行号、字段路径和可回喂修复示例。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompilerDiagnostic {
     /// 稳定的 diagnostic code，例如 `missing_section`。

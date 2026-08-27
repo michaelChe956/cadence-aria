@@ -47,6 +47,7 @@ fn seed_authoritative_group_plan_fixture(
                 summary: logical.title.clone(),
             },
             non_goals: Vec::new(),
+            depends_on: Vec::new(),
             input_contracts: Vec::new(),
             output_contracts: Vec::new(),
             tasks: Vec::new(),

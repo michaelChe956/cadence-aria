@@ -9,6 +9,8 @@ pub struct CanonicalWorkItemContract {
     pub identity: WorkItemContractIdentity,
     pub goal: WorkItemGoal,
     pub non_goals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
     pub input_contracts: Vec<RequiredInputContract>,
     pub output_contracts: Vec<PromisedOutputContract>,
     pub tasks: Vec<WorkItemTask>,

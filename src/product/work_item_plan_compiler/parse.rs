@@ -40,13 +40,7 @@ pub(super) const REQUIRED_FIELDS: [(&str, &[&str]); 13] = [
     ),
     (
         "Verification",
-        &[
-            "check_id",
-            "command",
-            "manual_instruction",
-            "required",
-            "non_zero_test_execution_required",
-        ],
+        &["check_id", "required", "non_zero_test_execution_required"],
     ),
     (
         "Handoff Schema",

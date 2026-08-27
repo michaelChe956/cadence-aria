@@ -22,6 +22,7 @@ fn group_canonical_contract(logical_id: &str, title: &str) -> CanonicalWorkItemC
             summary: title.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts: Vec::new(),
         output_contracts: Vec::new(),
         tasks: Vec::new(),

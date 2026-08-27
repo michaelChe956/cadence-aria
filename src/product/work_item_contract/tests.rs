@@ -26,6 +26,7 @@ pub(crate) fn canonical_contract_fixture(logical_work_item_id: &str) -> Canonica
             summary: "Provide the canonical work item contract".to_string(),
         },
         non_goals: vec!["Compile provider projections".to_string()],
+        depends_on: Vec::new(),
         input_contracts: vec![RequiredInputContract {
             contract_id: "contract.source".to_string(),
             provider_logical_work_item_id: "wi_upstream".to_string(),
@@ -133,6 +134,21 @@ fn canonical_work_item_contract_roundtrips_without_human_presentation_fields() {
     assert_eq!(
         serde_json::from_value::<CanonicalWorkItemContract>(value).unwrap(),
         contract
+    );
+}
+
+#[test]
+fn canonical_work_item_contract_legacy_json_defaults_depends_on() {
+    let mut value = serde_json::to_value(canonical_contract_fixture("wi_core")).unwrap();
+    value.as_object_mut().unwrap().remove("depends_on");
+    let contract = serde_json::from_value::<CanonicalWorkItemContract>(value).unwrap();
+    assert!(contract.depends_on.is_empty());
+    assert!(
+        !serde_json::to_value(&contract)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("depends_on")
     );
 }
 

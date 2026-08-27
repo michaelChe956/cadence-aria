@@ -190,6 +190,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
                 summary: logical.title.clone(),
             },
             non_goals: Vec::new(),
+            depends_on: Vec::new(),
             input_contracts: Vec::new(),
             output_contracts: vec![PromisedOutputContract {
                 contract_id: format!("contract_{work_item_id}"),
@@ -1087,7 +1088,6 @@ fn seed_delivery_work_item(store: &CodingAttemptStore, work_item_id: &str, repos
         })
         .expect("work item");
 }
-
 fn seed_delivery_attempt(
     store: &CodingAttemptStore,
     work_item_id: &str,

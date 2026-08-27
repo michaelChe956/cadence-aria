@@ -42,6 +42,7 @@ pub(super) fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &Coding
             summary: logical_work_item.title.clone(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts: Vec::new(),
         output_contracts: Vec::new(),
         tasks: Vec::new(),
