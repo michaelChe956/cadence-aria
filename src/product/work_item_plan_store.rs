@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
@@ -16,6 +18,58 @@ use crate::product::models::{
 const MAX_CONTEXT_RESOLUTIONS: usize = 20;
 const MAX_CONTEXT_ESTIMATED_TOKENS: u32 = 8_000;
 const SUMMARY_ESTIMATED_TOKENS: u32 = 512;
+
+#[cfg(test)]
+thread_local! {
+    static COMPILE_TRANSACTION_WRITE_JOURNAL: RefCell<Option<Vec<WorkItemPlanCompileTransaction>>> =
+        const { RefCell::new(None) };
+}
+
+/// 在测试中收集当前线程内每次 compile transaction 覆盖写的完整快照。
+///
+/// guard 离开作用域时恢复嵌套观察者并清理当前 case 的记录，避免并行测试串扰。
+#[cfg(test)]
+pub(crate) struct WorkItemPlanCompileTransactionJournalGuard {
+    previous: Option<Vec<WorkItemPlanCompileTransaction>>,
+}
+
+#[cfg(test)]
+impl WorkItemPlanCompileTransactionJournalGuard {
+    pub(crate) fn snapshots(&self) -> Vec<WorkItemPlanCompileTransaction> {
+        COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| {
+            journal
+                .borrow()
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| panic!("compile transaction journal guard is no longer active"))
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for WorkItemPlanCompileTransactionJournalGuard {
+    fn drop(&mut self) {
+        COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| {
+            *journal.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn observe_compile_transaction_writes() -> WorkItemPlanCompileTransactionJournalGuard {
+    let previous =
+        COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| journal.borrow_mut().replace(Vec::new()));
+    WorkItemPlanCompileTransactionJournalGuard { previous }
+}
+
+#[cfg(test)]
+fn record_compile_transaction_write(tx: &WorkItemPlanCompileTransaction) {
+    COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| {
+        if let Some(snapshots) = journal.borrow_mut().as_mut() {
+            snapshots.push(tx.clone());
+        }
+    });
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkItemPlanStore {
@@ -115,6 +169,8 @@ impl WorkItemPlanStore {
         tx: &WorkItemPlanCompileTransaction,
     ) -> Result<(), ProductStoreError> {
         validate_compile_transaction(tx)?;
+        #[cfg(test)]
+        record_compile_transaction_write(tx);
         write_json(&self.compile_transaction_path(tx), tx)
     }
 
