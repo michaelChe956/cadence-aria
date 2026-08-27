@@ -105,6 +105,14 @@ pub const ALLOWED_BLOCKER_ROUTES: [&str; 8] = [
     "operational_gate",
 ];
 
+/// 初始 compiler diagnostic 词汇表；Task 2.1 可在此追加 lowering 诊断码。
+pub const DIAGNOSTIC_CODES: [&str; 4] = [
+    "missing_section",
+    "unknown_structured_key",
+    "invalid_work_item_id",
+    "invalid_ears",
+];
+
 /// 编译器版本元数据；source matrix 的 `ir.compiler_version` 由此常量派生。
 pub const WORK_ITEM_PLAN_COMPILER_VERSION: &str = "work_item_plan_compiler/v1";
 

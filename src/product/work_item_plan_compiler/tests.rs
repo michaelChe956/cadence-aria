@@ -1,4 +1,5 @@
 use super::{grammar, types};
+use serde_json::Value;
 
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
 
@@ -111,6 +112,16 @@ fn grammar_contract() {
             "design_amendment",
             "operational_gate",
         ]
+    );
+    assert_eq!(
+        grammar::DIAGNOSTIC_CODES,
+        [
+            "missing_section",
+            "unknown_structured_key",
+            "invalid_work_item_id",
+            "invalid_ears",
+        ],
+        "初始 diagnostic 词汇表必须只覆盖 Task 1.4 的 grammar 失败"
     );
     assert_eq!(
         grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
@@ -314,4 +325,335 @@ fn field_source_matrix_keeps_context_and_handoff_runtime_values_out_of_markdown_
             columns[0]
         );
     }
+}
+
+const REP4_FIXTURE: &str = include_str!(
+    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
+);
+const MISSING_VERIFICATION_FIXTURE: &str = include_str!(
+    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/missing-verification.md"
+);
+const UNKNOWN_FIELD_FIXTURE: &str = include_str!(
+    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/unknown-field.md"
+);
+const INVALID_ID_FIXTURE: &str = include_str!(
+    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/invalid-id.md"
+);
+const INVALID_EARS_FIXTURE: &str = include_str!(
+    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/invalid-ears.md"
+);
+const EXPECTED_DIAGNOSTICS: &str = include_str!(
+    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/expected.json"
+);
+
+const DIAGNOSTIC_FIXTURES: [(&str, &str); 4] = [
+    (
+        "compiler-diagnostics/missing-verification.md",
+        MISSING_VERIFICATION_FIXTURE,
+    ),
+    (
+        "compiler-diagnostics/unknown-field.md",
+        UNKNOWN_FIELD_FIXTURE,
+    ),
+    ("compiler-diagnostics/invalid-id.md", INVALID_ID_FIXTURE),
+    ("compiler-diagnostics/invalid-ears.md", INVALID_EARS_FIXTURE),
+];
+
+fn item_sections<'a>(source: &'a str, item_heading: &str) -> Vec<&'a str> {
+    source
+        .split(item_heading)
+        .nth(1)
+        .expect("fixture 必须包含指定 work item")
+        .split("## Work Item WI-")
+        .next()
+        .expect("item 必须在下一个 heading 前结束")
+        .lines()
+        .filter_map(|line| line.strip_prefix("### "))
+        .filter(|section| grammar::STRUCTURED_SECTIONS.contains(section))
+        .collect()
+}
+
+fn structured_keys(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .filter_map(|line| line.split_once(':').map(|(key, _)| key.trim()))
+        .collect()
+}
+
+fn statements(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .filter_map(|line| line.strip_prefix("- statement: "))
+        .collect()
+}
+
+fn is_ears_statement(statement: &str) -> bool {
+    statement.starts_with(grammar::EARS_WHEN_PREFIX)
+        && statement.contains(grammar::EARS_SHALL_PREFIX)
+        && statement
+            .split_once(grammar::EARS_SHALL_PREFIX)
+            .is_some_and(|(_, outcome)| !outcome.trim().is_empty())
+}
+
+fn is_valid_item_heading(source: &str) -> bool {
+    let Some(heading) = source
+        .lines()
+        .find(|line| line.starts_with(grammar::ITEM_HEADING_PREFIX))
+    else {
+        return false;
+    };
+    let Some((id, title)) = heading
+        .strip_prefix(grammar::ITEM_HEADING_PREFIX)
+        .and_then(|rest| rest.split_once(": "))
+    else {
+        return false;
+    };
+    !title.is_empty() && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+#[test]
+fn fixtures_rep4_has_complete_static_source_structure() {
+    let headings = [
+        "## Work Item WI-001: Backend levels API",
+        "## Work Item WI-002: Frontend level selector",
+        "## Work Item WI-003: Integration levels API coverage",
+    ];
+    assert_eq!(
+        REP4_FIXTURE.matches("## Work Item WI-").count(),
+        headings.len(),
+        "rep4 fixture 必须恰好包含 backend、frontend、integration 三个 item"
+    );
+
+    for heading in headings {
+        assert!(REP4_FIXTURE.contains(heading), "fixture 缺少 {heading}");
+        assert_eq!(
+            item_sections(REP4_FIXTURE, heading),
+            grammar::STRUCTURED_SECTIONS,
+            "{heading} 必须完整覆盖稳定 section"
+        );
+    }
+
+    let integration = REP4_FIXTURE
+        .split("## Work Item WI-003: Integration levels API coverage")
+        .nth(1)
+        .expect("fixture 必须包含 integration item");
+    let integration_non_goals = integration
+        .split("### Non Goals\n")
+        .nth(1)
+        .expect("integration item 必须包含 Non Goals")
+        .split("### Dependencies")
+        .next()
+        .expect("Non Goals 必须在 Dependencies 前结束")
+        .lines()
+        .filter_map(|line| line.strip_prefix("- non_goals: "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        integration_non_goals,
+        [
+            "Product implementation is out of scope; tests/integration/** is explicitly allowed.",
+            "Upstream tests are out of scope.",
+        ],
+        "integration Non Goals 只能禁止产品实现和上游测试，并须明确允许 tests/integration/**"
+    );
+
+    let frontend = REP4_FIXTURE
+        .split("## Work Item WI-002: Frontend level selector")
+        .nth(1)
+        .expect("fixture 必须包含 frontend item")
+        .split("## Work Item WI-003")
+        .next()
+        .expect("frontend item 必须在 integration heading 前结束");
+    assert!(
+        frontend.contains(
+            "WHEN the levels page loads THE SYSTEM SHALL render the #level-selector container and load level-select.js."
+        ),
+        "HTML 验收只能约束容器和 level-select.js"
+    );
+    assert!(
+        !frontend.contains("/api/levels"),
+        "HTML 验收不得混入 API 断言"
+    );
+    assert!(
+        integration.contains("WHEN level-select.js runs THE SYSTEM SHALL request /api/levels and render returned options."),
+        "脚本证据必须单独断言 /api/levels"
+    );
+
+    for key in grammar::STRUCTURED_KEYS {
+        assert!(
+            structured_keys(REP4_FIXTURE).contains(&key),
+            "rep4 fixture 必须覆盖矩阵中的 markdown 语义字段 {key}"
+        );
+    }
+    assert!(
+        !REP4_FIXTURE.contains("trusted_commands"),
+        "trusted commands 不得写入 markdown"
+    );
+    assert!(
+        !REP4_FIXTURE.contains("target_repository_id"),
+        "target repository 不得写入 markdown"
+    );
+    assert!(!REP4_FIXTURE.contains("..."), "rep4 fixture 不得使用省略号");
+}
+
+#[test]
+fn fixtures_diagnostic_sources_have_one_static_target_error() {
+    for (fixture_name, source) in DIAGNOSTIC_FIXTURES {
+        assert!(
+            source.starts_with("# Work Item Plan\n\n"),
+            "{fixture_name} 必须保持完整文档标题"
+        );
+        assert_eq!(
+            source.matches("## Work Item WI-").count(),
+            1,
+            "{fixture_name} 只能包含一个目标 item"
+        );
+    }
+
+    let missing_sections = item_sections(MISSING_VERIFICATION_FIXTURE, "## Work Item WI-001");
+    assert_eq!(
+        missing_sections,
+        grammar::STRUCTURED_SECTIONS
+            .iter()
+            .copied()
+            .filter(|section| *section != "Verification")
+            .collect::<Vec<_>>(),
+        "missing-verification fixture 除缺少 Verification 外不得再缺 section"
+    );
+    assert!(is_valid_item_heading(MISSING_VERIFICATION_FIXTURE));
+    assert!(
+        structured_keys(MISSING_VERIFICATION_FIXTURE)
+            .iter()
+            .all(|key| grammar::STRUCTURED_KEYS.contains(key))
+    );
+    assert!(
+        statements(MISSING_VERIFICATION_FIXTURE)
+            .iter()
+            .all(|statement| is_ears_statement(statement))
+    );
+
+    assert_eq!(
+        item_sections(UNKNOWN_FIELD_FIXTURE, "## Work Item WI-001"),
+        grammar::STRUCTURED_SECTIONS
+    );
+    assert!(is_valid_item_heading(UNKNOWN_FIELD_FIXTURE));
+    let unknown_keys = structured_keys(UNKNOWN_FIELD_FIXTURE)
+        .into_iter()
+        .filter(|key| !grammar::STRUCTURED_KEYS.contains(key))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unknown_keys,
+        ["unexpected_key"],
+        "unknown-field fixture 只能含一个未知结构化字段"
+    );
+    assert!(
+        statements(UNKNOWN_FIELD_FIXTURE)
+            .iter()
+            .all(|statement| is_ears_statement(statement))
+    );
+
+    assert_eq!(
+        item_sections(INVALID_ID_FIXTURE, "## Work Item WI-invalid"),
+        grammar::STRUCTURED_SECTIONS
+    );
+    assert!(
+        !is_valid_item_heading(INVALID_ID_FIXTURE),
+        "invalid-id fixture 必须仅在 item ID 位置保留非法形状"
+    );
+    assert!(
+        structured_keys(INVALID_ID_FIXTURE)
+            .iter()
+            .all(|key| grammar::STRUCTURED_KEYS.contains(key))
+    );
+    assert!(
+        statements(INVALID_ID_FIXTURE)
+            .iter()
+            .all(|statement| is_ears_statement(statement))
+    );
+
+    assert_eq!(
+        item_sections(INVALID_EARS_FIXTURE, "## Work Item WI-001"),
+        grammar::STRUCTURED_SECTIONS
+    );
+    assert!(is_valid_item_heading(INVALID_EARS_FIXTURE));
+    assert!(
+        structured_keys(INVALID_EARS_FIXTURE)
+            .iter()
+            .all(|key| grammar::STRUCTURED_KEYS.contains(key))
+    );
+    let invalid_statements = statements(INVALID_EARS_FIXTURE)
+        .into_iter()
+        .filter(|statement| !is_ears_statement(statement))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        invalid_statements,
+        ["the selector renders returned options."],
+        "invalid-ears fixture 不得含第二个目标 EARS 错误"
+    );
+}
+
+#[test]
+fn fixtures_expected_json_has_the_diagnostic_schema() {
+    let expected: Value =
+        serde_json::from_str(EXPECTED_DIAGNOSTICS).expect("expected.json 必须是合法 JSON");
+    let entries = expected
+        .as_array()
+        .expect("expected.json 顶层必须是诊断数组");
+    assert_eq!(entries.len(), DIAGNOSTIC_FIXTURES.len());
+
+    let fixture_names = DIAGNOSTIC_FIXTURES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    let mut expected_fixture_names = Vec::new();
+    for entry in entries {
+        let object = entry
+            .as_object()
+            .expect("每一条 expected diagnostic 必须是对象");
+        assert_eq!(
+            object.len(),
+            5,
+            "expected diagnostic 只能包含 fixture、code、line、field、repair_example"
+        );
+        for field in ["fixture", "code", "line", "field", "repair_example"] {
+            assert!(
+                object.contains_key(field),
+                "expected diagnostic 缺少 {field}"
+            );
+        }
+
+        let fixture = object["fixture"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .expect("fixture 必须是非空字符串");
+        let code = object["code"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .expect("code 必须是非空字符串");
+        assert!(
+            grammar::DIAGNOSTIC_CODES.contains(&code),
+            "code 必须来自 grammar/lowering 诊断词汇表：{code}"
+        );
+        assert!(
+            object["line"].as_u64().is_some_and(|line| line > 0),
+            "line 必须是正整数"
+        );
+        for field in ["field", "repair_example"] {
+            assert!(
+                object[field]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "{field} 必须是非空字符串"
+            );
+        }
+        expected_fixture_names.push(fixture);
+    }
+
+    expected_fixture_names.sort_unstable();
+    let mut fixture_names = fixture_names;
+    fixture_names.sort_unstable();
+    assert_eq!(
+        expected_fixture_names, fixture_names,
+        "expected.json 必须与四个 diagnostic fixture 一一对应"
+    );
 }

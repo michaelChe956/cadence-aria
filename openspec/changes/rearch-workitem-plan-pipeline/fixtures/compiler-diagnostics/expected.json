@@ -1,0 +1,30 @@
+[
+  {
+    "fixture": "compiler-diagnostics/missing-verification.md",
+    "code": "missing_section",
+    "line": 42,
+    "field": "Verification",
+    "repair_example": "### Verification"
+  },
+  {
+    "fixture": "compiler-diagnostics/unknown-field.md",
+    "code": "unknown_structured_key",
+    "line": 10,
+    "field": "unexpected_key",
+    "repair_example": "- kind: backend"
+  },
+  {
+    "fixture": "compiler-diagnostics/invalid-id.md",
+    "code": "invalid_work_item_id",
+    "line": 3,
+    "field": "work_item_id",
+    "repair_example": "## Work Item WI-001: Levels API fixture"
+  },
+  {
+    "fixture": "compiler-diagnostics/invalid-ears.md",
+    "code": "invalid_ears",
+    "line": 28,
+    "field": "statement",
+    "repair_example": "- statement: WHEN the selector loads THE SYSTEM SHALL render returned options."
+  }
+]
