@@ -1,4 +1,6 @@
-use super::{grammar, types};
+use super::{
+    grammar, types, {lint_work_item_plan_source, parse_work_item_plan},
+};
 use serde_json::Value;
 
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
@@ -656,4 +658,184 @@ fn fixtures_expected_json_has_the_diagnostic_schema() {
         expected_fixture_names, fixture_names,
         "expected.json 必须与四个 diagnostic fixture 一一对应"
     );
+}
+
+fn assert_diagnostic_for_field(source: &str, code: &str, field: &str, description: &str) {
+    let diagnostics = lint_work_item_plan_source(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == code && diagnostic.field == field),
+        "{description} 必须产生 {code}/{field} 诊断，实际为 {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn source_linter_matches_every_diagnostic_fixture_field_by_field() {
+    let expected: Value =
+        serde_json::from_str(EXPECTED_DIAGNOSTICS).expect("expected.json 必须是合法 JSON");
+    for entry in expected
+        .as_array()
+        .expect("expected.json 顶层必须是诊断数组")
+    {
+        let fixture_name = entry["fixture"].as_str().expect("fixture 必须是字符串");
+        let (_, source) = DIAGNOSTIC_FIXTURES
+            .iter()
+            .find(|(name, _)| *name == fixture_name)
+            .expect("fixture 必须有对应 source");
+        let diagnostics = lint_work_item_plan_source(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "{fixture_name} 必须只产生 expected.json 标注的一条诊断"
+        );
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.code, entry["code"].as_str().unwrap());
+        assert_eq!(diagnostic.line, entry["line"].as_u64().unwrap() as usize);
+        assert_eq!(diagnostic.field, entry["field"].as_str().unwrap());
+        assert_eq!(
+            diagnostic.repair_example,
+            entry["repair_example"].as_str().unwrap()
+        );
+        assert!(!diagnostic.message.is_empty(), "message 必须非空");
+        assert!(!diagnostic.field.is_empty(), "field 必须非空");
+        assert!(
+            !diagnostic.repair_example.is_empty(),
+            "repair_example 必须恰好一个非空示例"
+        );
+    }
+}
+
+#[test]
+fn source_linter_rejects_unknown_structured_headings_keys_and_missing_required_parts() {
+    let unknown_heading = REP4_FIXTURE.replacen("### Goal", "### Unexpected Heading", 1);
+    assert_diagnostic_for_field(
+        &unknown_heading,
+        grammar::DIAGNOSTIC_CODES[1],
+        "Unexpected Heading",
+        "未知结构化 heading",
+    );
+    assert_diagnostic_for_field(
+        UNKNOWN_FIELD_FIXTURE,
+        grammar::DIAGNOSTIC_CODES[1],
+        "unexpected_key",
+        "未知结构化 key",
+    );
+    assert_diagnostic_for_field(
+        MISSING_VERIFICATION_FIXTURE,
+        grammar::DIAGNOSTIC_CODES[0],
+        "Verification",
+        "缺少 required section",
+    );
+
+    let missing_kind = REP4_FIXTURE.replacen("- kind: backend\n", "", 1);
+    assert_diagnostic_for_field(
+        &missing_kind,
+        grammar::DIAGNOSTIC_CODES[0],
+        "kind",
+        "缺少 required field",
+    );
+}
+
+#[test]
+fn source_linter_rejects_duplicate_identifiers_and_invalid_dependencies() {
+    for (source, field, description) in [
+        (
+            REP4_FIXTURE.replacen("## Work Item WI-002:", "## Work Item WI-001:", 1),
+            "work_item_id",
+            "重复 WI ID",
+        ),
+        (
+            REP4_FIXTURE.replacen("- task_id: TASK-002", "- task_id: TASK-001", 1),
+            "task_id",
+            "重复 TASK ID",
+        ),
+        (
+            REP4_FIXTURE.replacen("- criterion_id: AC-002", "- criterion_id: AC-001", 1),
+            "criterion_id",
+            "重复 AC ID",
+        ),
+        (
+            REP4_FIXTURE.replacen("- check_id: CHECK-002", "- check_id: CHECK-001", 1),
+            "check_id",
+            "重复 CHECK ID",
+        ),
+    ] {
+        assert_diagnostic_for_field(&source, grammar::DIAGNOSTIC_CODES[2], field, description);
+    }
+
+    let invalid_dependency =
+        REP4_FIXTURE.replacen("- depends_on: WI-001", "- depends_on: invalid", 1);
+    assert_diagnostic_for_field(
+        &invalid_dependency,
+        grammar::DIAGNOSTIC_CODES[2],
+        "depends_on",
+        "非法 dependency ID",
+    );
+    let missing_dependency =
+        REP4_FIXTURE.replacen("- depends_on: WI-001", "- depends_on: WI-999", 1);
+    assert_diagnostic_for_field(
+        &missing_dependency,
+        grammar::DIAGNOSTIC_CODES[2],
+        "depends_on",
+        "不存在的 dependency ID",
+    );
+    let self_dependency = REP4_FIXTURE.replacen("- depends_on: []", "- depends_on: WI-001", 1);
+    assert_diagnostic_for_field(
+        &self_dependency,
+        grammar::DIAGNOSTIC_CODES[2],
+        "depends_on",
+        "自依赖",
+    );
+    let cycle = REP4_FIXTURE.replacen("- depends_on: []", "- depends_on: WI-002", 1);
+    let cycle_diagnostics = lint_work_item_plan_source(&cycle);
+    assert!(
+        cycle_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == grammar::DIAGNOSTIC_CODES[2]
+                && diagnostic.field == "depends_on"
+                && diagnostic.message.contains("循环")
+        }),
+        "dependency cycle 必须失败关闭，实际为 {cycle_diagnostics:#?}"
+    );
+}
+
+#[test]
+fn source_linter_rejects_invalid_ears_and_keeps_free_text_uninterpreted() {
+    assert_diagnostic_for_field(
+        INVALID_EARS_FIXTURE,
+        grammar::DIAGNOSTIC_CODES[3],
+        "statement",
+        "非法 EARS",
+    );
+
+    let free_text = format!(
+        "{REP4_FIXTURE}\n### Notes\n任意 Unicode：中文、😀、a:b 与 | 表格 | 均保留。\n| 标题:甲 | 值:乙 |\n### Rationale\n自由文本不应被识别为 structured_key: value。\n"
+    );
+    assert!(
+        lint_work_item_plan_source(&free_text).is_empty(),
+        "Notes/Rationale 中的 Unicode、冒号与表格文本必须允许"
+    );
+    let ast = parse_work_item_plan(REP4_FIXTURE).expect("完整 rep4 source 必须可解析");
+    assert_eq!(ast.items.len(), 3);
+}
+
+#[test]
+fn source_linter_sorts_complete_diagnostics_stably() {
+    let source = UNKNOWN_FIELD_FIXTURE.replacen(
+        "- statement: WHEN GET /api/levels is requested THE SYSTEM SHALL return configured levels.",
+        "- statement: not an EARS statement.",
+        1,
+    );
+    let diagnostics = lint_work_item_plan_source(&source);
+    assert!(diagnostics.len() >= 2, "测试输入必须产生多个诊断");
+    assert!(diagnostics.windows(2).all(|pair| {
+        (pair[0].line, pair[0].field.as_str(), pair[0].code.as_str())
+            <= (pair[1].line, pair[1].field.as_str(), pair[1].code.as_str())
+    }));
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.line > 0
+            && !diagnostic.field.is_empty()
+            && !diagnostic.message.is_empty()
+            && !diagnostic.repair_example.is_empty()
+    }));
 }
