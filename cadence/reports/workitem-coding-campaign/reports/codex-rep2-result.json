@@ -1,0 +1,203 @@
+{
+  "provider": "codex",
+  "repetition": 2,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/wic-campaign/codex/rep2",
+  "startedAt": "2026-08-26T00:33:38.782Z",
+  "finishedAt": "2026-08-26T00:43:17.740Z",
+  "elapsedSec": 578.958,
+  "issue_id": "issue_0004",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0004",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "0268769e120564e909c120fdb545a296b085d082f85ea8003eb61bfa2822c2f1",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "90c7b4fe6ce7e7e2c933d2f8a1423da5ea593c96fd50c232c97b761e8efdcc05"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.071,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.12,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 124.284,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 124.358,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 209.908,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 209.978,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 403.48,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 403.554,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 209.908,
+      "findings": []
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 578.958,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "后端声明要用自有 fixture 覆盖数据不可读、JSON 解析失败、结构校验失败和静态路径安全，但没有任何可注入的数据路径/加载器或静态根目录接口；backend input_contracts 为空，且 write_policy 禁止依赖 web/**。现有测试无法确定性地触发这些分支而不改动真实数据或依赖内部 monkey patch。",
+          "evidence": "wi_backend_levels_api 的 task_backend_contract_tests 要求使用 tests/backend/fixtures/**；criterion_backend_errors 要求覆盖数据错误；criterion_backend_static 又要求验证 page_entry_path=web/index.html 且不读取 web/**，但 canonical contract 没有 dataPath、loader、staticRoot 或等价配置能力。",
+          "required_action": "在后端输出契约中定义可注入的数据加载与静态根目录/入口参数及默认值，并把其加入 handoff；同步改写 backend 测试和 integration 的错误触发方式，确保测试可独立、可重复执行。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "前端 handoff 要求 dom_render_interface，但 oc_frontend_page_entry 只声明容器 id 和 API 路径，没有定义脚本模块路径、初始化/渲染函数签名或 document/fetch 注入方式；因此最小 DOM 替身测试无法依据稳定公共接口编写。",
+          "evidence": "wi_frontend_level_select.handoff_contract.required_fields 包含 dom_render_interface；其 output_contract.oc_frontend_page_entry.capabilities 没有任何函数、模块或依赖注入能力，而 task_frontend_page 仅笼统写“可注入 document”。",
+          "required_action": "补充前端公共交接契约，明确可导入模块、初始化函数参数/返回值以及 document 和 fetch 的注入边界，并使 frontend 测试与 handoff 使用同一接口。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "后端实现任务同时要求静态根目录路径安全约束，却限制只能使用 node:http 与 node:fs；该依赖限制没有提供可靠的路径规范化/边界校验方案，容易导致实现无法满足安全验收或被迫使用脆弱字符串处理。",
+          "evidence": "wi_backend_levels_api.task_backend_implementation 明确写“仅使用 node:http 与 node:fs”，而 oc_static_hosting_boundary 和 criterion_backend_static 要求静态根目录路径安全解析。",
+          "required_action": "允许使用 node:path（必要时 node:url）等 Node 内置模块，或在契约中给出等价且可测试的安全解析算法；同步更新任务和验证范围。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "integration 明确要求错误响应的 Content-Type 为 application/json; charset=utf-8，但 backend 的 oc_levels_api_contract 和 criterion_backend_errors 只保证 error.code/message，没有向消费者承诺错误响应内容类型，形成提供方与消费者契约不一致。",
+          "evidence": "outline_integration_levels_http 的 criterion_integration_api_shape 要求错误响应包含 application/json; charset=utf-8；outline_backend_levels_api 的 oc_levels_api_contract.capabilities 及 criterion_backend_errors 均未包含该错误响应头能力。",
+          "required_action": "将错误响应 Content-Type 纳入后端提供契约和验收标准，或删除 integration 对该未提供能力的强制断言，并保持三项 Draft 的引用一致。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "服务生命周期交接只描述“返回实际监听地址”，没有定义返回值的具体结构、地址格式或测试端口策略；integration 需要从该交接构造同一实际来源，当前实现可在不同作者选择下产生不可兼容结果，且并行测试可能争用默认 3000。",
+          "evidence": "oc_backend_service_lifecycle 仅列出“启动后返回实际监听地址”；handoff_contract.required_fields 仅列 actual_listen_address；integration task 直接要求使用该地址访问 GET / 与 GET /api/levels，未定义例如 origin/port 的字段结构或 PORT=0 的隔离规则。",
+          "required_action": "定义 start/stop API 的精确返回结构与 origin 生成规则，并明确测试可使用的临时端口（如 PORT=0）及清理约束；同步更新 backend handoff、frontend/integration input contract 和测试任务。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "三项 Draft 都依赖“合法/有效字段”判断，但没有定义 id、name、difficulty、unlocked 的类型、空值规则或 difficulty 取值集合；后端校验、前端无效响应处理和 integration 的“完整字段”可能接受不同数据，导致验收不可判定。",
+          "evidence": "backend criterion_backend_api 使用“合法的 id、name、difficulty、unlocked 字段”；frontend criterion_frontend_error_handling 要求校验字段无效响应；integration criterion_integration_api_shape 要求完整字段，但 oc_levels_api_contract 只列字段名称，没有字段级约束。",
+          "required_action": "在共享 API 契约中补齐四个字段的类型、必填/非空规则及 difficulty 允许值，并让 backend、frontend、integration 的测试和验收引用同一约束。"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "后端声明要用自有 fixture 覆盖数据不可读、JSON 解析失败、结构校验失败和静态路径安全，但没有任何可注入的数据路径/加载器或静态根目录接口；backend input_contracts 为空，且 write_policy 禁止依赖 web/**。现有测试无法确定性地触发这些分支而不改动真实数据或依赖内部 monkey patch。",
+      "evidence": "wi_backend_levels_api 的 task_backend_contract_tests 要求使用 tests/backend/fixtures/**；criterion_backend_errors 要求覆盖数据错误；criterion_backend_static 又要求验证 page_entry_path=web/index.html 且不读取 web/**，但 canonical contract 没有 dataPath、loader、staticRoot 或等价配置能力。",
+      "required_action": "在后端输出契约中定义可注入的数据加载与静态根目录/入口参数及默认值，并把其加入 handoff；同步改写 backend 测试和 integration 的错误触发方式，确保测试可独立、可重复执行。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "前端 handoff 要求 dom_render_interface，但 oc_frontend_page_entry 只声明容器 id 和 API 路径，没有定义脚本模块路径、初始化/渲染函数签名或 document/fetch 注入方式；因此最小 DOM 替身测试无法依据稳定公共接口编写。",
+      "evidence": "wi_frontend_level_select.handoff_contract.required_fields 包含 dom_render_interface；其 output_contract.oc_frontend_page_entry.capabilities 没有任何函数、模块或依赖注入能力，而 task_frontend_page 仅笼统写“可注入 document”。",
+      "required_action": "补充前端公共交接契约，明确可导入模块、初始化函数参数/返回值以及 document 和 fetch 的注入边界，并使 frontend 测试与 handoff 使用同一接口。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "后端实现任务同时要求静态根目录路径安全约束，却限制只能使用 node:http 与 node:fs；该依赖限制没有提供可靠的路径规范化/边界校验方案，容易导致实现无法满足安全验收或被迫使用脆弱字符串处理。",
+      "evidence": "wi_backend_levels_api.task_backend_implementation 明确写“仅使用 node:http 与 node:fs”，而 oc_static_hosting_boundary 和 criterion_backend_static 要求静态根目录路径安全解析。",
+      "required_action": "允许使用 node:path（必要时 node:url）等 Node 内置模块，或在契约中给出等价且可测试的安全解析算法；同步更新任务和验证范围。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "integration 明确要求错误响应的 Content-Type 为 application/json; charset=utf-8，但 backend 的 oc_levels_api_contract 和 criterion_backend_errors 只保证 error.code/message，没有向消费者承诺错误响应内容类型，形成提供方与消费者契约不一致。",
+      "evidence": "outline_integration_levels_http 的 criterion_integration_api_shape 要求错误响应包含 application/json; charset=utf-8；outline_backend_levels_api 的 oc_levels_api_contract.capabilities 及 criterion_backend_errors 均未包含该错误响应头能力。",
+      "required_action": "将错误响应 Content-Type 纳入后端提供契约和验收标准，或删除 integration 对该未提供能力的强制断言，并保持三项 Draft 的引用一致。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "服务生命周期交接只描述“返回实际监听地址”，没有定义返回值的具体结构、地址格式或测试端口策略；integration 需要从该交接构造同一实际来源，当前实现可在不同作者选择下产生不可兼容结果，且并行测试可能争用默认 3000。",
+      "evidence": "oc_backend_service_lifecycle 仅列出“启动后返回实际监听地址”；handoff_contract.required_fields 仅列 actual_listen_address；integration task 直接要求使用该地址访问 GET / 与 GET /api/levels，未定义例如 origin/port 的字段结构或 PORT=0 的隔离规则。",
+      "required_action": "定义 start/stop API 的精确返回结构与 origin 生成规则，并明确测试可使用的临时端口（如 PORT=0）及清理约束；同步更新 backend handoff、frontend/integration input contract 和测试任务。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "三项 Draft 都依赖“合法/有效字段”判断，但没有定义 id、name、difficulty、unlocked 的类型、空值规则或 difficulty 取值集合；后端校验、前端无效响应处理和 integration 的“完整字段”可能接受不同数据，导致验收不可判定。",
+      "evidence": "backend criterion_backend_api 使用“合法的 id、name、difficulty、unlocked 字段”；frontend criterion_frontend_error_handling 要求校验字段无效响应；integration criterion_integration_api_shape 要求完整字段，但 oc_levels_api_contract 只列字段名称，没有字段级约束。",
+      "required_action": "在共享 API 契约中补齐四个字段的类型、必填/非空规则及 difficulty 允许值，并让 backend、frontend、integration 的测试和验收引用同一约束。"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 33303,
+      "output_tokens": 2620,
+      "cache_read_tokens": 30464,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "review_needs_human",
+  "error": "review_complete verdict=needs_human: [\n  {\n    \"severity\": \"must_fix\",\n    \"message\": \"后端声明要用自有 fixture 覆盖数据不可读、JSON 解析失败、结构校验失败和静态路径安全，但没有任何可注入的数据路径/加载器或静态根目录接口；backend input_contracts 为空，且 write_policy 禁止依赖 web/**。现有测试无法确定性地触发这些分支而不改动真实数据或依赖内部 monkey patch。\",\n    \"evidence\": \"wi_backend_levels_api 的 task_backend_contract_tests 要求使用 tests/backend/fixtures/**；criterion_backend_errors 要求覆盖数据错误；criterion_backend_static 又要求验证 page_entry_path=web/index.html 且不读取 web/**，但 canonical contract 没有 dataPath、loader、staticRoot 或等价配置能力。\",\n    \"required_action\": \"在后端输出契约中定义可注入的数据加载与静态根目录/入口参数及默认值，并把其加入 handoff；同步改写 backend 测试和 integration 的错误触发方式，确保测试可独立、可重复执行。\"\n  },\n  {\n    \"severity\": \"must_fix\",\n    \"message\": \"前端 handoff 要求 dom_render_interface，但 oc_frontend_page_entry 只声明容器 id 和 API 路径，没有定义脚本模块路径、初始化/渲染函数签名或 document/fetch 注入方式；因此最小 DOM 替身测试无法依据稳定公共接口编写。\",\n    \"evidence\": \"wi_frontend_level_select.handoff_contract.required_fields 包含 dom_render_interface；其 output_contract.oc_frontend_page_entry.capabilities 没有任何函数、模块或依赖注入能力，而 task_frontend_page 仅笼统写“可注入 document”。\",\n    \"required_action\": \"补充前端公共交接契约，明确可导入模块、初始化函数参数/返回值以及 document 和 fetch 的注入边界，并使 frontend 测试与 handoff 使用同一接口。\"\n  },\n  {\n    \"severity\": \"must_fix\",\n    \"message\": \"后端实现任务同时要求静态根目录路径安全约束，却限制只能使用 node:http 与 node:fs；该依赖限制没有提供可靠的路径规范化/边界校验方案，容易导致实现无法满足安全验收或被迫使用脆弱字符串处理。\",\n    \"evidence\": \"wi_backend_levels_api.task_backend_implementation 明确写“仅使用 node:http 与 node:fs”，而 oc_static_hosting_boundary 和 criterion_backend_static 要求静态根目录路径安全解析。\",\n    \"required_action\": \"允许使用 node:path（必要时 node:url）等 Node 内置模块，或在契约中给出等价且可测试的安全解析算法；同步更新任务和验证范围。\"\n  },\n  {\n    \"severity\": \"must_fix\",\n    \"message\": \"integration 明确要求错误响应的 Content-Type 为 application/json; charset=utf-8，但 backend 的 oc_levels_api_contract 和 criterion_backend_errors 只保证 error.code/message，没有向消费者承诺错误响应内容类型，形成提供方与消费者契约不一致。\",\n    \"evidence\": \"outline_integration_levels_http 的 criterion_integration_api_shape 要求错误响应包含 application/json; charset=utf-8；outline_backend_levels_api 的 oc_levels_api_contract.capabilities 及 criterion_backend_errors 均未包含该错误响应头能力。\",\n    \"required_action\": \"将错误响应 Content-Type 纳入后端提供契约和验收标准，或删除 integration 对该未提供能力的强制断言，并保持三项 Draft 的引用一致。\"\n  },\n  {\n    \"severity\": \"must_fix\",\n    \"message\": \"服务生命周期交接只描述“返回实际监听地址”，没有定义返回值的具体结构、地址格式或测试端口策略；integration 需要从该交接构造同一实际来源，当前实现可在不同作者选择下产生不可兼容结果，且并行测试可能争用默认 3000。\",\n    \"evidence\": \"oc_backend_service_lifecycle 仅列出“启动后返回实际监听地址”；handoff_contract.required_fields 仅列 actual_listen_address；integration task 直接要求使用该地址访问 GET / 与 GET /api/levels，未定义例如 origin/port 的字段结构或 PORT=0 的隔离规则。\",\n    \"required_action\": \"定义 start/stop API 的精确返回结构与 origin 生成规则，并明确测试可使用的临时端口（如 PORT=0）及清理约束；同步更新 backend handoff、frontend/integration input contract 和测试任务。\"\n  },\n  {\n    \"severity\": \"must_fix\",\n    \"message\": \"三项 Draft 都依赖“合法/有效字段”判断，但没有定义 id、name、difficulty、unlocked 的类型、空值规则或 difficulty 取值集合；后端校验、前端无效响应处理和 integration 的“完整字段”可能接受不同数据，导致验收不可判定。\",\n    \"evidence\": \"backend criterion_backend_api 使用“合法的 id、name、difficulty、unlocked 字段”；frontend criterion_frontend_error_handling 要求校验字段无效响应；integration criterion_integration_api_shape 要求完整字段，但 oc_levels_api_contract 只列字段名称，没有字段级约束。\",\n    \"required_action\": \"在共享 API 契约中补齐四个字段的类型、必填/非空规则及 difficulty 允许值，并让 backend、frontend、integration 的测试和验收引用同一约束。\"\n  }\n]",
+  "completed": false,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.049,
+    "1:running": 124.164,
+    "2:author_confirm": 0.074,
+    "3:cross_review": 85.55,
+    "4:author_confirm": 0.07,
+    "5:running": 193.502,
+    "6:author_confirm": 0.074,
+    "7:cross_review": 175.404
+  }
+}

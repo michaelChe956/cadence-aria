@@ -45,7 +45,7 @@ function parseArgs(argv) {
 
   const [provider, shapeId, rep, outRoot] = args;
   if (!PROVIDERS.has(provider)) usageAndExit(`Unsupported provider: ${provider}`);
-  if (!/^(0[1-6])$/.test(shapeId)) usageAndExit(`shapeId must be 01..06, got: ${shapeId}`);
+  if (!/^(0[1-7])$/.test(shapeId)) usageAndExit(`shapeId must be 01..07, got: ${shapeId}`);
   if (!/^[1-9][0-9]*$/.test(rep)) usageAndExit(`rep must be a positive integer, got: ${rep}`);
   if (!outRoot.trim()) usageAndExit('outRoot must not be empty.');
   return { provider, shapeId, rep, outRoot: path.resolve(outRoot), dryRun };
