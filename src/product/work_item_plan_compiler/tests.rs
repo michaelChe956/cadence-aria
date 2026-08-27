@@ -120,7 +120,8 @@ fn field_source_matrix_uses_only_the_four_allowed_sources() {
 fn field_source_matrix_keeps_context_and_handoff_runtime_values_out_of_markdown_lowering() {
     let rows = matrix_rows();
 
-    for field_path in ["target_repository_id"] {
+    {
+        let field_path = "target_repository_id";
         let row = rows
             .iter()
             .find(|columns| columns.first() == Some(&field_path))
