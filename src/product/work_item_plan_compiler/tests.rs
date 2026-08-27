@@ -129,33 +129,55 @@ fn grammar_contract() {
         grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
         "work_item_plan_compiler/v1"
     );
-    assert_eq!(grammar::PLAN_SECTION, grammar::DOCUMENT_HEADING);
-    assert_eq!(
-        grammar::WORK_ITEM_SECTION_PREFIX,
-        grammar::ITEM_HEADING_PREFIX
-    );
     assert_eq!(grammar::KEY_VALUE_SEPARATOR, ": ");
     assert_eq!(grammar::IDENTIFIED_LINE_SEPARATOR, " | ");
     assert_eq!(grammar::UNKNOWN_STRUCTURED_KEY_POLICY, "fail_closed");
     assert_eq!(grammar::FREE_TEXT_SECTION_POLICY, "allow_free_text");
-    assert_eq!(
-        grammar::EARS_KEYWORDS,
-        ["WHEN", "THE SYSTEM SHALL", "observable outcome"]
-    );
+    assert_eq!(grammar::EARS_KEYWORDS, ["WHEN", "THE SYSTEM SHALL"]);
 
     let ast = types::WorkItemPlanAst {
         items: vec![types::WorkItemPlanItemAst {
-            id: "WI-001".to_string(),
-            sections: std::collections::BTreeMap::new(),
+            id: types::Spanned {
+                value: "WI-001".to_string(),
+                line: 2,
+            },
+            title: types::Spanned {
+                value: "fixture".to_string(),
+                line: 2,
+            },
+            sections: vec![types::WorkItemPlanSectionAst {
+                name: types::Spanned {
+                    value: "Identity".to_string(),
+                    line: 4,
+                },
+                fields: vec![types::WorkItemPlanFieldAst {
+                    key: types::Spanned {
+                        value: "kind".to_string(),
+                        line: 5,
+                    },
+                    value: types::Spanned {
+                        value: "backend".to_string(),
+                        line: 5,
+                    },
+                }],
+            }],
         }],
-        notes: vec!["note".to_string()],
-        rationale: vec!["rationale".to_string()],
+        notes: vec![types::Spanned {
+            value: "note".to_string(),
+            line: 7,
+        }],
+        rationale: vec![types::Spanned {
+            value: "rationale".to_string(),
+            line: 8,
+        }],
     };
     let cloned_ast = ast.clone();
     assert_eq!(ast, cloned_ast);
-    assert_eq!(ast.items[0].id, "WI-001");
-    assert_eq!(ast.notes, ["note"]);
-    assert_eq!(ast.rationale, ["rationale"]);
+    assert_eq!(ast.items[0].id.value, "WI-001");
+    assert_eq!(ast.items[0].id.line, 2);
+    assert_eq!(ast.items[0].sections[0].fields[0].key.value, "kind");
+    assert_eq!(ast.notes[0].value, "note");
+    assert_eq!(ast.rationale[0].value, "rationale");
 
     let diagnostic = types::CompilerDiagnostic {
         code: "missing_section".to_string(),
@@ -171,6 +193,23 @@ fn grammar_contract() {
     let cloned_diagnostic = diagnostic.clone();
     assert_eq!(diagnostic, cloned_diagnostic);
     assert_eq!(diagnostic.repair_example, "example");
+}
+
+#[test]
+fn required_fields_define_every_structured_section() {
+    assert!(
+        grammar::STRUCTURED_SECTIONS.iter().all(|section| {
+            super::parse::REQUIRED_FIELDS
+                .iter()
+                .any(|(defined_section, _)| defined_section == section)
+        }),
+        "每个 STRUCTURED_SECTIONS 项都必须有 REQUIRED_FIELDS 定义"
+    );
+    assert_eq!(
+        super::parse::REQUIRED_FIELDS.len(),
+        grammar::STRUCTURED_SECTIONS.len(),
+        "REQUIRED_FIELDS 不得包含未声明的结构化 section"
+    );
 }
 
 const FIELD_SOURCE_MATRIX: &str =
@@ -838,4 +877,91 @@ fn source_linter_sorts_complete_diagnostics_stably() {
             && !diagnostic.message.is_empty()
             && !diagnostic.repair_example.is_empty()
     }));
+}
+
+#[test]
+fn parse_diagnostics_are_document_scoped_spanned_and_stable() {
+    let source = REP4_FIXTURE
+        .split("## Work Item WI-002:")
+        .next()
+        .expect("fixture 必须包含首个 item")
+        .replacen("## Work Item WI-001:", "## Work Item WI-invalid:", 1)
+        .replacen(
+            "### Goal\n- summary: WHEN a level list request arrives THE SYSTEM SHALL return the configured levels JSON.\n\n",
+            "",
+            1,
+        )
+        .replacen(
+            "- statement: WHEN the levels API receives GET /api/levels THE SYSTEM SHALL return the configured levels JSON.",
+            "- statement: the levels API returns configured levels JSON.",
+            1,
+        );
+
+    let expected = [
+        (
+            grammar::DIAGNOSTIC_CODES[2],
+            3,
+            "work_item_id",
+            "## Work Item WI-001: Levels API fixture",
+        ),
+        (grammar::DIAGNOSTIC_CODES[0], 11, "Goal", "### Goal"),
+        (
+            grammar::DIAGNOSTIC_CODES[3],
+            25,
+            "statement",
+            "- statement: WHEN the selector loads THE SYSTEM SHALL render returned options.",
+        ),
+    ];
+    let diagnostics = parse_work_item_plan(&source).expect_err("三个文档级错误必须聚合返回");
+    assert_eq!(
+        diagnostics.len(),
+        expected.len(),
+        "实际诊断为 {diagnostics:#?}"
+    );
+    for (diagnostic, (code, line, field, repair_example)) in diagnostics.iter().zip(expected) {
+        assert_eq!(diagnostic.code, code);
+        assert_eq!(diagnostic.line, line, "诊断行号必须是 1-based");
+        assert_eq!(diagnostic.field, field, "field 必须使用既有 canonical path");
+        assert!(!diagnostic.message.is_empty(), "中文诊断消息不得为空");
+        assert_eq!(diagnostic.repair_example, repair_example);
+        let is_structured_example = diagnostic.repair_example.starts_with("- ");
+        assert_eq!(
+            diagnostic.repair_example.matches('\n').count(),
+            0,
+            "repair example 必须恰好提供一个单行可回喂示例"
+        );
+        assert!(
+            !is_structured_example
+                || diagnostic.repair_example.starts_with("- key: ")
+                || diagnostic.repair_example.starts_with("- statement: "),
+            "结构化 repair example 只能给出一个 - key: 或 EARS 例"
+        );
+    }
+
+    let ast = parse_work_item_plan(REP4_FIXTURE).expect("有效 source 必须构造 AST");
+    assert_eq!(ast.items[0].id.value, "WI-001");
+    assert_eq!(ast.items[0].id.line, 3);
+    assert_eq!(ast.items[0].title.value, "Backend levels API");
+    assert_eq!(ast.items[0].title.line, 3);
+    assert_eq!(ast.items[0].sections[0].name.value, "Identity");
+    assert_eq!(ast.items[0].sections[0].name.line, 5);
+    assert_eq!(
+        ast.items[0].sections[0].fields[0].key.value,
+        "schema_version"
+    );
+    assert_eq!(ast.items[0].sections[0].fields[0].key.line, 6);
+    assert_eq!(ast.items[0].sections[0].fields[0].value.value, "1");
+    assert_eq!(ast.items[0].sections[0].fields[0].value.line, 6);
+    assert!(
+        ast.notes
+            .iter()
+            .chain(&ast.rationale)
+            .all(|line| line.line > 0)
+    );
+
+    assert_eq!(
+        parse_work_item_plan(REP4_FIXTURE),
+        parse_work_item_plan(REP4_FIXTURE),
+        "同源 parse 的 AST 与 diagnostic 顺序必须稳定"
+    );
 }

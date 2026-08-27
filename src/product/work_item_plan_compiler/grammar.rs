@@ -116,16 +116,6 @@ pub const DIAGNOSTIC_CODES: [&str; 4] = [
 /// 编译器版本元数据；source matrix 的 `ir.compiler_version` 由此常量派生。
 pub const WORK_ITEM_PLAN_COMPILER_VERSION: &str = "work_item_plan_compiler/v1";
 
-// 常量别名让调用方可以按语义读取元数据，同时保持单一字面量来源。
-pub const WORK_ITEM_PLAN_HEADING: &str = DOCUMENT_HEADING;
-pub const WORK_ITEM_HEADING: &str = ITEM_HEADING_PREFIX;
-pub const STRUCTURED_SECTION_NAMES: [&str; 13] = STRUCTURED_SECTIONS;
-pub const FREE_TEXT_SECTION_NAMES: [&str; 2] = FREE_TEXT_SECTIONS;
-pub const EARS_TEMPLATE: &str = EARS_STATEMENT_TEMPLATE;
-/// 文档固定一级标题的别名。
-pub const PLAN_SECTION: &str = DOCUMENT_HEADING;
-/// Work Item heading 的别名。
-pub const WORK_ITEM_SECTION_PREFIX: &str = ITEM_HEADING_PREFIX;
 /// 结构化行的 key/value 分隔符。
 pub const KEY_VALUE_SEPARATOR: &str = ": ";
 /// 显式 ID 行的分隔符。
@@ -135,4 +125,4 @@ pub const UNKNOWN_STRUCTURED_KEY_POLICY: &str = "fail_closed";
 /// 自由文本 section 的处理策略元数据。
 pub const FREE_TEXT_SECTION_POLICY: &str = "allow_free_text";
 /// EARS statement 的关键字元数据。
-pub const EARS_KEYWORDS: [&str; 3] = ["WHEN", "THE SYSTEM SHALL", "observable outcome"];
+pub const EARS_KEYWORDS: [&str; 2] = ["WHEN", "THE SYSTEM SHALL"];

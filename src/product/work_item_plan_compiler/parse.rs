@@ -4,11 +4,14 @@
 //! identifier、dependency 与 EARS。自由文本 section 保留原样，不把其中的冒号或表格
 //! 解释为结构化 token；typed lowering 由后续阶段负责。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use super::{
     grammar,
-    types::{CompilerDiagnostic, WorkItemPlanAst, WorkItemPlanItemAst},
+    types::{
+        CompilerDiagnostic, Spanned, WorkItemPlanAst, WorkItemPlanFieldAst, WorkItemPlanItemAst,
+        WorkItemPlanSectionAst,
+    },
 };
 
 const MISSING_SECTION_CODE: &str = grammar::DIAGNOSTIC_CODES[0];
@@ -16,7 +19,7 @@ const UNKNOWN_STRUCTURED_KEY_CODE: &str = grammar::DIAGNOSTIC_CODES[1];
 const INVALID_WORK_ITEM_ID_CODE: &str = grammar::DIAGNOSTIC_CODES[2];
 const INVALID_EARS_CODE: &str = grammar::DIAGNOSTIC_CODES[3];
 
-const REQUIRED_FIELDS: [(&str, &[&str]); 13] = [
+pub(super) const REQUIRED_FIELDS: [(&str, &[&str]); 13] = [
     (
         "Identity",
         &["schema_version", "logical_work_item_id", "title", "kind"],
@@ -74,18 +77,18 @@ struct ParsedField {
 #[derive(Debug)]
 struct ParsedItem {
     id: String,
+    title: String,
     heading_line: usize,
-    sections: BTreeMap<String, Vec<String>>,
     section_lines: HashMap<String, usize>,
     fields: Vec<ParsedField>,
 }
 
 impl ParsedItem {
-    fn new(id: String, heading_line: usize) -> Self {
+    fn new(id: String, title: String, heading_line: usize) -> Self {
         Self {
             id,
+            title,
             heading_line,
-            sections: BTreeMap::new(),
             section_lines: HashMap::new(),
             fields: Vec::new(),
         }
@@ -129,8 +132,8 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
 
         if raw_line.starts_with("## ") {
             current_section = None;
-            if let Some(id) = parse_work_item_heading(raw_line) {
-                items.push(ParsedItem::new(id, line));
+            if let Some((id, title)) = parse_work_item_heading(raw_line) {
+                items.push(ParsedItem::new(id, title, line));
                 current_item = Some(items.len() - 1);
             } else {
                 diagnostics.push(diagnostic(
@@ -161,7 +164,6 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                         ));
                     } else {
                         item.section_lines.insert(section.to_string(), line);
-                        item.sections.entry(section.to_string()).or_default();
                     }
                 } else {
                     diagnostics.push(diagnostic(
@@ -229,10 +231,6 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                     continue;
                 }
                 let item = &mut items[item_index];
-                item.sections
-                    .entry(section.to_string())
-                    .or_default()
-                    .push(raw_line.to_string());
                 item.fields.push(ParsedField {
                     section: section.to_string(),
                     key: key.to_string(),
@@ -240,8 +238,18 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                     line,
                 });
             }
-            Some("Notes") => notes.push(raw_line.to_string()),
-            Some("Rationale") => rationale.push(raw_line.to_string()),
+            Some(section) if section == grammar::FREE_TEXT_SECTIONS[0] => {
+                notes.push(Spanned {
+                    value: raw_line.to_string(),
+                    line,
+                });
+            }
+            Some(section) if section == grammar::FREE_TEXT_SECTIONS[1] => {
+                rationale.push(Spanned {
+                    value: raw_line.to_string(),
+                    line,
+                });
+            }
             _ => diagnostics.push(diagnostic(
                 UNKNOWN_STRUCTURED_KEY_CODE,
                 line,
@@ -279,13 +287,7 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
 
     (
         WorkItemPlanAst {
-            items: items
-                .into_iter()
-                .map(|item| WorkItemPlanItemAst {
-                    id: item.id,
-                    sections: item.sections,
-                })
-                .collect(),
+            items: items.into_iter().map(ast_item).collect(),
             notes,
             rationale,
         },
@@ -293,10 +295,57 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
     )
 }
 
-fn parse_work_item_heading(heading: &str) -> Option<String> {
+fn ast_item(item: ParsedItem) -> WorkItemPlanItemAst {
+    let mut section_entries = item.section_lines.iter().collect::<Vec<_>>();
+    section_entries.sort_by_key(|(_, line)| **line);
+    let sections = section_entries
+        .into_iter()
+        .map(|(section, line)| WorkItemPlanSectionAst {
+            name: Spanned {
+                value: section.clone(),
+                line: *line,
+            },
+            fields: item
+                .fields
+                .iter()
+                .filter(|field| field.section == *section)
+                .map(|field| WorkItemPlanFieldAst {
+                    key: Spanned {
+                        value: field.key.clone(),
+                        line: field.line,
+                    },
+                    value: Spanned {
+                        value: field.value.clone(),
+                        line: field.line,
+                    },
+                })
+                .collect(),
+        })
+        .collect();
+
+    WorkItemPlanItemAst {
+        id: Spanned {
+            value: item.id,
+            line: item.heading_line,
+        },
+        title: Spanned {
+            value: item.title,
+            line: item.heading_line,
+        },
+        sections,
+    }
+}
+
+fn parse_work_item_heading(heading: &str) -> Option<(String, String)> {
     let remainder = heading.strip_prefix(grammar::ITEM_HEADING_PREFIX)?;
     let (id_suffix, title) = remainder.split_once(": ")?;
-    (!title.trim().is_empty()).then(|| format!("{}{}", grammar::ITEM_ID_PREFIX, id_suffix))
+    let title = title.trim();
+    (!title.is_empty()).then(|| {
+        (
+            format!("{}{}", grammar::ITEM_ID_PREFIX, id_suffix),
+            title.to_string(),
+        )
+    })
 }
 
 fn validate_required_parts(items: &[ParsedItem], diagnostics: &mut Vec<CompilerDiagnostic>) {
