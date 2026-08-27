@@ -26,6 +26,7 @@ async fn coding_plan_repair_orphan_child_without_link_reuses_canonical_parent() 
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             },
             format!("workspace_session_{amendment_id}"),
         )
@@ -194,6 +195,7 @@ fn corrupt_reconnect_identity(fixture: &PlanRepairFixture, corruption: Reconnect
                         review_rounds: 1,
                         superpowers_enabled: true,
                         openspec_enabled: true,
+                        work_item_plan_options: None,
                     },
                     "workspace_session_forged".to_string(),
                 )

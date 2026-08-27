@@ -249,17 +249,14 @@ async fn review_decision_continue_with_work_item_plan_outline_candidate_restarts
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _rx) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "issue_work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create persisted outline review session");
     let mut session = WorkspaceSession::from_record(session_record);
     session.stage = WorkspaceStage::ReviewDecision;
@@ -347,17 +344,14 @@ async fn revision_input_uses_persisted_codex_author_session_when_engine_session_
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     lifecycle_store
         .replace_workspace_provider_conversations(

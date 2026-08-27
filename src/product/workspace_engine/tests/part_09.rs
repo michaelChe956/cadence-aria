@@ -225,6 +225,9 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
             message: "backend outline 缺少 exclusive_write_scope\n影响：会导致 draft 阶段写入冲突".to_string(),
             evidence: "outline 中 backend 项 exclusive_write_scopes 为空".to_string(),
             required_action: "为 backend outline 补充 exclusive_write_scope".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
@@ -269,6 +272,9 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
             message: "可补充 handoff 说明\n影响：不影响执行".to_string(),
             evidence: "现有说明较短".to_string(),
             required_action: "可后续补充".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
@@ -618,17 +624,14 @@ fn make_work_item_plan_engine_with_draft_candidate(
         .unwrap();
 
     let session_record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: project_id.to_string(),
-            issue_id: issue_id.to_string(),
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        entity_id: plan.id.clone(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .unwrap();
 
     let session = WorkspaceSession::from_record(session_record);

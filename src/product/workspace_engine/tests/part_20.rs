@@ -500,17 +500,14 @@ fn assert_non_plan_restart_has_no_human_presentations(
     entity_id: &str,
 ) {
     let session_record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: entity_id.to_string(),
-            workspace_type,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: entity_id.to_string(),
+        workspace_type,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .unwrap();
     let session_id = session_record.id.clone();
     let (initial_tx, _initial_rx) = mpsc::channel(8);

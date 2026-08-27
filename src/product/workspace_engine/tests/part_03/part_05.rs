@@ -99,6 +99,9 @@ async fn work_item_plan_item_plan_reopen_review_decision_restarts_outline_revisi
             evidence: "src/product/work_item_split_engine/types.rs:86".to_string(),
             required_action: "回到 Outline，把 provider metadata 状态边界扩到所有 ProviderName match。"
                 .to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
         }],
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: Some(WorkItemPlanReviewComplete {

@@ -815,6 +815,8 @@ pub(crate) fn workspace_session_status_text(status: &WorkspaceSessionStatus) -> 
         WorkspaceSessionStatus::ChangeRequested => "change_requested",
         WorkspaceSessionStatus::BlockedProviderUnavailable => "blocked_provider_unavailable",
         WorkspaceSessionStatus::Terminated => "terminated",
+        WorkspaceSessionStatus::StoppedNeedsHuman => "stopped_needs_human",
+        WorkspaceSessionStatus::Failed => "failed",
     }
 }
 

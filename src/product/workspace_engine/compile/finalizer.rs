@@ -193,6 +193,7 @@ impl WorkspaceEngine {
                             review_rounds: self.session.review_rounds,
                             superpowers_enabled: self.session.superpowers_enabled,
                             openspec_enabled: self.session.openspec_enabled,
+                            work_item_plan_options: None,
                         })
                         .map_err(|error| {
                             format!("create child work item workspace failed: {error}")

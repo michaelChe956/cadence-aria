@@ -402,6 +402,7 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .expect("session");
     lifecycle

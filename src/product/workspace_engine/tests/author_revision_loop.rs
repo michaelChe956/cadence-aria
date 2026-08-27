@@ -747,6 +747,7 @@ async fn legacy_record_with_review_decision_restores_to_author_confirm_via_persi
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle_store
@@ -1036,6 +1037,7 @@ async fn retried_author_feedback_revision_completes_after_real_reconnect() {
             review_rounds: 0,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
 

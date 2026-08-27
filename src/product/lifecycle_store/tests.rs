@@ -39,6 +39,7 @@ fn create_session(
             review_rounds: 2,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap()
 }

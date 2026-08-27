@@ -56,7 +56,7 @@ async fn batch_accept_skips_review_when_reviewer_disabled() {
 }
 
 #[tokio::test]
-async fn batch_review_revise_batch_returns_batch_confirm() {
+async fn batch_review_revise_batch_automatically_rewrites_once() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
@@ -94,16 +94,16 @@ async fn batch_review_revise_batch_returns_batch_confirm() {
     let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
         messages.iter().any(|message| {
             message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_batch_confirm"
+                && message["node"]["node_type"] == "work_item_batch_run"
         })
     })
     .await;
     assert!(
         messages.iter().any(|message| {
             message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_batch_confirm"
+                && message["node"]["node_type"] == "work_item_batch_run"
         }),
-        "revise_batch should return to batch confirm, got {messages:?}"
+        "the first revise_batch must automatically invoke the legacy batch rewrite, got {messages:?}"
     );
 
     ws.close(None).await.ok();

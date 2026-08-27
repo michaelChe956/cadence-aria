@@ -545,6 +545,9 @@ async fn work_item_plan_outline_optional_choice_can_skip_and_continue() {
             message: "handoff 描述可以更明确\n影响：不影响 Draft 生成".to_string(),
             evidence: "handoff_strategy 只有简短描述".to_string(),
             required_action: "可补充上下游交接说明".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: Some(WorkItemPlanReviewComplete {
@@ -612,6 +615,9 @@ async fn work_item_plan_optional_outline_review_actions_survive_session_restore(
             message: "handoff 描述可以更明确\n影响：不影响 Draft 生成".to_string(),
             evidence: "handoff_strategy 只有简短描述".to_string(),
             required_action: "可补充上下游交接说明".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: Some(WorkItemPlanReviewComplete {

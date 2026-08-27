@@ -224,17 +224,14 @@ async fn create_logical_confirm_fixture_with_spec_path(
         })
         .expect("logical story");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: story.id.clone(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("workspace session");
     let spec_path = app_paths
         .issue_lifecycle_root("project_0001", "issue_0001")

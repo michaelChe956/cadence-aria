@@ -379,6 +379,7 @@ async fn coding_plan_repair_ambiguous_parent_workspace_fails_closed_without_link
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let report = plan_defect_report(plan_defect_finding("evidence_a"));

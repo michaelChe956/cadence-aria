@@ -117,6 +117,7 @@ async fn work_item_plan_context_message_includes_plan_brief_and_workspace_type()
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 

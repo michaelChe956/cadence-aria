@@ -234,6 +234,14 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         }],
         created_at: "2026-05-28T00:00:00Z".to_string(),
         updated_at: "2026-05-28T00:00:00Z".to_string(),
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
     };
 
     let selected = select_work_item_markdown(
@@ -437,6 +445,7 @@ fn coding_execution_context_prefers_final_compile_over_workspace_artifact() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("create workspace session");
 
@@ -493,6 +502,7 @@ fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missin
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("create workspace session");
 

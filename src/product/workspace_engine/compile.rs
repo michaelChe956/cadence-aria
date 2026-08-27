@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::work_item_plan_policy::RunPolicy;
 
 mod finalizer;
 
@@ -51,6 +52,16 @@ pub(crate) fn compile_verification_plan_id(compile_id: &str, index: usize) -> St
 
 impl WorkspaceEngine {
     pub(crate) async fn enter_work_item_plan_compile(&mut self) {
+        self.enter_work_item_plan_compile_with_auto_confirmation(false)
+            .await;
+    }
+
+    pub(crate) async fn enter_policy_valid_work_item_plan_compile(&mut self) {
+        self.enter_work_item_plan_compile_with_auto_confirmation(true)
+            .await;
+    }
+
+    async fn enter_work_item_plan_compile_with_auto_confirmation(&mut self, auto_confirm: bool) {
         self.transition_stage(WorkspaceStage::Running).await;
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemPlanCompile,
@@ -70,10 +81,23 @@ impl WorkspaceEngine {
                     "Final Compile 完成，已创建 {work_item_count} 个 Work Item"
                 )))
                 .await;
-                self.enter_human_confirm(Some(format!(
-                    "Final Compile 完成，已创建 {work_item_count} 个 Work Item，等待最终确认"
-                )))
-                .await;
+                if auto_confirm && self.session.run_policy == RunPolicy::AutoIfValid {
+                    if let Err(message) = self
+                        .complete_policy_valid_work_item_plan(work_item_count)
+                        .await
+                    {
+                        let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                        self.enter_human_confirm(Some(
+                            "Final Compile 已完成，但自动确认失败，等待人工确认".to_string(),
+                        ))
+                        .await;
+                    }
+                } else {
+                    self.enter_human_confirm(Some(format!(
+                        "Final Compile 完成，已创建 {work_item_count} 个 Work Item，等待最终确认"
+                    )))
+                    .await;
+                }
             }
             Err(message) => {
                 self.complete_active_node(Some(format!("Final Compile 失败：{message}")))
@@ -94,6 +118,31 @@ impl WorkspaceEngine {
                 }
             }
         }
+    }
+
+    async fn complete_policy_valid_work_item_plan(
+        &mut self,
+        work_item_count: usize,
+    ) -> Result<(), String> {
+        self.validate_confirm_aggregate_spec_gate()?;
+        self.mark_latest_artifact_confirmed(Some("auto_if_valid".to_string()));
+        let (plan, child_sessions) = self.confirm_work_item_plan().await?;
+        self.transition_stage(WorkspaceStage::Completed).await;
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::Completed,
+            agent: None,
+            stage: WorkspaceStage::Completed,
+            round: None,
+            title: "WorkItemPlan 已自动确认".to_string(),
+            summary: Some(format!(
+                "Final Compile 完成，plan {} 已自动确认；已创建 {work_item_count} 个 Work Item 和 {} 个子 WorkItem session",
+                plan.id,
+                child_sessions.len()
+            )),
+            status: TimelineNodeStatus::Completed,
+        })
+        .await;
+        Ok(())
     }
 
     pub(crate) async fn enter_work_item_plan_compile_recovery(&mut self, summary: Option<String>) {

@@ -33,10 +33,10 @@ pub(crate) use crate::product::work_item_split_engine::{
 };
 pub(crate) use crate::product::workspace_engine::{
     AuthorDecisionOutcome, EngineEvent, HumanPresentationScope, InterruptedRunRecoveryOutcome,
-    PendingAuthorChoiceError, ReviewDecisionOutcome, SaveHumanPresentationRevision,
-    WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome,
-    WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
-    build_work_item_plan_revision_input,
+    PendingAuthorChoiceError, ProviderRunKind, ReviewDecisionOutcome,
+    SaveHumanPresentationRevision, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
+    WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine,
+    WorkspaceSession, WorkspaceStage, build_work_item_plan_revision_input,
 };
 pub(crate) use crate::product::workspace_repository::workspace_repository_for_session;
 pub(crate) use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};

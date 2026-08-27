@@ -9,6 +9,7 @@ use crate::product::coding_models::{
     ReviewRequest, WorkItemExecutionPlan,
 };
 use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::work_item_plan_policy::RunPolicy;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,6 +784,8 @@ pub struct PrepareWorkItemPlanRequest {
     pub review_rounds: Option<u32>,
     pub superpowers_enabled: Option<bool>,
     pub openspec_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_policy: Option<RunPolicy>,
     pub include_integration_tests: Option<bool>,
     pub include_e2e_tests: Option<bool>,
     pub force_frontend_backend_split: Option<bool>,
@@ -878,6 +881,17 @@ pub struct WorkspaceSessionDto {
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
     pub messages: Vec<WorkspaceMessageDto>,
+}
+
+/// 显式人工接管结果。`workspace_session` 是新建的交互式子 session；其余字段保留
+/// 与不可变 stopped 父 session 及审计事件的持久关联。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionTakeoverDto {
+    #[serde(flatten)]
+    pub workspace_session: WorkspaceSessionDto,
+    pub parent_session_id: String,
+    pub takeover_event_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

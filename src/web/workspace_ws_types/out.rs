@@ -3,7 +3,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::{
-    HumanPresentationRevision, NodeDetail, PlanRepairSessionSnapshotDto, WorkspaceType,
+    HumanPresentationRevision, NodeDetail, PlanRepairSessionSnapshotDto, WorkspaceSessionStatus,
+    WorkspaceType,
+};
+use crate::product::work_item_plan_policy::{
+    HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
+    ReviewInvocationScope, RunHistory, RunPolicy, WorkItemPlanFlowKind,
 };
 use crate::product::workspace_engine::LinkedWorkspaceSessionSnapshot;
 
@@ -141,6 +146,20 @@ pub enum WsOutMessage {
         recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_repair: Option<Box<PlanRepairSessionSnapshotDto>>,
+        session_status: WorkspaceSessionStatus,
+        flow_kind: WorkItemPlanFlowKind,
+        run_policy: RunPolicy,
+        run_history: RunHistory,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_invocation_scope: Option<Box<ReviewInvocationScope>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        human_gate_snapshot: Option<HumanGateSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repair_reservation: Option<Box<RepairReservation>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        policy_diagnostics: Vec<PolicyDiagnostic>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_start_ledger: Vec<ProviderStartLedgerEntry>,
     },
     Error {
         message: String,
@@ -155,4 +174,69 @@ pub enum WsOutMessage {
         locked_at: String,
     },
     Pong,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
+
+    #[test]
+    fn session_state_serializes_work_item_plan_durable_fields() {
+        let message = WsOutMessage::SessionState {
+            session_id: "session_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            stage: "prepare_context".to_string(),
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            messages: Vec::new(),
+            checkpoints: Vec::new(),
+            artifact: None,
+            providers: WsProviderConfig {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+            },
+            timeline_nodes: Vec::new(),
+            active_node_id: None,
+            artifact_versions: Vec::new(),
+            artifact_version_summaries: Vec::new(),
+            timeline_node_details: HashMap::new(),
+            timeline_node_summaries: HashMap::new(),
+            active_run_id: None,
+            human_presentation_revisions: Vec::new(),
+            reviewer_enabled_at_start: None,
+            recoverable_interrupted_run: None,
+            plan_repair: None,
+            session_status: WorkspaceSessionStatus::StoppedNeedsHuman,
+            flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+            run_policy: RunPolicy::AutoIfValid,
+            run_history: RunHistory::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+        };
+
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(value["session_status"], "stopped_needs_human");
+        assert_eq!(value["flow_kind"], "single_candidate");
+        assert_eq!(value["run_policy"], "auto_if_valid");
+        assert_eq!(
+            value["run_history"],
+            serde_json::json!({
+                "seen_fingerprints": [],
+                "repairs_used": 0,
+                "manual_repairs_used": 0,
+                "transitions_used": 0,
+                "initial_review_count": 0,
+                "verification_review_count": 0,
+                "review_cycles": {},
+            })
+        );
+    }
 }

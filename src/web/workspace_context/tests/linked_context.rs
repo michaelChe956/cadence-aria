@@ -48,6 +48,7 @@ async fn story_workspace_context_codex_author_requires_request_user_input() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
@@ -138,6 +139,7 @@ async fn design_workspace_context_includes_linked_story_markdown() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
@@ -170,6 +172,7 @@ async fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
@@ -203,6 +206,7 @@ async fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
@@ -303,6 +307,7 @@ async fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
     let stale_messages = vec![

@@ -148,4 +148,4 @@ pub use runtime::{advance_task, artifact_content, confirm_task, create_task, fil
 pub use support::{EventsQuery, FileContentQuery, FileDiffQuery, GateResolveQuery, ProjectionQuery, WorkspaceQuery, events};
 pub(crate) use support::provider_gateway_error_code;
 #[rustfmt::skip]
-pub use workspace_session::{workspace_session_artifact_version, workspace_session_confirm, workspace_session_message, workspace_session_run_next, workspace_session_timeline_event_output, workspace_session_timeline_node_detail, workspace_session_timeline_node_prompt};
+pub use workspace_session::{workspace_session_artifact_version, workspace_session_confirm, workspace_session_message, workspace_session_run_next, workspace_session_takeover, workspace_session_timeline_event_output, workspace_session_timeline_node_detail, workspace_session_timeline_node_prompt};

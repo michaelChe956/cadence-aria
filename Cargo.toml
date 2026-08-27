@@ -39,6 +39,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 uuid = { version = "1.23.1", features = ["v4", "serde"] }
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 mockito = "1"

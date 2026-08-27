@@ -322,6 +322,15 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         reviewer_enabled_at_start: None,
         superpowers_enabled: true,
         openspec_enabled: true,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
         provider_conversations: Vec::new(),
         repository_path: None,
     }
@@ -781,17 +790,14 @@ async fn persistent_engine_recovers_pending_text_fallback_choice_after_restart()
     let app_paths = ProductAppPaths::new(app_root.path().join(".aria"));
     let lifecycle_store = LifecycleStore::new(app_paths.clone());
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("workspace session");
     lifecycle_store
         .replace_workspace_messages(

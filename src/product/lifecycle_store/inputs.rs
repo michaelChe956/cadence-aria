@@ -7,6 +7,7 @@ use crate::product::models::{
     VerificationManualCheck, VerificationScope, WorkItemContextBudget, WorkItemKind,
     WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceType,
 };
+use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 
 /// 聚合代码库 Story 视野范围。由 Story 生成/修订入口在逻辑代码库分支构造：
 /// `logical_codebase_ref` 取 manifest.logical_codebase_id；`effective_member_ids` 来自
@@ -219,6 +220,23 @@ pub struct AppendProviderReviewRoundInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItemPlanSessionOptions {
+    pub flow_kind: WorkItemPlanFlowKind,
+    pub run_policy: RunPolicy,
+    pub rollout_snapshot: bool,
+}
+
+impl Default for WorkItemPlanSessionOptions {
+    fn default() -> Self {
+        Self {
+            flow_kind: WorkItemPlanFlowKind::Legacy,
+            run_policy: RunPolicy::Interactive,
+            rollout_snapshot: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateWorkspaceSessionInput {
     pub project_id: String,
     pub issue_id: String,
@@ -229,6 +247,7 @@ pub struct CreateWorkspaceSessionInput {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    pub work_item_plan_options: Option<WorkItemPlanSessionOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

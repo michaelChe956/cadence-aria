@@ -237,6 +237,8 @@ impl WorkspaceEngine {
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
             plan_repair_snapshot: None,
+            #[cfg(test)]
+            policy_route_before_persist: None,
             logical_provider_gateway: None,
         }
     }
@@ -379,8 +381,24 @@ impl WorkspaceEngine {
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
             plan_repair_snapshot,
+            #[cfg(test)]
+            policy_route_before_persist: None,
             logical_provider_gateway: None,
         }
+    }
+
+    /// 为已停止的 auto WorkItemPlan 创建新的 interactive 后继运行。
+    /// 原运行只作为 durable 审计来源，不会被此操作改写；WS/UI 操作入口属于阶段 3。
+    pub fn takeover_stopped_needs_human(
+        &self,
+    ) -> Result<crate::product::models::WorkspaceSessionRecord, String> {
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        store
+            .takeover_stopped_needs_human(&self.session.session_id)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn outline_revision_recovery_error(&self) -> Option<&str> {

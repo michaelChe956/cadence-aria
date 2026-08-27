@@ -162,11 +162,13 @@ impl WorkspaceEngine {
             })
             .collect::<Vec<_>>();
 
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::Confirmed,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
 
         Ok((plan, child_sessions))

@@ -56,6 +56,15 @@ async fn interrupted_recovery_provider_start_failure_returns_to_prepare_context(
         reviewer_enabled_at_start: None,
         superpowers_enabled: false,
         openspec_enabled: false,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: vec![],
+        provider_start_ledger: vec![],
         provider_conversations: vec![],
         repository_path: None,
     };
@@ -105,6 +114,7 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .expect("workspace session");
     let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));

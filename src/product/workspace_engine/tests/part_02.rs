@@ -369,17 +369,14 @@ fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let engine =
@@ -492,17 +489,14 @@ async fn permission_timeout_marks_node_detail_and_returns_to_prepare_context() {
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (engine_tx, mut engine_rx) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let mut engine = WorkspaceEngine::new_persistent(
@@ -838,17 +832,14 @@ async fn provider_drive_story_run_writes_back_involved_from_structured_output() 
     save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: story.id.clone(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let (tx, _rx) = mpsc::channel(64);
@@ -920,17 +911,14 @@ async fn provider_drive_design_run_writes_back_involved_and_change_order_from_st
     save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: design.id.clone(),
-            workspace_type: WorkspaceType::Design,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: design.id.clone(),
+        workspace_type: WorkspaceType::Design,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let (tx, _rx) = mpsc::channel(64);
@@ -984,17 +972,14 @@ async fn provider_drive_single_repo_story_run_does_not_write_back_aggregate() {
         .unwrap();
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: story.id.clone(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let (tx, _rx) = mpsc::channel(64);
@@ -1056,17 +1041,14 @@ async fn provider_drive_aggregate_story_missing_structured_output_records_diagno
     save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: story.id.clone(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let (tx, _rx) = mpsc::channel(64);

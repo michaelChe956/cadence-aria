@@ -36,6 +36,8 @@ use tokio_util::sync::CancellationToken;
 pub struct WorkspaceActiveRun {
     pub id: u64,
     pub token: u64,
+    /// 已登记的活动 run 所属 timeline 节点；用于拒绝同一节点的重复启动请求。
+    pub node_id: Option<String>,
     pub cancel: CancellationToken,
     pub command_tx: mpsc::Sender<ProviderCommand>,
     pub pending_choice_ids: Arc<AsyncMutex<HashSet<String>>>,
@@ -128,6 +130,7 @@ pub struct WebAppState {
     aggregate_initialization_dependencies:
         Option<crate::web::handlers::AggregateInitializationDependencies>,
     pub test_provider_enabled: bool,
+    pub work_item_plan_single_candidate: bool,
     provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
@@ -198,6 +201,7 @@ impl WebAppState {
             repository_registration_dependencies: None,
             aggregate_initialization_dependencies: None,
             test_provider_enabled,
+            work_item_plan_single_candidate: false,
             provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),

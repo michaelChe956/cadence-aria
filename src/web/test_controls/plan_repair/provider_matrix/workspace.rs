@@ -56,6 +56,7 @@ pub(super) async fn run_workspace_provider_roles(
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             },
             session_id.clone(),
         )

@@ -500,6 +500,15 @@ impl WorkspaceEngine {
                 snapshot.timeline_nodes = self.timeline_nodes.clone();
                 Box::new(snapshot)
             }),
+            session_status: self.session.session_status.clone(),
+            flow_kind: self.session.flow_kind,
+            run_policy: self.session.run_policy,
+            run_history: self.session.run_history.clone(),
+            review_invocation_scope: self.session.review_invocation_scope.clone().map(Box::new),
+            human_gate_snapshot: self.session.human_gate_snapshot.clone(),
+            repair_reservation: self.session.repair_reservation.clone().map(Box::new),
+            policy_diagnostics: self.session.policy_diagnostics.clone(),
+            provider_start_ledger: self.session.provider_start_ledger.clone(),
         }
     }
 }

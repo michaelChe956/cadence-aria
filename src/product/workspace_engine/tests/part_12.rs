@@ -135,17 +135,14 @@ async fn build_session_state_inlines_sanitized_work_item_plan_run_details() {
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "issue_work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let session_id = session.session_id.clone();

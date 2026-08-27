@@ -337,13 +337,6 @@ pub(crate) async fn handle_workspace_socket(
         }
     });
 
-    let event_forward_task = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx.clone(),
-        session_id.clone(),
-        state.workspace_runs.clone(),
-    );
-
     let current_run: Arc<Mutex<Option<WorkspaceActiveRun>>> = Arc::new(Mutex::new(None));
     let next_run_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let run_context = ProviderRunContext {
@@ -365,6 +358,13 @@ pub(crate) async fn handle_workspace_socket(
         workspace_runs: state.workspace_runs.clone(),
         session_id: session_id.clone(),
     };
+    let event_forward_task = spawn_engine_event_forward_task(
+        engine_rx,
+        outbound_tx.clone(),
+        session_id.clone(),
+        state.workspace_runs.clone(),
+        Some(run_context.clone()),
+    );
     let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let current_run_for_idle = current_run.clone();
     let idle_timeout_task = spawn_idle_timeout_task(

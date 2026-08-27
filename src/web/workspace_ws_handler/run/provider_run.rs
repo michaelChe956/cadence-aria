@@ -1,4 +1,28 @@
 use super::*;
+
+pub(crate) async fn spawn_provider_run_from_event(
+    run_context: ProviderRunContext,
+    run_kind: ProviderRunKind,
+    requested_node_id: Option<String>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+) -> Result<(), String> {
+    if run_context
+        .workspace_runs
+        .run(&run_context.session_id)
+        .await
+        .is_some_and(|run| run.node_id == requested_node_id)
+    {
+        tracing::debug!(
+            session_id = %run_context.session_id,
+            node_id = ?requested_node_id,
+            "drained duplicate provider run request"
+        );
+        return Ok(());
+    }
+
+    spawn_provider_run_from_handler(run_context, run_kind, outbound_tx).await
+}
+
 pub(crate) async fn spawn_provider_run_from_handler(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -16,7 +40,17 @@ pub(crate) async fn spawn_provider_run_from_handler(
         session_record: _,
     } = run_context;
 
+    // Handler-originated starts always supersede the active provider run. In
+    // particular, a user message must cancel a streaming run before waiting
+    // for the engine mutex, which the stream owner holds while driving its
+    // provider session. Duplicate engine-originated requests are filtered by
+    // `spawn_provider_run_from_event` before reaching this handler.
     abort_active_run(&current_run, &workspace_runs, &session_id).await;
+
+    let target_node_id = {
+        let engine = engine.lock().await;
+        engine.active_timeline_node_id()
+    };
 
     let provider_name = {
         let engine = engine.lock().await;
@@ -58,6 +92,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
     let active_run = WorkspaceActiveRun {
         id: run_id,
         token: run_token,
+        node_id: target_node_id,
         cancel: run_cancel.clone(),
         command_tx: command_tx.clone(),
         pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),

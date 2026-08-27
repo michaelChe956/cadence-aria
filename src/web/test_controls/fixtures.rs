@@ -83,6 +83,7 @@ pub(super) fn create_large_workspace_fixture(
         review_rounds: 5,
         superpowers_enabled: false,
         openspec_enabled: true,
+        work_item_plan_options: None,
     })?;
 
     let session_id = session.id;

@@ -6,9 +6,10 @@ use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    PlanRepairSessionSnapshotDto, ProviderConversationRef, WorkItemRuntimeBinding,
-    WorkspaceMessageRecord, WorkspaceRolePermissionModes, WorkspaceSessionLink,
-    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceSessionSummaryRecord, WorkspaceType,
+    HumanGateTakeoverEvent, PlanRepairSessionSnapshotDto, ProviderConversationRef,
+    WorkItemRuntimeBinding, WorkspaceMessageRecord, WorkspaceRolePermissionModes,
+    WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceSessionSummaryRecord, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -18,6 +19,16 @@ use super::{
     read_workspace_session_record, remove_dir_all_if_exists, remove_file_if_exists,
     workspace_session_file_paths,
 };
+
+pub struct PolicyRoutePersist {
+    pub status: WorkspaceSessionStatus,
+    pub run_history: crate::product::work_item_plan_policy::RunHistory,
+    pub scope: Option<crate::product::work_item_plan_policy::ReviewInvocationScope>,
+    pub gate: Option<crate::product::work_item_plan_policy::HumanGateSnapshot>,
+    pub diagnostics: Vec<crate::product::work_item_plan_policy::PolicyDiagnostic>,
+    pub repair_reservation: Option<crate::product::work_item_plan_policy::RepairReservation>,
+    pub provider_start_ledger: Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+}
 
 impl LifecycleStore {
     pub fn compare_and_save_plan_repair_session_state(
@@ -209,6 +220,14 @@ impl LifecycleStore {
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.entity_id)?;
         validate_relative_id(&id)?;
+        if input.workspace_type != WorkspaceType::WorkItemPlan
+            && input.work_item_plan_options.is_some()
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "workspace_session",
+                reason: "work_item_plan_options require workspace_type work_item_plan".to_string(),
+            });
+        }
 
         let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
         let target_path = root.join(format!("{id}.json"));
@@ -228,6 +247,7 @@ impl LifecycleStore {
             });
         }
         let now = Utc::now().to_rfc3339();
+        let work_item_plan_options = input.work_item_plan_options.unwrap_or_default();
         let session = WorkspaceSessionRecord {
             id: id.clone(),
             project_id: input.project_id,
@@ -243,6 +263,14 @@ impl LifecycleStore {
             reviewer_enabled_at_start: None,
             superpowers_enabled: input.superpowers_enabled,
             openspec_enabled: input.openspec_enabled,
+            flow_kind: work_item_plan_options.flow_kind,
+            run_policy: work_item_plan_options.run_policy,
+            run_history: Default::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
             work_item_runtime_binding: None,
             provider_conversations: Vec::new(),
             messages: Vec::new(),
@@ -253,6 +281,101 @@ impl LifecycleStore {
         super::ensure_target_absent(&target_path)?;
         write_json(&target_path, &session)?;
         Ok(session)
+    }
+
+    /// Creates the interactive successor for a resumable stopped WorkItemPlan
+    /// session while leaving the terminal parent record untouched. The durable
+    /// event makes a repeated explicit takeover idempotent.
+    pub fn takeover_stopped_needs_human(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(parent_session_id)?;
+        let parent = self.get_workspace_session(parent_session_id)?;
+        if parent.workspace_type != WorkspaceType::WorkItemPlan
+            || parent.status != WorkspaceSessionStatus::StoppedNeedsHuman
+            || !parent
+                .human_gate_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.resumable)
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "human_gate_takeover",
+                reason: "parent must be a resumable stopped work_item_plan session".to_string(),
+            });
+        }
+
+        let event_id = format!("human_gate_takeover_{}", parent.id);
+        let event_path = self
+            .paths
+            .issue_lifecycle_root(&parent.project_id, &parent.issue_id)
+            .join("human-gate-takeovers")
+            .join(format!("{event_id}.json"));
+        with_exclusive_lock(&event_path, || {
+            if path_exists(&event_path)? {
+                let event: HumanGateTakeoverEvent = read_json(&event_path)?;
+                if event.id != event_id || event.parent_session_id != parent.id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "human_gate_takeover",
+                        id: event_id.clone(),
+                    });
+                }
+                return self.get_workspace_session(&event.child_session_id);
+            }
+
+            let child_id = format!("workspace_session_takeover_{}", parent.id);
+            let child = self.create_workspace_session_with_id(
+                CreateWorkspaceSessionInput {
+                    project_id: parent.project_id.clone(),
+                    issue_id: parent.issue_id.clone(),
+                    entity_id: parent.entity_id.clone(),
+                    workspace_type: WorkspaceType::WorkItemPlan,
+                    author_provider: parent.author_provider.clone(),
+                    reviewer_provider: parent.reviewer_provider.clone(),
+                    review_rounds: parent.review_rounds,
+                    superpowers_enabled: parent.superpowers_enabled,
+                    openspec_enabled: parent.openspec_enabled,
+                    work_item_plan_options: Some(super::WorkItemPlanSessionOptions {
+                        flow_kind: parent.flow_kind,
+                        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                        rollout_snapshot: false,
+                    }),
+                },
+                child_id,
+            )?;
+            let event = HumanGateTakeoverEvent {
+                id: event_id,
+                parent_session_id: parent.id.clone(),
+                child_session_id: child.id.clone(),
+                created_at: Utc::now().to_rfc3339(),
+            };
+            write_json(&event_path, &event)?;
+            Ok(child)
+        })
+    }
+
+    pub fn get_human_gate_takeover_event(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Option<HumanGateTakeoverEvent>, ProductStoreError> {
+        let parent = self.get_workspace_session(parent_session_id)?;
+        let event_id = format!("human_gate_takeover_{}", parent.id);
+        let event_path = self
+            .paths
+            .issue_lifecycle_root(&parent.project_id, &parent.issue_id)
+            .join("human-gate-takeovers")
+            .join(format!("{event_id}.json"));
+        if !path_exists(&event_path)? {
+            return Ok(None);
+        }
+        let event: HumanGateTakeoverEvent = read_json(&event_path)?;
+        if event.id != event_id || event.parent_session_id != parent.id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "human_gate_takeover",
+                id: event_id,
+            });
+        }
+        Ok(Some(event))
     }
 
     pub fn list_workspace_sessions(
@@ -377,9 +500,94 @@ impl LifecycleStore {
         let session_path = self.find_workspace_session_path(session_id)?;
         let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
         session.status = status;
+        if matches!(
+            session.status,
+            WorkspaceSessionStatus::Confirmed
+                | WorkspaceSessionStatus::Terminated
+                | WorkspaceSessionStatus::Failed
+        ) {
+            session.human_gate_snapshot = None;
+        }
         session.updated_at = Utc::now().to_rfc3339();
         write_json(&session_path, &session)?;
         Ok(session)
+    }
+
+    /// Atomically projects a policy route into the durable session record.
+    /// The expected record check prevents stale websocket workers from
+    /// overwriting a newer route; callers must reload and re-evaluate on clash.
+    pub fn compare_and_save_policy_route(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        persist: PolicyRoutePersist,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let PolicyRoutePersist {
+            status,
+            run_history,
+            scope,
+            gate,
+            diagnostics,
+            repair_reservation,
+            provider_start_ledger,
+        } = persist;
+        validate_relative_id(&expected.id)?;
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let locked_session_path = session_path.clone();
+        with_exclusive_lock(&session_path, move || {
+            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            stored.status = status;
+            stored.run_history = run_history;
+            stored.review_invocation_scope = scope;
+            stored.human_gate_snapshot = gate;
+            stored.policy_diagnostics = diagnostics;
+            stored.repair_reservation = repair_reservation;
+            stored.provider_start_ledger = provider_start_ledger;
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&locked_session_path, &stored)?;
+            Ok(stored)
+        })
+    }
+
+    /// Atomically claims a provider-start idempotency key. A key can be claimed
+    /// only once, and the durable ledger is the source of truth during recovery.
+    pub fn claim_provider_start(
+        &self,
+        session_id: &str,
+        provider_start_idempotency_key: &str,
+    ) -> Result<bool, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        if provider_start_idempotency_key.trim().is_empty() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_start_ledger",
+                reason: "idempotency key must not be empty".to_string(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(session_id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            if session
+                .provider_start_ledger
+                .iter()
+                .any(|entry| entry.provider_start_idempotency_key == provider_start_idempotency_key)
+            {
+                return Ok(false);
+            }
+            session.provider_start_ledger.push(
+                crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+                    provider_start_idempotency_key: provider_start_idempotency_key.to_string(),
+                    started: true,
+                },
+            );
+            session.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &session)?;
+            Ok(true)
+        })
     }
 
     pub fn compare_and_update_workspace_session_status(
@@ -795,4 +1003,79 @@ fn parse_sequential_id(value: &str, prefix: &str) -> Option<usize> {
         .strip_prefix(prefix)
         .and_then(|suffix| suffix.strip_prefix('_'))
         .and_then(|suffix| suffix.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+
+    fn create_input(
+        workspace_type: WorkspaceType,
+        work_item_plan_options: Option<WorkItemPlanSessionOptions>,
+    ) -> CreateWorkspaceSessionInput {
+        CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "entity_0001".to_string(),
+            workspace_type,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options,
+        }
+    }
+
+    #[test]
+    fn create_workspace_session_persists_work_item_plan_options() {
+        let temp = tempdir().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+        let options = WorkItemPlanSessionOptions {
+            flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+            run_policy: RunPolicy::AutoIfValid,
+            rollout_snapshot: true,
+        };
+
+        let session = store
+            .create_workspace_session(create_input(
+                WorkspaceType::WorkItemPlan,
+                Some(options.clone()),
+            ))
+            .unwrap();
+
+        assert_eq!(session.flow_kind, options.flow_kind);
+        assert_eq!(session.run_policy, options.run_policy);
+        assert_eq!(
+            store.get_workspace_session(&session.id).unwrap().flow_kind,
+            WorkItemPlanFlowKind::SingleCandidate
+        );
+    }
+
+    #[test]
+    fn create_workspace_session_rejects_work_item_plan_options_for_other_workspace_types() {
+        let temp = tempdir().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+
+        let error = store
+            .create_workspace_session(create_input(
+                WorkspaceType::Story,
+                Some(WorkItemPlanSessionOptions::default()),
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProductStoreError::InvalidRecord {
+                kind: "workspace_session",
+                ..
+            }
+        ));
+    }
 }

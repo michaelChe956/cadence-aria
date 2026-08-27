@@ -46,17 +46,14 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
             _ => unreachable!("text fallback recovery only applies to story and design"),
         };
         let session_record = lifecycle_store
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: entity_id.clone(),
-                workspace_type: workspace_type.clone(),
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            })
+            .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: entity_id.clone(),
+            workspace_type: workspace_type.clone(),
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .expect("workspace session");
         lifecycle_store
             .append_version(AppendSpecVersionInput {

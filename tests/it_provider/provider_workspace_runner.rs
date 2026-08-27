@@ -66,6 +66,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             review_rounds: 3,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
     store

@@ -175,6 +175,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
 
@@ -209,6 +210,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
 
@@ -234,6 +236,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle
@@ -627,6 +630,7 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle

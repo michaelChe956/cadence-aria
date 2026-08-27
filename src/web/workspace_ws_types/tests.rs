@@ -165,6 +165,9 @@ fn review_messages_and_session_state_serialize_as_contract() {
             message: "缺少验收标准".to_string(),
             evidence: "Artifact 未列出验收标准".to_string(),
             required_action: "补充验收标准".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
         }],
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: None,
@@ -230,6 +233,15 @@ fn review_messages_and_session_state_serialize_as_contract() {
         reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
     })
     .unwrap();
     assert_eq!(state["type"], "session_state");
@@ -797,6 +809,15 @@ fn session_state_artifact_accepts_markdown_payload() {
         reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");

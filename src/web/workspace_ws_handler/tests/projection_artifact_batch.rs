@@ -98,6 +98,7 @@ async fn work_item_plan_projection_artifact_batch_sorts_and_expands_in_version_o
         outbound_tx,
         "session_projection_batch".to_string(),
         WorkspaceRunRegistry::default(),
+        None,
     );
 
     engine_tx

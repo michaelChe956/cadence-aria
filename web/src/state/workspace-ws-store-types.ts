@@ -266,12 +266,84 @@ export interface RecoverableInterruptedRun {
   label: string;
 }
 
+export type WorkspaceSessionStatus =
+  | "open"
+  | "running"
+  | "waiting_for_human"
+  | "confirmed"
+  | "change_requested"
+  | "blocked_provider_unavailable"
+  | "terminated"
+  | "stopped_needs_human"
+  | "failed";
+export type WorkItemPlanFlowKind = "legacy" | "single_candidate";
+export type WorkItemPlanRunPolicy = "interactive" | "auto_if_valid";
+export interface WorkItemPlanRunHistory {
+  seen_fingerprints: string[];
+  repairs_used: number;
+  manual_repairs_used: number;
+  transitions_used: number;
+  initial_review_count: number;
+  verification_review_count: number;
+  review_cycles?: Record<
+    string,
+    { repairs_used: number; initial_count: number; verification_count: number }
+  >;
+}
+
+export interface WorkItemPlanHumanGateSnapshot {
+  findings: Array<{
+    class: "mechanical_error" | "repairable" | "human_required" | "advisory";
+    fingerprint: string;
+    category: string | null;
+    severity: string;
+    message: string;
+    evidence: string | null;
+    required_action: string | null;
+    contract_field: string | null;
+  }>;
+  repeated_fingerprints: string[];
+  attempts_used: number;
+  manual_repairs_remaining: number;
+  trigger: "native_human_required" | "repeated_fingerprint" | "repair_budget_exhausted";
+  resumable: boolean;
+}
+
+export interface WorkItemPlanRepairReservation {
+  token: string;
+  owner_session_id: string;
+  owner_run_id: string;
+  provider_start_idempotency_key: string;
+  state: "reserved" | "provider_started" | "committed" | "released";
+  commit_id: string | null;
+}
+
+export interface WorkItemPlanPolicyDiagnostic {
+  code: string;
+  message: string;
+  field: string | null;
+}
+
+export interface WorkItemPlanProviderStartLedgerEntry {
+  provider_start_idempotency_key: string;
+  started: boolean;
+}
+
 export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
   stage: string;
   superpowersEnabled: boolean;
   openSpecEnabled: boolean;
+  sessionStatus: WorkspaceSessionStatus | null;
+  flowKind: WorkItemPlanFlowKind | null;
+  runPolicy: WorkItemPlanRunPolicy | null;
+  runHistory: WorkItemPlanRunHistory | null;
+  reviewInvocationScope: unknown | null;
+  humanGateSnapshot: WorkItemPlanHumanGateSnapshot | null;
+  repairReservation: WorkItemPlanRepairReservation | null;
+  policyDiagnostics: WorkItemPlanPolicyDiagnostic[];
+  providerStartLedger: WorkItemPlanProviderStartLedgerEntry[];
   visitedStages: string[];
   messages: WsMessage[];
   checkpoints: WsCheckpoint[];
@@ -325,6 +397,15 @@ export interface WorkspaceWsActions {
     stage: string;
     superpowers_enabled?: boolean;
     openspec_enabled?: boolean;
+    session_status: WorkspaceSessionStatus;
+    flow_kind: WorkItemPlanFlowKind;
+    run_policy: WorkItemPlanRunPolicy;
+    run_history: WorkItemPlanRunHistory;
+    review_invocation_scope?: unknown | null;
+    human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
+    repair_reservation?: WorkItemPlanRepairReservation | null;
+    policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
+    provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
     messages: WsMessage[];
     checkpoints: WsCheckpoint[];
     artifact: WorkspaceArtifact;

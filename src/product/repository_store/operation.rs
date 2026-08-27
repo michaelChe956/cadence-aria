@@ -649,17 +649,13 @@ fn all_steps_completed(operation: &RepositoryInitializationOperation) -> bool {
 }
 
 fn interrupted_error() -> RepositoryRegistrationError {
-    RepositoryRegistrationError {
-        stage: "repository_initialization".to_string(),
-        provider: None,
-        command_index: None,
-        command: None,
-        reason_code: "repository_initialization_interrupted".to_string(),
-        stderr_summary: None,
-        changed_paths: None,
-        retryable: true,
-        action: INTERRUPTION_ACTION.to_string(),
-    }
+    RepositoryRegistrationError::new(
+        "repository_initialization",
+        "repository_initialization_interrupted",
+        None,
+        true,
+        INTERRUPTION_ACTION,
+    )
 }
 
 fn identity_mismatch(id: &str) -> ProductStoreError {

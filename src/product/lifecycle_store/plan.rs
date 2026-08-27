@@ -236,6 +236,7 @@ impl LifecycleStore {
                 review_rounds,
                 superpowers_enabled,
                 openspec_enabled,
+                work_item_plan_options: None,
             })?;
             created.push(session);
         }

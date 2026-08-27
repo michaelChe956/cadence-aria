@@ -440,6 +440,7 @@ async fn claude_code_story_context_requires_structured_ask_user_question() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
@@ -477,6 +478,14 @@ fn workspace_session_record(
         work_item_runtime_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
         created_at: "2026-06-30T00:00:00Z".to_string(),
         updated_at: "2026-06-30T00:00:00Z".to_string(),
     }

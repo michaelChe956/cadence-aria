@@ -41,6 +41,7 @@ fn persistent_single_repo_design_test_engine() -> (TempDir, LifecycleStore, Stri
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("seed Design workspace session");
     let (tx, _rx) = mpsc::channel(64);

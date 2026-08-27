@@ -589,17 +589,14 @@ fn plan_repair_child_record(
 ) -> crate::product::models::WorkspaceSessionRecord {
     lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: "work_item_plan_0001".to_string(),
-                workspace_type: WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 2,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             session_id.to_string(),
         )
         .unwrap()

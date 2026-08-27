@@ -39,7 +39,8 @@ pub use types::{
     RepositoryInitializationOperationStatus, RepositoryInitializationProgress,
     RepositoryInitializationStepKind, RepositoryInitializationStepRecord,
     RepositoryInitializationStepStatus, RepositoryInitializationSummary,
-    RepositoryRegistrationError, RepositoryRegistrationInput, RepositoryRegistrationSuccess,
+    RepositoryRegistrationError, RepositoryRegistrationErrorDetails, RepositoryRegistrationInput,
+    RepositoryRegistrationSuccess,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

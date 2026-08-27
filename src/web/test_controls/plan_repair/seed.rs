@@ -456,6 +456,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .map_err(fixture_error)?;
     lifecycle

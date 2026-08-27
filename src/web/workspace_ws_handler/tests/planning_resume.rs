@@ -595,6 +595,7 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
 

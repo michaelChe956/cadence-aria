@@ -57,6 +57,12 @@ impl WorkspaceEngine {
 
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
+            // 分类枚举错误必须直接沿 fallback diagnostic → policy fatal
+            // 路径收口，不能进入 JSON repair 或人工 gate。
+            Err(first_error) if first_error.is_classification_fatal() => {
+                let verdict = fallback_review_verdict(&first_completion, &first_error, false);
+                self.complete_review(first_completion, verdict).await;
+            }
             // Kimi 仅复用既有的一次 JSON 等值 repair；Pi 仍不进入 repair。
             Err(first_error)
                 if provider_allows_review_repair(&reviewer) && first_error.is_repairable() =>
@@ -267,6 +273,12 @@ impl WorkspaceEngine {
 
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
+            // 分类枚举错误必须直接沿 fallback diagnostic → policy fatal
+            // 路径收口，不能进入 JSON repair 或人工 gate。
+            Err(first_error) if first_error.is_classification_fatal() => {
+                let verdict = fallback_review_verdict(&first_completion, &first_error, false);
+                self.complete_review(first_completion, verdict).await;
+            }
             Err(first_error) if first_error.is_repairable() && reviewer != ProviderName::Pi => {
                 let repair_input = match self.build_review_repair_input(
                     &input,

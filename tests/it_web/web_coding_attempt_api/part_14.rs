@@ -32,17 +32,14 @@ fn seed_bound_work_item_session(
     work_item_revision_id: &str,
 ) {
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: GROUP_PROJECT_ID.to_string(),
-            issue_id: GROUP_ISSUE_ID.to_string(),
-            entity_id: work_item_id.to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: GROUP_PROJECT_ID.to_string(),
+        issue_id: GROUP_ISSUE_ID.to_string(),
+        entity_id: work_item_id.to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: ProviderName::Fake,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create work item session");
     let binding = WorkItemRuntimeBinding {
         plan_id: GROUP_PLAN_ID.to_string(),

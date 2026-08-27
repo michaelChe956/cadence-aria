@@ -3,11 +3,13 @@ use super::support::*;
 use super::*;
 use crate::product::lifecycle_store::{
     AggregateDesignSpecScope, AggregateStorySpecScope, ConfirmAggregateGateError,
+    WorkItemPlanSessionOptions,
 };
 use crate::product::logical_codebase::{
     LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
 };
 use crate::product::models::WorkItemRuntimeBinding;
+use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::product::workspace_engine::group_work_items_by_target;
@@ -467,6 +469,7 @@ pub async fn generate_story_specs(
             review_rounds: workspace_config.review_rounds,
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
+            work_item_plan_options: None,
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
@@ -555,6 +558,7 @@ pub async fn generate_design_specs(
             review_rounds: workspace_config.review_rounds,
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
+            work_item_plan_options: None,
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
@@ -671,6 +675,15 @@ pub async fn prepare_work_item_plan(
             review_rounds: workspace_config.review_rounds,
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: if state.work_item_plan_single_candidate {
+                    WorkItemPlanFlowKind::SingleCandidate
+                } else {
+                    WorkItemPlanFlowKind::Legacy
+                },
+                run_policy: request.run_policy.unwrap_or(RunPolicy::Interactive),
+                rollout_snapshot: state.work_item_plan_single_candidate,
+            }),
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)

@@ -49,6 +49,45 @@ pub async fn workspace_session_run_next(
     Ok(Json(workspace_session_dto(output.session)))
 }
 
+pub async fn workspace_session_takeover(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<WorkspaceSessionTakeoverDto>> {
+    let lifecycle = LifecycleStore::new(product_app_paths(&state));
+    let child = lifecycle
+        .takeover_stopped_needs_human(&session_id)
+        .map_err(workspace_session_takeover_api_error)?;
+    let event = lifecycle
+        .get_human_gate_takeover_event(&session_id)
+        .map_err(workspace_session_takeover_api_error)?
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "workspace_session_takeover_event_missing",
+                "workspace session takeover event is missing",
+                json!({"parent_session_id": session_id}),
+            )
+        })?;
+    Ok(Json(WorkspaceSessionTakeoverDto {
+        workspace_session: workspace_session_dto(child),
+        parent_session_id: event.parent_session_id,
+        takeover_event_id: event.id,
+    }))
+}
+
+fn workspace_session_takeover_api_error(error: ProductStoreError) -> ApiError {
+    match error {
+        ProductStoreError::InvalidRecord {
+            kind: "human_gate_takeover",
+            reason,
+        } => ApiError::runtime(
+            "workspace_session_takeover_not_allowed",
+            "workspace session takeover is not allowed",
+            json!({"reason": reason}),
+        ),
+        other => product_store_api_error(other),
+    }
+}
+
 pub async fn workspace_session_confirm(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
@@ -252,6 +291,7 @@ mod tests {
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,
+                work_item_plan_options: None,
             })
             .expect("create workspace session");
         let session_id = session.id.clone();
@@ -301,6 +341,7 @@ mod tests {
                 review_rounds: 1,
                 superpowers_enabled: false,
                 openspec_enabled: false,
+                work_item_plan_options: None,
             })
             .expect("create workspace session");
         lifecycle

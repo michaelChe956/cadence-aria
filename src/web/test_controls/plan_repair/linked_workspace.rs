@@ -94,6 +94,7 @@ pub(super) async fn restore_linked_workspace_matrix(
                 review_rounds: 2,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             },
             "workspace_session_linked_work_item_parent".to_string(),
         )
@@ -110,6 +111,7 @@ pub(super) async fn restore_linked_workspace_matrix(
                 review_rounds: 2,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             },
             "workspace_session_linked_wi_core".to_string(),
         )

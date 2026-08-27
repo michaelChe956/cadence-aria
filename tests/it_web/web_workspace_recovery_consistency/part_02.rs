@@ -129,6 +129,15 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
+        session_status: cadence_aria::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: cadence_aria::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: cadence_aria::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: cadence_aria::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");

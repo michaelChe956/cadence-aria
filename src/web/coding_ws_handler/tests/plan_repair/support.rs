@@ -403,6 +403,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle

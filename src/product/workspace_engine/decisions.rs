@@ -286,10 +286,12 @@ impl WorkspaceEngine {
         self.complete_active_node(Some(summary.to_string())).await;
         self.mark_latest_artifact_confirmed(Some("human".to_string()));
         if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+            if let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::Confirmed,
-            );
+            ) {
+                self.session.session_status = record.status;
+            }
             let _ = match self.session.workspace_type {
                 WorkspaceType::Story | WorkspaceType::Design => store
                     .update_spec_confirmation_status(
@@ -612,6 +614,7 @@ impl WorkspaceEngine {
                             OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
                         )
                         .await?;
+                    self.record_manual_policy_repair()?;
                     return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
                         feedback,
                     });
@@ -659,15 +662,22 @@ impl WorkspaceEngine {
                         })
                         .await;
                 }
+                if self.session.workspace_type == WorkspaceType::WorkItemPlan
+                    && self.session.human_gate_snapshot.is_some()
+                {
+                    self.record_manual_policy_repair()?;
+                }
                 Ok(ReviewDecisionOutcome::StartRevision)
             }
             HumanConfirmDecision::Terminate => {
                 self.complete_active_node(Some("已终止".to_string())).await;
-                if let Some(store) = &self.lifecycle_store {
-                    let _ = store.update_workspace_session_status(
+                if let Some(store) = &self.lifecycle_store
+                    && let Ok(record) = store.update_workspace_session_status(
                         &self.session.session_id,
                         WorkspaceSessionStatus::Terminated,
-                    );
+                    )
+                {
+                    self.session.session_status = record.status;
                 }
                 self.transition_stage(WorkspaceStage::Completed).await;
                 let _ = self
@@ -702,11 +712,13 @@ impl WorkspaceEngine {
                 })?;
                 self.append_work_item_plan_context_blocker_resolution(resolution)
                     .await?;
-                if let Some(store) = &self.lifecycle_store {
-                    let _ = store.update_workspace_session_status(
+                if let Some(store) = &self.lifecycle_store
+                    && let Ok(record) = store.update_workspace_session_status(
                         &self.session.session_id,
                         WorkspaceSessionStatus::Open,
-                    );
+                    )
+                {
+                    self.session.session_status = record.status;
                 }
                 self.transition_stage(WorkspaceStage::Running).await;
                 Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline)
@@ -714,11 +726,13 @@ impl WorkspaceEngine {
             HumanConfirmDecision::Terminate => {
                 self.complete_active_node(Some("已终止 WorkItemPlan Outline 生成".to_string()))
                     .await;
-                if let Some(store) = &self.lifecycle_store {
-                    let _ = store.update_workspace_session_status(
+                if let Some(store) = &self.lifecycle_store
+                    && let Ok(record) = store.update_workspace_session_status(
                         &self.session.session_id,
                         WorkspaceSessionStatus::Terminated,
-                    );
+                    )
+                {
+                    self.session.session_status = record.status;
                 }
                 self.transition_stage(WorkspaceStage::Completed).await;
                 let _ = self
@@ -815,11 +829,13 @@ impl WorkspaceEngine {
         _findings: &[WorkItemSplitFinding],
     ) {
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
         let _ = self
             .create_timeline_node(TimelineNodeDraft {
@@ -836,11 +852,13 @@ impl WorkspaceEngine {
 
     pub(crate) async fn enter_work_item_plan_context_blocker(&mut self, summary: Option<String>) {
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
         let _ = self
             .create_timeline_node(TimelineNodeDraft {
@@ -868,11 +886,13 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Active,
             })
             .await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
     }
 
@@ -889,11 +909,13 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Active,
             })
             .await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
     }
 
@@ -910,11 +932,13 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Active,
             })
             .await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
     }
 
@@ -931,11 +955,13 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Active,
             })
             .await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
     }
 
@@ -952,11 +978,13 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Active,
             })
             .await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
     }
 
@@ -973,11 +1001,13 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Active,
             })
             .await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::WaitingForHuman,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
     }
 }

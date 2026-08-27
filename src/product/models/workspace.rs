@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+use crate::product::work_item_plan_policy::{
+    HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
+    ReviewInvocationScope, RunHistory, RunPolicy, WorkItemPlanFlowKind,
+};
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 use super::provider::{ProviderConversationRef, ProviderName};
@@ -25,6 +29,8 @@ pub enum WorkspaceSessionStatus {
     ChangeRequested,
     BlockedProviderUnavailable,
     Terminated,
+    StoppedNeedsHuman,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +47,14 @@ impl Default for WorkspaceRolePermissionModes {
             reviewer: ProviderPermissionMode::Auto,
         }
     }
+}
+
+fn default_flow_kind() -> WorkItemPlanFlowKind {
+    WorkItemPlanFlowKind::Legacy
+}
+
+fn default_run_policy() -> RunPolicy {
+    RunPolicy::Interactive
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +77,22 @@ pub struct WorkspaceSessionRecord {
     pub reviewer_enabled_at_start: Option<bool>,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    #[serde(default = "default_flow_kind")]
+    pub flow_kind: WorkItemPlanFlowKind,
+    #[serde(default = "default_run_policy")]
+    pub run_policy: RunPolicy,
+    #[serde(default)]
+    pub run_history: RunHistory,
+    #[serde(default)]
+    pub review_invocation_scope: Option<ReviewInvocationScope>,
+    #[serde(default)]
+    pub human_gate_snapshot: Option<HumanGateSnapshot>,
+    #[serde(default)]
+    pub repair_reservation: Option<RepairReservation>,
+    #[serde(default)]
+    pub policy_diagnostics: Vec<PolicyDiagnostic>,
+    #[serde(default)]
+    pub provider_start_ledger: Vec<ProviderStartLedgerEntry>,
     #[serde(default)]
     pub work_item_runtime_binding: Option<WorkItemRuntimeBinding>,
     #[serde(default)]
@@ -70,6 +100,16 @@ pub struct WorkspaceSessionRecord {
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Durable audit event that associates an immutable stopped auto run with the
+/// interactive session created by an explicit human takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanGateTakeoverEvent {
+    pub id: String,
+    pub parent_session_id: String,
+    pub child_session_id: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +239,44 @@ mod tests {
         assert_eq!(
             record.permission_modes.reviewer,
             ProviderPermissionMode::Auto
+        );
+    }
+
+    #[test]
+    fn old_workspace_session_record_defaults_work_item_plan_policy_fields() {
+        let json = serde_json::json!({
+            "id": "s1", "project_id": "p1", "issue_id": "i1", "entity_id": "e1",
+            "workspace_type": "work_item_plan", "status": "open",
+            "author_provider": "claude_code", "reviewer_provider": "codex",
+            "review_rounds": 1, "superpowers_enabled": false, "openspec_enabled": false,
+            "messages": [], "created_at": "", "updated_at": ""
+        });
+
+        let record: WorkspaceSessionRecord = serde_json::from_value(json).unwrap();
+
+        assert_eq!(
+            record.flow_kind,
+            crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy
+        );
+        assert_eq!(
+            record.run_policy,
+            crate::product::work_item_plan_policy::RunPolicy::Interactive
+        );
+        assert_eq!(
+            record.run_history,
+            crate::product::work_item_plan_policy::RunHistory::default()
+        );
+    }
+
+    #[test]
+    fn workspace_session_status_serializes_new_terminal_values() {
+        assert_eq!(
+            serde_json::to_value(WorkspaceSessionStatus::StoppedNeedsHuman).unwrap(),
+            "stopped_needs_human"
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceSessionStatus::Failed).unwrap(),
+            "failed"
         );
     }
 }

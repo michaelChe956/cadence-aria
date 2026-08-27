@@ -205,17 +205,14 @@ async fn bootstrap_confirmed_work_item_with_providers(
     let author_provider = provider_name_from_str(work_item_author_provider);
     let reviewer_provider = provider_name_from_str(work_item_reviewer_provider);
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider,
-            reviewer_provider,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        author_provider,
+        reviewer_provider,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create work item session");
     lifecycle
         .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)

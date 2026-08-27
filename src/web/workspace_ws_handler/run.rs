@@ -17,7 +17,7 @@ mod gateway_start;
 pub(crate) use gateway_start::{resolve_plan_author_launch, start_work_item_plan_author};
 #[path = "run/provider_run.rs"]
 mod provider_run;
-pub(crate) use provider_run::spawn_provider_run_from_handler;
+pub(crate) use provider_run::{spawn_provider_run_from_event, spawn_provider_run_from_handler};
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -31,33 +31,6 @@ pub(crate) struct ProviderRunContext {
     pub(crate) next_run_id: Arc<Mutex<u64>>,
     pub(crate) app_paths: ProductAppPaths,
     pub(crate) session_record: WorkspaceSessionRecord,
-}
-
-pub(crate) enum ProviderRunKind {
-    Author {
-        content: String,
-    },
-    AuthorChoiceFollowup {
-        content: String,
-    },
-    Revision,
-    ReviewOnly,
-    WorkItemPlanAuthor,
-    WorkItemPlanOutlineRevision {
-        feedback: Option<String>,
-    },
-    /// StaleContext 重建：携带 rebuilt 的规划上下文，启动**全新** outline run（新建节点、
-    /// 使用 rebuilt cwd/inventory/policy，不沿用中断会话的 OutlineRun 节点）。
-    WorkItemPlanOutlineRebuild {
-        rebuilt: Box<ResolvedPlanningContext>,
-    },
-    WorkItemPlanDraft {
-        feedback: Option<String>,
-    },
-    WorkItemPlanBatch,
-    WorkItemPlanRevision {
-        feedback: Option<String>,
-    },
 }
 
 /// 新 BLOCKER 修复：rebuilt snapshot 仅在 **provider 成功启动后** 才 commit（延迟落盘）。

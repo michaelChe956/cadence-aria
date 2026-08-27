@@ -493,7 +493,10 @@ macro_rules! workspace_ws_provider_run_followups {
                     .await;
             }
         }
+        // 仅当持久化策略路由属于当前节点时，才由 ProviderRunRequested 消费者启动。
+        // 先前 artifact 的路由作用域不能阻断刚创建的 serial Outline run。
         if $engine.session().workspace_type == WorkspaceType::WorkItemPlan
+            && !$engine.policy_route_targets_active_node()
             && $engine.session().stage == WorkspaceStage::Running
             && $engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
@@ -571,7 +574,10 @@ macro_rules! workspace_ws_provider_run_followups {
                 }
             }
         }
+        // 同上：仅当前节点的策略路由会改由 ProviderRunRequested 启动；历史 scope
+        // 不能吞掉 serial 当前项返修的直接 follow-up。
         if $engine.session().workspace_type == WorkspaceType::WorkItemPlan
+            && !$engine.policy_route_targets_active_node()
             && $engine.session().stage == WorkspaceStage::Running
             && $engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)

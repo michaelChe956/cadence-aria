@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::product::work_item_plan_policy::{FindingClassHint, ReviewFindingCategory};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewVerdictType {
@@ -25,6 +27,12 @@ pub struct ReviewFinding {
     pub evidence: String,
     #[serde(default)]
     pub required_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<ReviewFindingCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_hint: Option<FindingClassHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_field: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -235,10 +235,38 @@ pub(crate) fn spawn_engine_event_forward_task(
     outbound_tx: mpsc::Sender<OutboundControl>,
     session_id: String,
     workspace_runs: WorkspaceRunRegistry,
+    run_context: Option<ProviderRunContext>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
             let event = match event {
+                // ProviderRunRequested 是 engine→runtime 的内部控制面信号，不能映射为
+                // WebSocket 协议消息。启动必须脱离转发循环：请求由仍持有 engine mutex 的
+                // provider task 发出；若在此同步等待启动例程取得该锁，转发循环会阻塞，新的
+                // serial draft 永远无法启动。
+                EngineEvent::ProviderRunRequested { kind, node_id } => {
+                    if let Some(run_context) = run_context.as_ref() {
+                        let run_context = run_context.clone();
+                        let outbound_tx = outbound_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(message) = spawn_provider_run_from_event(
+                                run_context,
+                                kind,
+                                node_id,
+                                outbound_tx.clone(),
+                            )
+                            .await
+                            {
+                                let _ = send_json_outbound(
+                                    &outbound_tx,
+                                    &WsOutMessage::Error { message },
+                                )
+                                .await;
+                            }
+                        });
+                    }
+                    continue;
+                }
                 EngineEvent::ArtifactBatchUpdate { mut updates } => {
                     updates.sort_by_key(|update| update.version);
                     let mut connected = true;
@@ -285,6 +313,9 @@ pub(crate) fn spawn_engine_event_forward_task(
                 }
                 EngineEvent::ArtifactBatchUpdate { .. } => {
                     unreachable!("artifact batches are expanded before single-event mapping")
+                }
+                EngineEvent::ProviderRunRequested { .. } => {
+                    unreachable!("provider run requests are consumed before WebSocket mapping")
                 }
                 EngineEvent::PermissionRequest {
                     id,

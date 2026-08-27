@@ -37,17 +37,14 @@ async fn bootstrap_legacy_plan_with_session(app: axum::Router, repo_path: &std::
         })
         .expect("create legacy work item plan");
     lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "issue_work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: ProviderName::Fake,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create work item plan session");
 }
 

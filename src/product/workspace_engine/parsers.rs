@@ -1,5 +1,6 @@
 use super::*;
 use crate::cross_cutting::structured_output::parse_last_structured_output;
+use crate::product::work_item_plan_policy::{ParsedReviewEnvelope, ReviewStructuredOutputError};
 
 mod choice;
 pub(crate) use choice::*;
@@ -39,6 +40,9 @@ pub(crate) enum ReviewStructuredOutputErrorCode {
     MalformedFindings,
     InvalidOutlineReference,
     InvalidGenerationRound,
+    UnknownFindingCategory,
+    UnknownFindingClassHint,
+    InvalidFindingField,
 }
 
 impl ReviewStructuredOutputErrorCode {
@@ -50,6 +54,9 @@ impl ReviewStructuredOutputErrorCode {
             Self::MalformedFindings => "malformed_findings",
             Self::InvalidOutlineReference => "invalid_outline_reference",
             Self::InvalidGenerationRound => "invalid_generation_round",
+            Self::UnknownFindingCategory => "unknown_finding_category",
+            Self::UnknownFindingClassHint => "unknown_class_hint",
+            Self::InvalidFindingField => "invalid_finding_field",
         }
     }
 
@@ -61,7 +68,65 @@ impl ReviewStructuredOutputErrorCode {
             Self::MalformedFindings => "审核 findings 结构不合法",
             Self::InvalidOutlineReference => "审核引用了无效的 outline",
             Self::InvalidGenerationRound => "审核 generation round 缺失或为空",
+            Self::UnknownFindingCategory => "审核 finding category 不在允许枚举内",
+            Self::UnknownFindingClassHint => "审核 finding class_hint 不在允许枚举内",
+            Self::InvalidFindingField => "审核 finding 字段结构不合法",
         }
+    }
+}
+
+impl From<ReviewStructuredOutputError> for ReviewStructuredOutputErrorCode {
+    fn from(error: ReviewStructuredOutputError) -> Self {
+        match error {
+            ReviewStructuredOutputError::UnknownFindingCategory(_) => Self::UnknownFindingCategory,
+            ReviewStructuredOutputError::UnknownFindingClassHint(_) => {
+                Self::UnknownFindingClassHint
+            }
+            ReviewStructuredOutputError::InvalidFindingField { .. }
+            | ReviewStructuredOutputError::VerificationScopeViolation { .. } => {
+                Self::InvalidFindingField
+            }
+        }
+    }
+}
+
+/// 唯一的 reviewer JSON adapter：保留原始 verdict，并对 finding 的新枚举字段作显式转换。
+pub(crate) fn parse_review_envelope(
+    value: &serde_json::Value,
+) -> Result<ParsedReviewEnvelope, ReviewStructuredOutputError> {
+    let raw_verdict = parse_raw_review_verdict(value)?;
+    let findings = parse_review_findings_strict(value.get("findings"))?;
+    let parsed_findings = ParsedReviewFindings {
+        findings: findings.clone(),
+        malformed: false,
+        structured_error: None,
+    };
+
+    Ok(ParsedReviewEnvelope {
+        raw_verdict: raw_verdict.clone(),
+        normalized_gate: review_gate_for(&raw_verdict, &parsed_findings),
+        findings,
+    })
+}
+
+fn parse_raw_review_verdict(
+    value: &serde_json::Value,
+) -> Result<ReviewVerdictType, ReviewStructuredOutputError> {
+    let verdict = value
+        .get("verdict")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ReviewStructuredOutputError::InvalidFindingField {
+            field: "verdict".to_string(),
+            details: "must be a string".to_string(),
+        })?;
+    match verdict {
+        "pass" => Ok(ReviewVerdictType::Pass),
+        "revise" => Ok(ReviewVerdictType::Revise),
+        "needs_human" => Ok(ReviewVerdictType::NeedsHuman),
+        _ => Err(ReviewStructuredOutputError::InvalidFindingField {
+            field: "verdict".to_string(),
+            details: "must be pass, revise, or needs_human".to_string(),
+        }),
     }
 }
 
@@ -134,7 +199,7 @@ pub(crate) fn parse_review_value(
 ) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
     let verdict = value
         .get("verdict")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .ok_or(ReviewStructuredOutputErrorCode::MissingVerdict)?;
     let parsed_verdict = match verdict {
         "pass" => ReviewVerdictType::Pass,
@@ -144,7 +209,7 @@ pub(crate) fn parse_review_value(
     };
     let summary = value
         .get("summary")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or(match parsed_verdict {
             ReviewVerdictType::Pass => "审核通过",
             ReviewVerdictType::Revise => "需要返修",
@@ -152,6 +217,9 @@ pub(crate) fn parse_review_value(
         })
         .to_string();
     let parsed_findings = parse_review_findings(value.get("findings"));
+    if let Some(error) = parsed_findings.structured_error.as_ref() {
+        return Err(error.clone().into());
+    }
     if parsed_findings.malformed {
         return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
     }
@@ -257,6 +325,9 @@ pub(crate) fn parse_work_item_plan_review_value(
         return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
     }
     let parsed_findings = parse_review_findings(value.get("findings"));
+    if let Some(error) = parsed_findings.structured_error.as_ref() {
+        return Err(error.clone().into());
+    }
     if parsed_findings.malformed {
         return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
     }
@@ -511,6 +582,192 @@ fn collect_work_item_plan_review_reference(
 pub(crate) struct ParsedReviewFindings {
     pub(crate) findings: Vec<ReviewFinding>,
     pub(crate) malformed: bool,
+    pub(crate) structured_error: Option<ReviewStructuredOutputError>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReviewFinding {
+    severity: String,
+    message: String,
+    #[serde(default)]
+    evidence: String,
+    #[serde(default)]
+    required_action: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    class_hint: Option<String>,
+    #[serde(default)]
+    contract_field: Option<String>,
+}
+
+fn parse_review_findings_strict(
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<ReviewFinding>, ReviewStructuredOutputError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| invalid_finding_field("findings", "must be an array"))?;
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| parse_raw_review_finding(item, index))
+        .collect()
+}
+
+fn parse_raw_review_finding(
+    value: &serde_json::Value,
+    index: usize,
+) -> Result<ReviewFinding, ReviewStructuredOutputError> {
+    let prefix = format!("findings[{index}]");
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_finding_field(prefix.clone(), "must be an object"))?;
+    // `target_outline_id` is intentionally excluded from this generic policy
+    // envelope. The WorkItemPlan legacy parser consumes it directly from the
+    // raw finding to derive `affects_items`; accepting it here would otherwise
+    // acknowledge and discard its routing meaning.
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "severity"
+                | "message"
+                | "evidence"
+                | "required_action"
+                | "category"
+                | "class_hint"
+                | "contract_field"
+        ) {
+            return Err(invalid_finding_field(
+                format!("{prefix}.{field}"),
+                "is not allowed",
+            ));
+        }
+    }
+    required_string_field(object, &prefix, "severity")?;
+    required_string_field(object, &prefix, "message")?;
+    optional_string_field(object, &prefix, "evidence")?;
+    optional_string_field(object, &prefix, "required_action")?;
+    optional_string_or_null_field(object, &prefix, "category")?;
+    optional_string_or_null_field(object, &prefix, "class_hint")?;
+    optional_string_or_null_field(object, &prefix, "contract_field")?;
+
+    let raw = serde_json::from_value::<RawReviewFinding>(value.clone()).map_err(|error| {
+        invalid_finding_field(prefix.clone(), format!("cannot be decoded: {error}"))
+    })?;
+    let severity = parse_live_review_finding_severity(&raw.severity).ok_or_else(|| {
+        invalid_finding_field(
+            format!("{prefix}.severity"),
+            "must be blocking, must_fix, or suggestion",
+        )
+    })?;
+
+    Ok(ReviewFinding {
+        severity,
+        message: raw.message,
+        evidence: raw.evidence,
+        required_action: raw.required_action,
+        category: raw
+            .category
+            .map(|raw| parse_finding_category(&raw))
+            .transpose()?,
+        class_hint: raw
+            .class_hint
+            .map(|raw| parse_finding_class_hint(&raw))
+            .transpose()?,
+        contract_field: raw.contract_field,
+    })
+}
+
+fn parse_finding_category(
+    value: &str,
+) -> Result<crate::product::work_item_plan_policy::ReviewFindingCategory, ReviewStructuredOutputError>
+{
+    use crate::product::work_item_plan_policy::ReviewFindingCategory;
+
+    match value {
+        "contract_gap" => Ok(ReviewFindingCategory::ContractGap),
+        "self_contradiction" => Ok(ReviewFindingCategory::SelfContradiction),
+        "scope_conflict" => Ok(ReviewFindingCategory::ScopeConflict),
+        "verification_unattributable" => Ok(ReviewFindingCategory::VerificationUnattributable),
+        "completeness" => Ok(ReviewFindingCategory::Completeness),
+        "other" => Ok(ReviewFindingCategory::Other),
+        _ => Err(ReviewStructuredOutputError::UnknownFindingCategory(
+            value.to_string(),
+        )),
+    }
+}
+
+fn parse_finding_class_hint(
+    value: &str,
+) -> Result<crate::product::work_item_plan_policy::FindingClassHint, ReviewStructuredOutputError> {
+    use crate::product::work_item_plan_policy::FindingClassHint;
+
+    match value {
+        "repairable" => Ok(FindingClassHint::Repairable),
+        "human_required" => Ok(FindingClassHint::HumanRequired),
+        "advisory" => Ok(FindingClassHint::Advisory),
+        _ => Err(ReviewStructuredOutputError::UnknownFindingClassHint(
+            value.to_string(),
+        )),
+    }
+}
+
+fn required_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+    field: &str,
+) -> Result<(), ReviewStructuredOutputError> {
+    if object.get(field).is_some_and(serde_json::Value::is_string) {
+        Ok(())
+    } else {
+        Err(invalid_finding_field(
+            format!("{prefix}.{field}"),
+            "must be a string",
+        ))
+    }
+}
+
+fn optional_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+    field: &str,
+) -> Result<(), ReviewStructuredOutputError> {
+    match object.get(field) {
+        None | Some(serde_json::Value::String(_)) => Ok(()),
+        Some(_) => Err(invalid_finding_field(
+            format!("{prefix}.{field}"),
+            "must be a string",
+        )),
+    }
+}
+
+fn optional_string_or_null_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+    field: &str,
+) -> Result<(), ReviewStructuredOutputError> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => Ok(()),
+        Some(_) => Err(invalid_finding_field(
+            format!("{prefix}.{field}"),
+            "must be a string or null",
+        )),
+    }
+}
+
+fn invalid_finding_field(
+    field: impl Into<String>,
+    details: impl Into<String>,
+) -> ReviewStructuredOutputError {
+    ReviewStructuredOutputError::InvalidFindingField {
+        field: field.into(),
+        details: details.into(),
+    }
 }
 
 pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> ParsedReviewFindings {
@@ -518,18 +775,20 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
         return ParsedReviewFindings {
             findings: Vec::new(),
             malformed: false,
+            structured_error: None,
         };
     };
     let Some(items) = value.as_array() else {
         return ParsedReviewFindings {
             findings: Vec::new(),
             malformed: true,
+            structured_error: None,
         };
     };
 
     let mut findings = Vec::new();
     let mut malformed = false;
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         let Some(object) = item.as_object() else {
             malformed = true;
             continue;
@@ -540,15 +799,46 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
         }
         let Some(severity) = object
             .get("severity")
-            .and_then(|value| value.as_str())
+            .and_then(serde_json::Value::as_str)
             .and_then(parse_live_review_finding_severity)
         else {
             malformed = true;
             continue;
         };
-        let Some(message) = object.get("message").and_then(|value| value.as_str()) else {
+        let Some(message) = object.get("message").and_then(serde_json::Value::as_str) else {
             malformed = true;
             continue;
+        };
+        let prefix = format!("findings[{index}]");
+        let category = match parse_optional_finding_category(object, &prefix) {
+            Ok(category) => category,
+            Err(error) => {
+                return ParsedReviewFindings {
+                    findings: Vec::new(),
+                    malformed: false,
+                    structured_error: Some(error),
+                };
+            }
+        };
+        let class_hint = match parse_optional_finding_class_hint(object, &prefix) {
+            Ok(class_hint) => class_hint,
+            Err(error) => {
+                return ParsedReviewFindings {
+                    findings: Vec::new(),
+                    malformed: false,
+                    structured_error: Some(error),
+                };
+            }
+        };
+        let contract_field = match parse_optional_contract_field(object, &prefix) {
+            Ok(contract_field) => contract_field,
+            Err(error) => {
+                return ParsedReviewFindings {
+                    findings: Vec::new(),
+                    malformed: false,
+                    structured_error: Some(error),
+                };
+            }
         };
 
         findings.push(ReviewFinding {
@@ -556,20 +846,72 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
             message: message.to_string(),
             evidence: object
                 .get("evidence")
-                .and_then(|value| value.as_str())
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string(),
             required_action: object
                 .get("required_action")
-                .and_then(|value| value.as_str())
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            category,
+            class_hint,
+            contract_field,
         });
     }
 
     ParsedReviewFindings {
         findings,
         malformed,
+        structured_error: None,
+    }
+}
+
+fn parse_optional_finding_category(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+) -> Result<
+    Option<crate::product::work_item_plan_policy::ReviewFindingCategory>,
+    ReviewStructuredOutputError,
+> {
+    match object.get("category") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => parse_finding_category(value).map(Some),
+        Some(_) => Err(invalid_finding_field(
+            format!("{prefix}.category"),
+            "must be a string or null",
+        )),
+    }
+}
+
+fn parse_optional_finding_class_hint(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+) -> Result<
+    Option<crate::product::work_item_plan_policy::FindingClassHint>,
+    ReviewStructuredOutputError,
+> {
+    match object.get("class_hint") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => parse_finding_class_hint(value).map(Some),
+        Some(_) => Err(invalid_finding_field(
+            format!("{prefix}.class_hint"),
+            "must be a string or null",
+        )),
+    }
+}
+
+fn parse_optional_contract_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+) -> Result<Option<String>, ReviewStructuredOutputError> {
+    match object.get("contract_field") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(invalid_finding_field(
+            format!("{prefix}.contract_field"),
+            "must be a string or null",
+        )),
     }
 }
 
@@ -605,5 +947,107 @@ pub(crate) fn review_gate_for(
             ReviewGate::UserTriageRequired
         }
         ReviewVerdictType::Revise => ReviewGate::UserConfirmAllowed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_envelope_parses_legacy_findings_with_new_fields_defaulted() {
+        let envelope = parse_review_envelope(&serde_json::json!({
+            "verdict": "revise",
+            "findings": [{
+                "severity": "must_fix",
+                "message": "legacy finding",
+                "evidence": "evidence",
+                "required_action": "repair it"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(envelope.raw_verdict, ReviewVerdictType::Revise);
+        assert_eq!(envelope.findings[0].category, None);
+        assert_eq!(envelope.findings[0].class_hint, None);
+        assert_eq!(envelope.findings[0].contract_field, None);
+    }
+
+    #[test]
+    fn review_envelope_unknown_category_and_hint_have_distinct_stable_errors() {
+        let category = parse_review_envelope(&serde_json::json!({
+            "verdict": "revise",
+            "findings": [{
+                "severity": "must_fix",
+                "message": "unknown category",
+                "category": "unsupported"
+            }]
+        }))
+        .unwrap_err();
+        assert_eq!(
+            category,
+            ReviewStructuredOutputError::UnknownFindingCategory("unsupported".to_string())
+        );
+        assert_eq!(category.code(), "unknown_finding_category");
+        assert_eq!(
+            ReviewStructuredOutputErrorCode::from(category).as_str(),
+            "unknown_finding_category"
+        );
+
+        let hint = parse_review_envelope(&serde_json::json!({
+            "verdict": "revise",
+            "findings": [{
+                "severity": "must_fix",
+                "message": "unknown hint",
+                "class_hint": "unsupported"
+            }]
+        }))
+        .unwrap_err();
+        assert_eq!(
+            hint,
+            ReviewStructuredOutputError::UnknownFindingClassHint("unsupported".to_string())
+        );
+        assert_eq!(hint.code(), "unknown_class_hint");
+        assert_eq!(
+            ReviewStructuredOutputErrorCode::from(hint).as_str(),
+            "unknown_class_hint"
+        );
+    }
+
+    #[test]
+    fn review_envelope_reports_finding_field_type_errors_explicitly() {
+        let error = parse_review_envelope(&serde_json::json!({
+            "verdict": "revise",
+            "findings": [{
+                "severity": "must_fix",
+                "message": "invalid type",
+                "category": 5
+            }]
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ReviewStructuredOutputError::InvalidFindingField {
+                field: "findings[0].category".to_string(),
+                details: "must be a string or null".to_string(),
+            }
+        );
+        assert_eq!(error.code(), "invalid_finding_field");
+    }
+
+    #[test]
+    fn review_envelope_preserves_raw_needs_human_when_strong_finding_changes_gate() {
+        let envelope = parse_review_envelope(&serde_json::json!({
+            "verdict": "needs_human",
+            "findings": [{
+                "severity": "must_fix",
+                "message": "strong finding"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(envelope.raw_verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(envelope.normalized_gate, ReviewGate::RequiresRevision);
     }
 }

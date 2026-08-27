@@ -23,6 +23,8 @@ mod plan_repair_activation;
 mod planning_resume;
 #[path = "tests/projection_artifact_batch.rs"]
 mod projection_artifact_batch;
+#[path = "tests/provider_run_events.rs"]
+mod provider_run_events;
 
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {
@@ -437,6 +439,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
@@ -570,6 +573,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
@@ -703,6 +707,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -950,6 +955,7 @@ async fn assert_pi_failure_does_not_start_alternate(mode: PiFailureMode) {
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
     let mut session = WorkspaceSession::from_record(record.clone());
@@ -1097,6 +1103,7 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
 

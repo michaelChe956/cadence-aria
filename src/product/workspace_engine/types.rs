@@ -1,3 +1,4 @@
+use crate::product::logical_codebase::ResolvedPlanningContext;
 use crate::product::models::WorkspaceRolePermissionModes;
 
 use super::*;
@@ -88,6 +89,16 @@ pub struct WorkspaceSession {
     pub reviewer_enabled_at_start: Option<bool>,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    pub session_status: WorkspaceSessionStatus,
+    pub flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind,
+    pub run_policy: crate::product::work_item_plan_policy::RunPolicy,
+    pub run_history: crate::product::work_item_plan_policy::RunHistory,
+    pub review_invocation_scope:
+        Option<crate::product::work_item_plan_policy::ReviewInvocationScope>,
+    pub human_gate_snapshot: Option<crate::product::work_item_plan_policy::HumanGateSnapshot>,
+    pub repair_reservation: Option<crate::product::work_item_plan_policy::RepairReservation>,
+    pub policy_diagnostics: Vec<crate::product::work_item_plan_policy::PolicyDiagnostic>,
+    pub provider_start_ledger: Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
     pub provider_conversations: Vec<ProviderConversationRef>,
     pub repository_path: Option<PathBuf>,
 }
@@ -123,6 +134,15 @@ impl WorkspaceSession {
             reviewer_enabled_at_start: record.reviewer_enabled_at_start,
             superpowers_enabled: record.superpowers_enabled,
             openspec_enabled: record.openspec_enabled,
+            session_status: record.status,
+            flow_kind: record.flow_kind,
+            run_policy: record.run_policy,
+            run_history: record.run_history,
+            review_invocation_scope: record.review_invocation_scope,
+            human_gate_snapshot: record.human_gate_snapshot,
+            repair_reservation: record.repair_reservation,
+            policy_diagnostics: record.policy_diagnostics,
+            provider_start_ledger: record.provider_start_ledger,
             provider_conversations: record.provider_conversations,
             repository_path: None,
         }
@@ -165,6 +185,34 @@ pub struct ArtifactUpdateEvent {
     pub payload: ArtifactPayload,
 }
 
+#[derive(Clone)]
+pub enum ProviderRunKind {
+    Author {
+        content: String,
+    },
+    AuthorChoiceFollowup {
+        content: String,
+    },
+    Revision,
+    ReviewOnly,
+    WorkItemPlanAuthor,
+    WorkItemPlanOutlineRevision {
+        feedback: Option<String>,
+    },
+    /// StaleContext 重建：携带 rebuilt 的规划上下文，启动**全新** outline run（新建节点、
+    /// 使用 rebuilt cwd/inventory/policy，不沿用中断会话的 OutlineRun 节点）。
+    WorkItemPlanOutlineRebuild {
+        rebuilt: Box<ResolvedPlanningContext>,
+    },
+    WorkItemPlanDraft {
+        feedback: Option<String>,
+    },
+    WorkItemPlanBatch,
+    WorkItemPlanRevision {
+        feedback: Option<String>,
+    },
+}
+
 pub enum EngineEvent {
     StreamChunk {
         role: String,
@@ -203,6 +251,14 @@ pub enum EngineEvent {
     },
     ProviderStatus {
         status: ProviderStatus,
+    },
+    /// 引擎完成持久化路由后请求 Web runtime 启动新的 provider run。
+    /// `node_id` 让 runtime 可以在不等待 engine mutex 的情况下排空同一节点的重复请求，
+    /// 同时保留新节点请求替换旧 run 的语义。
+    /// 此事件不经 WebSocket 对客户端序列化；仅由 socket runtime 消费。
+    ProviderRunRequested {
+        kind: ProviderRunKind,
+        node_id: Option<String>,
     },
     ExecutionEvent {
         event: ProviderExecutionEvent,
@@ -372,6 +428,9 @@ pub(crate) struct WorkItemPlanCompileProjectionContext<'a> {
     pub(crate) now: &'a str,
 }
 
+#[cfg(test)]
+pub(crate) type PolicyRouteBeforePersistHook = Box<dyn FnOnce(&LifecycleStore, &str) + Send>;
+
 pub struct WorkspaceEngine {
     pub(crate) checkpoint_store: Arc<CheckpointStore>,
     pub(crate) lifecycle_store: Option<LifecycleStore>,
@@ -393,6 +452,8 @@ pub struct WorkspaceEngine {
     pub(crate) outline_revision_crash_after: Option<OutlineRevisionCrashPoint>,
     pub(crate) plan_repair_crash_after: Option<PlanRepairCrashPoint>,
     pub(crate) plan_repair_snapshot: Option<PlanRepairSessionSnapshotDto>,
+    #[cfg(test)]
+    pub(crate) policy_route_before_persist: Option<PolicyRouteBeforePersistHook>,
     /// Task 11:逻辑代码库真实 provider 启动的唯一入口。非空时,planning author stream
     /// 经 `LogicalCodebaseProviderGateway::start_streaming` 启动并留 audit;为 `None`
     /// 时(传统单仓/非逻辑 issue)保留直接 `provider.start` 路径。Web 接入 task 为

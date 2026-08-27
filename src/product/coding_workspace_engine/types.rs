@@ -248,11 +248,11 @@ impl CancellableCodingEventSender {
     pub(crate) async fn send(
         &self,
         event: CodingWsOutMessage,
-    ) -> Result<(), mpsc::error::SendError<CodingWsOutMessage>> {
+    ) -> Result<(), Box<mpsc::error::SendError<CodingWsOutMessage>>> {
         let permit = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => {
-                return Err(mpsc::error::SendError(event));
+                return Err(Box::new(mpsc::error::SendError(event)));
             }
             permit = self.sender.reserve() => permit,
         };
@@ -261,7 +261,7 @@ impl CancellableCodingEventSender {
                 permit.send(event);
                 Ok(())
             }
-            Err(_) => Err(mpsc::error::SendError(event)),
+            Err(_) => Err(Box::new(mpsc::error::SendError(event))),
         }
     }
 

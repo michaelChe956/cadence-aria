@@ -470,17 +470,14 @@ async fn bootstrap_confirmed_work_item_session(
         })
         .expect("create work item");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider,
-            reviewer_provider,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        author_provider,
+        reviewer_provider,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create work item session");
     lifecycle
         .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
@@ -1029,17 +1026,14 @@ async fn create_logical_confirm_fixture(
         _ => panic!("only Story/Design supported"),
     };
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id,
-            workspace_type: kind,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id,
+        workspace_type: kind,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("workspace session");
     (root, app, session.id)
 }
@@ -1159,17 +1153,14 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
         })
         .expect("legacy story");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id,
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: story.id,
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("legacy session");
     let (status, body) = request_json(
         app,

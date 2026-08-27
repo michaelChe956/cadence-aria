@@ -136,17 +136,14 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
         .unwrap();
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: project_id.to_string(),
-            issue_id: issue_id.to_string(),
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 0,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        entity_id: plan.id.clone(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::ClaudeCode,
+        review_rounds: 0,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .unwrap();
 
     let session = WorkspaceSession::from_record(session_record);

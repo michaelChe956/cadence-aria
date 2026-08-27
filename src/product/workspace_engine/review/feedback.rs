@@ -76,6 +76,9 @@ mod tests {
                 required_action:
                     "把 provider_name_to_type 和测试 fixture provider_name 一并纳入本 work item 的写入范围。"
                         .to_string(),
+                category: None,
+                class_hint: None,
+                contract_field: None,
             }],
             review_gate: ReviewGate::RequiresRevision,
             work_item_plan_review: Some(WorkItemPlanReviewComplete {

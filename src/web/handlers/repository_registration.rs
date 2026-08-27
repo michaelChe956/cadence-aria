@@ -447,18 +447,15 @@ fn validate_user_home(home: PathBuf) -> RepositoryRegistrationBuildResult<PathBu
 }
 
 fn home_resolution_error(reason: &str) -> Box<RepositoryRegistrationError> {
-    Box::new(RepositoryRegistrationError {
-        stage: "cadence_skills_home".to_string(),
-        provider: None,
-        command_index: None,
-        command: None,
-        reason_code: "cadence_skills_unavailable".to_string(),
-        stderr_summary: Some(reason.to_string()),
-        changed_paths: Some(Vec::new()),
-        retryable: false,
-        action: "Configure HOME or USERPROFILE with an absolute user directory, then add the repository again."
-            .to_string(),
-    })
+    let mut error = RepositoryRegistrationError::new(
+        "cadence_skills_home",
+        "cadence_skills_unavailable",
+        Some(reason.to_string()),
+        false,
+        "Configure HOME or USERPROFILE with an absolute user directory, then add the repository again.",
+    );
+    error.changed_paths = Some(Vec::new());
+    Box::new(error)
 }
 
 fn command_environment() -> BTreeMap<String, String> {

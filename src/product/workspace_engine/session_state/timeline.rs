@@ -19,11 +19,14 @@ impl WorkspaceEngine {
     }
 
     pub(crate) async fn finish_failed_run(&mut self) {
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        self.session.session_status = WorkspaceSessionStatus::Open;
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::Open,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
         self.active_run_id = None;
         self.transition_stage(WorkspaceStage::PrepareContext).await;

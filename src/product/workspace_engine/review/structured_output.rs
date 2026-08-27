@@ -44,6 +44,16 @@ impl ReviewCompletionError {
         }
     }
 
+    pub(crate) fn is_classification_fatal(&self) -> bool {
+        matches!(
+            self,
+            Self::Schema(
+                ReviewStructuredOutputErrorCode::UnknownFindingCategory
+                    | ReviewStructuredOutputErrorCode::UnknownFindingClassHint
+            )
+        )
+    }
+
     pub(crate) fn is_repairable(&self) -> bool {
         let Some(recoverable_value) = self.recoverable_value() else {
             return false;
@@ -190,6 +200,22 @@ mod tests {
         json!({
             "findings": ["DEC-001", "CMP-002", "API-002", "REQ-003"]
         })
+    }
+
+    #[test]
+    fn classification_errors_are_fatal_and_not_repairable() {
+        assert!(
+            ReviewCompletionError::Schema(ReviewStructuredOutputErrorCode::UnknownFindingCategory)
+                .is_classification_fatal()
+        );
+        assert!(
+            ReviewCompletionError::Schema(ReviewStructuredOutputErrorCode::UnknownFindingClassHint)
+                .is_classification_fatal()
+        );
+        assert!(
+            !ReviewCompletionError::Schema(ReviewStructuredOutputErrorCode::InvalidFindingField)
+                .is_classification_fatal()
+        );
     }
 
     #[test]

@@ -457,6 +457,7 @@ async fn repository_initializer_rejects_stream_close_without_completed() {
     assert_eq!(error.reason_code, "repository_init_command_failed");
     assert!(
         error
+            .into_details()
             .stderr_summary
             .unwrap()
             .contains("closed before completion")
@@ -479,7 +480,13 @@ async fn repository_initializer_times_out_and_aborts_the_current_turn() {
     tokio::task::yield_now().await;
 
     assert_eq!(error.reason_code, "repository_init_command_failed");
-    assert!(error.stderr_summary.unwrap().contains("timed out"));
+    assert!(
+        error
+            .into_details()
+            .stderr_summary
+            .unwrap()
+            .contains("timed out")
+    );
     assert_eq!(
         provider.commands.lock().unwrap().as_slice(),
         &[ProviderCommand::Abort]
@@ -554,7 +561,7 @@ async fn repository_initializer_sanitizes_secrets_controls_and_long_output() {
         )
         .await
         .unwrap_err();
-    let summary = error.stderr_summary.unwrap();
+    let summary = error.into_details().stderr_summary.unwrap();
 
     assert!(!summary.contains("secret"));
     assert!(!summary.contains('\u{1b}'));
@@ -581,7 +588,7 @@ async fn repository_initializer_keeps_failure_message_when_output_is_non_empty()
         true,
     );
 
-    let summary = error.stderr_summary.unwrap();
+    let summary = error.into_details().stderr_summary.unwrap();
     assert!(summary.contains("正在执行 rule-config 探索阶段输出..."));
     assert!(summary.contains("initialization timed out"));
 }
@@ -629,7 +636,7 @@ async fn repository_initializer_bounds_and_sanitizes_session_start_failures() {
         )
         .await
         .unwrap_err();
-    let summary = error.stderr_summary.unwrap();
+    let summary = error.into_details().stderr_summary.unwrap();
 
     assert!(!summary.contains("secret"));
     assert!(summary.contains("[REDACTED]"));

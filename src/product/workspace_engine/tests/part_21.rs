@@ -97,17 +97,14 @@ fn plan_repair_parent_engine(
         .set_active_plan_revision(&plan, "plan_revision_0001")
         .unwrap();
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: plan.id,
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: plan.id,
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let (tx, _) = mpsc::channel(64);
     let engine = WorkspaceEngine::new_persistent(
@@ -247,17 +244,14 @@ async fn plan_repair_child_session_recovers_orphan_without_creating_second_sessi
         .unwrap();
     let orphan = lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: plan.id.clone(),
-                workspace_type: WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 2,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: plan.id.clone(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             format!("workspace_session_{amendment_id}"),
         )
         .unwrap();
@@ -330,17 +324,14 @@ fn plan_repair_workspace_session_link_is_absent_for_ordinary_workspace_types() {
         let tmp = TempDir::new().unwrap();
         let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
         let session = lifecycle
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: "entity_0001".to_string(),
-                workspace_type,
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 2,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            })
+            .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "entity_0001".to_string(),
+            workspace_type,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .unwrap();
 
         assert!(lifecycle.get_session_link(&session.id).is_err());

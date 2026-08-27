@@ -49,9 +49,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.code.as_str() {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
-            "checkpoint_unsafe_dirty_worktree" | "workspace_session_ambiguous" => {
-                StatusCode::CONFLICT
-            }
+            "checkpoint_unsafe_dirty_worktree"
+            | "workspace_session_ambiguous"
+            | "workspace_session_takeover_not_allowed" => StatusCode::CONFLICT,
             "coding_attempt_active"
             | "coding_attempt_ambiguous"
             | "coding_attempt_scope_mismatch"
@@ -213,6 +213,7 @@ impl From<crate::web::issue_registry::IssueRegistryError> for ApiError {
 
 impl From<crate::product::repository_store::RepositoryRegistrationError> for ApiError {
     fn from(error: crate::product::repository_store::RepositoryRegistrationError) -> Self {
+        let error = error.into_details();
         let stderr_summary = error
             .stderr_summary
             .as_deref()
@@ -405,7 +406,9 @@ fn is_path_terminator(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::product::repository_store::RepositoryRegistrationError;
+    use crate::product::repository_store::{
+        RepositoryRegistrationError, RepositoryRegistrationErrorDetails,
+    };
 
     #[test]
     fn repository_routing_error_codes_map_to_4xx() {
@@ -616,18 +619,21 @@ mod tests {
         ];
 
         for (code, expected_status) in cases {
-            let api_error = ApiError::from(RepositoryRegistrationError {
-                stage: "repository_init_command".to_string(),
-                provider: Some("claude_code".to_string()),
-                command_index: Some(2),
-                command: Some("/rule-config".to_string()),
-                reason_code: code.to_string(),
-                stderr_summary: Some("safe diagnostic".to_string()),
-                changed_paths: Some(vec![".claude/rules/project.md".to_string()]),
-                retryable: true,
-                action: "Fix the problem, inspect changed_paths, then add the repository again."
-                    .to_string(),
-            });
+            let api_error = ApiError::from(RepositoryRegistrationError::from(
+                RepositoryRegistrationErrorDetails {
+                    stage: "repository_init_command".to_string(),
+                    provider: Some("claude_code".to_string()),
+                    command_index: Some(2),
+                    command: Some("/rule-config".to_string()),
+                    reason_code: code.to_string(),
+                    stderr_summary: Some("safe diagnostic".to_string()),
+                    changed_paths: Some(vec![".claude/rules/project.md".to_string()]),
+                    retryable: true,
+                    action:
+                        "Fix the problem, inspect changed_paths, then add the repository again."
+                            .to_string(),
+                },
+            ));
 
             assert_eq!(api_error.code, code);
             assert_eq!(
@@ -653,21 +659,23 @@ mod tests {
 
     #[test]
     fn repository_registration_api_error_sanitizes_changed_paths_at_boundary() {
-        let api_error = ApiError::from(RepositoryRegistrationError {
-            stage: "repository_init_command".to_string(),
-            provider: Some("claude_code".to_string()),
-            command_index: Some(2),
-            command: Some("/rule-config".to_string()),
-            reason_code: "repository_init_command_failed".to_string(),
-            stderr_summary: Some("safe diagnostic".to_string()),
-            changed_paths: Some(vec![
-                "/private/repo/generated".to_string(),
-                ".claude/rules/project.md".to_string(),
-                "src/monkey.rs".to_string(),
-            ]),
-            retryable: true,
-            action: "Inspect changed paths and retry.".to_string(),
-        });
+        let api_error = ApiError::from(RepositoryRegistrationError::from(
+            RepositoryRegistrationErrorDetails {
+                stage: "repository_init_command".to_string(),
+                provider: Some("claude_code".to_string()),
+                command_index: Some(2),
+                command: Some("/rule-config".to_string()),
+                reason_code: "repository_init_command_failed".to_string(),
+                stderr_summary: Some("safe diagnostic".to_string()),
+                changed_paths: Some(vec![
+                    "/private/repo/generated".to_string(),
+                    ".claude/rules/project.md".to_string(),
+                    "src/monkey.rs".to_string(),
+                ]),
+                retryable: true,
+                action: "Inspect changed paths and retry.".to_string(),
+            },
+        ));
 
         assert_eq!(
             api_error.details["changed_paths"],
@@ -677,17 +685,19 @@ mod tests {
 
     #[test]
     fn repository_registration_api_error_uses_nulls_and_empty_changed_paths() {
-        let api_error = ApiError::from(RepositoryRegistrationError {
-            stage: "repository_path".to_string(),
-            provider: None,
-            command_index: None,
-            command: None,
-            reason_code: "repository_path_invalid".to_string(),
-            stderr_summary: None,
-            changed_paths: None,
-            retryable: false,
-            action: "Choose a valid path, then add the repository again.".to_string(),
-        });
+        let api_error = ApiError::from(RepositoryRegistrationError::from(
+            RepositoryRegistrationErrorDetails {
+                stage: "repository_path".to_string(),
+                provider: None,
+                command_index: None,
+                command: None,
+                reason_code: "repository_path_invalid".to_string(),
+                stderr_summary: None,
+                changed_paths: None,
+                retryable: false,
+                action: "Choose a valid path, then add the repository again.".to_string(),
+            },
+        ));
 
         assert_eq!(api_error.details["provider"], Value::Null);
         assert_eq!(api_error.details["command"], Value::Null);
@@ -697,20 +707,22 @@ mod tests {
 
     #[test]
     fn repository_registration_api_error_sanitizes_public_summary() {
-        let api_error = ApiError::from(RepositoryRegistrationError {
-            stage: "repository_init_command".to_string(),
-            provider: Some("claude_code".to_string()),
-            command_index: Some(1),
-            command: Some("/pre-check".to_string()),
-            reason_code: "repository_init_command_failed".to_string(),
-            stderr_summary: Some(format!(
-                "failed\nTOKEN=super-secret PASSWORD: hidden HOME=/home/alice /usr/bin/git json={{\"path\":\"/home/alice/repo\",\"command\":\"/usr/bin/git\"}} file:///home/alice/repo failed_at(/home/alice/file.rs:10) {}",
-                "x".repeat(2_000)
-            )),
-            changed_paths: Some(Vec::new()),
-            retryable: true,
-            action: "Fix the problem, then add the repository again.".to_string(),
-        });
+        let api_error = ApiError::from(RepositoryRegistrationError::from(
+            RepositoryRegistrationErrorDetails {
+                stage: "repository_init_command".to_string(),
+                provider: Some("claude_code".to_string()),
+                command_index: Some(1),
+                command: Some("/pre-check".to_string()),
+                reason_code: "repository_init_command_failed".to_string(),
+                stderr_summary: Some(format!(
+                    "failed\nTOKEN=super-secret PASSWORD: hidden HOME=/home/alice /usr/bin/git json={{\"path\":\"/home/alice/repo\",\"command\":\"/usr/bin/git\"}} file:///home/alice/repo failed_at(/home/alice/file.rs:10) {}",
+                    "x".repeat(2_000)
+                )),
+                changed_paths: Some(Vec::new()),
+                retryable: true,
+                action: "Fix the problem, then add the repository again.".to_string(),
+            },
+        ));
         let summary = api_error.details["stderr_summary"]
             .as_str()
             .expect("sanitized stderr summary");

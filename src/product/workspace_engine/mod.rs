@@ -116,6 +116,9 @@ pub use plan_projection::{
     compile_plan_projection_bundle, compile_work_item_revision, plan_projection_input,
     publish_initial_plan_revision,
 };
+pub use review::policy_routing::{
+    GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,
+};
 pub use types::{
     ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, LinkedWorkspaceAmendmentTarget,
     LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
@@ -145,7 +148,7 @@ pub(crate) use session_state::*;
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, OutlineRevisionCrashPoint,
-    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint,
+    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint, ProviderRunKind,
     ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
     StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
     WorkItemPlanOutlineRevisionSource,

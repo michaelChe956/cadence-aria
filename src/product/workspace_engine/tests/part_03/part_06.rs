@@ -164,17 +164,14 @@ async fn persistent_queued_review_engine_for(
         WorkspaceType::WorkItemPlan => "work_item_plan_0001",
     };
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: entity_id.to_string(),
-            workspace_type,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: entity_id.to_string(),
+        workspace_type,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("persistent review session");
     let mut session = WorkspaceSession::from_record(session_record);
     session.artifact = Some(artifact);

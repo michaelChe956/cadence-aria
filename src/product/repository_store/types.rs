@@ -54,9 +54,14 @@ pub struct RepositoryRegistrationSuccess {
     pub completed_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[error("{reason_code} at {stage}: {stderr_summary:?}; action: {action}")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryRegistrationError {
+    #[serde(flatten)]
+    details: Box<RepositoryRegistrationErrorDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryRegistrationErrorDetails {
     pub stage: String,
     pub provider: Option<String>,
     pub command_index: Option<usize>,
@@ -66,6 +71,40 @@ pub struct RepositoryRegistrationError {
     pub changed_paths: Option<Vec<String>>,
     pub retryable: bool,
     pub action: String,
+}
+
+impl std::ops::Deref for RepositoryRegistrationError {
+    type Target = RepositoryRegistrationErrorDetails;
+
+    fn deref(&self) -> &Self::Target {
+        &self.details
+    }
+}
+
+impl std::ops::DerefMut for RepositoryRegistrationError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.details
+    }
+}
+
+impl std::fmt::Display for RepositoryRegistrationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} at {}: {:?}; action: {}",
+            self.reason_code, self.stage, self.stderr_summary, self.action
+        )
+    }
+}
+
+impl std::error::Error for RepositoryRegistrationError {}
+
+impl From<RepositoryRegistrationErrorDetails> for RepositoryRegistrationError {
+    fn from(details: RepositoryRegistrationErrorDetails) -> Self {
+        Self {
+            details: Box::new(details),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +247,10 @@ pub trait RepositoryInitializationProgress: Send + Sync {
 }
 
 impl RepositoryRegistrationError {
+    pub(crate) fn into_details(self) -> RepositoryRegistrationErrorDetails {
+        *self.details
+    }
+
     pub(crate) fn new(
         stage: impl Into<String>,
         reason_code: impl Into<String>,
@@ -216,15 +259,17 @@ impl RepositoryRegistrationError {
         action: impl Into<String>,
     ) -> Self {
         Self {
-            stage: stage.into(),
-            provider: None,
-            command_index: None,
-            command: None,
-            reason_code: reason_code.into(),
-            stderr_summary,
-            changed_paths: None,
-            retryable,
-            action: action.into(),
+            details: Box::new(RepositoryRegistrationErrorDetails {
+                stage: stage.into(),
+                provider: None,
+                command_index: None,
+                command: None,
+                reason_code: reason_code.into(),
+                stderr_summary,
+                changed_paths: None,
+                retryable,
+                action: action.into(),
+            }),
         }
     }
 

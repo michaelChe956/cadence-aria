@@ -232,6 +232,7 @@ pub(super) fn seed_runner_revision_history(fixture: &ReadinessFixture) {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("plan workspace session");
     lifecycle

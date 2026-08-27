@@ -76,17 +76,14 @@ fn app_with_group_full_chain_attempt_fixture(
         })
         .expect("create schema v2 plan metadata");
     let plan_session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: ProviderName::Fake,
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("create work item plan session");
     seed_group_revision_history_fixture(&lifecycle, &plan_session.id);
 

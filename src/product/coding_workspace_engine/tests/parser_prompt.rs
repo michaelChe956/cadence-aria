@@ -695,6 +695,7 @@ async fn group_attempt_prompts_use_current_work_item_id() {
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             })
             .expect("create work item session");
         lifecycle

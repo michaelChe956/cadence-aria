@@ -185,6 +185,15 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         reviewer_enabled_at_start: None,
         superpowers_enabled: false,
         openspec_enabled: false,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: vec![],
+        provider_start_ledger: vec![],
         provider_conversations: vec![],
         repository_path: Some(repository_path),
     }
@@ -354,6 +363,7 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .expect("workspace session");
 

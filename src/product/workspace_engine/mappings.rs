@@ -233,9 +233,10 @@ pub(crate) fn workspace_stage_for_status(status: &WorkspaceSessionStatus) -> Wor
             WorkspaceStage::HumanConfirm
         }
         WorkspaceSessionStatus::Confirmed => WorkspaceStage::Completed,
-        WorkspaceSessionStatus::BlockedProviderUnavailable | WorkspaceSessionStatus::Terminated => {
-            WorkspaceStage::Completed
-        }
+        WorkspaceSessionStatus::BlockedProviderUnavailable
+        | WorkspaceSessionStatus::Terminated
+        | WorkspaceSessionStatus::StoppedNeedsHuman
+        | WorkspaceSessionStatus::Failed => WorkspaceStage::Completed,
     }
 }
 

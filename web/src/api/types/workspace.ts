@@ -39,19 +39,76 @@ export type WorkspaceMessage = {
   created_at: string;
 };
 
+export type WorkspaceSessionStatus =
+  | "open"
+  | "running"
+  | "waiting_for_human"
+  | "confirmed"
+  | "change_requested"
+  | "blocked_provider_unavailable"
+  | "terminated"
+  | "stopped_needs_human"
+  | "failed";
+
+export type WorkItemPlanFlowKind = "legacy" | "single_candidate";
+export type WorkItemPlanRunPolicy = "interactive" | "auto_if_valid";
+export type WorkItemPlanRunHistory = {
+  seen_fingerprints: string[];
+  repairs_used: number;
+  manual_repairs_used: number;
+  transitions_used: number;
+  initial_review_count: number;
+  verification_review_count: number;
+  review_cycles?: Record<
+    string,
+    { repairs_used: number; initial_count: number; verification_count: number }
+  >;
+};
+
+export type WorkItemPlanHumanGateSnapshot = {
+  findings: Array<{
+    class: "mechanical_error" | "repairable" | "human_required" | "advisory";
+    fingerprint: string;
+    category: string | null;
+    severity: string;
+    message: string;
+    evidence: string | null;
+    required_action: string | null;
+    contract_field: string | null;
+  }>;
+  repeated_fingerprints: string[];
+  attempts_used: number;
+  manual_repairs_remaining: number;
+  trigger: "native_human_required" | "repeated_fingerprint" | "repair_budget_exhausted";
+  resumable: boolean;
+};
+
+export type WorkItemPlanRepairReservation = {
+  token: string;
+  owner_session_id: string;
+  owner_run_id: string;
+  provider_start_idempotency_key: string;
+  state: "reserved" | "provider_started" | "committed" | "released";
+  commit_id: string | null;
+};
+
+export type WorkItemPlanPolicyDiagnostic = {
+  code: string;
+  message: string;
+  field: string | null;
+};
+
+export type WorkItemPlanProviderStartLedgerEntry = {
+  provider_start_idempotency_key: string;
+  started: boolean;
+};
+
 export type WorkspaceSessionSummary = {
   workspace_session_id: string;
   issue_id: string;
   entity_id: string;
   workspace_type: "story" | "design" | "work_item" | "work_item_plan";
-  status:
-    | "open"
-    | "running"
-    | "waiting_for_human"
-    | "confirmed"
-    | "change_requested"
-    | "blocked_provider_unavailable"
-    | "terminated";
+  status: WorkspaceSessionStatus;
   author_provider: WorkspaceProviderName;
   reviewer_provider: WorkspaceProviderName;
   review_rounds: number;
@@ -566,6 +623,15 @@ export type WsOutMessage =
       reviewer_enabled_at_start?: boolean | null;
       recoverable_interrupted_run?: RecoverableInterruptedRun | null;
       plan_repair?: PlanRepairSessionSnapshot | null;
+      session_status: WorkspaceSessionStatus;
+      flow_kind: WorkItemPlanFlowKind;
+      run_policy: WorkItemPlanRunPolicy;
+      run_history: WorkItemPlanRunHistory;
+      review_invocation_scope?: unknown | null;
+      human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
+      repair_reservation?: WorkItemPlanRepairReservation | null;
+      policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
+      provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }
