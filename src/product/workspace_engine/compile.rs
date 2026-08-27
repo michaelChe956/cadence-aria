@@ -1,7 +1,6 @@
 use super::*;
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
-use crate::product::work_item_revision_store::InitialPlanPublicationJournal;
 use crate::product::work_item_split_validator::WorkItemSplitValidationReport;
 use crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto;
 
@@ -95,7 +94,7 @@ pub struct PreparedInitialPlanCompile {
     pub work_items: Vec<LifecycleWorkItemRecord>,
     pub verification_plans: Vec<VerificationPlan>,
     pub validation_report: WorkItemSplitValidationReport,
-    pub publication_journal: Option<InitialPlanPublicationJournal>,
+    pub publication_input: Option<super::plan_projection::InitialPlanPublicationInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,7 +198,7 @@ pub fn prepare_initial_plan_compile(
         updated_at: input.now.clone(),
         committed_at: None,
     };
-    let publication_journal = if validation_report.has_errors() {
+    let publication_input = if validation_report.has_errors() {
         None
     } else {
         let accepted_drafts = input
@@ -224,20 +223,15 @@ pub fn prepare_initial_plan_compile(
                 &logical_ids,
             )
             .map_err(|error| error.to_string())?;
-        Some(
-            super::plan_projection::prepare_initial_plan_publication(
-                super::plan_projection::InitialPlanPublicationInput {
-                    previous_plan: input.previous_plan,
-                    outline: input.outline_candidate.outline,
-                    outline_order: input.outline_order,
-                    accepted_drafts,
-                    compile_id: input.compile_id,
-                    now: input.now,
-                    allocated_ids,
-                },
-            )
-            .map_err(|error| error.to_string())?,
-        )
+        Some(super::plan_projection::InitialPlanPublicationInput {
+            previous_plan: input.previous_plan,
+            outline: input.outline_candidate.outline,
+            outline_order: input.outline_order,
+            accepted_drafts,
+            compile_id: input.compile_id,
+            now: input.now,
+            allocated_ids,
+        })
     };
     Ok(PreparedInitialPlanCompile {
         transaction,
@@ -245,7 +239,7 @@ pub fn prepare_initial_plan_compile(
         work_items,
         verification_plans,
         validation_report,
-        publication_journal,
+        publication_input,
     })
 }
 
@@ -316,11 +310,12 @@ pub fn execute_initial_plan_compile(
         .plan_store
         .put_compile_transaction(&transaction)
         .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
-    let journal = prepared
-        .publication_journal
-        .as_ref()
-        .expect("valid initial compile preparation has publication journal");
-    let outcome = publish_initial_plan_revision(&stores.revision_store, journal)
+    let publication_input = prepared
+        .publication_input
+        .expect("valid initial compile preparation has publication input");
+    let journal = super::plan_projection::prepare_initial_plan_publication(publication_input)
+        .map_err(|error| error.to_string())?;
+    let outcome = publish_initial_plan_revision(&stores.revision_store, &journal)
         .map_err(|error| error.to_string())?;
     Ok((outcome, transaction))
 }

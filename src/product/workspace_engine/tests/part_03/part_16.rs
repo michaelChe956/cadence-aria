@@ -149,23 +149,26 @@ fn work_item_plan_initial_compile_phase2_publication_identity_is_deterministic()
         InitialPlanCompileDurableContext::legacy(),
     )
     .expect("first input preparation succeeds");
-    let second = prepare_initial_plan_compile(
-        first_input,
-        InitialPlanCompileDurableContext::legacy(),
-    )
-    .expect("replayed input preparation succeeds");
-    assert_eq!(first.publication_journal, second.publication_journal);
-    assert_eq!(
+    let second =
+        prepare_initial_plan_compile(first_input, InitialPlanCompileDurableContext::legacy())
+            .expect("replayed input preparation succeeds");
+    assert_eq!(first.publication_input, second.publication_input);
+    let first_journal = prepare_initial_plan_publication(
         first
-            .publication_journal
-            .as_ref()
-            .expect("valid fixture has publication journal")
-            .artifact_fingerprint,
+            .publication_input
+            .expect("valid fixture has publication input"),
+    )
+    .expect("first publication preparation succeeds");
+    let second_journal = prepare_initial_plan_publication(
         second
-            .publication_journal
-            .as_ref()
-            .expect("valid fixture has publication journal")
-            .artifact_fingerprint
+            .publication_input
+            .expect("valid fixture has publication input"),
+    )
+    .expect("replayed publication preparation succeeds");
+    assert_eq!(first_journal, second_journal);
+    assert_eq!(
+        first_journal.artifact_fingerprint,
+        second_journal.artifact_fingerprint
     );
 }
 
@@ -181,10 +184,13 @@ fn work_item_plan_initial_compile_phase2_publication_preserves_recovery_identity
         "2026-08-27T00:00:00Z",
     );
     let prepared = prepare_initial_plan_compile(input, InitialPlanCompileDurableContext::legacy())
-        .expect("valid fixture has publication journal");
-    let journal = prepared
-        .publication_journal
-        .expect("valid fixture has publication journal");
+        .expect("valid fixture has publication input");
+    let journal = prepare_initial_plan_publication(
+        prepared
+            .publication_input
+            .expect("valid fixture has publication input"),
+    )
+    .expect("publication preparation succeeds");
     assert_eq!(journal.compile_id, "compile_publication_fields");
     assert_eq!(journal.project_id, "project_0001");
     assert_eq!(journal.issue_id, "issue_0001");
