@@ -115,3 +115,36 @@ fn outline_prompt_logical_injects_aggregate_policy_reference() {
     assert!(prompt.contains("policy_digest: abc123"));
     assert!(prompt.contains("不作为政策正文"));
 }
+
+#[test]
+fn draft_runtime_contract_has_no_behavior_layer_in_any_routing_context() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    for context in [
+        RoutingReferenceContext::Legacy,
+        RoutingReferenceContext::Logical(logical_policy_fixture()),
+    ] {
+        let prompt = crate::product::work_item_split_engine::prompts::build_work_item_draft_prompt(
+            &outline,
+            &outline.work_item_outlines[0],
+            crate::product::models::WorkItemGenerationMode::Serial,
+            &[],
+            &[],
+            None,
+            "nonce",
+            &context,
+        );
+
+        assert!(!prompt.contains("[superpowers_contract]"));
+        assert!(!prompt.contains("using-superpowers"));
+        assert!(!prompt.contains("writing-plans 的拆分、TDD、验证与交接质量纪律"));
+        assert!(prompt.contains("不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段"));
+        assert!(prompt.contains("不得提前执行 writing-plans 的落盘步骤"));
+        assert!(prompt.contains("[forbidden_outputs]"));
+        assert!(prompt.contains("verification_checks"));
+        assert!(prompt.contains("handoff_contract"));
+    }
+}

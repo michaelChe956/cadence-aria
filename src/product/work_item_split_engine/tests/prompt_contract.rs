@@ -16,8 +16,6 @@ fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
     .expect("draft invocation");
 
     for required in [
-        "当前仅处于 human-confirmation 之前的候选阶段",
-        "writing-plans 的拆分、TDD、验证与交接质量纪律",
         "不得创建 cadence/plans/ 或任何 workspace 文件",
         "不得提前执行 writing-plans 的落盘步骤",
         "仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON",
@@ -26,10 +24,89 @@ fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
     ] {
         assert!(
             invocation.prompt.contains(required),
-            "draft prompt must scope writing-plans persistence to a later phase; missing {required}: {}",
+            "draft prompt must retain the C-layer output/writeback boundary; missing {required}: {}",
             invocation.prompt
         );
     }
+    assert!(
+        !invocation
+            .prompt
+            .contains("writing-plans 的拆分、TDD、验证与交接质量纪律"),
+        "draft prompt must not teach the B-layer planning process: {}",
+        invocation.prompt
+    );
+}
+
+#[test]
+fn single_item_prompt_behavior_layer_removed_but_output_boundaries_retained() {
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    outline.work_item_outlines[0].target_repository_id = Some(
+        crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(1)),
+    );
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("draft invocation");
+
+    for removed in [
+        "必调 Skill：using-superpowers → writing-plans。",
+        "[superpowers_contract]",
+        "必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。",
+        "生成的是计划和任务拆分，不执行代码修改。",
+        "每个 outline/draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、结构化验证方案、依赖输入、交接输出和风险；其中 draft 只有存在目标仓库可信证据时才可给出 command，证据不足必须进入 manual/repair/blocker，不得臆造命令。",
+        "每个 outline/draft 的 TDD 与验证闭环必须在当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行；不得把后续 Work Item 才会提供的注册、接线、生成或部署作为当前项验证的前提。无法根据目标仓库事实建立该闭环时，必须调整拆分或进入既有 repair/blocker 路由。",
+        "当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。",
+    ] {
+        assert!(
+            !invocation.prompt.contains(removed),
+            "B-layer text must be absent: {removed}: {}",
+            invocation.prompt
+        );
+    }
+    assert!(!invocation.prompt.contains("[superpowers_contract]"));
+
+    for retained in [
+        "不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段",
+        "不得提前执行 writing-plans 的落盘步骤",
+        "当前 Draft 的 target_repository_id 必须逐字保留 [current_work_item_outline] 的 target_repository_id",
+        "source_story_spec_ids/source_design_spec_ids",
+        "00000000-0000-0000-0000-000000000001",
+        "[openspec_contract]",
+        "[allowed_outputs]",
+        "[forbidden_outputs]",
+        "exclusive_scopes",
+        "verification_checks",
+        "handoff_contract",
+        "候选，不能写入 canonical artifact",
+    ] {
+        assert!(
+            invocation.prompt.contains(retained),
+            "C-layer contract text must remain: {retained}: {}",
+            invocation.prompt
+        );
+    }
+    assert_eq!(
+        invocation
+            .prompt
+            .matches("不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段")
+            .count(),
+        1
+    );
+    assert_eq!(
+        invocation
+            .prompt
+            .matches("不得提前执行 writing-plans 的落盘步骤")
+            .count(),
+        1
+    );
 }
 
 #[test]

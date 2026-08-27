@@ -140,7 +140,7 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
     );
 
     assert!(prompt.contains("[openspec_contract]"));
-    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(!prompt.contains("[superpowers_contract]"));
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
@@ -150,12 +150,12 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(prompt.contains("[forbidden_outputs]"));
     assert!(prompt.contains("代码实现、Story/Design 重写"));
-    assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
-    assert!(prompt.contains("Claude Code"));
-    assert!(prompt.contains("Codex"));
-    for required in [
+    for removed in [
+        "必调 Skill：using-superpowers → writing-plans。",
+        "using-superpowers",
+        "TDD",
         "40k",
         "50k",
         "最大内聚",
@@ -167,8 +167,8 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
         "上下文代理指标",
     ] {
         assert!(
-            prompt.contains(required),
-            "outline prompt must include `{required}`: {prompt}"
+            !prompt.contains(removed),
+            "outline prompt must not include B-layer text `{removed}`: {prompt}"
         );
     }
     assert!(!prompt.contains("1..19999"));
@@ -184,17 +184,17 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
         build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("[openspec_contract]"));
-    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(!prompt.contains("[superpowers_contract]"));
     assert!(prompt.contains("[allowed_outputs]"));
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(prompt.contains("[forbidden_outputs]"));
     assert!(prompt.contains("代码实现、Story/Design 重写"));
-    assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
-    assert!(prompt.contains("Claude Code"));
-    assert!(prompt.contains("Codex"));
-    for required in [
+    for removed in [
+        "必调 Skill：using-superpowers → writing-plans。",
+        "using-superpowers",
+        "TDD",
         "40k",
         "50k",
         "最大内聚",
@@ -206,8 +206,8 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
         "上下文代理指标",
     ] {
         assert!(
-            prompt.contains(required),
-            "outline prompt must include `{required}`: {prompt}"
+            !prompt.contains(removed),
+            "outline revision prompt must not include B-layer text `{removed}`: {prompt}"
         );
     }
     assert!(!prompt.contains("1..19999"));
@@ -488,16 +488,26 @@ fn work_item_plan_prompts_require_current_scope_verification_closure() {
     .expect("draft invocation")
     .prompt;
 
-    for prompt in [initial_outline_prompt, revision_outline_prompt, draft_prompt] {
-        // C 去重后 draft 段写作“当前项 exclusive_write_scopes”（无“的”）；
-        // 三种 prompt 共有的保留语义子串如下。
+    assert!(initial_outline_prompt.contains("[openspec_contract]"));
+    assert!(initial_outline_prompt.contains("[allowed_outputs]"));
+    assert!(initial_outline_prompt.contains("[forbidden_outputs]"));
+    assert!(initial_outline_prompt.contains("追踪关系"));
+    assert!(revision_outline_prompt.contains("[openspec_contract]"));
+    assert!(revision_outline_prompt.contains("[allowed_outputs]"));
+    assert!(revision_outline_prompt.contains("[forbidden_outputs]"));
+    assert!(revision_outline_prompt.contains("追踪关系"));
+    for retained in [
+        "[openspec_contract]",
+        "[allowed_outputs]",
+        "[forbidden_outputs]",
+        "exclusive_scopes",
+        "verification_checks",
+        "handoff_contract",
+        "不得提前执行 writing-plans 的落盘步骤",
+    ] {
         assert!(
-            prompt.contains("exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行"),
-            "Work Item Plan author prompt must require a verification closure executable at the current dependency point: {prompt}"
-        );
-        assert!(
-            prompt.contains("后续 Work Item 才会提供的注册、接线、生成或部署"),
-            "Work Item Plan author prompt must reject verification that relies on later wiring: {prompt}"
+            draft_prompt.contains(retained),
+            "Draft prompt must retain the C-layer output contract `{retained}`: {draft_prompt}"
         );
     }
 }
@@ -1002,21 +1012,19 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
     .expect("draft invocation");
 
     assert!(invocation.prompt.contains("[openspec_contract]"));
-    assert!(invocation.prompt.contains("[superpowers_contract]"));
+    assert!(!invocation.prompt.contains("[superpowers_contract]"));
     assert!(invocation.prompt.contains("[allowed_outputs]"));
     assert!(invocation.prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(invocation.prompt.contains("[forbidden_outputs]"));
     assert!(invocation.prompt.contains("代码实现、Story/Design 重写"));
-    assert!(invocation.prompt.contains("writing-plans"));
-    assert!(invocation.prompt.contains("TDD"));
-    assert!(invocation.prompt.contains("implementation_context"));
+    assert!(!invocation.prompt.contains("using-superpowers"));
+    assert!(!invocation.prompt.contains("TDD 与验证纪律"));
     assert!(invocation.prompt.contains("canonical_contract"));
     assert!(invocation.prompt.contains("handoff_contract"));
     // verification_plan 字段契约改由 [canonical_field_contract] 简写记号承载（语义保留）。
     assert!(invocation.prompt.contains("verification_plan: obj{checks:"));
-    assert!(invocation.prompt.contains("estimated_context_tokens"));
-    assert!(invocation.prompt.contains("单个 Claude Code/Codex 会话"));
-    assert!(invocation.prompt.contains("50k"));
+    assert!(!invocation.prompt.contains("单个 Claude Code/Codex 会话"));
+    assert!(!invocation.prompt.contains("estimated_context_tokens 不得超过 50k"));
     assert!(!invocation.prompt.contains("小于 20k"));
 }
 

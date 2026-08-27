@@ -47,7 +47,6 @@ fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext
     format!(
         "{}\
          当前阶段：已确认 Story/Design 后的 Work Item Plan 候选规划。\n\
-         必调 Skill：using-superpowers → writing-plans。\n\
          前置 gate：Aria 的 human-confirmation gate 承接人工确认；Provider 只能输出候选，不能写入 canonical artifact。\n\n\
          [openspec_contract]\n\
          Role: {role}\n\
@@ -56,17 +55,6 @@ fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext
          - 每个 outline/draft 必须能追溯到 source_story_spec_ids 与 source_design_spec_ids。\n\
          - 发现 Story/Design/Work Item 之间冲突、缺失验收依据或无法确定写入边界时，必须输出 blocker 或 reviewer 可处理的风险，而不是猜测。\n\
          - 不得声称已写回 OpenSpec；当前仅生成可供 daemon 后续写回 OpenSpec tasks constraints 的结构化候选。\n\n\
-         [superpowers_contract]\n\
-         - 必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。\n\
-         - 生成的是计划和任务拆分，不执行代码修改。\n\
-         - 每个 outline/draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、结构化验证方案、依赖输入、交接输出和风险；其中 draft 只有存在目标仓库可信证据时才可给出 command，证据不足必须进入 manual/repair/blocker，不得臆造命令。\n\
-         - 每个 outline/draft 的 TDD 与验证闭环必须在当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行；不得把后续 Work Item 才会提供的注册、接线、生成或部署作为当前项验证的前提。无法根据目标仓库事实建立该闭环时，必须调整拆分或进入既有 repair/blocker 路由。\n\
-         - 每个 outline 必须拆到单个 Claude Code/Codex 会话可完成，并遵循最少拆分。\n\
-         - 拆分目标是在每个 Work Item 能由单个 Claude Code 或 Codex coding 会话可靠完成的前提下，使 outline 数量最少。\n\
-         - 必须按最大内聚任务生成，优先合并目标一致、写入范围相同或重叠、可在同一 session 完成编码与验证的工作；先合并，再证明为什么必须拆。\n\
-         - estimated_context_tokens 不超过 40k 属正常范围；40001..=50000 可输出并交由 Reviewer 判断；超过 50k 必须继续拆分。\n\
-         - API、数据层、UI、测试或 TDD 子步骤本身不是独立拆分理由；除用户显式拆分选项、必要外部/权限/前序结果中断点外，独立回滚边界、独立验收边界，以及写入范围/依赖交接/验证复杂度超过现有上下文代理指标时，也必须保留拆分。\n\
-         - 结论必须能追溯到已提供的 Story/Design/Outline/Draft 证据。\n\n\
          [allowed_outputs]\n\
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
@@ -252,12 +240,10 @@ fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
         "{}\
-         当前阶段：已确认 Story/Design 后的 Work Item Plan 候选规划；必调 Skill：using-superpowers → writing-plans。\n\
+         当前阶段：已确认 Story/Design 后的 Work Item Plan 候选规划。\n\
          前置 gate：Aria 的 human-confirmation gate 承接人工确认；Provider 只能输出候选，不能写入 canonical artifact。\n\
          [openspec_contract]\n\
          Role: Work Item Draft author。必须基于已确认 Story Spec、Design Spec 与 source_story_spec_ids/source_design_spec_ids 追踪关系；冲突、缺失验收依据或边界不明时输出 blocker 或 reviewer 可处理风险，不得猜测。\n\
-         [superpowers_contract]\n\
-         遵守 using-superpowers、writing-plans、TDD 与验证纪律；只生成候选，不执行代码修改。TDD 与验证闭环必须在当前项 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行，不得把后续 Work Item 才会提供的注册、接线、生成或部署作为前提。command 仅可来自目标仓库可信证据，不得根据 WorkItemKind 推导；证据不足用 manual/repair/blocker。每项必须可由单个 Claude Code/Codex 会话完成，estimated_context_tokens 不得超过 50k。\n\
          [allowed_outputs]\n\
          {allowed_outputs}\n\
          [forbidden_outputs]\n\
@@ -913,7 +899,6 @@ pub(crate) fn build_work_item_draft_prompt(
          - blocker_rules: [obj{{reason_code: str+, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: [string]}}]；design_traceability: [obj{{source_type: string, source_id: string, requirement_id: string}}]。\n\
          - plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id。\n\n\
          [hard_rules]\n\
-         - 当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。\n\
          - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤；canonical writeback 与正式 Plan 落盘由 human-confirmation gate 与 daemon 负责，不得声称已完成。\n\
          - 仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON（不用 Markdown code fence），其 outline_id/logical_work_item_id{target_refs} 对应当前 `{outline_id}`/`{logical_work_item_id}`{target_outline_note}；draft 只含 [canonical_field_contract] 所列字段。\n\
          - 不得修改、新增、删除或重命名 Outline；不得输出 work_item_id、draft_id、status 等后端状态字段；logical_work_item_id 必须与其 identity 一致。\n\
