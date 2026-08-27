@@ -1,7 +1,11 @@
 use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 
 include!("tests/part_01.rs");
-include!("tests/prompt_contract.rs");
+mod prompt_contract {
+    use super::*;
+
+    include!("tests/prompt_contract.rs");
+}
 include!("tests/part_02.rs");
 include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");

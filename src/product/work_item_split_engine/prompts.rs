@@ -6,6 +6,7 @@ use crate::product::models::{
     IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
     RepositoryRecord, WorkItemDraftRecord, WorkItemGenerationMode, WorkspaceType,
 };
+use crate::product::work_item_plan_compiler::grammar;
 use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
 use crate::web::error::ApiResult;
 use crate::web::types::GenerateWorkItemsRequest;
@@ -74,6 +75,177 @@ fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
+}
+
+const WORK_ITEM_PLAN_FEW_SHOT_FINDINGS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
+));
+
+const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
+    "rep1-f1", "rep1-f2", "rep2-f1", "rep2-f2", "rep2-f3", "rep2-f4", "rep2-f5", "rep2-f6",
+    "rep3-f1", "rep4-f1", "rep4-f2",
+];
+
+fn work_item_plan_markdown_grammar() -> String {
+    format!(
+        "[markdown_grammar]\n\
+         标题 `{document_heading}`；item `{item_heading_prefix}{item_id_suffix}: <title>`（ID 前缀 `{item_id_prefix}`）。\n\
+         section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
+         行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
+         key 白名单：{structured_keys}。\n\
+         值域：compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
+         未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
+        document_heading = grammar::DOCUMENT_HEADING,
+        item_heading_prefix = grammar::ITEM_HEADING_PREFIX,
+        item_id_suffix = grammar::ITEM_ID_SUFFIX,
+        item_id_prefix = grammar::ITEM_ID_PREFIX,
+        structured_sections = grammar::STRUCTURED_SECTIONS.join("、"),
+        free_text_sections = grammar::FREE_TEXT_SECTIONS.join("、"),
+        free_text_policy = grammar::FREE_TEXT_SECTION_POLICY,
+        structured_line = grammar::STRUCTURED_LINE_PREFIX,
+        identified_line = grammar::IDENTIFIED_LINE_PREFIX,
+        ears_template = grammar::EARS_STATEMENT_TEMPLATE,
+        ears_keywords = grammar::EARS_KEYWORDS.join("、"),
+        structured_keys = grammar::STRUCTURED_KEYS.join("、"),
+        compatibility_policies = grammar::ALLOWED_COMPATIBILITY_POLICIES.join("、"),
+        evidence_kinds = grammar::ALLOWED_EVIDENCE_KINDS.join("、"),
+        blocker_routes = grammar::ALLOWED_BLOCKER_ROUTES.join("、"),
+        unknown_key_policy = grammar::UNKNOWN_STRUCTURED_KEY_POLICY,
+        diagnostic_codes = grammar::DIAGNOSTIC_CODES.join("、"),
+    )
+}
+
+fn work_item_plan_minimum_legal_source() -> &'static str {
+    "# Work Item Plan\n\
+     ## Work Item WI-001: x\n\
+     ### Identity\n\
+     - schema_version: 1\n\
+     - logical_work_item_id: WI-001\n\
+     - title: x\n\
+     - kind: backend\n\
+     ### Goal\n\
+     - summary: WHEN x THE SYSTEM SHALL y.\n\
+     ### Non Goals\n\
+     - non_goals: x\n\
+     ### Dependencies\n\
+     - depends_on: []\n\
+     ### Inputs\n\
+     ### Outputs\n\
+     - contract_id: c\n\
+     - capabilities: x\n\
+     ### Tasks\n\
+     - task_id: TASK-001\n\
+     - statement: WHEN x THE SYSTEM SHALL y.\n\
+     - requirement_refs: REQ-001\n\
+     - done_when_refs: AC-001\n\
+     ### Write Policy\n\
+     - exclusive_scopes: x\n\
+     - forbidden_scopes: y\n\
+     ### Acceptance Criteria\n\
+     - criterion_id: AC-001\n\
+     - statement: WHEN x THE SYSTEM SHALL y.\n\
+     - required_evidence: source_diff\n\
+     ### Verification\n\
+     - check_id: CHECK-001\n\
+     - command: null\n\
+     - manual_instruction: x\n\
+     - required: true\n\
+     - non_zero_test_execution_required: false\n\
+     ### Handoff Schema\n\
+     - required_fields: x\n\
+     - provided_contract_refs: c\n\
+     - reviewer_check_refs: AC-001\n\
+     ### Blockers\n\
+     - reason_code: x\n\
+     - route: coder_rework\n\
+     - target_contract_refs: c\n\
+     ### Traceability\n\
+     - source_type: x\n\
+     - source_id: x\n\
+     - requirement_id: REQ-001\n"
+}
+
+fn work_item_plan_real_few_shot() -> Result<String, String> {
+    let findings: Vec<serde_json::Value> =
+        serde_json::from_str(WORK_ITEM_PLAN_FEW_SHOT_FINDINGS)
+            .map_err(|error| format!("无法读取 Work Item Plan 判例 fixture：{error}"))?;
+    let mut cases = String::from(
+        "[real_finding_few_shot]\n以下为真实 provider 原始 finding；rep1 是 Advisory。按错误模式→修正原则学习，勿照抄业务名、ID、路径或命令。\n",
+    );
+
+    for id in WORK_ITEM_PLAN_FEW_SHOT_IDS {
+        let entry = findings
+            .iter()
+            .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
+            .ok_or_else(|| format!("判例 fixture 缺少 {id}"))?;
+        if entry.get("source_kind").and_then(serde_json::Value::as_str) != Some("provider_raw") {
+            return Err(format!("判例 {id} 不是 provider 原始 finding"));
+        }
+        let finding = entry
+            .get("finding")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| format!("判例 {id} 缺少 finding"))?;
+        let field = |name: &str| {
+            finding
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("判例 {id} 缺少 {name}"))
+        };
+        cases.push_str(&format!(
+            "\n#### {id}\n错误模式：{}\n证据：{}\n修正原则：{}\n",
+            field("message")?,
+            field("evidence")?,
+            field("required_action")?,
+        ));
+    }
+
+    Ok(cases)
+}
+
+/// 构造单候选路径专用的 markdown source author prompt。
+///
+/// 该 prompt 只描述待编译的 `work-item-plan.md` 产物：Provider 原始输出直接进入
+/// source revision 与 compiler，不携带旧 JSON/sentinel/draft 契约，也不从上下文补齐
+/// markdown 字段。legacy builder 仍由旧 flow 使用。
+// Task 4.2a 才将 SingleCandidate provider runner 接到此 builder；当前任务只固定 prompt 契约。
+#[allow(dead_code)]
+pub(crate) fn build_work_item_plan_markdown_prompt(
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    story_context: &str,
+    design_context: &str,
+    repository_structure: &str,
+    _routing_context: &RoutingReferenceContext,
+) -> Result<String, String> {
+    let few_shot = work_item_plan_real_few_shot()?;
+    Ok(format!(
+        "只输出完整 `work-item-plan.md` source；原始输出直接成为 source revision 并交 compiler parse。\n\
+         [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\
+         [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
+         story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
+         [source_boundary]\n\
+         只写 markdown 字段；不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段，且不得输出 target_repository_id、durable ID、source hash 或 trusted command catalog。\n\
+         exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得和 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
+         command 仅取已确认的可信仓库证据；不足则写 manual_instruction 或 blocker，不得臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\n\
+         {grammar}\
+         [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
+         {few_shot}\n\
+         [output] 现在仅输出完整 markdown source。",
+        issue_title = issue.title,
+        issue_description = issue.description.as_deref().unwrap_or("无"),
+        repository_id = repository.id,
+        repository_path = repository.path.display(),
+        story_context = story_context,
+        design_context = design_context,
+        repository_structure = repository_structure,
+        story_spec_ids = request.story_spec_ids.join(", "),
+        design_spec_ids = request.design_spec_ids.join(", "),
+        grammar = work_item_plan_markdown_grammar(),
+        minimum_source = work_item_plan_minimum_legal_source(),
+        few_shot = few_shot,
+    ))
 }
 
 fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String {

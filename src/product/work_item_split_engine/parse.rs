@@ -97,6 +97,19 @@ impl WorkItemSplitEngine {
     }
 }
 
+/// 对单候选 markdown outline 执行本地、无 Provider 的机械解析，并返回真实候选项数。
+///
+/// 此 helper 故意只委托 compiler parser：语法不合法时原样返回 compiler diagnostics，
+/// 调用方不得猜测 count、退回客户端选择或回退 legacy flow。Task 5.2 的内部 mode
+/// selector 将在 outline invocation 成功后复用此结果。
+// Task 5.2 的 selector 接线完成前，此纯 helper 仅由本模块测试使用。
+#[allow(dead_code)]
+pub(crate) fn count_work_item_plan_candidates(
+    source: &str,
+) -> Result<usize, Vec<crate::product::work_item_plan_compiler::types::CompilerDiagnostic>> {
+    crate::product::work_item_plan_compiler::parse_work_item_plan(source).map(|ast| ast.items.len())
+}
+
 pub fn parse_work_item_plan_outline_output(
     value: serde_json::Value,
 ) -> ApiResult<super::types::OutlineAuthorOutput> {

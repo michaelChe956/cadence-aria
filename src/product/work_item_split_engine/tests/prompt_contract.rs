@@ -61,16 +61,12 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
         invocation.prompt
     );
     assert!(
-        invocation
-            .prompt
-            .contains("必须且只能含所列字段"),
+        invocation.prompt.contains("必须且只能含所列字段"),
         "draft prompt must retain the canonical contract field whitelist in the shorthand field contract: {}",
         invocation.prompt
     );
     assert!(
-        invocation
-            .prompt
-            .contains("verification_plan: obj{checks:"),
+        invocation.prompt.contains("verification_plan: obj{checks:"),
         "draft prompt must retain the verification-plan field contract in the shorthand field contract: {}",
         invocation.prompt
     );
@@ -164,10 +160,7 @@ fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_p
     )
     .expect_err("short catalog exceeding maxItems must fail before provider invocation");
 
-    assert_eq!(
-        error.code,
-        "trusted_verification_command_catalog_too_large"
-    );
+    assert_eq!(error.code, "trusted_verification_command_catalog_too_large");
 }
 
 #[test]
@@ -197,10 +190,7 @@ fn single_item_prompt_rejects_oversized_trusted_command_catalog_before_provider_
     )
     .expect_err("oversized trusted catalog must fail before provider invocation");
 
-    assert_eq!(
-        error.code,
-        "trusted_verification_command_catalog_too_large"
-    );
+    assert_eq!(error.code, "trusted_verification_command_catalog_too_large");
     assert_eq!(
         error.message,
         "outline outline_backend trusted verification command catalog exceeds the maximum of 3 entries"
@@ -343,9 +333,7 @@ fn single_item_prompt_routes_manual_items_to_acceptance_criteria() {
         "draft prompt must not force every check to be optional when the catalog is empty"
     );
     assert!(
-        !invocation
-            .prompt
-            .contains("人工核对必须 required=true"),
+        !invocation.prompt.contains("人工核对必须 required=true"),
         "draft prompt must not make manual checks a Coder delivery precondition"
     );
 }
@@ -450,9 +438,9 @@ fn single_item_prompt_requires_reviewer_checks_to_equal_criteria() {
     .expect("draft invocation");
 
     assert!(
-        invocation.prompt.contains(
-            "reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致"
-        ),
+        invocation
+            .prompt
+            .contains("reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致"),
         "draft prompt must require reviewer checks to contain only acceptance criterion IDs"
     );
 }
@@ -558,9 +546,9 @@ fn single_item_prompt_relaxes_handoff_provided_contract_refs_for_terminal_items(
         );
     }
     assert!(
-        !invocation
-            .prompt
-            .contains("required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复"),
+        !invocation.prompt.contains(
+            "required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复"
+        ),
         "draft prompt must not require non-empty provided_contract_refs: {}",
         invocation.prompt
     );
@@ -666,4 +654,124 @@ fn single_item_prompt_names_both_verification_check_owners() {
             "draft prompt must name both verification check owners; missing {required}"
         );
     }
+}
+
+#[test]
+fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            "story_spec_0001: level selection",
+            "design_spec_0001: levels API",
+            "src/product/levels; web/src/levels; tests/integration",
+            &RoutingReferenceContext::Legacy,
+        )
+        .expect("markdown author prompt");
+
+    for section in crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS {
+        let heading = format!("### {section}");
+        assert!(
+            prompt.contains(&heading),
+            "markdown prompt must inline every structured section; missing {heading}"
+        );
+    }
+    for required in [
+        crate::product::work_item_plan_compiler::grammar::EARS_STATEMENT_TEMPLATE,
+        "未知结构化 key 必须拒绝（fail_closed）",
+        "不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段",
+        "明确允许新增和维护 tests/integration/**",
+        "GET / 只验证三个容器与 level-select.js 加载",
+        "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "markdown prompt must retain grammar/boundary/few-shot evidence; missing {required}"
+        );
+    }
+
+    let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
+    )))
+    .expect("golden findings JSON");
+    for finding in golden
+        .as_array()
+        .expect("golden findings array")
+        .iter()
+        .take(11)
+    {
+        let finding = finding.get("finding").expect("finding payload");
+        for field in ["message", "evidence", "required_action"] {
+            let value = finding
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .expect("provider raw finding field");
+            assert!(
+                prompt.contains(value),
+                "markdown prompt must inline provider raw few-shot field {field}: {value}"
+            );
+        }
+    }
+    for forbidden in [
+        "请读取 aria 仓 fixture",
+        "<ARIA_STRUCTURED_OUTPUT",
+        "canonical_field_contract",
+        "class_hint",
+    ] {
+        assert!(
+            !prompt.contains(forbidden),
+            "markdown author prompt must not retain private JSON/sentinel/classifier instruction {forbidden}: {prompt}"
+        );
+    }
+    let (_, minimum_source) = prompt
+        .split_once("[minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n")
+        .expect("markdown prompt must inline a minimum source");
+    let (minimum_source, _) = minimum_source
+        .split_once("[real_finding_few_shot]")
+        .expect("minimum source must precede few-shot findings");
+    assert_eq!(
+        crate::product::work_item_plan_compiler::parse_work_item_plan(minimum_source)
+            .expect("minimum prompt source must satisfy the compiler grammar")
+            .items
+            .len(),
+        1
+    );
+    assert!(
+        prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
+        "markdown prompt must remain below the existing quality budget: {} bytes",
+        prompt.len()
+    );
+}
+
+#[test]
+fn work_item_plan_markdown_mechanical_count_uses_compiler_parser() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
+    ));
+
+    assert_eq!(
+        crate::product::work_item_split_engine::parse::count_work_item_plan_candidates(source)
+            .expect("rep4 markdown must pass the compiler parser"),
+        3,
+        "candidate count must come from the parsed markdown AST rather than client input"
+    );
+}
+
+#[test]
+fn work_item_plan_markdown_mechanical_count_fails_closed_on_invalid_source() {
+    let error = crate::product::work_item_split_engine::parse::count_work_item_plan_candidates(
+        "# Work Item Plan\n\n## Work Item WI-001: invalid\n",
+    )
+    .expect_err("invalid markdown outline must not produce a guessed candidate count");
+
+    assert!(
+        error
+            .iter()
+            .any(|diagnostic| diagnostic.code == "missing_section"),
+        "compiler diagnostics must be returned for an invalid source: {error:?}"
+    );
 }
