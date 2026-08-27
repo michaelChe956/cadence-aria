@@ -824,12 +824,36 @@ impl WorkspaceEngine {
                 Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
             }
             WorkItemPlanCompileRecoveryActionDto::Continue => {
-                let outcome = match self
-                    .load_initial_plan_compile_outcome(&tx)
-                    .map_err(|error| error.to_string())?
-                {
-                    Some(outcome) => outcome,
-                    None => self.resume_initial_plan_compile_transaction(&store, &mut tx)?,
+                // A Prepared publication journal is the pre-active recovery boundary. Even when
+                // the last write already made the lineage active (for example, the
+                // PlanActivated failpoint fired after that write), resume through the original
+                // transaction path so it records `publication_resumed` before finalization.
+                let publication_is_pre_active = match WorkItemRevisionStore::new(lifecycle.app_paths())
+                    .get_initial_plan_publication_journal(
+                        &tx.project_id,
+                        &tx.issue_id,
+                        &tx.plan_id,
+                        &tx.compile_id,
+                    ) {
+                    Ok(journal) => journal.phase
+                        == crate::product::work_item_revision_store::InitialPlanPublicationPhase::Prepared,
+                    Err(ProductStoreError::NotFound { .. }) => false,
+                    Err(error) => {
+                        return Err(format!(
+                            "load initial Plan publication journal during Continue failed: {error}"
+                        ));
+                    }
+                };
+                let outcome = if publication_is_pre_active {
+                    self.resume_initial_plan_compile_transaction(&store, &mut tx)?
+                } else {
+                    match self
+                        .load_initial_plan_compile_outcome(&tx)
+                        .map_err(|error| error.to_string())?
+                    {
+                        Some(outcome) => outcome,
+                        None => self.resume_initial_plan_compile_transaction(&store, &mut tx)?,
+                    }
                 };
                 tx.failure_reason = reason.or(tx.failure_reason);
                 self.finalize_initial_plan_compile(&lifecycle, &store, &mut tx, &outcome)

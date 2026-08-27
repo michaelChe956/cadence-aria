@@ -27,6 +27,40 @@ struct NormalizedInitialCompileObservation {
     finalizer: Value,
 }
 
+fn assert_initial_plan_compile_outcome_parity(
+    interrupted: &InitialPlanCompileOutcome,
+    recovered: &InitialPlanCompileOutcome,
+) {
+    assert_eq!(
+        recovered.plan_revision, interrupted.plan_revision,
+        "recovery must retain the original PlanRevision"
+    );
+    assert_eq!(
+        recovered.dependency_graph_revision, interrupted.dependency_graph_revision,
+        "recovery must retain the original dependency graph"
+    );
+    assert_eq!(
+        recovered.validation_report, interrupted.validation_report,
+        "recovery must retain the original validation report"
+    );
+    assert_eq!(
+        recovered.plan_projection_bundle, interrupted.plan_projection_bundle,
+        "recovery must retain the original PlanProjectionBundle"
+    );
+    assert_eq!(
+        recovered.work_items, interrupted.work_items,
+        "recovery must retain the original compiled work items"
+    );
+    assert_eq!(
+        recovered.contract_validation, interrupted.contract_validation,
+        "recovery must retain contract validation findings"
+    );
+    assert_eq!(
+        recovered.projection_validation, interrupted.projection_validation,
+        "recovery must retain projection validation findings"
+    );
+}
+
 #[test]
 fn work_item_plan_initial_compile_pure_prepare_is_deterministic_without_store_handles() {
     let (_tmp, lifecycle, plan_id, engine) =
@@ -108,6 +142,71 @@ fn work_item_plan_initial_compile_pure_prepare_is_deterministic_without_store_ha
             "work_item_compile_pure_prepare_002"
         ]
     );
+}
+
+#[test]
+fn work_item_plan_initial_compile_phase2_publication_identity_is_deterministic() {
+    let (_tmp, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let first_input = initial_plan_compile_input_from_fixture(
+        &engine,
+        &lifecycle,
+        &plan_id,
+        "compile_publication_identity",
+        "2026-08-27T00:00:00Z",
+    );
+    let first = prepare_initial_plan_compile(
+        first_input.clone(),
+        InitialPlanCompileDurableContext::legacy(),
+    )
+    .expect("first input preparation succeeds");
+    let second = prepare_initial_plan_compile(
+        first_input,
+        InitialPlanCompileDurableContext::legacy(),
+    )
+    .expect("replayed input preparation succeeds");
+    assert_eq!(first.publication_journal, second.publication_journal);
+    assert_eq!(
+        first
+            .publication_journal
+            .as_ref()
+            .expect("valid fixture has publication journal")
+            .artifact_fingerprint,
+        second
+            .publication_journal
+            .as_ref()
+            .expect("valid fixture has publication journal")
+            .artifact_fingerprint
+    );
+}
+
+#[test]
+fn work_item_plan_initial_compile_phase2_publication_preserves_recovery_identity_fields() {
+    let (_tmp, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let input = initial_plan_compile_input_from_fixture(
+        &engine,
+        &lifecycle,
+        &plan_id,
+        "compile_publication_fields",
+        "2026-08-27T00:00:00Z",
+    );
+    let prepared = prepare_initial_plan_compile(input, InitialPlanCompileDurableContext::legacy())
+        .expect("valid fixture has publication journal");
+    let journal = prepared
+        .publication_journal
+        .expect("valid fixture has publication journal");
+    assert_eq!(journal.compile_id, "compile_publication_fields");
+    assert_eq!(journal.project_id, "project_0001");
+    assert_eq!(journal.issue_id, "issue_0001");
+    assert_eq!(journal.plan_id, plan_id);
+    assert_eq!(
+        journal.phase,
+        crate::product::work_item_revision_store::InitialPlanPublicationPhase::Prepared
+    );
+    assert_eq!(journal.error, None);
+    assert!(!journal.artifact_fingerprint.is_empty());
+    assert_eq!(journal.artifacts.work_items.len(), 2);
 }
 
 #[test]
@@ -1004,11 +1103,15 @@ fn stable_dynamic_id_map(
     };
     for tx in snapshots {
         add(&tx.compile_id, "<compile-transaction>".to_string());
-        for (outline_id, id) in &tx.outline_to_work_item_id {
-            add(id, format!("<work-item-{outline_id}>"));
-        }
+        // `outline_to_work_item_id` 的值是稳定的 logical work item identity，
+        // 不是 runtime 分配的 ID；保留它以避免 baseline/recovery 的映射来源不同。
         for (outline_id, id) in &tx.outline_to_verification_plan_id {
-            add(id, format!("<verification-plan-{outline_id}>"));
+            let logical_id = tx
+                .outline_to_work_item_id
+                .get(outline_id)
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            add(id, format!("<verification-plan-revision-{logical_id}>"));
         }
         for (index, id) in tx.created_work_item_ids.iter().enumerate() {
             let logical_id = outcome

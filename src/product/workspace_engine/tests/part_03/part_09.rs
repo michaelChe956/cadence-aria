@@ -404,6 +404,21 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
             crate::product::models::IssueWorkItemPlanStatus::Confirmed,
         ),
     ] {
+        let (_baseline_tmp, baseline_lifecycle, baseline_plan_id, mut baseline_engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        let baseline_journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
+        let baseline_outcome = baseline_engine
+            .run_work_item_plan_compile()
+            .await
+            .expect("normal compile baseline succeeds");
+        let baseline_observation = normalized_initial_compile_observation(
+            &baseline_outcome,
+            &baseline_journal.snapshots(),
+            &baseline_lifecycle,
+            &baseline_plan_id,
+            &baseline_engine,
+        );
+
         let (_tmp, lifecycle, plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         let compile_id = format!("compile_finalizer_{checkpoint:?}").to_lowercase();
@@ -414,6 +429,14 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
             &compile_id,
             "2026-07-17T00:01:20Z",
         );
+        compile_tx.validator_findings = baseline_journal
+            .snapshots()
+            .last()
+            .expect("normal compile baseline has a committed snapshot")
+            .validator_findings
+            .clone();
+        let provider_ledger_before = provider_ledger_bytes(&lifecycle);
+        let recovery_journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
         let plan_store = engine.work_item_plan_store().unwrap();
         plan_store.put_compile_transaction(&compile_tx).unwrap();
         let published = engine
@@ -502,7 +525,7 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
         let session_record = lifecycle
             .get_workspace_session(&engine.session.session_id)
             .unwrap();
-        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut recovered = WorkspaceEngine::new_persistent(
             engine.checkpoint_store.clone(),
             lifecycle.clone(),
@@ -518,6 +541,23 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
             .unwrap();
 
         assert_eq!(recovery, WorkItemPlanCompileRecoveryOutcome::HumanConfirm);
+        let provider_ledger_after = provider_ledger_bytes(&lifecycle);
+        assert_eq!(
+            provider_ledger_after, provider_ledger_before,
+            "finalizer recovery must preserve provider ledger bytes"
+        );
+        assert_eq!(
+            provider_ledger_started_count(&provider_ledger_after)
+                .checked_sub(provider_ledger_started_count(&provider_ledger_before)),
+            Some(0),
+            "finalizer recovery must not start a provider run"
+        );
+        assert!(
+            !drain_compile_events(&mut event_rx)
+                .iter()
+                .any(|event| matches!(event, EngineEvent::ProviderRunRequested { .. })),
+            "finalizer recovery must not request a provider run"
+        );
         let committed_tx = plan_store
             .get_compile_transaction(
                 "project_0001",
@@ -571,6 +611,22 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
                 .count(),
             1,
             "report replay must be idempotent"
+        );
+        let recovered_outcome = recovered
+            .load_initial_plan_compile_outcome(&committed_tx)
+            .expect("load recovered outcome")
+            .expect("recovered outcome exists");
+        let recovered_observation = normalized_initial_compile_observation(
+            &recovered_outcome,
+            &recovery_journal.snapshots(),
+            &lifecycle,
+            &plan_id,
+            &recovered,
+        );
+        assert_initial_plan_compile_outcome_parity(&published, &recovered_outcome);
+        assert_eq!(
+            recovered_observation.finalizer, baseline_observation.finalizer,
+            "recovery finalizer observation must match the 3.1 normal-compile baseline"
         );
     }
 }
@@ -710,6 +766,217 @@ async fn compile_recovery_continue_replays_pre_active_publication_with_same_tx_a
             .count(),
         1
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compile_recovery_continue_replays_each_pre_active_publication_checkpoint_after_restart() {
+    for checkpoint in [
+        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::LineageWritten,
+        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::FirstWorkItemArtifactsWritten,
+        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::PlanArtifactsWritten,
+        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::FirstWorkItemActivated,
+        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::PlanActivated,
+    ] {
+        let (_tmp, lifecycle, plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        let outline_payload = engine.session.artifact.clone().expect("outline artifact");
+        engine.update_artifact(outline_payload).await;
+        let compile_id = format!("compile_pre_active_{checkpoint:?}").to_lowercase();
+        let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
+            &engine,
+            &lifecycle,
+            &plan_id,
+            &compile_id,
+            "2026-07-17T00:01:50Z",
+        );
+        let plan_store = engine.work_item_plan_store().unwrap();
+        plan_store.put_compile_transaction(&compile_tx).unwrap();
+        let provider_ledger_before = provider_ledger_bytes(&lifecycle);
+        let transaction_journal =
+            crate::product::work_item_plan_store::observe_compile_transaction_writes();
+        let publication_store = engine.revision_store();
+        let failpoint = publication_store.register_initial_plan_publication_failpoint(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            &compile_tx.compile_id,
+            checkpoint,
+        );
+
+        let error = engine
+            .compile_initial_plan_revision(&accepted_drafts)
+            .expect_err("each publication checkpoint must interrupt before activation");
+        assert!(error.to_string().contains(&format!("{checkpoint:?}")));
+        drop(failpoint);
+        assert!(engine.mark_latest_compile_transaction_recovery_required(&error.to_string()));
+        let prepared_journal = publication_store
+            .get_initial_plan_publication_journal(
+                "project_0001",
+                "issue_0001",
+                &plan_id,
+                &compile_tx.compile_id,
+            )
+            .unwrap();
+        assert_eq!(
+            prepared_journal.phase,
+            crate::product::work_item_revision_store::InitialPlanPublicationPhase::Prepared
+        );
+        assert!(prepared_journal.error.as_deref().is_some_and(|error| {
+            error.contains(&format!("initial_publication_failpoint:{checkpoint:?}"))
+        }));
+        assert_eq!(prepared_journal.compile_id, compile_tx.compile_id);
+        assert!(!prepared_journal.artifact_fingerprint.is_empty());
+        engine
+            .enter_work_item_plan_compile_recovery(Some(error.to_string()))
+            .await;
+
+        let session_record = lifecycle
+            .get_workspace_session(&engine.session.session_id)
+            .unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let mut recovered = WorkspaceEngine::new_persistent(
+            engine.checkpoint_store.clone(),
+            lifecycle.clone(),
+            event_tx,
+            WorkspaceSession::from_record(session_record),
+        );
+        let recovery = recovered
+            .handle_work_item_plan_compile_recovery_action(
+                WorkItemPlanCompileRecoveryActionDto::Continue,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovery, WorkItemPlanCompileRecoveryOutcome::HumanConfirm);
+
+        let transaction_snapshots = transaction_journal.snapshots();
+        let cursors = snapshot_cursors(&transaction_snapshots);
+        let resumed_at = cursors
+            .iter()
+            .position(|cursor| *cursor == "publication_resumed")
+            .unwrap_or_else(|| panic!("pre-active recovery must record publication_resumed; cursors={cursors:?}"));
+        let first_finalizer = cursors
+            .iter()
+            .position(|cursor| *cursor == "plan_summary_prepared")
+            .expect("pre-active recovery must enter the finalizer");
+        assert!(
+            resumed_at < first_finalizer,
+            "publication_resumed must precede every finalizer cursor for {checkpoint:?}"
+        );
+
+        let completed_journal = recovered
+            .revision_store()
+            .get_initial_plan_publication_journal(
+                "project_0001",
+                "issue_0001",
+                &plan_id,
+                &compile_tx.compile_id,
+            )
+            .unwrap();
+        assert_eq!(
+            completed_journal.phase,
+            crate::product::work_item_revision_store::InitialPlanPublicationPhase::PlanActivated
+        );
+        assert_eq!(completed_journal.error, None);
+        assert_eq!(completed_journal.id, prepared_journal.id);
+        assert_eq!(completed_journal.compile_id, prepared_journal.compile_id);
+        assert_eq!(
+            completed_journal.outline_version_ref,
+            prepared_journal.outline_version_ref
+        );
+        assert_eq!(
+            completed_journal.active_draft_revision_ids,
+            prepared_journal.active_draft_revision_ids
+        );
+        assert_eq!(completed_journal.allocated_ids, prepared_journal.allocated_ids);
+        assert_eq!(
+            completed_journal.artifact_fingerprint,
+            prepared_journal.artifact_fingerprint
+        );
+        assert_eq!(completed_journal.artifacts, prepared_journal.artifacts);
+        let replayed = recovered
+            .revision_store()
+            .publish_or_resume_initial_plan_revision(&completed_journal)
+            .unwrap();
+        assert_eq!(replayed, completed_journal, "publication replay must be idempotent");
+
+        let transactions = plan_store
+            .list_compile_transactions("project_0001", "issue_0001", &plan_id)
+            .unwrap();
+        assert_eq!(transactions.len(), 1, "recovery must retain one transaction");
+        assert_eq!(transactions[0].compile_id, compile_tx.compile_id);
+        assert_eq!(transactions[0].status, WorkItemPlanCompileStatus::Committed);
+        assert_eq!(
+            transactions[0].plan_commit_state,
+            WorkItemPlanCommitState::Committed
+        );
+        assert_eq!(transactions[0].step_cursor, "committed");
+        let active_lineage = recovered
+            .revision_store()
+            .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+            .unwrap();
+        assert_eq!(
+            active_lineage.active_revision_id.as_deref(),
+            Some(completed_journal.artifacts.plan_revision.id.as_str())
+        );
+        let plan_revision = recovered
+            .revision_store()
+            .get_plan_revision(
+                "project_0001",
+                "issue_0001",
+                &plan_id,
+                &completed_journal.artifacts.plan_revision.id,
+            )
+            .unwrap();
+        assert_eq!(plan_revision, completed_journal.artifacts.plan_revision);
+        for item in &completed_journal.artifacts.work_items {
+            assert_eq!(
+                recovered
+                    .revision_store()
+                    .get_work_item_revision(
+                        &active_lineage,
+                        &item.logical_work_item.id,
+                        &item.work_item_revision.id,
+                    )
+                    .unwrap(),
+                item.work_item_revision
+            );
+            assert_eq!(
+                recovered
+                    .revision_store()
+                    .get_verification_plan_revision(
+                        &active_lineage,
+                        &item.verification_plan_revision.id,
+                    )
+                    .unwrap(),
+                item.verification_plan_revision
+            );
+            assert_eq!(
+                recovered
+                    .revision_store()
+                    .get_work_item_projection_bundle(&active_lineage, &item.projection_bundle.id)
+                    .unwrap(),
+                item.projection_bundle
+            );
+        }
+        let provider_ledger_after = provider_ledger_bytes(&lifecycle);
+        assert_eq!(
+            provider_ledger_after, provider_ledger_before,
+            "publication recovery must preserve provider ledger bytes"
+        );
+        assert_eq!(
+            provider_ledger_started_count(&provider_ledger_after)
+                .checked_sub(provider_ledger_started_count(&provider_ledger_before)),
+            Some(0),
+            "publication recovery must not start a provider run"
+        );
+        assert!(
+            !drain_compile_events(&mut event_rx)
+                .iter()
+                .any(|event| matches!(event, EngineEvent::ProviderRunRequested { .. })),
+            "publication recovery must not request a provider run"
+        );
+    }
 }
 
 fn prepare_initial_compile_transaction(
