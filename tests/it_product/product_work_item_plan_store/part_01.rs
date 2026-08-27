@@ -11,9 +11,11 @@ use cadence_aria::product::models::{
     WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemDraftVerificationPlan,
     WorkItemGenerationMode, WorkItemKind, WorkItemOutline, WorkItemOutlineDependencyEdge,
     WorkItemOutlineSessionFit, WorkItemPlanCommitState, WorkItemPlanCompileStatus,
-    WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex, WorkItemPlanOutline, WorkspaceType,
+    WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex, WorkItemPlanOutline,
+    WorkspaceType,
 };
 use cadence_aria::product::work_item_contract::CanonicalWorkItemContract;
+use cadence_aria::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use cadence_aria::product::work_item_plan_store::{
     WorkItemPlanStore, compact_outline_context_index, copy_draft_for_current_round,
     mark_downstream_superseded, mark_draft_active, mark_draft_record_superseded, next_batch_id,
@@ -136,6 +138,13 @@ fn work_item_plan_models_roundtrip() {
         project_id: "project_1".to_string(),
         issue_id: "issue_1".to_string(),
         plan_id: "plan_1".to_string(),
+        flow_kind: None,
+        source_revision_id: None,
+        source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        publication_provenance_content_hash: None,
         generation_round_id: "round_001".to_string(),
         outline_version_ref: "artifact://outline/1".to_string(),
         active_draft_ids: vec!["draft_001".to_string()],
@@ -283,6 +292,50 @@ fn compile_transaction_roundtrips_with_previous_plan_snapshot() {
         .get_compile_transaction("project_1", "issue_1", "../bad", "compile_001")
         .expect_err("path escape should fail");
     assert!(matches!(error, ProductStoreError::PathEscape(_)));
+}
+
+#[test]
+fn compile_transaction_legacy_json_defaults_durable_context_and_single_candidate_roundtrips() {
+    let legacy = sample_compile_transaction();
+    let legacy_json = serde_json::to_value(&legacy).expect("serialize legacy transaction");
+    for field in [
+        "flow_kind",
+        "source_revision_id",
+        "source_revision_ref",
+        "plan_candidate_ir_ref",
+        "mechanical_report_ref",
+        "publication_provenance_ref",
+        "publication_provenance_content_hash",
+    ] {
+        assert!(
+            legacy_json.get(field).is_none(),
+            "legacy JSON omits {field}"
+        );
+    }
+    let restored: WorkItemPlanCompileTransaction =
+        serde_json::from_value(legacy_json).expect("deserialize legacy transaction");
+    assert_eq!(restored.effective_flow_kind(), WorkItemPlanFlowKind::Legacy);
+    assert_eq!(restored.flow_kind, None);
+    assert_eq!(restored.source_revision_id, None);
+    assert_eq!(restored.source_revision_ref, None);
+    assert_eq!(restored.plan_candidate_ir_ref, None);
+    assert_eq!(restored.mechanical_report_ref, None);
+    assert_eq!(restored.publication_provenance_ref, None);
+    assert_eq!(restored.publication_provenance_content_hash, None);
+
+    let mut single_candidate = sample_compile_transaction();
+    single_candidate.flow_kind = Some(WorkItemPlanFlowKind::SingleCandidate);
+    single_candidate.source_revision_id = Some("revision_001".to_string());
+    single_candidate.source_revision_ref = Some("revision://001".to_string());
+    single_candidate.plan_candidate_ir_ref = Some("ir://plan/001".to_string());
+    single_candidate.mechanical_report_ref = Some("report://001".to_string());
+    single_candidate.publication_provenance_ref = Some("provenance://001".to_string());
+    single_candidate.publication_provenance_content_hash = Some("sha256:001".to_string());
+    let roundtrip: WorkItemPlanCompileTransaction = serde_json::from_value(
+        serde_json::to_value(&single_candidate).expect("serialize single candidate transaction"),
+    )
+    .expect("deserialize single candidate transaction");
+    assert_eq!(roundtrip, single_candidate);
 }
 
 #[test]

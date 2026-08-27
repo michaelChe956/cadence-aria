@@ -320,6 +320,7 @@ impl WorkspaceEngine {
         Err("cannot resolve repository_id for WorkItemPlan compile".to_string())
     }
 
+    #[cfg(test)]
     pub(crate) fn project_work_item_plan_drafts_for_compile(
         &self,
         previous_plan: &IssueWorkItemPlan,
@@ -334,77 +335,97 @@ impl WorkspaceEngine {
         ),
         String,
     > {
-        let outline_order = context.outline_order;
-        let outline_to_work_item_id = context.outline_to_work_item_id;
-        let outline_to_verification_plan_id = context.outline_to_verification_plan_id;
-        let logical_targets = context.logical_targets;
-        let now = context.now;
-        let draft_by_outline: HashMap<&str, &WorkItemDraftRecord> = draft_records
-            .iter()
-            .map(|record| (record.outline_id.as_str(), record))
-            .collect();
-        let mut logical_to_outline_id = HashMap::new();
-        for record in draft_records {
-            if logical_to_outline_id
-                .insert(
-                    record.candidate.logical_work_item_id.as_str(),
-                    record.outline_id.as_str(),
-                )
-                .is_some()
-            {
-                return Err(format!(
-                    "duplicate logical work item identity `{}` during compile",
-                    record.candidate.logical_work_item_id
-                ));
-            }
+        project_work_item_plan_drafts_for_compile(
+            previous_plan,
+            draft_records,
+            context,
+            change_order,
+        )
+    }
+}
+
+pub(crate) fn project_work_item_plan_drafts_for_compile(
+    previous_plan: &IssueWorkItemPlan,
+    draft_records: &[WorkItemDraftRecord],
+    context: WorkItemPlanCompileProjectionContext<'_>,
+    change_order: &[LogicalRepositoryId],
+) -> Result<
+    (
+        IssueWorkItemPlan,
+        Vec<LifecycleWorkItemRecord>,
+        Vec<VerificationPlan>,
+    ),
+    String,
+> {
+    let outline_order = context.outline_order;
+    let outline_to_work_item_id = context.outline_to_work_item_id;
+    let outline_to_verification_plan_id = context.outline_to_verification_plan_id;
+    let logical_targets = context.logical_targets;
+    let now = context.now;
+    let draft_by_outline: HashMap<&str, &WorkItemDraftRecord> = draft_records
+        .iter()
+        .map(|record| (record.outline_id.as_str(), record))
+        .collect();
+    let mut logical_to_outline_id = HashMap::new();
+    for record in draft_records {
+        if logical_to_outline_id
+            .insert(
+                record.candidate.logical_work_item_id.as_str(),
+                record.outline_id.as_str(),
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate logical work item identity `{}` during compile",
+                record.candidate.logical_work_item_id
+            ));
         }
-        let mut work_items = Vec::with_capacity(outline_order.len());
-        let mut verification_plans = Vec::with_capacity(outline_order.len());
-        if let Some(logical_targets) = logical_targets {
-            for outline_id in outline_order {
-                let record = draft_by_outline
-                    .get(outline_id.as_str())
-                    .ok_or_else(|| format!("accepted draft for outline `{outline_id}` missing"))?;
-                let target_repository_id = record.candidate.target_repository_id.ok_or_else(|| {
+    }
+    let mut work_items = Vec::with_capacity(outline_order.len());
+    let mut verification_plans = Vec::with_capacity(outline_order.len());
+    if let Some(logical_targets) = logical_targets {
+        for outline_id in outline_order {
+            let record = draft_by_outline
+                .get(outline_id.as_str())
+                .ok_or_else(|| format!("accepted draft for outline `{outline_id}` missing"))?;
+            let target_repository_id = record.candidate.target_repository_id.ok_or_else(|| {
                     format!(
                         "work_item_target_missing: target_repository_id_missing for outline `{outline_id}`"
                     )
                 })?;
-                if !logical_targets.contains_key(&target_repository_id) {
-                    return Err(format!(
-                        "work_item_target_missing: target_repository_id_not_effective for outline `{outline_id}`"
-                    ));
-                }
+            if !logical_targets.contains_key(&target_repository_id) {
+                return Err(format!(
+                    "work_item_target_missing: target_repository_id_not_effective for outline `{outline_id}`"
+                ));
             }
         }
-        for (index, outline_id) in outline_order.iter().enumerate() {
-            let record = draft_by_outline
-                .get(outline_id.as_str())
-                .ok_or_else(|| format!("accepted draft for outline `{outline_id}` missing"))?;
-            let candidate = &record.candidate;
-            let work_item_id = outline_to_work_item_id
-                .get(outline_id)
-                .cloned()
-                .ok_or_else(|| format!("work item id for outline `{outline_id}` missing"))?;
-            let verification_plan_id = outline_to_verification_plan_id
-                .get(outline_id)
-                .cloned()
-                .ok_or_else(|| {
-                    format!("verification plan id for outline `{outline_id}` missing")
-                })?;
-            let (repository_id, target_repository_id) = match logical_targets {
-                Some(logical_targets) => {
-                    let target_repository_id = candidate.target_repository_id.expect(
-                        "logical target prevalidation must ensure target_repository_id is present",
-                    );
-                    let repository_id = logical_targets.get(&target_repository_id).expect(
-                        "logical target prevalidation must ensure target_repository_id is effective",
-                    );
-                    (repository_id.as_str(), Some(target_repository_id))
-                }
-                None => (context.repository_id, None),
-            };
-            let depends_on = candidate
+    }
+    for (index, outline_id) in outline_order.iter().enumerate() {
+        let record = draft_by_outline
+            .get(outline_id.as_str())
+            .ok_or_else(|| format!("accepted draft for outline `{outline_id}` missing"))?;
+        let candidate = &record.candidate;
+        let work_item_id = outline_to_work_item_id
+            .get(outline_id)
+            .cloned()
+            .ok_or_else(|| format!("work item id for outline `{outline_id}` missing"))?;
+        let verification_plan_id = outline_to_verification_plan_id
+            .get(outline_id)
+            .cloned()
+            .ok_or_else(|| format!("verification plan id for outline `{outline_id}` missing"))?;
+        let (repository_id, target_repository_id) = match logical_targets {
+            Some(logical_targets) => {
+                let target_repository_id = candidate.target_repository_id.expect(
+                    "logical target prevalidation must ensure target_repository_id is present",
+                );
+                let repository_id = logical_targets.get(&target_repository_id).expect(
+                    "logical target prevalidation must ensure target_repository_id is effective",
+                );
+                (repository_id.as_str(), Some(target_repository_id))
+            }
+            None => (context.repository_id, None),
+        };
+        let depends_on = candidate
                 .canonical_contract_candidate
                 .input_contracts
                 .iter()
@@ -427,96 +448,92 @@ impl WorkspaceEngine {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            work_items.push(LifecycleWorkItemRecord {
-                id: work_item_id.clone(),
-                project_id: previous_plan.project_id.clone(),
-                issue_id: previous_plan.issue_id.clone(),
-                repository_id: repository_id.to_string(),
-                target_repository_id,
-                story_spec_ids: previous_plan.source_story_spec_ids.clone(),
-                design_spec_ids: previous_plan.source_design_spec_ids.clone(),
-                title: candidate
-                    .canonical_contract_candidate
-                    .identity
-                    .title
-                    .clone(),
-                plan_status: WorkItemPlanStatus::Confirmed,
-                execution_status: crate::product::models::WorkItemStatus::Pending,
-                worktree_path: None,
-                work_item_set_id: Some(previous_plan.id.clone()),
-                source_work_item_plan_id: Some(previous_plan.id.clone()),
-                source_outline_id: Some(record.outline_id.clone()),
-                source_draft_id: Some(record.draft_id.clone()),
-                planned_implementation_context: None,
-                kind: crate::product::work_item_split_engine::types::parse_work_item_kind(
-                    &candidate.canonical_contract_candidate.identity.kind,
-                ),
-                sequence_hint: Some((index + 1) as u32),
-                depends_on,
-                exclusive_write_scopes: candidate
-                    .canonical_contract_candidate
-                    .write_policy
-                    .exclusive_scopes
-                    .clone(),
-                forbidden_write_scopes: candidate
-                    .canonical_contract_candidate
-                    .write_policy
-                    .forbidden_scopes
-                    .clone(),
-                context_budget: crate::product::models::WorkItemContextBudget::default(),
-                verification_plan_ref: Some(verification_plan_id.clone()),
-                require_execution_plan_confirm: previous_plan
-                    .options
-                    .require_execution_plan_confirm,
-                execution_plan_status:
-                    crate::product::models::WorkItemExecutionPlanStatus::NotStarted,
-                completion_commit: None,
-                completion_diff_summary_ref: None,
-                created_at: now.to_string(),
-                updated_at: now.to_string(),
-            });
-            verification_plans.push(parse_compile_verification_plan(
-                &candidate.verification_plan,
-                verification_plan_id,
-                previous_plan.project_id.clone(),
-                previous_plan.issue_id.clone(),
-                work_item_id,
-                now.to_string(),
-            ));
-        }
-        // Task 8：把 Design 的 change_order（仓级执行顺序）映射成跨仓 WorkItem depends_on。
-        // 单仓/无 aggregate scope → change_order 为空 → 不映射，compile 行为不变（红线）。
-        apply_change_order_cross_repo_depends_on(&mut work_items, change_order)?;
-        let work_item_ids: Vec<String> = outline_order
-            .iter()
-            .filter_map(|outline_id| outline_to_work_item_id.get(outline_id).cloned())
-            .collect();
-        let verification_plan_ids: Vec<String> = outline_order
-            .iter()
-            .filter_map(|outline_id| outline_to_verification_plan_id.get(outline_id).cloned())
-            .collect();
-        let dependency_graph = work_items
-            .iter()
-            .flat_map(|work_item| {
-                work_item
-                    .depends_on
-                    .iter()
-                    .map(|dependency_id| IssueWorkItemDependencyEdge {
-                        from_work_item_id: dependency_id.clone(),
-                        to_work_item_id: work_item.id.clone(),
-                    })
-            })
-            .collect();
-        let mut compiled_plan = previous_plan.clone();
-        compiled_plan.status = crate::product::models::IssueWorkItemPlanStatus::Confirmed;
-        compiled_plan.work_item_ids = work_item_ids;
-        compiled_plan.verification_plan_ids = verification_plan_ids;
-        compiled_plan.repository_profile_ref = None;
-        compiled_plan.dependency_graph = dependency_graph;
-        compiled_plan.validator_findings = Vec::new();
-        compiled_plan.updated_at = now.to_string();
-        Ok((compiled_plan, work_items, verification_plans))
+        work_items.push(LifecycleWorkItemRecord {
+            id: work_item_id.clone(),
+            project_id: previous_plan.project_id.clone(),
+            issue_id: previous_plan.issue_id.clone(),
+            repository_id: repository_id.to_string(),
+            target_repository_id,
+            story_spec_ids: previous_plan.source_story_spec_ids.clone(),
+            design_spec_ids: previous_plan.source_design_spec_ids.clone(),
+            title: candidate
+                .canonical_contract_candidate
+                .identity
+                .title
+                .clone(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            execution_status: crate::product::models::WorkItemStatus::Pending,
+            worktree_path: None,
+            work_item_set_id: Some(previous_plan.id.clone()),
+            source_work_item_plan_id: Some(previous_plan.id.clone()),
+            source_outline_id: Some(record.outline_id.clone()),
+            source_draft_id: Some(record.draft_id.clone()),
+            planned_implementation_context: None,
+            kind: crate::product::work_item_split_engine::types::parse_work_item_kind(
+                &candidate.canonical_contract_candidate.identity.kind,
+            ),
+            sequence_hint: Some((index + 1) as u32),
+            depends_on,
+            exclusive_write_scopes: candidate
+                .canonical_contract_candidate
+                .write_policy
+                .exclusive_scopes
+                .clone(),
+            forbidden_write_scopes: candidate
+                .canonical_contract_candidate
+                .write_policy
+                .forbidden_scopes
+                .clone(),
+            context_budget: crate::product::models::WorkItemContextBudget::default(),
+            verification_plan_ref: Some(verification_plan_id.clone()),
+            require_execution_plan_confirm: previous_plan.options.require_execution_plan_confirm,
+            execution_plan_status: crate::product::models::WorkItemExecutionPlanStatus::NotStarted,
+            completion_commit: None,
+            completion_diff_summary_ref: None,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+        });
+        verification_plans.push(parse_compile_verification_plan(
+            &candidate.verification_plan,
+            verification_plan_id,
+            previous_plan.project_id.clone(),
+            previous_plan.issue_id.clone(),
+            work_item_id,
+            now.to_string(),
+        ));
     }
+    // Task 8：把 Design 的 change_order（仓级执行顺序）映射成跨仓 WorkItem depends_on。
+    // 单仓/无 aggregate scope → change_order 为空 → 不映射，compile 行为不变（红线）。
+    apply_change_order_cross_repo_depends_on(&mut work_items, change_order)?;
+    let work_item_ids: Vec<String> = outline_order
+        .iter()
+        .filter_map(|outline_id| outline_to_work_item_id.get(outline_id).cloned())
+        .collect();
+    let verification_plan_ids: Vec<String> = outline_order
+        .iter()
+        .filter_map(|outline_id| outline_to_verification_plan_id.get(outline_id).cloned())
+        .collect();
+    let dependency_graph = work_items
+        .iter()
+        .flat_map(|work_item| {
+            work_item
+                .depends_on
+                .iter()
+                .map(|dependency_id| IssueWorkItemDependencyEdge {
+                    from_work_item_id: dependency_id.clone(),
+                    to_work_item_id: work_item.id.clone(),
+                })
+        })
+        .collect();
+    let mut compiled_plan = previous_plan.clone();
+    compiled_plan.status = crate::product::models::IssueWorkItemPlanStatus::Confirmed;
+    compiled_plan.work_item_ids = work_item_ids;
+    compiled_plan.verification_plan_ids = verification_plan_ids;
+    compiled_plan.repository_profile_ref = None;
+    compiled_plan.dependency_graph = dependency_graph;
+    compiled_plan.validator_findings = Vec::new();
+    compiled_plan.updated_at = now.to_string();
+    Ok((compiled_plan, work_items, verification_plans))
 }
 
 #[cfg(test)]

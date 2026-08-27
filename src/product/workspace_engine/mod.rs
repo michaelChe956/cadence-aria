@@ -105,6 +105,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use compile::{
+    CompileStores, InitialPlanCompileDurableContext, InitialPlanCompileInput,
+    PreparedInitialPlanCompile, execute_initial_plan_compile, prepare_initial_plan_compile,
+};
 pub use human_presentation::{
     HumanPresentationScope, SaveHumanPresentationRevision, WorkItemRepositoryGroup,
     group_work_items_by_target, save_human_presentation_revision,
@@ -112,9 +116,9 @@ pub use human_presentation::{
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
 pub use linked_workspace_amendment::restore_linked_workspace_snapshot;
 pub use plan_projection::{
-    CompiledWorkItemRevision, InitialPlanCompileOutcome, WorkspaceEngineError,
-    compile_plan_projection_bundle, compile_work_item_revision, plan_projection_input,
-    publish_initial_plan_revision,
+    CompiledWorkItemRevision, InitialPlanCompileOutcome, InitialPlanPublicationInput,
+    WorkspaceEngineError, compile_plan_projection_bundle, compile_work_item_revision,
+    plan_projection_input, prepare_initial_plan_publication, publish_initial_plan_revision,
 };
 pub use review::policy_routing::{
     GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,

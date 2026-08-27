@@ -1,5 +1,329 @@
 use super::*;
-use crate::product::work_item_plan_policy::RunPolicy;
+use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+use crate::product::work_item_revision_store::InitialPlanPublicationJournal;
+use crate::product::work_item_split_validator::WorkItemSplitValidationReport;
+use crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialPlanCompileInput {
+    pub project_id: String,
+    pub issue_id: String,
+    pub plan_id: String,
+    pub previous_plan: IssueWorkItemPlan,
+    pub active_index: WorkItemPlanDraftActiveIndex,
+    pub outline_candidate: WorkItemPlanOutlineCandidateDto,
+    pub outline_order: Vec<String>,
+    pub draft_records: Vec<WorkItemDraftRecord>,
+    pub logical_targets: Option<BTreeMap<LogicalRepositoryId, String>>,
+    pub repository_id: String,
+    pub change_order: Vec<LogicalRepositoryId>,
+    pub compile_id: String,
+    pub now: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialPlanCompileDurableContext {
+    pub flow_kind: Option<WorkItemPlanFlowKind>,
+    pub source_revision_id: Option<String>,
+    pub source_revision_ref: Option<String>,
+    pub plan_candidate_ir_ref: Option<String>,
+    pub mechanical_report_ref: Option<String>,
+    pub publication_provenance_ref: Option<String>,
+    pub publication_provenance_content_hash: Option<String>,
+}
+
+impl InitialPlanCompileDurableContext {
+    pub fn legacy() -> Self {
+        Self {
+            flow_kind: None,
+            source_revision_id: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            publication_provenance_content_hash: None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let required = [
+            ("source_revision_id", self.source_revision_id.as_deref()),
+            ("source_revision_ref", self.source_revision_ref.as_deref()),
+            (
+                "plan_candidate_ir_ref",
+                self.plan_candidate_ir_ref.as_deref(),
+            ),
+            (
+                "mechanical_report_ref",
+                self.mechanical_report_ref.as_deref(),
+            ),
+            (
+                "publication_provenance_ref",
+                self.publication_provenance_ref.as_deref(),
+            ),
+            (
+                "publication_provenance_content_hash",
+                self.publication_provenance_content_hash.as_deref(),
+            ),
+        ];
+        match self.flow_kind {
+            None => {
+                if required.iter().any(|(_, value)| value.is_some()) {
+                    return Err("legacy compile durable context must be all None".to_string());
+                }
+            }
+            Some(WorkItemPlanFlowKind::Legacy) => {
+                return Err("legacy compile durable context must be all None".to_string());
+            }
+            Some(WorkItemPlanFlowKind::SingleCandidate) => {
+                for (field, value) in required {
+                    if value.is_none() {
+                        return Err(format!("single candidate durable context missing {field}"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedInitialPlanCompile {
+    pub transaction: WorkItemPlanCompileTransaction,
+    pub compiled_plan: IssueWorkItemPlan,
+    pub work_items: Vec<LifecycleWorkItemRecord>,
+    pub verification_plans: Vec<VerificationPlan>,
+    pub validation_report: WorkItemSplitValidationReport,
+    pub publication_journal: Option<InitialPlanPublicationJournal>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompileStores {
+    pub plan_store: WorkItemPlanStore,
+    pub revision_store: WorkItemRevisionStore,
+}
+
+/// 将 legacy/IR adapter 已读取的值变成确定性的 initial compile 草稿。
+/// 此函数不持有任何 store，亦不读取系统时钟。
+pub fn prepare_initial_plan_compile(
+    input: InitialPlanCompileInput,
+    durable_context: InitialPlanCompileDurableContext,
+) -> Result<PreparedInitialPlanCompile, String> {
+    durable_context.validate()?;
+    if input.project_id != input.previous_plan.project_id
+        || input.issue_id != input.previous_plan.issue_id
+        || input.plan_id != input.previous_plan.id
+        || input.project_id != input.active_index.project_id
+        || input.issue_id != input.active_index.issue_id
+        || input.plan_id != input.active_index.plan_id
+    {
+        return Err("initial plan compile input identity mismatch".to_string());
+    }
+    if input.outline_order.is_empty() {
+        return Err("initial plan compile requires at least one outline".to_string());
+    }
+    let outline_to_work_item_id = input
+        .outline_order
+        .iter()
+        .enumerate()
+        .map(|(index, outline_id)| {
+            (
+                outline_id.clone(),
+                compile_work_item_id(&input.compile_id, index),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let outline_to_verification_plan_id = input
+        .outline_order
+        .iter()
+        .enumerate()
+        .map(|(index, outline_id)| {
+            (
+                outline_id.clone(),
+                compile_verification_plan_id(&input.compile_id, index),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if outline_to_work_item_id.len() != input.outline_order.len() {
+        return Err("initial plan compile outline order contains duplicates".to_string());
+    }
+    let (compiled_plan, work_items, verification_plans) =
+        draft_batch::compile_support::project_work_item_plan_drafts_for_compile(
+            &input.previous_plan,
+            &input.draft_records,
+            WorkItemPlanCompileProjectionContext {
+                outline_order: &input.outline_order,
+                outline_to_work_item_id: &outline_to_work_item_id,
+                outline_to_verification_plan_id: &outline_to_verification_plan_id,
+                repository_id: &input.repository_id,
+                logical_targets: input.logical_targets.as_ref(),
+                now: &input.now,
+            },
+            &input.change_order,
+        )?;
+    let validation_report =
+        WorkItemSplitValidator::validate(&compiled_plan, &work_items, None, &verification_plans);
+    let transaction = WorkItemPlanCompileTransaction {
+        compile_id: input.compile_id.clone(),
+        project_id: input.project_id,
+        issue_id: input.issue_id,
+        plan_id: input.plan_id,
+        flow_kind: durable_context.flow_kind,
+        source_revision_id: durable_context.source_revision_id,
+        source_revision_ref: durable_context.source_revision_ref,
+        plan_candidate_ir_ref: durable_context.plan_candidate_ir_ref,
+        mechanical_report_ref: durable_context.mechanical_report_ref,
+        publication_provenance_ref: durable_context.publication_provenance_ref,
+        publication_provenance_content_hash: durable_context.publication_provenance_content_hash,
+        generation_round_id: input.active_index.current_generation_round_id,
+        outline_version_ref: input.outline_candidate.outline.id.clone(),
+        active_draft_ids: input
+            .draft_records
+            .iter()
+            .map(|record| record.draft_id.clone())
+            .collect(),
+        status: WorkItemPlanCompileStatus::Preparing,
+        plan_commit_state: WorkItemPlanCommitState::NotStarted,
+        step_cursor: "preparing".to_string(),
+        outline_to_work_item_id: BTreeMap::new(),
+        outline_to_verification_plan_id: BTreeMap::new(),
+        created_work_item_ids: Vec::new(),
+        created_verification_plan_ids: Vec::new(),
+        child_session_ids: Vec::new(),
+        validator_findings: Vec::new(),
+        abort_requested_at: None,
+        failure_reason: None,
+        previous_plan_snapshot: input.previous_plan.clone(),
+        created_at: input.now.clone(),
+        updated_at: input.now.clone(),
+        committed_at: None,
+    };
+    let publication_journal = if validation_report.has_errors() {
+        None
+    } else {
+        let accepted_drafts = input
+            .draft_records
+            .iter()
+            .map(work_item_draft_revision_from_record)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let logical_ids = input
+            .outline_candidate
+            .outline
+            .work_item_outlines
+            .iter()
+            .map(|outline| outline.logical_work_item_id.clone())
+            .collect::<Vec<_>>();
+        let allocated_ids =
+            crate::product::work_item_revision_store::allocate_initial_plan_publication_ids(
+                &input.previous_plan.project_id,
+                &input.previous_plan.issue_id,
+                &input.previous_plan.id,
+                &input.compile_id,
+                &logical_ids,
+            )
+            .map_err(|error| error.to_string())?;
+        Some(
+            super::plan_projection::prepare_initial_plan_publication(
+                super::plan_projection::InitialPlanPublicationInput {
+                    previous_plan: input.previous_plan,
+                    outline: input.outline_candidate.outline,
+                    outline_order: input.outline_order,
+                    accepted_drafts,
+                    compile_id: input.compile_id,
+                    now: input.now,
+                    allocated_ids,
+                },
+            )
+            .map_err(|error| error.to_string())?,
+        )
+    };
+    Ok(PreparedInitialPlanCompile {
+        transaction,
+        compiled_plan,
+        work_items,
+        verification_plans,
+        validation_report,
+        publication_journal,
+    })
+}
+
+/// 执行阶段仅持有 writer；所有输入读取和时间/ID 分配均在 adapter 外层完成。
+pub fn execute_initial_plan_compile(
+    stores: &CompileStores,
+    prepared: PreparedInitialPlanCompile,
+) -> Result<(InitialPlanCompileOutcome, WorkItemPlanCompileTransaction), String> {
+    let mut transaction = prepared.transaction;
+    stores
+        .plan_store
+        .put_compile_transaction(&transaction)
+        .map_err(|error| format!("save compile transaction failed: {error}"))?;
+
+    transaction.status = WorkItemPlanCompileStatus::Validating;
+    transaction.step_cursor = "validating".to_string();
+    transaction.outline_to_work_item_id = prepared
+        .work_items
+        .iter()
+        .map(|work_item| {
+            (
+                work_item
+                    .source_outline_id
+                    .clone()
+                    .expect("prepared work item has source outline id"),
+                work_item.id.clone(),
+            )
+        })
+        .collect();
+    transaction.outline_to_verification_plan_id = prepared
+        .verification_plans
+        .iter()
+        .map(|verification_plan| {
+            let outline_id = prepared
+                .work_items
+                .iter()
+                .find(|work_item| work_item.id == verification_plan.work_item_id)
+                .and_then(|work_item| work_item.source_outline_id.clone())
+                .expect("prepared verification plan belongs to a work item outline");
+            (outline_id, verification_plan.id.clone())
+        })
+        .collect();
+    stores
+        .plan_store
+        .put_compile_transaction(&transaction)
+        .map_err(|error| format!("save validating compile transaction failed: {error}"))?;
+
+    transaction.validator_findings = prepared.validation_report.findings.clone();
+    if prepared.validation_report.has_errors() {
+        transaction.status = WorkItemPlanCompileStatus::Failed;
+        transaction.failure_reason = Some(work_item_plan_findings_summary(
+            "Final Compile strict validator failed",
+            &prepared.validation_report.findings,
+        ));
+        stores
+            .plan_store
+            .put_compile_transaction(&transaction)
+            .map_err(|error| format!("save failed compile transaction failed: {error}"))?;
+        return Err(work_item_plan_findings_summary(
+            "Final Compile strict validator failed",
+            &prepared.validation_report.findings,
+        ));
+    }
+
+    transaction.status = WorkItemPlanCompileStatus::Committing;
+    transaction.step_cursor = "committing".to_string();
+    stores
+        .plan_store
+        .put_compile_transaction(&transaction)
+        .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
+    let journal = prepared
+        .publication_journal
+        .as_ref()
+        .expect("valid initial compile preparation has publication journal");
+    let outcome = publish_initial_plan_revision(&stores.revision_store, journal)
+        .map_err(|error| error.to_string())?;
+    Ok((outcome, transaction))
+}
 
 mod finalizer;
 
@@ -261,156 +585,41 @@ impl WorkspaceEngine {
             .lifecycle_store
             .clone()
             .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
-        let store = self.work_item_plan_store()?;
-        let project_id = self.session.project_id.clone();
-        let issue_id = self.session.issue_id.clone();
-        let plan_id = self.session.entity_id.clone();
-        let previous_plan = lifecycle
-            .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load issue work item plan failed: {error}"))?;
-        let index = store
-            .load_active_index(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?
-            .ok_or_else(|| "work item plan active index missing".to_string())?;
-        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
-        let outline_order = work_item_plan_outline_topological_order(&outline_candidate.outline)?;
-        let draft_records =
-            self.accepted_active_draft_records_for_compile(&store, &index, &outline_order)?;
-        let active_draft_ids: Vec<String> = draft_records
-            .iter()
-            .map(|record| record.draft_id.clone())
-            .collect();
-        let compile_id = next_compile_id();
-        let now = chrono::Utc::now().to_rfc3339();
-        let outline_to_work_item_id: BTreeMap<String, String> = outline_order
-            .iter()
-            .enumerate()
-            .map(|(index, outline_id)| {
-                (outline_id.clone(), compile_work_item_id(&compile_id, index))
-            })
-            .collect();
-        let outline_to_verification_plan_id: BTreeMap<String, String> = outline_order
-            .iter()
-            .enumerate()
-            .map(|(index, outline_id)| {
-                (
-                    outline_id.clone(),
-                    compile_verification_plan_id(&compile_id, index),
-                )
-            })
-            .collect();
-        let mut tx = WorkItemPlanCompileTransaction {
-            compile_id: compile_id.clone(),
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            plan_id: plan_id.clone(),
-            generation_round_id: index.current_generation_round_id.clone(),
-            outline_version_ref: outline_candidate.outline.id.clone(),
-            active_draft_ids,
-            status: WorkItemPlanCompileStatus::Preparing,
+        let input = self.legacy_initial_plan_compile_input(
+            &lifecycle,
+            next_compile_id(),
+            chrono::Utc::now().to_rfc3339(),
+        )?;
+        let failure_report = WorkItemPlanCompileReportPayload {
+            compile_id: input.compile_id.clone(),
+            generation_round_id: input.active_index.current_generation_round_id.clone(),
+            status: WorkItemPlanCompileStatus::Failed,
             plan_commit_state: WorkItemPlanCommitState::NotStarted,
-            step_cursor: "preparing".to_string(),
-            outline_to_work_item_id: BTreeMap::new(),
-            outline_to_verification_plan_id: BTreeMap::new(),
-            created_work_item_ids: Vec::new(),
-            created_verification_plan_ids: Vec::new(),
+            work_item_ids: Vec::new(),
+            verification_plan_ids: Vec::new(),
             child_session_ids: Vec::new(),
             validator_findings: Vec::new(),
-            abort_requested_at: None,
-            failure_reason: None,
-            previous_plan_snapshot: previous_plan.clone(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            committed_at: None,
         };
-        store
-            .put_compile_transaction(&tx)
-            .map_err(|error| format!("save compile transaction failed: {error}"))?;
-
-        let logical_targets =
-            self.logical_work_item_plan_repository_targets(&lifecycle, &previous_plan)?;
-        let repository_id = if logical_targets.is_none() {
-            self.work_item_plan_repository_id(&lifecycle, &previous_plan)?
-        } else {
-            String::new()
+        let draft_records = input.draft_records.clone();
+        let prepared =
+            prepare_initial_plan_compile(input, InitialPlanCompileDurableContext::legacy())?;
+        let mut failure_report = failure_report;
+        failure_report.validator_findings =
+            work_item_split_findings_to_dto(&prepared.validation_report.findings);
+        let stores = CompileStores {
+            plan_store: self.work_item_plan_store()?,
+            revision_store: self.revision_store(),
         };
-        let (compiled_plan, work_items, verification_plans) = self
-            .project_work_item_plan_drafts_for_compile(
-                &previous_plan,
-                &draft_records,
-                WorkItemPlanCompileProjectionContext {
-                    outline_order: &outline_order,
-                    outline_to_work_item_id: &outline_to_work_item_id,
-                    outline_to_verification_plan_id: &outline_to_verification_plan_id,
-                    repository_id: &repository_id,
-                    logical_targets: logical_targets.as_ref(),
-                    now: &now,
-                },
-                &draft_batch::compile_support::load_change_order_from_confirmed_design(
-                    &lifecycle,
-                    &previous_plan,
-                )?,
-            )?;
-        tx.status = WorkItemPlanCompileStatus::Validating;
-        tx.step_cursor = "validating".to_string();
-        tx.outline_to_work_item_id = outline_to_work_item_id;
-        tx.outline_to_verification_plan_id = outline_to_verification_plan_id;
-        tx.updated_at = chrono::Utc::now().to_rfc3339();
-        store
-            .put_compile_transaction(&tx)
-            .map_err(|error| format!("save validating compile transaction failed: {error}"))?;
-
-        let report = WorkItemSplitValidator::validate(
-            &compiled_plan,
-            &work_items,
-            None,
-            &verification_plans,
-        );
-        tx.validator_findings = report.findings.clone();
-        if report.has_errors() {
-            let failure_report = WorkItemPlanCompileReportPayload {
-                compile_id: compile_id.clone(),
-                generation_round_id: index.current_generation_round_id.clone(),
-                status: WorkItemPlanCompileStatus::Failed,
-                plan_commit_state: WorkItemPlanCommitState::NotStarted,
-                work_item_ids: Vec::new(),
-                verification_plan_ids: Vec::new(),
-                child_session_ids: Vec::new(),
-                validator_findings: work_item_split_findings_to_dto(&tx.validator_findings),
-            };
-            tx.status = WorkItemPlanCompileStatus::Failed;
-            tx.failure_reason = Some(work_item_plan_findings_summary(
-                "Final Compile strict validator failed",
-                &report.findings,
-            ));
-            tx.updated_at = chrono::Utc::now().to_rfc3339();
-            store
-                .put_compile_transaction(&tx)
-                .map_err(|error| format!("save failed compile transaction failed: {error}"))?;
-            self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
-                compile_report: Box::new(failure_report),
-            })
-            .await;
-            return Err(work_item_plan_findings_summary(
-                "Final Compile strict validator failed",
-                &report.findings,
-            ));
-        }
-        tx.status = WorkItemPlanCompileStatus::Committing;
-        tx.step_cursor = "committing".to_string();
-        tx.updated_at = chrono::Utc::now().to_rfc3339();
-        store
-            .put_compile_transaction(&tx)
-            .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
-
-        let accepted_drafts = draft_records
-            .iter()
-            .map(work_item_draft_revision_from_record)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        let outcome = self
-            .compile_initial_plan_revision(&accepted_drafts)
-            .map_err(|error| error.to_string())?;
+        let (outcome, mut tx) = match execute_initial_plan_compile(&stores, prepared) {
+            Ok(result) => result,
+            Err(error) => {
+                self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
+                    compile_report: Box::new(failure_report),
+                })
+                .await;
+                return Err(error);
+            }
+        };
         let compiled_by_logical_id = outcome
             .work_items
             .iter()
@@ -437,10 +646,58 @@ impl WorkspaceEngine {
                 )
             })
             .collect();
-        self.finalize_initial_plan_compile(&lifecycle, &store, &mut tx, &outcome)
+        self.finalize_initial_plan_compile(&lifecycle, &stores.plan_store, &mut tx, &outcome)
             .await?;
-
         Ok(outcome)
+    }
+
+    fn legacy_initial_plan_compile_input(
+        &self,
+        lifecycle: &LifecycleStore,
+        compile_id: String,
+        now: String,
+    ) -> Result<InitialPlanCompileInput, String> {
+        let store = self.work_item_plan_store()?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let previous_plan = lifecycle
+            .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load issue work item plan failed: {error}"))?;
+        let active_index = store
+            .load_active_index(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let outline_order = work_item_plan_outline_topological_order(&outline_candidate.outline)?;
+        let draft_records =
+            self.accepted_active_draft_records_for_compile(&store, &active_index, &outline_order)?;
+        let logical_targets =
+            self.logical_work_item_plan_repository_targets(lifecycle, &previous_plan)?;
+        let repository_id = if logical_targets.is_none() {
+            self.work_item_plan_repository_id(lifecycle, &previous_plan)?
+        } else {
+            String::new()
+        };
+        let change_order = draft_batch::compile_support::load_change_order_from_confirmed_design(
+            lifecycle,
+            &previous_plan,
+        )?;
+        Ok(InitialPlanCompileInput {
+            project_id,
+            issue_id,
+            plan_id,
+            previous_plan,
+            active_index,
+            outline_candidate,
+            outline_order,
+            draft_records,
+            logical_targets,
+            repository_id,
+            change_order,
+            compile_id,
+            now,
+        })
     }
 }
 

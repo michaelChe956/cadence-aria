@@ -3,8 +3,11 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::product::models::{WorkItemPlanCommitState, WorkItemPlanCompileStatus};
+use crate::product::models::{
+    WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction,
+};
 use crate::product::work_item_contract::canonical_contract_hash;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
 /// 3.2 输入抽取前的 legacy compile 三层语义基线。
 ///
@@ -22,6 +25,148 @@ struct NormalizedInitialCompileObservation {
     transaction_states: Vec<Value>,
     created_record_counts: Value,
     finalizer: Value,
+}
+
+#[test]
+fn work_item_plan_initial_compile_pure_prepare_is_deterministic_without_store_handles() {
+    let (_tmp, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let input = initial_plan_compile_input_from_fixture(
+        &engine,
+        &lifecycle,
+        &plan_id,
+        "compile_pure_prepare",
+        "2026-08-27T00:00:00Z",
+    );
+
+    let outline_to_work_item_id = input
+        .outline_order
+        .iter()
+        .enumerate()
+        .map(|(index, outline_id)| {
+            (
+                outline_id.clone(),
+                format!("work_item_{}_{:03}", input.compile_id, index + 1),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let outline_to_verification_plan_id = input
+        .outline_order
+        .iter()
+        .enumerate()
+        .map(|(index, outline_id)| {
+            (
+                outline_id.clone(),
+                format!("verification_plan_{}_{:03}", input.compile_id, index + 1),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let legacy_projection = engine
+        .project_work_item_plan_drafts_for_compile(
+            &input.previous_plan,
+            &input.draft_records,
+            WorkItemPlanCompileProjectionContext {
+                outline_order: &input.outline_order,
+                outline_to_work_item_id: &outline_to_work_item_id,
+                outline_to_verification_plan_id: &outline_to_verification_plan_id,
+                repository_id: &input.repository_id,
+                logical_targets: input.logical_targets.as_ref(),
+                now: &input.now,
+            },
+            &input.change_order,
+        )
+        .expect("legacy projection accepts the same fixture");
+    let first =
+        prepare_initial_plan_compile(input.clone(), InitialPlanCompileDurableContext::legacy())
+            .expect("pure prepare accepts legacy input");
+    let second = prepare_initial_plan_compile(input, InitialPlanCompileDurableContext::legacy())
+        .expect("the same pure input prepares deterministically");
+
+    assert_eq!(first, second);
+    assert_eq!(
+        (
+            first.compiled_plan.clone(),
+            first.work_items.clone(),
+            first.verification_plans.clone(),
+        ),
+        legacy_projection,
+        "legacy adapter and pure core must retain the same projection and validator input"
+    );
+    assert_eq!(
+        first.transaction.status,
+        WorkItemPlanCompileStatus::Preparing
+    );
+    assert_eq!(first.transaction.created_at, "2026-08-27T00:00:00Z");
+    assert_eq!(
+        first.transaction.effective_flow_kind(),
+        WorkItemPlanFlowKind::Legacy
+    );
+    assert_eq!(
+        first.compiled_plan.work_item_ids,
+        vec![
+            "work_item_compile_pure_prepare_001",
+            "work_item_compile_pure_prepare_002"
+        ]
+    );
+}
+
+#[test]
+fn work_item_plan_initial_compile_durable_context_is_legacy_compatible_and_fail_closed() {
+    let (_tmp, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let input = initial_plan_compile_input_from_fixture(
+        &engine,
+        &lifecycle,
+        &plan_id,
+        "compile_durable_context",
+        "2026-08-27T00:00:00Z",
+    );
+    let prepared = prepare_initial_plan_compile(input, InitialPlanCompileDurableContext::legacy())
+        .expect("legacy durable context is valid");
+
+    let mut legacy_json =
+        serde_json::to_value(&prepared.transaction).expect("serialize transaction");
+    let legacy_object = legacy_json
+        .as_object_mut()
+        .expect("transaction serializes as an object");
+    for field in [
+        "flow_kind",
+        "source_revision_id",
+        "source_revision_ref",
+        "plan_candidate_ir_ref",
+        "mechanical_report_ref",
+        "publication_provenance_ref",
+        "publication_provenance_content_hash",
+    ] {
+        assert!(
+            legacy_object.remove(field).is_none(),
+            "legacy None fields are omitted"
+        );
+    }
+    let legacy: WorkItemPlanCompileTransaction =
+        serde_json::from_value(legacy_json).expect("legacy transaction remains readable");
+    assert_eq!(legacy.effective_flow_kind(), WorkItemPlanFlowKind::Legacy);
+    assert_eq!(legacy.flow_kind, None);
+    assert_eq!(legacy.source_revision_id, None);
+    assert_eq!(legacy.source_revision_ref, None);
+    assert_eq!(legacy.plan_candidate_ir_ref, None);
+    assert_eq!(legacy.mechanical_report_ref, None);
+    assert_eq!(legacy.publication_provenance_ref, None);
+    assert_eq!(legacy.publication_provenance_content_hash, None);
+
+    let incomplete = InitialPlanCompileDurableContext {
+        flow_kind: Some(WorkItemPlanFlowKind::SingleCandidate),
+        source_revision_id: Some("revision_001".to_string()),
+        source_revision_ref: Some("revision://001".to_string()),
+        plan_candidate_ir_ref: Some("ir://plan/001".to_string()),
+        mechanical_report_ref: Some("report://001".to_string()),
+        publication_provenance_ref: Some("provenance://001".to_string()),
+        publication_provenance_content_hash: None,
+    };
+    let error = incomplete
+        .validate()
+        .expect_err("single candidate context requires every durable ref");
+    assert!(error.contains("publication_provenance_content_hash"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -60,10 +205,9 @@ async fn work_item_plan_initial_compile_phase2_normal_records_transaction_journa
         .expect("compile cannot remove provider ledger started records");
     assert_eq!(newly_started, 0, "compile cannot start a provider run");
     assert!(
-        !drain_compile_events(&mut event_rx).iter().any(|event| matches!(
-            event,
-            EngineEvent::ProviderRunRequested { .. }
-        )),
+        !drain_compile_events(&mut event_rx)
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ProviderRunRequested { .. })),
         "initial compile must not request a provider run"
     );
 
@@ -110,17 +254,15 @@ async fn work_item_plan_initial_compile_phase2_normal_records_transaction_journa
         ]
     );
     assert_eq!(
-        snapshots.last().expect("committed snapshot").plan_commit_state,
+        snapshots
+            .last()
+            .expect("committed snapshot")
+            .plan_commit_state,
         WorkItemPlanCommitState::Committed
     );
 
-    let observation = normalized_initial_compile_observation(
-        &outcome,
-        &snapshots,
-        &lifecycle,
-        &plan_id,
-        &engine,
-    );
+    let observation =
+        normalized_initial_compile_observation(&outcome, &snapshots, &lifecycle, &plan_id, &engine);
     assert_eq!(
         observation.created_record_counts,
         serde_json::json!({
@@ -162,7 +304,9 @@ async fn work_item_plan_initial_compile_phase2_validation_failure_records_failed
         )
         .expect("accepted draft B");
     draft_b.candidate.verification_plan.checks[0].command = Some("rm -rf /".to_string());
-    store.put_draft_record(&draft_b).expect("save invalid draft");
+    store
+        .put_draft_record(&draft_b)
+        .expect("save invalid draft");
 
     let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
     let error = engine
@@ -187,16 +331,31 @@ async fn work_item_plan_initial_compile_phase2_validation_failure_records_failed
             WorkItemPlanCompileStatus::Failed,
         ]
     );
-    assert_eq!(snapshot_cursors(&snapshots), vec!["preparing", "validating", "validating"]);
+    assert_eq!(
+        snapshot_cursors(&snapshots),
+        vec!["preparing", "validating", "validating"]
+    );
     let failed = snapshots.last().expect("failed snapshot");
-    assert_eq!(failed.plan_commit_state, WorkItemPlanCommitState::NotStarted);
-    assert!(failed.failure_reason.as_deref().is_some_and(|reason| !reason.is_empty()));
-    assert!(failed
-        .validator_findings
-        .iter()
-        .any(|finding| finding.code == "verification_command_unsafe"));
+    assert_eq!(
+        failed.plan_commit_state,
+        WorkItemPlanCommitState::NotStarted
+    );
+    assert!(
+        failed
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+    assert!(
+        failed
+            .validator_findings
+            .iter()
+            .any(|finding| finding.code == "verification_command_unsafe")
+    );
     assert!(matches!(
-        engine.revision_store().get_plan_lineage("project_0001", "issue_0001", &plan_id),
+        engine
+            .revision_store()
+            .get_plan_lineage("project_0001", "issue_0001", &plan_id),
         Err(crate::product::json_store::ProductStoreError::NotFound { .. })
     ));
     assert_eq!(
@@ -214,8 +373,8 @@ async fn work_item_plan_initial_compile_phase2_validation_failure_records_failed
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn work_item_plan_initial_compile_phase2_recovery_reuses_compile_id_and_marks_publication_resumed(
-) {
+async fn work_item_plan_initial_compile_phase2_recovery_reuses_compile_id_and_marks_publication_resumed()
+ {
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
@@ -227,16 +386,18 @@ async fn work_item_plan_initial_compile_phase2_recovery_reuses_compile_id_and_ma
     );
     let store = engine.work_item_plan_store().expect("work item plan store");
     let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
-    store.put_compile_transaction(&compile_tx).expect("seed transaction");
+    store
+        .put_compile_transaction(&compile_tx)
+        .expect("seed transaction");
     let failpoint = engine
         .revision_store()
         .register_initial_plan_publication_failpoint(
-            "project_0001",
-            "issue_0001",
-            &plan_id,
-            &compile_tx.compile_id,
-            crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::LineageWritten,
-        );
+        "project_0001",
+        "issue_0001",
+        &plan_id,
+        &compile_tx.compile_id,
+        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::LineageWritten,
+    );
     let error = engine
         .compile_initial_plan_revision(&accepted_drafts)
         .expect_err("publication failpoint interrupts initial publish");
@@ -272,7 +433,11 @@ async fn work_item_plan_initial_compile_phase2_recovery_reuses_compile_id_and_ma
     let transactions = store
         .list_compile_transactions("project_0001", "issue_0001", &plan_id)
         .expect("list transactions");
-    assert_eq!(transactions.len(), 1, "recovery must not allocate a new transaction");
+    assert_eq!(
+        transactions.len(),
+        1,
+        "recovery must not allocate a new transaction"
+    );
     assert_eq!(transactions[0].compile_id, compile_tx.compile_id);
     assert_eq!(transactions[0].status, WorkItemPlanCompileStatus::Committed);
     assert_eq!(transactions[0].step_cursor, "committed");
@@ -282,11 +447,7 @@ async fn work_item_plan_initial_compile_phase2_recovery_reuses_compile_id_and_ma
         .expect("load persisted outcome")
         .expect("committed outcome");
     let observation = normalized_initial_compile_observation(
-        &reloaded,
-        &snapshots,
-        &lifecycle,
-        &plan_id,
-        &engine,
+        &reloaded, &snapshots, &lifecycle, &plan_id, &engine,
     );
     assert_eq!(
         observation.created_record_counts,
@@ -323,18 +484,12 @@ async fn work_item_plan_initial_compile_phase2_recovery_reuses_compile_id_and_ma
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn work_item_plan_initial_compile_phase2_updated_at_order_is_transient_for_selection_and_continue(
-) {
-    let (first_selected, first_observation) = updated_at_recovery_case(
-        "2026-08-27T00:00:30Z",
-        "2026-08-27T00:00:10Z",
-    )
-    .await;
-    let (second_selected, second_observation) = updated_at_recovery_case(
-        "2026-08-27T00:00:10Z",
-        "2026-08-27T00:00:30Z",
-    )
-    .await;
+async fn work_item_plan_initial_compile_phase2_updated_at_order_is_transient_for_selection_and_continue()
+ {
+    let (first_selected, first_observation) =
+        updated_at_recovery_case("2026-08-27T00:00:30Z", "2026-08-27T00:00:10Z").await;
+    let (second_selected, second_observation) =
+        updated_at_recovery_case("2026-08-27T00:00:10Z", "2026-08-27T00:00:30Z").await;
 
     assert_eq!(first_selected, "compile_time_new");
     assert_eq!(second_selected, "compile_time_new");
@@ -343,14 +498,10 @@ async fn work_item_plan_initial_compile_phase2_updated_at_order_is_transient_for
         "reversing only valid updated_at values must not change matching, Continue cursors, or final artifacts"
     );
 
-    let selected_with_original_created_at = select_recovery_transaction_by_created_at(
-        "2026-08-27T00:00:00Z",
-        "2026-08-27T00:01:00Z",
-    );
-    let selected_with_reversed_created_at = select_recovery_transaction_by_created_at(
-        "2026-08-27T00:01:00Z",
-        "2026-08-27T00:00:00Z",
-    );
+    let selected_with_original_created_at =
+        select_recovery_transaction_by_created_at("2026-08-27T00:00:00Z", "2026-08-27T00:01:00Z");
+    let selected_with_reversed_created_at =
+        select_recovery_transaction_by_created_at("2026-08-27T00:01:00Z", "2026-08-27T00:00:00Z");
     assert_eq!(selected_with_original_created_at, "compile_created_new");
     assert_eq!(selected_with_reversed_created_at, "compile_created_old");
 }
@@ -380,8 +531,12 @@ async fn updated_at_recovery_case(
     old_tx.updated_at = old_updated_at.to_string();
     new_tx.updated_at = new_updated_at.to_string();
     let store = engine.work_item_plan_store().expect("work item plan store");
-    store.put_compile_transaction(&old_tx).expect("seed old transaction");
-    store.put_compile_transaction(&new_tx).expect("seed new transaction");
+    store
+        .put_compile_transaction(&old_tx)
+        .expect("seed old transaction");
+    store
+        .put_compile_transaction(&new_tx)
+        .expect("seed new transaction");
 
     assert!(engine.mark_latest_compile_transaction_recovery_required("phase2 transient timestamp"));
     let selected = engine
@@ -411,25 +566,15 @@ async fn updated_at_recovery_case(
         Some("publication_resumed")
     );
     let committed = store
-        .get_compile_transaction(
-            "project_0001",
-            "issue_0001",
-            &plan_id,
-            &selected.compile_id,
-        )
+        .get_compile_transaction("project_0001", "issue_0001", &plan_id, &selected.compile_id)
         .expect("selected transaction after Continue");
     assert_eq!(committed.status, WorkItemPlanCompileStatus::Committed);
     let outcome = engine
         .load_initial_plan_compile_outcome(&committed)
         .expect("load completed outcome")
         .expect("completed initial outcome");
-    let observation = normalized_initial_compile_observation(
-        &outcome,
-        &snapshots,
-        &lifecycle,
-        &plan_id,
-        &engine,
-    );
+    let observation =
+        normalized_initial_compile_observation(&outcome, &snapshots, &lifecycle, &plan_id, &engine);
     (selected.compile_id, observation)
 }
 
@@ -453,9 +598,13 @@ async fn work_item_plan_initial_compile_phase2_abort_and_human_triage_updated_at
         tx.failure_reason = Some("phase2 real-time action fixture".to_string());
         tx.updated_at = "2026-08-27T00:00:01Z".to_string();
         let store = engine.work_item_plan_store().expect("work item plan store");
-        store.put_compile_transaction(&tx).expect("seed recovery transaction");
+        store
+            .put_compile_transaction(&tx)
+            .expect("seed recovery transaction");
         engine
-            .enter_work_item_plan_compile_recovery(Some("phase2 real-time action fixture".to_string()))
+            .enter_work_item_plan_compile_recovery(Some(
+                "phase2 real-time action fixture".to_string(),
+            ))
             .await;
 
         let outcome = engine
@@ -498,13 +647,73 @@ fn select_recovery_transaction_by_created_at(old_created_at: &str, new_created_a
     old_tx.updated_at = "2026-08-27T00:00:30Z".to_string();
     new_tx.updated_at = "2026-08-27T00:00:10Z".to_string();
     let store = engine.work_item_plan_store().expect("work item plan store");
-    store.put_compile_transaction(&old_tx).expect("seed old transaction");
-    store.put_compile_transaction(&new_tx).expect("seed new transaction");
+    store
+        .put_compile_transaction(&old_tx)
+        .expect("seed old transaction");
+    store
+        .put_compile_transaction(&new_tx)
+        .expect("seed new transaction");
     assert!(engine.mark_latest_compile_transaction_recovery_required("created_at baseline"));
     engine
         .latest_work_item_plan_recovery_transaction(&store)
         .expect("latest created_at transaction")
         .compile_id
+}
+
+fn initial_plan_compile_input_from_fixture(
+    engine: &WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    plan_id: &str,
+    compile_id: &str,
+    now: &str,
+) -> InitialPlanCompileInput {
+    let store = engine.work_item_plan_store().expect("work item plan store");
+    let active_index = store
+        .load_active_index("project_0001", "issue_0001", plan_id)
+        .expect("load active index")
+        .expect("active index");
+    let outline_candidate = engine
+        .latest_work_item_plan_outline_candidate()
+        .expect("outline candidate");
+    let outline_order = work_item_plan_outline_topological_order(&outline_candidate.outline)
+        .expect("outline order");
+    let draft_records = engine
+        .accepted_active_draft_records_for_compile(&store, &active_index, &outline_order)
+        .expect("accepted drafts");
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan("project_0001", "issue_0001", plan_id)
+        .expect("previous plan");
+    let logical_targets = engine
+        .logical_work_item_plan_repository_targets(lifecycle, &previous_plan)
+        .expect("logical targets");
+    let repository_id = if logical_targets.is_none() {
+        engine
+            .work_item_plan_repository_id(lifecycle, &previous_plan)
+            .expect("legacy repository id")
+    } else {
+        String::new()
+    };
+    let change_order = draft_batch::compile_support::load_change_order_from_confirmed_design(
+        lifecycle,
+        &previous_plan,
+    )
+    .expect("change order");
+
+    InitialPlanCompileInput {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: plan_id.to_string(),
+        previous_plan,
+        active_index,
+        outline_candidate,
+        outline_order,
+        draft_records,
+        logical_targets,
+        repository_id,
+        change_order,
+        compile_id: compile_id.to_string(),
+        now: now.to_string(),
+    }
 }
 
 fn normalized_initial_compile_observation(
@@ -546,9 +755,7 @@ fn normalized_initial_compile_observation(
         .list_workspace_sessions("project_0001", "issue_0001")
         .expect("list child sessions")
         .into_iter()
-        .filter(|session| {
-            session.workspace_type == crate::product::models::WorkspaceType::WorkItem
-        })
+        .filter(|session| session.workspace_type == crate::product::models::WorkspaceType::WorkItem)
         .collect::<Vec<_>>();
     assert_eq!(sessions.len(), outcome.work_items.len());
     for session in &sessions {
@@ -570,10 +777,22 @@ fn normalized_initial_compile_observation(
             binding.verification_plan_revision_id,
             item.verification_plan_revision.id
         );
-        assert_eq!(binding.canonical_contract_hash, item.work_item_revision.canonical_contract_hash);
-        assert_eq!(binding.human_projection_hash, item.projection_bundle.human_projection_hash);
-        assert_eq!(binding.coder_projection_hash, item.projection_bundle.coder_projection_hash);
-        assert_eq!(binding.reviewer_projection_hash, item.projection_bundle.reviewer_projection_hash);
+        assert_eq!(
+            binding.canonical_contract_hash,
+            item.work_item_revision.canonical_contract_hash
+        );
+        assert_eq!(
+            binding.human_projection_hash,
+            item.projection_bundle.human_projection_hash
+        );
+        assert_eq!(
+            binding.coder_projection_hash,
+            item.projection_bundle.coder_projection_hash
+        );
+        assert_eq!(
+            binding.reviewer_projection_hash,
+            item.projection_bundle.reviewer_projection_hash
+        );
     }
 
     let confirmed_plan = lifecycle
@@ -596,7 +815,11 @@ fn normalized_initial_compile_observation(
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(reports.len(), 1, "finalizer persists exactly one compile report");
+    assert_eq!(
+        reports.len(),
+        1,
+        "finalizer persists exactly one compile report"
+    );
     assert_eq!(reports[0].status, WorkItemPlanCompileStatus::Committed);
     assert_eq!(reports[0].child_session_ids.len(), sessions.len());
 
@@ -628,13 +851,20 @@ fn normalized_initial_compile_observation(
             serde_json::to_value(
                 sessions
                     .iter()
-                    .map(|session| (&session.id, &session.entity_id, &session.work_item_runtime_binding))
+                    .map(|session| {
+                        (
+                            &session.id,
+                            &session.entity_id,
+                            &session.work_item_runtime_binding,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
             .expect("serialize runtime bindings"),
         ),
         plan_projection: normalize(
-            serde_json::to_value(&outcome.plan_projection_bundle).expect("serialize plan projection"),
+            serde_json::to_value(&outcome.plan_projection_bundle)
+                .expect("serialize plan projection"),
         ),
         work_item_projections: normalize(
             serde_json::to_value(
@@ -646,22 +876,20 @@ fn normalized_initial_compile_observation(
             )
             .expect("serialize work item projections"),
         ),
-        projection_hashes: normalize(
-            serde_json::json!({
-                "plan": {
-                    "human": outcome.plan_projection_bundle.human_group_projection_hash,
-                    "coder": outcome.plan_projection_bundle.coder_group_context_hash,
-                    "reviewer": outcome.plan_projection_bundle.reviewer_group_matrix_hash,
-                },
-                "work_items": outcome.work_items.iter().map(|item| serde_json::json!({
-                    "logical_work_item_id": item.work_item_revision.logical_work_item_id,
-                    "canonical_contract": item.work_item_revision.canonical_contract_hash,
-                    "human": item.projection_bundle.human_projection_hash,
-                    "coder": item.projection_bundle.coder_projection_hash,
-                    "reviewer": item.projection_bundle.reviewer_projection_hash,
-                })).collect::<Vec<_>>(),
-            }),
-        ),
+        projection_hashes: normalize(serde_json::json!({
+            "plan": {
+                "human": outcome.plan_projection_bundle.human_group_projection_hash,
+                "coder": outcome.plan_projection_bundle.coder_group_context_hash,
+                "reviewer": outcome.plan_projection_bundle.reviewer_group_matrix_hash,
+            },
+            "work_items": outcome.work_items.iter().map(|item| serde_json::json!({
+                "logical_work_item_id": item.work_item_revision.logical_work_item_id,
+                "canonical_contract": item.work_item_revision.canonical_contract_hash,
+                "human": item.projection_bundle.human_projection_hash,
+                "coder": item.projection_bundle.coder_projection_hash,
+                "reviewer": item.projection_bundle.reviewer_projection_hash,
+            })).collect::<Vec<_>>(),
+        })),
         transaction_states: snapshots
             .iter()
             .map(|tx| {
@@ -697,7 +925,9 @@ fn provider_ledger_bytes(lifecycle: &LifecycleStore) -> Vec<u8> {
     collect_provider_ledger_files(&root, &root, &mut files);
     files.sort();
     files.into_iter().fold(Vec::new(), |mut snapshot, path| {
-        let relative = path.strip_prefix(&root).expect("provider ledger file below root");
+        let relative = path
+            .strip_prefix(&root)
+            .expect("provider ledger file below root");
         snapshot.extend_from_slice(relative.to_string_lossy().as_bytes());
         snapshot.push(0);
         snapshot.extend_from_slice(&std::fs::read(path).expect("read provider ledger bytes"));
@@ -806,13 +1036,28 @@ fn stable_dynamic_id_map(
         }
     }
     add(&outcome.plan_revision.id, "<plan-revision>".to_string());
-    add(&outcome.dependency_graph_revision.id, "<dependency-graph>".to_string());
-    add(&outcome.validation_report.id, "<validation-report>".to_string());
-    add(&outcome.plan_projection_bundle.id, "<plan-projection>".to_string());
+    add(
+        &outcome.dependency_graph_revision.id,
+        "<dependency-graph>".to_string(),
+    );
+    add(
+        &outcome.validation_report.id,
+        "<validation-report>".to_string(),
+    );
+    add(
+        &outcome.plan_projection_bundle.id,
+        "<plan-projection>".to_string(),
+    );
     for item in &outcome.work_items {
         let logical_id = &item.work_item_revision.logical_work_item_id;
-        add(&item.draft_revision.id, format!("<draft-revision-{logical_id}>"));
-        add(&item.work_item_revision.id, format!("<work-item-revision-{logical_id}>"));
+        add(
+            &item.draft_revision.id,
+            format!("<draft-revision-{logical_id}>"),
+        );
+        add(
+            &item.work_item_revision.id,
+            format!("<work-item-revision-{logical_id}>"),
+        );
         add(
             &item.verification_plan_revision.id,
             format!("<verification-plan-revision-{logical_id}>"),
@@ -828,10 +1073,7 @@ fn stable_dynamic_id_map(
     map
 }
 
-fn normalize_value(
-    value: Value,
-    ids: &std::collections::BTreeMap<String, String>,
-) -> Value {
+fn normalize_value(value: Value, ids: &std::collections::BTreeMap<String, String>) -> Value {
     match value {
         Value::Array(values) => Value::Array(
             values
@@ -856,7 +1098,10 @@ fn normalize_value(
 }
 
 fn assert_compile_snapshot_timestamps(snapshots: &[WorkItemPlanCompileTransaction]) {
-    assert!(!snapshots.is_empty(), "journal must capture every compile transaction write");
+    assert!(
+        !snapshots.is_empty(),
+        "journal must capture every compile transaction write"
+    );
     let created_at = &snapshots[0].created_at;
     assert_rfc3339(created_at, "compile transaction created_at");
     for tx in snapshots {

@@ -41,7 +41,8 @@ pub(crate) use initial_publication::InitialPlanPublicationCheckpoint;
 pub use initial_publication::{
     InitialPlanPublicationArtifacts, InitialPlanPublicationIds, InitialPlanPublicationJournal,
     InitialPlanPublicationPhase, InitialWorkItemPublicationArtifacts,
-    InitialWorkItemPublicationIds,
+    InitialWorkItemPublicationIds, allocate_initial_plan_publication_ids,
+    prepare_initial_plan_publication_journal,
 };
 pub use plan::ActiveAmendmentReleaseOutcome;
 #[cfg(test)]

@@ -67,11 +67,7 @@ async fn work_item_plan_initial_compile_uses_tx_scoped_publication_journal() {
         compile_tx.created_at
     );
     assert_eq!(outcome.plan_revision.id, allocated.plan_revision_id);
-    for (item, publication_item) in outcome
-        .work_items
-        .iter()
-        .zip(&journal.artifacts.work_items)
-    {
+    for (item, publication_item) in outcome.work_items.iter().zip(&journal.artifacts.work_items) {
         let ids = allocated
             .work_items
             .get(&item.work_item_revision.logical_work_item_id)
@@ -103,7 +99,10 @@ async fn work_item_plan_initial_compile_uses_tx_scoped_publication_journal() {
     let replayed = revision_store
         .publish_or_resume_initial_plan_revision(&journal)
         .unwrap();
-    assert_eq!(replayed, journal, "replay must preserve journal fingerprint");
+    assert_eq!(
+        replayed, journal,
+        "replay must preserve journal fingerprint"
+    );
 }
 
 #[tokio::test]
@@ -155,6 +154,13 @@ async fn active_initial_plan_outcome_reload_finishes_journal_marker_after_restar
         project_id: "project_0001".to_string(),
         issue_id: "issue_0001".to_string(),
         plan_id: plan_id.clone(),
+        flow_kind: None,
+        source_revision_id: None,
+        source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        publication_provenance_content_hash: None,
         generation_round_id: index.current_generation_round_id,
         outline_version_ref: outline.outline.id,
         active_draft_ids: draft_records
@@ -417,9 +423,7 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
         compile_tx.failure_reason = Some(format!("simulated {checkpoint:?} crash"));
         plan_store.put_compile_transaction(&compile_tx).unwrap();
         engine
-            .enter_work_item_plan_compile_recovery(Some(format!(
-                "simulated {checkpoint:?} crash"
-            )))
+            .enter_work_item_plan_compile_recovery(Some(format!("simulated {checkpoint:?} crash")))
             .await;
         let _failpoint = engine.register_work_item_plan_compile_finalizer_failpoint(
             &compile_tx.compile_id,
@@ -447,7 +451,10 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
             interrupted_tx.plan_commit_state,
             WorkItemPlanCommitState::NotStarted
         );
-        assert_eq!(interrupted_tx.status, WorkItemPlanCompileStatus::RecoveryRequired);
+        assert_eq!(
+            interrupted_tx.status,
+            WorkItemPlanCompileStatus::RecoveryRequired
+        );
         assert_eq!(interrupted_tx.step_cursor, expected_cursor);
         assert_eq!(interrupted_tx.child_session_ids.len(), expected_sessions);
         assert_eq!(
@@ -621,7 +628,10 @@ async fn compile_recovery_continue_replays_pre_active_publication_with_same_tx_a
             &compile_tx.compile_id,
         )
         .unwrap();
-    assert_eq!(recovery_tx.status, WorkItemPlanCompileStatus::RecoveryRequired);
+    assert_eq!(
+        recovery_tx.status,
+        WorkItemPlanCompileStatus::RecoveryRequired
+    );
     engine
         .enter_work_item_plan_compile_recovery(Some(error.to_string()))
         .await;
@@ -733,6 +743,13 @@ fn prepare_initial_compile_transaction(
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: plan_id.to_string(),
+            flow_kind: None,
+            source_revision_id: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            publication_provenance_content_hash: None,
             generation_round_id: index.current_generation_round_id,
             outline_version_ref: outline.outline.id,
             active_draft_ids: draft_records

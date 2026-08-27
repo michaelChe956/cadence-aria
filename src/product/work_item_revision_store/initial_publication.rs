@@ -123,59 +123,77 @@ impl WorkItemRevisionStore {
         compile_id: &str,
         logical_work_item_ids: &[String],
     ) -> Result<InitialPlanPublicationIds, ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(issue_id)?;
-        validate_relative_id(plan_id)?;
-        validate_relative_id(compile_id)?;
-        if logical_work_item_ids.is_empty() {
-            return Err(identity_mismatch("initial_plan_publication", compile_id));
-        }
-        let mut unique = BTreeSet::new();
-        for logical_id in logical_work_item_ids {
-            validate_relative_id(logical_id)?;
-            if !unique.insert(logical_id.as_str()) {
-                return Err(identity_mismatch(
-                    "initial_plan_publication_logical_work_item",
-                    logical_id,
-                ));
-            }
-        }
+        allocate_initial_plan_publication_ids(
+            project_id,
+            issue_id,
+            plan_id,
+            compile_id,
+            logical_work_item_ids,
+        )
+    }
+}
 
-        let scoped_id = |prefix: &str, logical_id: Option<&str>| {
-            initial_publication_id(
-                prefix, project_id, issue_id, plan_id, compile_id, logical_id,
-            )
-        };
-        let work_items = logical_work_item_ids
-            .iter()
-            .map(|logical_id| {
-                (
-                    logical_id.clone(),
-                    InitialWorkItemPublicationIds {
-                        work_item_revision_id: scoped_id("work_item_revision", Some(logical_id)),
-                        verification_plan_revision_id: scoped_id(
-                            "verification_plan_revision",
-                            Some(logical_id),
-                        ),
-                        work_item_projection_bundle_id: scoped_id(
-                            "work_item_projection_bundle",
-                            Some(logical_id),
-                        ),
-                    },
-                )
-            })
-            .collect();
-
-        Ok(InitialPlanPublicationIds {
-            journal_id: scoped_id("initial_plan_publication", None),
-            plan_revision_id: scoped_id("plan_revision", None),
-            dependency_graph_revision_id: scoped_id("dependency_graph_revision", None),
-            validation_report_id: scoped_id("plan_validation_report", None),
-            plan_projection_bundle_id: scoped_id("plan_projection_bundle", None),
-            work_items,
-        })
+pub fn allocate_initial_plan_publication_ids(
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    compile_id: &str,
+    logical_work_item_ids: &[String],
+) -> Result<InitialPlanPublicationIds, ProductStoreError> {
+    validate_relative_id(project_id)?;
+    validate_relative_id(issue_id)?;
+    validate_relative_id(plan_id)?;
+    validate_relative_id(compile_id)?;
+    if logical_work_item_ids.is_empty() {
+        return Err(identity_mismatch("initial_plan_publication", compile_id));
+    }
+    let mut unique = BTreeSet::new();
+    for logical_id in logical_work_item_ids {
+        validate_relative_id(logical_id)?;
+        if !unique.insert(logical_id.as_str()) {
+            return Err(identity_mismatch(
+                "initial_plan_publication_logical_work_item",
+                logical_id,
+            ));
+        }
     }
 
+    let scoped_id = |prefix: &str, logical_id: Option<&str>| {
+        initial_publication_id(
+            prefix, project_id, issue_id, plan_id, compile_id, logical_id,
+        )
+    };
+    let work_items = logical_work_item_ids
+        .iter()
+        .map(|logical_id| {
+            (
+                logical_id.clone(),
+                InitialWorkItemPublicationIds {
+                    work_item_revision_id: scoped_id("work_item_revision", Some(logical_id)),
+                    verification_plan_revision_id: scoped_id(
+                        "verification_plan_revision",
+                        Some(logical_id),
+                    ),
+                    work_item_projection_bundle_id: scoped_id(
+                        "work_item_projection_bundle",
+                        Some(logical_id),
+                    ),
+                },
+            )
+        })
+        .collect();
+
+    Ok(InitialPlanPublicationIds {
+        journal_id: scoped_id("initial_plan_publication", None),
+        plan_revision_id: scoped_id("plan_revision", None),
+        dependency_graph_revision_id: scoped_id("dependency_graph_revision", None),
+        validation_report_id: scoped_id("plan_validation_report", None),
+        plan_projection_bundle_id: scoped_id("plan_projection_bundle", None),
+        work_items,
+    })
+}
+
+impl WorkItemRevisionStore {
     pub fn build_initial_plan_publication_journal(
         &self,
         compile_id: &str,
@@ -184,9 +202,6 @@ impl WorkItemRevisionStore {
         publication_created_at: &str,
         artifacts: InitialPlanPublicationArtifacts,
     ) -> Result<InitialPlanPublicationJournal, ProductStoreError> {
-        validate_relative_id(compile_id)?;
-        validate_relative_id(outline_version_ref)?;
-        validate_initial_validation_report(&artifacts.validation_report)?;
         let logical_ids = artifacts
             .work_items
             .iter()
@@ -199,24 +214,14 @@ impl WorkItemRevisionStore {
             compile_id,
             &logical_ids,
         )?;
-        let journal = InitialPlanPublicationJournal {
-            id: allocated_ids.journal_id.clone(),
-            project_id: artifacts.lineage.project_id.clone(),
-            issue_id: artifacts.lineage.issue_id.clone(),
-            plan_id: artifacts.lineage.id.clone(),
-            compile_id: compile_id.to_string(),
-            outline_version_ref: outline_version_ref.to_string(),
+        prepare_initial_plan_publication_journal(
+            compile_id,
+            outline_version_ref,
             active_draft_revision_ids,
             allocated_ids,
-            artifact_fingerprint: publication_fingerprint(&artifacts)?,
+            publication_created_at,
             artifacts,
-            phase: InitialPlanPublicationPhase::Prepared,
-            error: None,
-            created_at: publication_created_at.to_string(),
-            updated_at: publication_created_at.to_string(),
-        };
-        validate_initial_publication_journal(&journal)?;
-        Ok(journal)
+        )
     }
 
     pub fn publish_or_resume_initial_plan_revision(
@@ -568,6 +573,37 @@ fn initial_publication_id(
     }
     let digest = hex::encode(hasher.finalize());
     format!("{prefix}_{}", &digest[..24])
+}
+
+pub fn prepare_initial_plan_publication_journal(
+    compile_id: &str,
+    outline_version_ref: &str,
+    active_draft_revision_ids: BTreeMap<String, String>,
+    allocated_ids: InitialPlanPublicationIds,
+    publication_created_at: &str,
+    artifacts: InitialPlanPublicationArtifacts,
+) -> Result<InitialPlanPublicationJournal, ProductStoreError> {
+    validate_relative_id(compile_id)?;
+    validate_relative_id(outline_version_ref)?;
+    validate_initial_validation_report(&artifacts.validation_report)?;
+    let journal = InitialPlanPublicationJournal {
+        id: allocated_ids.journal_id.clone(),
+        project_id: artifacts.lineage.project_id.clone(),
+        issue_id: artifacts.lineage.issue_id.clone(),
+        plan_id: artifacts.lineage.id.clone(),
+        compile_id: compile_id.to_string(),
+        outline_version_ref: outline_version_ref.to_string(),
+        active_draft_revision_ids,
+        allocated_ids,
+        artifact_fingerprint: publication_fingerprint(&artifacts)?,
+        artifacts,
+        phase: InitialPlanPublicationPhase::Prepared,
+        error: None,
+        created_at: publication_created_at.to_string(),
+        updated_at: publication_created_at.to_string(),
+    };
+    validate_initial_publication_journal(&journal)?;
+    Ok(journal)
 }
 
 fn publication_fingerprint(
