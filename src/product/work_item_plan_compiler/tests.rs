@@ -1,3 +1,165 @@
+use super::{grammar, types};
+
+fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
+
+#[test]
+fn grammar_contract() {
+    assert_ast_traits::<types::WorkItemPlanAst>();
+    assert_ast_traits::<types::WorkItemPlanItemAst>();
+    assert_ast_traits::<types::CompilerDiagnostic>();
+    assert_eq!(
+        grammar::DOCUMENT_HEADING,
+        "# Work Item Plan",
+        "文档标题必须稳定"
+    );
+    assert_eq!(
+        grammar::ITEM_HEADING_PREFIX,
+        "## Work Item WI-",
+        "Work Item heading 前缀必须稳定"
+    );
+    assert_eq!(
+        grammar::EARS_STATEMENT_TEMPLATE,
+        "WHEN <condition> THE SYSTEM SHALL <observable outcome>",
+        "EARS 模板必须稳定"
+    );
+    assert_eq!(
+        grammar::STRUCTURED_SECTIONS,
+        [
+            "Identity",
+            "Goal",
+            "Non Goals",
+            "Dependencies",
+            "Inputs",
+            "Outputs",
+            "Tasks",
+            "Write Policy",
+            "Acceptance Criteria",
+            "Verification",
+            "Handoff Schema",
+            "Blockers",
+            "Traceability",
+        ],
+        "结构化 section 集合及顺序必须稳定"
+    );
+    assert_eq!(
+        grammar::FREE_TEXT_SECTIONS,
+        ["Notes", "Rationale"],
+        "仅 Notes/Rationale 允许自由文本"
+    );
+    assert_eq!(
+        grammar::STRUCTURED_KEYS,
+        [
+            "schema_version",
+            "logical_work_item_id",
+            "title",
+            "kind",
+            "summary",
+            "non_goals",
+            "depends_on",
+            "contract_id",
+            "provider_logical_work_item_id",
+            "required_capabilities",
+            "compatibility_policy",
+            "capabilities",
+            "task_id",
+            "statement",
+            "requirement_refs",
+            "done_when_refs",
+            "exclusive_scopes",
+            "forbidden_scopes",
+            "criterion_id",
+            "required_evidence",
+            "check_id",
+            "command",
+            "manual_instruction",
+            "required",
+            "non_zero_test_execution_required",
+            "required_fields",
+            "provided_contract_refs",
+            "reviewer_check_refs",
+            "reason_code",
+            "route",
+            "target_contract_refs",
+            "source_type",
+            "source_id",
+            "requirement_id",
+        ],
+        "结构化 key 集合必须覆盖矩阵中的 markdown 字段"
+    );
+    assert_eq!(
+        grammar::ALLOWED_COMPATIBILITY_POLICIES,
+        ["require_all", "require_any"]
+    );
+    assert_eq!(
+        grammar::ALLOWED_EVIDENCE_KINDS,
+        [
+            "source_diff",
+            "non_zero_test_execution",
+            "manual_check",
+            "handoff_field",
+        ]
+    );
+    assert_eq!(
+        grammar::ALLOWED_BLOCKER_ROUTES,
+        [
+            "coder_rework",
+            "verification_retry",
+            "plan_repair_current",
+            "plan_repair_upstream",
+            "subgraph_replan",
+            "story_amendment",
+            "design_amendment",
+            "operational_gate",
+        ]
+    );
+    assert_eq!(
+        grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
+        "work_item_plan_compiler/v1"
+    );
+    assert_eq!(grammar::PLAN_SECTION, grammar::DOCUMENT_HEADING);
+    assert_eq!(
+        grammar::WORK_ITEM_SECTION_PREFIX,
+        grammar::ITEM_HEADING_PREFIX
+    );
+    assert_eq!(grammar::KEY_VALUE_SEPARATOR, ": ");
+    assert_eq!(grammar::IDENTIFIED_LINE_SEPARATOR, " | ");
+    assert_eq!(grammar::UNKNOWN_STRUCTURED_KEY_POLICY, "fail_closed");
+    assert_eq!(grammar::FREE_TEXT_SECTION_POLICY, "allow_free_text");
+    assert_eq!(
+        grammar::EARS_KEYWORDS,
+        ["WHEN", "THE SYSTEM SHALL", "observable outcome"]
+    );
+
+    let ast = types::WorkItemPlanAst {
+        items: vec![types::WorkItemPlanItemAst {
+            id: "WI-001".to_string(),
+            sections: std::collections::BTreeMap::new(),
+        }],
+        notes: vec!["note".to_string()],
+        rationale: vec!["rationale".to_string()],
+    };
+    let cloned_ast = ast.clone();
+    assert_eq!(ast, cloned_ast);
+    assert_eq!(ast.items[0].id, "WI-001");
+    assert_eq!(ast.notes, ["note"]);
+    assert_eq!(ast.rationale, ["rationale"]);
+
+    let diagnostic = types::CompilerDiagnostic {
+        code: "missing_section".to_string(),
+        line: 1,
+        field: "".to_string(),
+        message: "message".to_string(),
+        repair_example: "example".to_string(),
+    };
+    assert_eq!(diagnostic.code, "missing_section");
+    assert_eq!(diagnostic.line, 1);
+    assert_eq!(diagnostic.field, "");
+    assert_eq!(diagnostic.message, "message");
+    let cloned_diagnostic = diagnostic.clone();
+    assert_eq!(diagnostic, cloned_diagnostic);
+    assert_eq!(diagnostic.repair_example, "example");
+}
+
 const FIELD_SOURCE_MATRIX: &str =
     include_str!("../../../openspec/changes/rearch-workitem-plan-pipeline/field-source-matrix.md");
 
