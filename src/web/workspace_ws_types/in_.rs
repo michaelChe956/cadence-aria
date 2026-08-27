@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::ProviderName;
@@ -110,6 +112,21 @@ pub enum WsInMessage {
     },
     Abort,
     Ping,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceInboundEnvelope {
+    pub(crate) message: WsInMessage,
+    pub(crate) submitted_fields: BTreeSet<String>,
+}
+
+impl From<WsInMessage> for WorkspaceInboundEnvelope {
+    fn from(message: WsInMessage) -> Self {
+        Self {
+            message,
+            submitted_fields: BTreeSet::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

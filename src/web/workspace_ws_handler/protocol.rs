@@ -1,4 +1,34 @@
+use std::collections::BTreeSet;
+
 use super::*;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+
+const CLIENT_SUBMITTED_SCOPE_FIELDS: [&str; 3] =
+    ["scope", "review_invocation_scope", "review_scope"];
+
+pub(crate) fn single_candidate_scope_submission_error(
+    flow_kind: WorkItemPlanFlowKind,
+    submitted_fields: &BTreeSet<String>,
+) -> Option<WsOutMessage> {
+    if flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+        return None;
+    }
+
+    let forbidden_fields = submitted_fields
+        .iter()
+        .filter(|field| CLIENT_SUBMITTED_SCOPE_FIELDS.contains(&field.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if forbidden_fields.is_empty() {
+        return None;
+    }
+
+    Some(WsOutMessage::ProtocolError {
+        code: "SINGLE_CANDIDATE_SCOPE_FORBIDDEN".to_string(),
+        message: "single-candidate review scope is server-controlled".to_string(),
+        context: Some(serde_json::json!({ "submitted_fields": forbidden_fields })),
+    })
+}
 
 pub(crate) fn missing_active_run_error(message_type: &'static str, id: &str) -> WsOutMessage {
     WsOutMessage::ProtocolError {

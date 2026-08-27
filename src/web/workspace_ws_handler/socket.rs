@@ -129,6 +129,26 @@ pub(crate) fn planning_resume_run_kind(
     }
 }
 
+/// Parse one websocket inbound message without discarding unknown top-level fields.
+///
+/// `WsInMessage` intentionally remains the typed business payload. The envelope records
+/// only field names (never client values) so protocol handlers can reject fields that are
+/// forbidden for a durable flow before any state mutation occurs.
+pub(crate) fn parse_workspace_inbound_text(
+    text: &str,
+) -> Result<WorkspaceInboundEnvelope, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let submitted_fields = value
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    let message = serde_json::from_value(value)?;
+    Ok(WorkspaceInboundEnvelope {
+        message,
+        submitted_fields,
+    })
+}
+
 pub(crate) async fn handle_workspace_socket(
     socket: WebSocket,
     session_id: String,
@@ -469,8 +489,8 @@ pub(crate) async fn handle_workspace_socket(
             _ => continue,
         };
 
-        let in_msg: WsInMessage = match serde_json::from_str(&text) {
-            Ok(m) => m,
+        let envelope = match parse_workspace_inbound_text(&text) {
+            Ok(envelope) => envelope,
             Err(e) => {
                 let err = WsOutMessage::Error {
                     message: format!("invalid message: {e}"),
@@ -479,13 +499,25 @@ pub(crate) async fn handle_workspace_socket(
                 continue;
             }
         };
+        let in_msg = &envelope.message;
+        let scope_submission_error = {
+            let engine = engine.lock().await;
+            single_candidate_scope_submission_error(
+                engine.session().flow_kind,
+                &envelope.submitted_fields,
+            )
+        };
+        if let Some(err) = scope_submission_error {
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+            continue;
+        }
         *last_client_message_at.lock().await = tokio::time::Instant::now();
 
-        let stage_type_and_cancel_replay = if requires_stage_validation(&in_msg) {
+        let stage_type_and_cancel_replay = if requires_stage_validation(in_msg) {
             Some({
                 let engine = engine.lock().await;
                 let completed_cancel_replay = matches!(
-                    &in_msg,
+                    in_msg,
                     WsInMessage::CancelPlanAmendment { amendment_id, .. }
                         if engine.current_stage() == WorkspaceStage::Completed
                             && engine.is_cancelled_plan_amendment_replay(amendment_id)
@@ -501,7 +533,7 @@ pub(crate) async fn handle_workspace_socket(
         };
         if let Some((stage, workspace_type, completed_cancel_replay)) =
             stage_type_and_cancel_replay.as_ref()
-            && !is_message_valid_for_stage(&in_msg, stage)
+            && !is_message_valid_for_stage(in_msg, stage)
             && !completed_cancel_replay
             && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
                 && *stage == WorkspaceStage::AuthorConfirm
@@ -511,19 +543,19 @@ pub(crate) async fn handle_workspace_socket(
                 code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
                 message: format!(
                     "message {} not allowed in stage {}",
-                    message_type(&in_msg),
+                    message_type(in_msg),
                     stage.as_str()
                 ),
                 context: Some(serde_json::json!({
                     "stage": stage.as_str(),
-                    "received": message_type(&in_msg),
+                    "received": message_type(in_msg),
                 })),
             };
             let _ = send_json_outbound(&outbound_tx, &err).await;
             continue;
         }
 
-        handle_workspace_inbound_message(inbound_context.clone(), in_msg).await;
+        handle_workspace_inbound_message(inbound_context.clone(), envelope).await;
     }
 
     let active = { current_run.lock().await.take() };

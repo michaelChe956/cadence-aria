@@ -35,10 +35,13 @@ pub(crate) async fn finish_interrupted_recovery_spawn_error(
         .await;
 }
 
-pub(crate) async fn handle_workspace_inbound_message(
+pub(crate) async fn handle_workspace_inbound_message<E>(
     context: WorkspaceInboundContext,
-    in_msg: WsInMessage,
-) {
+    envelope: E,
+) where
+    E: Into<WorkspaceInboundEnvelope>,
+{
+    let envelope = envelope.into();
     let WorkspaceInboundContext {
         app_state,
         engine,
@@ -49,7 +52,19 @@ pub(crate) async fn handle_workspace_inbound_message(
         session_id,
     } = context;
 
-    match in_msg {
+    let scope_submission_error = {
+        let engine = engine.lock().await;
+        single_candidate_scope_submission_error(
+            engine.session().flow_kind,
+            &envelope.submitted_fields,
+        )
+    };
+    if let Some(err) = scope_submission_error {
+        let _ = send_json_outbound(&outbound_tx, &err).await;
+        return;
+    }
+
+    match envelope.message {
         WsInMessage::UserMessage { content } => {
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context.clone(),

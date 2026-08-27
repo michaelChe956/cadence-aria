@@ -18,7 +18,11 @@ impl WorkspaceEngine {
             .reviewer_provider
             .clone()
             .unwrap_or(ProviderName::Codex);
-        let input = match self.build_review_input() {
+        let input = match self
+            .ensure_review_invocation_scope()
+            .await
+            .and_then(|_| self.build_review_input())
+        {
             Ok(input) => input,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
@@ -222,7 +226,11 @@ impl WorkspaceEngine {
             .reviewer_provider
             .clone()
             .unwrap_or(ProviderName::Codex);
-        let input = match self.build_review_input() {
+        let input = match self
+            .ensure_review_invocation_scope()
+            .await
+            .and_then(|_| self.build_review_input())
+        {
             Ok(input) => input,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;

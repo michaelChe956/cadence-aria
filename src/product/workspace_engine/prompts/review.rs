@@ -10,11 +10,94 @@ use crate::product::models::PlanProjectionBundle;
 use super::review_context::{
     PlanReviewSource, append_review_context_section, load_plan_review_context,
 };
+use crate::product::work_item_plan_policy::ReviewInvocationScope;
+
+/// 根据服务端持久化的 invocation scope 生成 reviewer 的范围指令。
+///
+/// scope 是协议边界的一部分：provider 只能消费这里生成的指令，不能在请求中
+/// 自行扩大或替换审核范围。digest 校验失败以及 Verification 缺少机械报告均
+/// fail-closed，避免把不完整的范围交给 provider。
+pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result<String, String> {
+    scope
+        .validate_digest()
+        .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
+
+    match scope {
+        ReviewInvocationScope::Initial {
+            initial_revision_id,
+            scope_digest,
+        } if initial_revision_id.trim().is_empty() => {
+            Err("initial review scope requires an immutable revision".to_string())
+        }
+        ReviewInvocationScope::Initial {
+            initial_revision_id,
+            scope_digest,
+        } => Ok(format!(
+            "\n## 服务端审核 invocation scope（Initial）\n\
+             - immutable initial revision: {initial_revision_id}\n\
+             - scope digest: {scope_digest}\n\
+             - 只允许一次全候选评估；不得自行增加候选、范围或 provider/campaign 指令。\n\
+             - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
+             - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n",
+        )),
+        ReviewInvocationScope::Verification {
+            original_fingerprints,
+            repaired_revision_id,
+            mechanical_report_ref,
+            scope_digest,
+        } if repaired_revision_id.trim().is_empty() => {
+            Err("verification review scope requires an immutable repaired revision".to_string())
+        }
+        ReviewInvocationScope::Verification {
+            original_fingerprints,
+            repaired_revision_id,
+            mechanical_report_ref,
+            scope_digest,
+        } if mechanical_report_ref.trim().is_empty() => {
+            Err("verification review scope requires a mechanical report".to_string())
+        }
+        ReviewInvocationScope::Verification {
+            original_fingerprints,
+            repaired_revision_id,
+            mechanical_report_ref,
+            scope_digest,
+        } => {
+            let fingerprints = original_fingerprints
+                .iter()
+                .map(|fingerprint| fingerprint.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "\n## 服务端审核 invocation scope（Verification）\n\
+                 - immutable repaired revision: {repaired_revision_id}\n\
+                 - immutable mechanical report: {mechanical_report_ref}\n\
+                 - scope digest: {scope_digest}\n\
+                 - 仅复核原 fingerprints，不得将新 finding 伪装为原 finding：[{fingerprints}]\n\
+                 - mechanical report 是本次 invocation 的唯一机械证据来源。\n\
+                 - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
+                 - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n",
+            ))
+        }
+    }
+}
 
 impl WorkspaceEngine {
     pub(crate) fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
         if matches!(self.session.workspace_type, WorkspaceType::WorkItemPlan) {
-            return self.build_work_item_plan_review_input();
+            let mut input = self.build_work_item_plan_review_input()?;
+            if self.session.flow_kind
+                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            {
+                let scope = self
+                    .session
+                    .review_invocation_scope
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "single-candidate review invocation scope is not durable".to_string()
+                    })?;
+                input.prompt.push_str(&review_scope_instructions(scope)?);
+            }
+            return Ok(input);
         }
 
         let working_dir = match &self.session.repository_path {

@@ -1,3 +1,5 @@
+#[path = "routing_scope.rs"]
+mod routing_scope;
 use super::feedback::format_review_feedback;
 use super::policy_routing::{GateSnapshotContext, RoutingAction, route_outcome};
 use super::*;
@@ -8,7 +10,6 @@ use crate::product::work_item_plan_policy::{
     ReviewEvaluationInput, ReviewFindingCategory, ReviewInvocationScope, ReviewPhase, RunBudgets,
     RunHistory, RunHistoryDelta, RunPolicy, classify_review, evaluate,
 };
-
 impl WorkspaceEngine {
     pub(crate) async fn complete_review(
         &mut self,
@@ -155,13 +156,15 @@ impl WorkspaceEngine {
         } else {
             ReviewPhase::Verification
         };
-        let invocation = match phase {
-            ReviewPhase::Initial => ReviewInvocationScope::initial(cycle_key.clone()),
-            ReviewPhase::Verification => ReviewInvocationScope::verification(
-                self.session.run_history.seen_fingerprints.clone(),
-                cycle_key.clone(),
-                "legacy_mechanical_report",
-            ),
+        let invocation = match self.policy_invocation(phase, &cycle_key) {
+            Ok(scope) => scope,
+            Err(action) => {
+                return Some((
+                    ReviewInvocationScope::initial(cycle_key.clone()),
+                    action,
+                    self.session.run_history.clone(),
+                ));
+            }
         };
         if let Some(diagnostic) = verdict.structured_output_diagnostic.as_ref()
             && matches!(
@@ -401,7 +404,7 @@ impl WorkspaceEngine {
         self.session.session_status = status;
     }
 
-    fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {
+    pub(super) fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {
         self.session.session_status = record.status.clone();
         self.session.run_history = record.run_history.clone();
         self.session.review_invocation_scope = record.review_invocation_scope.clone();

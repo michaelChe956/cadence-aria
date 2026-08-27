@@ -45,8 +45,9 @@ pub(crate) use crate::web::types::GenerateWorkItemsRequest;
 pub(crate) use crate::web::workspace_context::ensure_workspace_context_message;
 pub(crate) use crate::web::workspace_ws_types::{
     ChoiceOption, ChoiceQuestion, HumanConfirmDecision, HumanPresentationScopeDto, RevisionPath,
-    TimelineNodeRetryError, WorkItemGenerationModeDto, WsExecutionEvent, WsExecutionEventKind,
-    WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
+    TimelineNodeRetryError, WorkItemGenerationModeDto, WorkspaceInboundEnvelope, WsExecutionEvent,
+    WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel,
+    WsProviderStatus,
 };
 
 mod decisions;
@@ -67,6 +68,8 @@ pub(crate) use mapping::*;
 pub(crate) use plan_repair_activation::*;
 pub(crate) use protocol::*;
 pub(crate) use run::*;
+#[cfg(test)]
+pub(crate) use socket::parse_workspace_inbound_text;
 pub(crate) use socket::{OutboundControl, send_json_outbound};
 
 #[cfg(test)]
