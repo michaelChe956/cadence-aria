@@ -136,6 +136,7 @@ impl ClaudeRepositoryInitializer {
         Ok(summaries)
     }
 
+    #[allow(clippy::result_large_err)]
     async fn run_turn(
         &self,
         adapter: Arc<dyn crate::cross_cutting::streaming_provider::StreamingProviderAdapter>,

@@ -347,6 +347,8 @@ impl RepositoryRegistrationCoordinator {
         &self.git_environment
     }
 
+    // 存量大 Err 签名，待后续统一 Box 化重构；新代码不得新增此豁免
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn begin_initialization(
         &self,
         input: RepositoryRegistrationInput,
@@ -409,6 +411,7 @@ impl RepositoryRegistrationCoordinator {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn execute_initialization(
         &self,
         launch: RepositoryInitializationLaunch,
@@ -644,6 +647,7 @@ impl RepositoryRegistrationCoordinator {
             .recover_interrupted(project_id, operation_id, (self.clock)())
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn register(
         &self,
         input: RepositoryRegistrationInput,
@@ -698,6 +702,7 @@ impl RepositoryRegistrationCoordinator {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     async fn resolve_git_root(
         &self,
         working_dir: &Path,
@@ -749,6 +754,7 @@ impl RepositoryRegistrationCoordinator {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     async fn git_status(
         &self,
         git_root: &Path,

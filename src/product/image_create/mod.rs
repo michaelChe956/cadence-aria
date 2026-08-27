@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod image_files;
 pub mod models;
 pub mod prompt_iteration;
 pub mod run_registry;
@@ -7,6 +8,7 @@ pub mod settings_store;
 pub mod templates;
 
 pub use engine::ImageCreateEngine;
+pub use models::ImageCreateError;
 pub use prompt_iteration::{IterationHistory, IterationOutcome, PromptIterationEngine};
 pub use run_registry::ImageCreateRunRegistry;
 pub use session_store::SessionStore;

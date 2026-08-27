@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -338,6 +339,35 @@ impl ImageCreateEngine {
     ) -> Result<GenerationResult, ImageCreateError> {
         match outcome {
             Ok(outcome) => {
+                let image_id = uuid::Uuid::new_v4().to_string();
+                let bytes = general_purpose::STANDARD
+                    .decode(outcome.b64.as_bytes())
+                    .map_err(|error| {
+                        ImageCreateError::ImageClient(format!("invalid b64 from gateway: {error}"))
+                    })?;
+                let media_type = outcome.media_type;
+                if let Err(error) = crate::product::image_create::image_files::write_image_atomic(
+                    &self.paths,
+                    &image_id,
+                    &media_type,
+                    &bytes,
+                )
+                .await
+                {
+                    let _ = self
+                        .session_store
+                        .append_event(
+                            session_id,
+                            SessionEvent {
+                                kind: "generation_error".to_string(),
+                                message: error.to_string(),
+                                ts: Utc::now(),
+                            },
+                        )
+                        .await;
+                    return Err(error);
+                }
+
                 let result = GenerationResult {
                     prompt: req.prompt.clone(),
                     params: DefaultParams {
@@ -346,8 +376,9 @@ impl ImageCreateEngine {
                         background: req.background,
                         output_format: req.output_format,
                     },
-                    media_type: outcome.media_type,
-                    b64: outcome.b64,
+                    media_type,
+                    image_id: Some(image_id),
+                    b64: None,
                     ts: Utc::now(),
                 };
                 if let Err(error) = self
@@ -405,6 +436,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
+    use base64::engine::general_purpose;
     use image::codecs::png::PngEncoder;
     use image::{ExtendedColorType, ImageEncoder};
     use tokio::sync::Notify;
@@ -824,7 +856,8 @@ mod tests {
                 .generate("session", request("draw"), reference.clone())
                 .await
                 .expect("generate");
-            assert_eq!(result.b64, "AAAA");
+            assert!(result.image_id.is_some());
+            assert!(result.b64.is_none());
             assert_eq!(
                 client.references.lock().await[0].is_some(),
                 reference.is_some()
@@ -841,6 +874,85 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn finish_generation_writes_image_file_before_appending_reference() {
+        let store = Arc::new(FakeSessionStore::with_record());
+        let engine = engine(
+            store.clone(),
+            valid_settings(),
+            Arc::new(FakeImageClient::success()),
+            None,
+        );
+        let outcome = Ok(ImageGenOutcome {
+            media_type: "image/png".to_string(),
+            b64: general_purpose::STANDARD.encode("img-bytes"),
+        });
+
+        let result = engine
+            .finish_generation("session", &request("draw"), outcome)
+            .await
+            .expect("finish");
+        let image_id = result.image_id.as_deref().expect("image id assigned");
+        assert!(result.b64.is_none());
+        let file = engine
+            .paths
+            .image_create_image_file(image_id, "image/png")
+            .expect("path");
+        assert_eq!(
+            tokio::fs::read(&file).await.expect("file written"),
+            b"img-bytes"
+        );
+
+        let record = store.record.lock().await;
+        let record = record.as_ref().expect("record");
+        assert_eq!(record.generation_results.len(), 1);
+        assert_eq!(
+            record.generation_results[0].image_id.as_deref(),
+            Some(image_id)
+        );
+        assert!(record.generation_results[0].b64.is_none());
+    }
+
+    #[tokio::test]
+    async fn finish_generation_image_write_failure_keeps_record_clean() {
+        let store = Arc::new(FakeSessionStore::with_record());
+        let engine = engine(
+            store.clone(),
+            valid_settings(),
+            Arc::new(FakeImageClient::success()),
+            None,
+        );
+        std::fs::create_dir_all(
+            engine
+                .paths
+                .image_create_images_dir()
+                .parent()
+                .expect("image create directory"),
+        )
+        .expect("create image create directory");
+        std::fs::write(engine.paths.image_create_images_dir(), "not a directory")
+            .expect("block images directory");
+        let outcome = Ok(ImageGenOutcome {
+            media_type: "image/png".to_string(),
+            b64: general_purpose::STANDARD.encode("img-bytes"),
+        });
+
+        let error = engine
+            .finish_generation("session", &request("draw"), outcome)
+            .await
+            .expect_err("must fail");
+        assert!(matches!(error, ImageCreateError::Store(_)));
+        let record = store.record.lock().await;
+        let record = record.as_ref().expect("record");
+        assert!(record.generation_results.is_empty(), "失败不得写入成功结果");
+        assert!(
+            record
+                .events
+                .iter()
+                .any(|event| event.kind == "generation_error")
+        );
     }
 
     #[tokio::test]
@@ -866,6 +978,22 @@ mod tests {
                 .generation_results
                 .is_empty()
         );
+        let image_id = engine
+            .pending_results
+            .lock()
+            .await
+            .get("session")
+            .and_then(|pending| pending.first())
+            .and_then(|pending| pending.result.image_id.as_deref())
+            .expect("pending image id")
+            .to_string();
+        assert!(
+            engine
+                .paths
+                .image_create_image_file(&image_id, "image/png")
+                .expect("pending image path")
+                .exists()
+        );
 
         assert!(matches!(
             engine.generate("session", request("   "), None).await,
@@ -881,6 +1009,18 @@ mod tests {
                 .generation_results
                 .len(),
             1
+        );
+        assert_eq!(
+            store
+                .record
+                .lock()
+                .await
+                .as_ref()
+                .expect("record")
+                .generation_results[0]
+                .image_id
+                .as_deref(),
+            Some(image_id.as_str())
         );
     }
 

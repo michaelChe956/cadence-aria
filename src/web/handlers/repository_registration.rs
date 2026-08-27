@@ -94,6 +94,8 @@ impl RepositoryRegistrationDependencies {
         RepositoryRegistrationDependenciesBuilder::new(app_paths, home, runner, gate, registry)
     }
 
+    // 存量大 Err 签名，待后续统一 Box 化重构；新代码不得新增此豁免
+    #[allow(clippy::result_large_err)]
     async fn begin_initialization(
         &self,
         input: RepositoryRegistrationInput,
@@ -107,6 +109,7 @@ impl RepositoryRegistrationDependencies {
             .await
     }
 
+    #[allow(clippy::result_large_err)]
     async fn execute_initialization(
         &self,
         launch: crate::product::repository_store::RepositoryInitializationLaunch,

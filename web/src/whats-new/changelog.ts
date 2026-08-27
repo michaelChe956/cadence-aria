@@ -5,9 +5,19 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.0.8";
+export const CURRENT_VERSION = "0.0.9";
 
+// 发布升版本时请裁剪数组，仅保留最新 4 条。
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.0.9",
+    date: "2026-08-26",
+    title: "图片创作提速与修复",
+    highlights: [
+      "图片创作生成图片改为本地文件存储，历史会话打开不再受 base64 拖累",
+      "修复 kimi code 提示词迭代失败问题",
+    ],
+  },
   {
     version: "0.0.8",
     date: "2026-08-17",
@@ -43,14 +53,13 @@ export const CHANGELOG: ChangelogEntry[] = [
       "新增人工组级最终确认：Work Item 完成后由用户手动确认组级完成",
     ],
   },
-  {
-    version: "0.0.5",
-    date: "2026-08-08",
-    title: "v0.0.5 更新",
-    highlights: [
-      "Coder 提交与 Provider 重试",
-      "新增人工组级最终确认",
-      "移除图片客户端临时诊断日志",
-    ],
-  },
 ];
+
+export function recentEntries(currentVersion: string, limit = 4): ChangelogEntry[] {
+  const currentVersionIndex = CHANGELOG.findIndex((item) => item.version === currentVersion);
+  if (currentVersionIndex === -1) {
+    return [];
+  }
+
+  return CHANGELOG.slice(currentVersionIndex, currentVersionIndex + limit);
+}

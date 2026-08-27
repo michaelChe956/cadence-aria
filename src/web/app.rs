@@ -33,6 +33,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_image_create_session).delete(handlers::delete_image_create_session),
         )
         .route(
+            "/api/image-create/sessions/{id}/images/{image_id}",
+            get(handlers::image_create::get_session_image),
+        )
+        .route(
             "/api/image-create/sessions/{id}/chat",
             get(handlers::image_create_chat_ws),
         )

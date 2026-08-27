@@ -29,8 +29,8 @@ export function AppShell({
 
   return (
     <div className="relative">
-      {whatsNew.open && whatsNew.entry ? (
-        <WhatsNewDialog entry={whatsNew.entry} onClose={whatsNew.close} />
+      {whatsNew.open && whatsNew.entries.length > 0 ? (
+        <WhatsNewDialog entries={whatsNew.entries} onClose={whatsNew.close} />
       ) : null}
       <a
         href="/image-create"

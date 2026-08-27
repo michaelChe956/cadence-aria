@@ -3,8 +3,9 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Multipart, Path, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -13,10 +14,11 @@ use serde_json::json;
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::cross_cutting::image_client::{ImageGenRequest, ImageRefImage};
 use crate::cross_cutting::image_reference_validation::validate_reference_image;
+use crate::product::image_create::image_files;
 use crate::product::image_create::models::{
-    CreateSessionRequest, ImageBackground, ImageCreateError, ImageOutputFormat, ImageQuality,
-    ImageSize, IterationEvent, SessionStoreApi, SettingsStoreApi, SettingsUpdateRequest,
-    validate_session_id,
+    CreateSessionRequest, GenerationResult, ImageBackground, ImageCreateError, ImageOutputFormat,
+    ImageQuality, ImageSize, IterationEvent, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
+    SettingsStoreApi, SettingsUpdateRequest, validate_session_id,
 };
 use crate::product::image_create::{ImageCreateEngine, SessionStore, SettingsStore};
 use crate::web::state::WebAppState;
@@ -33,6 +35,20 @@ impl ImageCreateApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error: message.into(),
+        }
+    }
+
+    fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: message.into(),
+        }
+    }
+
+    fn not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            error: "image not found".to_string(),
         }
     }
 }
@@ -96,6 +112,10 @@ fn checked_session_id(id: String) -> HandlerResult<String> {
 
 pub async fn list_sessions(State(state): State<WebAppState>) -> HandlerResult<impl IntoResponse> {
     let sessions = session_store(&state).list().await?;
+    let sessions = sessions
+        .into_iter()
+        .map(SessionSummaryDto::from)
+        .collect::<Vec<_>>();
     Ok(Json(sessions))
 }
 
@@ -116,7 +136,7 @@ pub async fn get_session(
         .get(&id)
         .await?
         .ok_or(ImageCreateError::SessionNotFound)?;
-    Ok(Json(record))
+    Ok(Json(SessionRecordDto::from(record)))
 }
 
 pub async fn delete_session(
@@ -126,6 +146,57 @@ pub async fn delete_session(
     let id = checked_session_id(id)?;
     engine(&state)?.delete_session(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_session_image(
+    State(state): State<WebAppState>,
+    Path((session_id, image_id)): Path<(String, String)>,
+) -> HandlerResult<Response> {
+    let session_id = checked_session_id(session_id)?;
+    if !image_files::valid_image_id(&image_id) {
+        return Err(ImageCreateApiError::invalid_request("invalid image id"));
+    }
+    let record = session_store(&state)
+        .get(&session_id)
+        .await?
+        .ok_or_else(ImageCreateApiError::not_found)?;
+    let result = record
+        .generation_results
+        .iter()
+        .find(|result| result.image_id.as_deref() == Some(image_id.as_str()))
+        .ok_or_else(ImageCreateApiError::not_found)?;
+    let bytes = match paths(&state).image_create_image_file(&image_id, &result.media_type) {
+        Some(path) => match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(_) => decode_legacy(result)?,
+        },
+        None => decode_legacy(result)?,
+    };
+    let headers = [
+        (
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&result.media_type).expect("mime"),
+        ),
+        (
+            header::ETAG,
+            HeaderValue::from_str(&format!("\"{image_id}\"")).expect("etag"),
+        ),
+        (
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, max-age=31536000, immutable"),
+        ),
+    ];
+    Ok((StatusCode::OK, headers, bytes).into_response())
+}
+
+fn decode_legacy(result: &GenerationResult) -> HandlerResult<Vec<u8>> {
+    let b64 = result
+        .b64
+        .as_deref()
+        .ok_or_else(ImageCreateApiError::not_found)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|_| ImageCreateApiError::not_found())
 }
 
 pub async fn get_settings(State(state): State<WebAppState>) -> HandlerResult<impl IntoResponse> {
@@ -158,8 +229,8 @@ pub async fn generate_image(
     let (request, reference) = parse_generate_multipart(multipart).await?;
     let result = engine(&state)?.generate(&id, request, reference).await?;
     Ok(Json(json!({
+        "image_id": result.image_id,
         "media_type": result.media_type,
-        "b64": result.b64,
     })))
 }
 
@@ -792,10 +863,10 @@ mod tests {
             .await
             .expect("generate response");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response_json::<Value>(response).await,
-            json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
-        );
+        let result = response_json::<Value>(response).await;
+        assert!(result["image_id"].as_str().is_some());
+        assert_eq!(result["media_type"], "image/png");
+        assert!(result.get("b64").is_none());
     }
 
     #[tokio::test]
@@ -992,10 +1063,10 @@ mod tests {
             .expect("generate response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response_json::<Value>(response).await,
-            json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
-        );
+        let result = response_json::<Value>(response).await;
+        assert!(result["image_id"].as_str().is_some());
+        assert_eq!(result["media_type"], "image/png");
+        assert!(result.get("b64").is_none());
     }
 
     #[tokio::test]
@@ -1112,3 +1183,7 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+#[path = "image_create_endpoint_tests.rs"]
+mod image_create_endpoint_tests;

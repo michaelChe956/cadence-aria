@@ -17,6 +17,10 @@ const api = vi.hoisted(() => ({
     (sessionId: string) =>
       `ws://localhost:3000/api/image-create/sessions/${sessionId}/chat`,
   ),
+  imageUrl: vi.fn(
+    (sessionId: string, imageId: string) =>
+      `/api/image-create/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(imageId)}`,
+  ),
 }));
 
 vi.mock("../api/image-create", () => api);
@@ -92,6 +96,60 @@ describe("image create store", () => {
     expect(useImageCreateStore.getState().currentSession?.session.id).toBe(
       "session-1",
     );
+  });
+
+  it("maps persisted image references through their endpoint URL", async () => {
+    const session = imageSession({ id: "session/with space" });
+    api.getImageCreateSession.mockResolvedValue(
+      record(session, [
+        generationResult({ image_id: "legacy/image", legacy_pending: true }),
+        generationResult({ image_id: null, legacy_pending: false }),
+        generationResult({ image_id: null, legacy_pending: true }),
+      ]),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+
+    expect(api.imageUrl).toHaveBeenCalledWith(session.id, "legacy/image");
+    expect(useImageCreateStore.getState().entries).toEqual([
+      expect.objectContaining({
+        type: "generation_image",
+        imageUrl:
+          "/api/image-create/sessions/session%2Fwith%20space/images/legacy%2Fimage",
+      }),
+      expect.objectContaining({
+        type: "generation_error",
+        content: "图片引用缺失",
+      }),
+      expect.objectContaining({
+        type: "system_notice",
+        content: "历史图片正在迁移，请稍后刷新",
+      }),
+    ]);
+  });
+
+  it("uses a generated image ID to append its endpoint URL without reloading", async () => {
+    const session = imageSession({ current_prompt: "initial prompt" });
+    api.getImageCreateSession.mockResolvedValue(record(session));
+    api.generateImage.mockResolvedValue({
+      media_type: "image/webp",
+      image_id: "generated/image",
+    });
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+    useImageCreateStore.getState().setParams({ prompt: "final prompt" });
+    await useImageCreateStore.getState().generate();
+
+    expect(api.imageUrl).toHaveBeenCalledWith(session.id, "generated/image");
+    expect(useImageCreateStore.getState().entries.at(-1)).toMatchObject({
+      type: "generation_image",
+      prompt: "final prompt",
+      mediaType: "image/webp",
+      imageUrl: "/api/image-create/sessions/session-1/images/generated%2Fimage",
+    });
+    expect(api.getImageCreateSession).toHaveBeenCalledTimes(1);
   });
 
   it("maps iteration events to independent entries and keeps the previous prompt when parsing has no suggestion", async () => {
@@ -212,7 +270,7 @@ describe("image create store", () => {
     );
     let resolveGeneration!: (result: {
       media_type: string;
-      b64: string;
+      image_id: string;
     }) => void;
     api.generateImage.mockImplementation(
       () =>
@@ -225,7 +283,7 @@ describe("image create store", () => {
     await useImageCreateStore.getState().openSession(first.id);
     const generation = useImageCreateStore.getState().generate();
     await useImageCreateStore.getState().openSession(second.id);
-    resolveGeneration({ media_type: "image/png", b64: "old-session-image" });
+    resolveGeneration({ media_type: "image/png", image_id: "old-session-image" });
     await generation;
 
     expect(useImageCreateStore.getState().currentSession?.session.id).toBe(second.id);
@@ -233,7 +291,7 @@ describe("image create store", () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: "generation_image",
-          base64: "old-session-image",
+          imageUrl: expect.stringContaining("old-session-image"),
         }),
       ]),
     );
@@ -361,12 +419,34 @@ function summary(session: ImageCreateSession): SessionSummary {
   };
 }
 
-function record(session: ImageCreateSession): SessionRecord {
+function generationResult(
+  overrides: Partial<SessionRecord["generation_results"][number]> = {},
+): SessionRecord["generation_results"][number] {
+  return {
+    prompt: "generated prompt",
+    params: {
+      size: "auto",
+      quality: "auto",
+      background: "auto",
+      output_format: "png",
+    },
+    media_type: "image/png",
+    image_id: "image-1",
+    legacy_pending: false,
+    ts: "2026-08-03T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function record(
+  session: ImageCreateSession,
+  generationResults: SessionRecord["generation_results"] = [],
+): SessionRecord {
   return {
     session,
     messages: [],
     prompt_blocks: [],
-    generation_results: [],
+    generation_results: generationResults,
     events: [],
     generation: 0,
   };

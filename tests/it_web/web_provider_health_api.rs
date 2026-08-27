@@ -130,6 +130,8 @@ fn configured_runner(root: &Path, claude: &str, codex: &str) -> Arc<FixtureRunne
             install_cli(root, "codex", codex)
         },
     );
+    runner.map("pi", root.join("missing/pi"));
+    runner.map("kimi", root.join("missing/kimi"));
     runner
 }
 
