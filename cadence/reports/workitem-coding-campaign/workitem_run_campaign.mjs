@@ -33,7 +33,8 @@ const PROJECT_ID = process.env.ARIA_PROJECT_ID ?? 'project_0001';
 const REPOSITORY_ID = process.env.ARIA_REPOSITORY_ID ?? 'repository_0001';
 const BASE = (process.env.ARIA_BASE_URL ?? 'http://127.0.0.1:4317').replace(/\/$/, '');
 const WS_BASE = (process.env.ARIA_WS_BASE_URL ?? BASE.replace(/^http/, 'ws')).replace(/\/$/, '');
-const ARIA_ROOT = path.resolve(process.env.ARIA_DATA_ROOT ?? path.join(REPO_ROOT, '.aria'));
+// 服务端 durable 数据根固定为当前 workspace 的 .aria；campaign 环境变量不得重定向读路径。
+const ARIA_ROOT = path.join(REPO_ROOT, '.aria');
 const FIXTURE_FILES = [
   'story_spec_0001.json',
   'story_version_0001.json',
@@ -325,10 +326,13 @@ function normalizedRunHistory(value) {
   return runHistory;
 }
 
-function providerStartCount(value) {
-  if (value === undefined) return 0;
+function normalizedProviderStartLedger(value, required = false) {
+  if (value === undefined) {
+    if (required) throw new Error('$.provider_start_ledger 必须是数组');
+    return [];
+  }
   if (!Array.isArray(value)) throw new Error('$.provider_start_ledger 必须是数组');
-  const keys = new Set();
+  const entriesByKey = new Map();
   value.forEach((entry, index) => {
     if (!isRecord(entry) || typeof entry.provider_start_idempotency_key !== 'string' || !entry.provider_start_idempotency_key) {
       throw new Error(`$.provider_start_ledger[${index}].provider_start_idempotency_key 必须是非空字符串`);
@@ -336,18 +340,34 @@ function providerStartCount(value) {
     if (typeof entry.started !== 'boolean') {
       throw new Error(`$.provider_start_ledger[${index}].started 必须是布尔值`);
     }
-    if (entry.started) keys.add(entry.provider_start_idempotency_key);
+    const key = entry.provider_start_idempotency_key;
+    const prior = entriesByKey.get(key);
+    // 恢复重放的同 key 账本条目合并为一个，并保留“任一次已启动”的不可逆事实。
+    entriesByKey.set(key, {
+      provider_start_idempotency_key: key,
+      started: Boolean(prior?.started || entry.started),
+    });
   });
-  return keys.size;
+  return [...entriesByKey.values()];
+}
+
+function providerStartCount(value, required = false) {
+  return normalizedProviderStartLedger(value, required)
+    .filter((entry) => entry.started)
+    .length;
 }
 
 // 仅从 SessionState 的 durable 字段读取策略、计数和 provider 启动账本；不使用 stage/event 推断。
-function sessionStateProtocol(message, expectedRunPolicy = CONFIGURED_RUN_POLICY) {
+function sessionStateProtocol(
+  message,
+  expectedRunPolicy = CONFIGURED_RUN_POLICY,
+  expectedFlowKind = EXPECTED_FLOW_KIND,
+) {
   if (!isRecord(message) || message.type !== 'session_state') {
     throw new Error('首条状态消息必须是 session_state');
   }
-  if (message.flow_kind !== EXPECTED_FLOW_KIND) {
-    throw new Error(`$.flow_kind 必须为 ${EXPECTED_FLOW_KIND}，实际为 ${String(message.flow_kind)}`);
+  if (message.flow_kind !== expectedFlowKind) {
+    throw new Error(`$.flow_kind 必须为 ${expectedFlowKind}，实际为 ${String(message.flow_kind)}`);
   }
   if (message.run_policy !== expectedRunPolicy) {
     throw new Error(`$.run_policy 必须为 ${expectedRunPolicy}，实际为 ${String(message.run_policy)}`);
@@ -355,6 +375,10 @@ function sessionStateProtocol(message, expectedRunPolicy = CONFIGURED_RUN_POLICY
   if (typeof message.session_status !== 'string' || !message.session_status) {
     throw new Error('$.session_status 必须是非空字符串');
   }
+  const providerStartLedger = normalizedProviderStartLedger(
+    message.provider_start_ledger,
+    expectedFlowKind === 'single_candidate',
+  );
   return {
     session_status: message.session_status,
     flow_kind: message.flow_kind,
@@ -362,7 +386,8 @@ function sessionStateProtocol(message, expectedRunPolicy = CONFIGURED_RUN_POLICY
     run_history: normalizedRunHistory(message.run_history),
     policy_diagnostics: normalizedPolicyDiagnostics(message.policy_diagnostics),
     human_gate_snapshot: message.human_gate_snapshot ?? null,
-    provider_start_count: providerStartCount(message.provider_start_ledger),
+    provider_start_ledger: providerStartLedger,
+    provider_start_count: providerStartLedger.filter((entry) => entry.started).length,
   };
 }
 
@@ -371,9 +396,12 @@ function terminalSessionAction(
   message,
   awaitingReviewNeedsHumanTerminal = false,
   terminalReadback = false,
+  flowKind = EXPECTED_FLOW_KIND,
 ) {
   const diagnostics = normalizedPolicyDiagnostics(message?.policy_diagnostics);
-  if (message?.session_status === 'confirmed') return { kind: 'complete' };
+  if (message?.session_status === 'confirmed' || (
+    flowKind === 'single_candidate' && message?.session_status === 'completed'
+  )) return { kind: 'complete' };
   if (message?.session_status === 'stopped_needs_human') {
     return { kind: 'terminal', failureClass: 'stopped_needs_human' };
   }
@@ -381,7 +409,8 @@ function terminalSessionAction(
     return { kind: 'terminal', failureClass: 'policy_failed' };
   }
   if (
-    message?.session_status === 'waiting_for_human'
+    flowKind !== 'single_candidate'
+    && message?.session_status === 'waiting_for_human'
     && (awaitingReviewNeedsHumanTerminal || terminalReadback)
   ) {
     return { kind: 'terminal', failureClass: 'awaiting_human' };
@@ -633,6 +662,31 @@ function reviewDecisionAction(message, reviewVerdict, reviewComplete = null) {
   return { kind: 'fail', strategy: 'unhandled_without_options' };
 }
 
+function legacySingleCandidateDecisionMessage(message) {
+  if (!isRecord(message)) return null;
+  if (new Set([
+    'provider_select_request',
+    'choice_request',
+    'review_decision_required',
+  ]).has(message.type)) return message;
+  if (message.type === 'stage_change' && new Set([
+    'author_confirm',
+    'human_confirm',
+    'review_decision',
+  ]).has(message.stage)) return message;
+  if (message.type === 'timeline_node_created' && (
+    message.node?.node_type === 'human_confirm'
+    || AUTHOR_CONFIRM_NODE_TYPES.has(message.node?.node_type)
+  )) {
+    return message;
+  }
+  return null;
+}
+
+function confirmedCountForPlanStatus(status) {
+  return typeof status === 'string' && status.toLowerCase() === 'confirmed' ? 1 : 0;
+}
+
 function generationModeSelectionForNode(nodeId, respondedNodeIds) {
   if (!nodeId || respondedNodeIds.has(nodeId)) return null;
   respondedNodeIds.add(nodeId);
@@ -658,6 +712,12 @@ function authorConfirmAction(activeNodeType, hasLatestArtifact) {
       : { kind: 'fail', failureClass: 'batch_artifact_missing' };
   }
   return { kind: 'fail', failureClass: 'unhandled_work_item_plan_gate' };
+}
+
+function applyResultTiming(result, durationMs) {
+  result.finishedAt = now();
+  result.duration_ms = durationMs;
+  result.elapsedSec = Number((durationMs / 1_000).toFixed(3));
 }
 
 function resultTemplate(
@@ -703,6 +763,10 @@ function resultTemplate(
     policy_diagnostics: [],
     human_gate_snapshot: null,
     provider_start_count: 0,
+    provider_start_ledger: [],
+    legacy_decision_messages: [],
+    confirmed_count: 0,
+    duration_ms: null,
     stage_durations_sec: {},
   };
 }
@@ -780,8 +844,7 @@ async function runCampaign({
     result.usage_by_role = Object.keys(usageByRole).length
       ? usageByRole
       : { usage_unavailable: true };
-    result.finishedAt = now();
-    result.elapsedSec = elapsedSec();
+    applyResultTiming(result, elapsedMs());
     result.stage_durations_sec = Object.fromEntries(result.stageTimeline.map((entry, index) => [
       `${index}:${entry.stage}`,
       Math.round(((result.stageTimeline[index + 1]?.elapsedSec ?? result.elapsedSec) - entry.elapsedSec) * 1_000) / 1_000,
@@ -803,6 +866,16 @@ async function runCampaign({
   };
   const send = (message) => {
     if (ended) return;
+    if (
+      result.flow_kind === 'single_candidate'
+      && message?.type !== 'start_generation'
+    ) {
+      fail(
+        'single_candidate_outbound_not_allowed',
+        `SingleCandidate 仅允许 start_generation，拒绝发送: ${String(message?.type)}`,
+      );
+      return;
+    }
     writeLog({ direction: 'out', message });
     ws.send(JSON.stringify(message));
   };
@@ -929,6 +1002,7 @@ async function runCampaign({
     result.policy_diagnostics = protocol.policy_diagnostics;
     result.human_gate_snapshot = protocol.human_gate_snapshot;
     result.provider_start_count = protocol.provider_start_count;
+    result.provider_start_ledger = protocol.provider_start_ledger;
   };
   const durableSessionStatePath = () => path.join(
     ARIA_ROOT,
@@ -975,6 +1049,7 @@ async function runCampaign({
     result.completed = true;
     verifyConfirmedPlan(result, elapsedMs)
       .then(({ plan, workItemIds }) => {
+        result.confirmed_count = confirmedCountForPlanStatus(plan.status);
         result.work_item_ids = workItemIds;
         result.validator_findings.push(...(Array.isArray(plan.validator_findings) ? plan.validator_findings : []));
         const handoff = {
@@ -1011,7 +1086,12 @@ async function runCampaign({
       return false;
     }
     applySessionProtocol(durable.protocol, durable.message);
-    const action = terminalSessionAction(durable.message, awaitingReviewNeedsHumanTerminal, true);
+    const action = terminalSessionAction(
+      durable.message,
+      awaitingReviewNeedsHumanTerminal,
+      true,
+      durable.protocol.flow_kind,
+    );
     writeLog({
       event: 'durable_session_readback',
       trigger,
@@ -1070,7 +1150,12 @@ async function runCampaign({
         },
         reviewer_enabled: true,
       });
-    } else if (stage === 'author_confirm') {
+      return;
+    }
+    // SingleCandidate 的控制面只允许 start_generation；旧 author/review/generation gate
+    // 即使被服务端意外重放，也绝不能被下方 legacy 分支自动应答。
+    if (result.flow_kind === 'single_candidate') return;
+    if (stage === 'author_confirm') {
       handleAuthorConfirm();
     } else if (stage === 'human_confirm') {
       handleHumanConfirm();
@@ -1174,7 +1259,12 @@ async function runCampaign({
         if (message.type === 'session_state') {
           const protocol = sessionStateProtocol(message, runPolicy);
           applySessionProtocol(protocol, message);
-          const action = terminalSessionAction(message, awaitingReviewNeedsHumanTerminal);
+          const action = terminalSessionAction(
+            message,
+            awaitingReviewNeedsHumanTerminal,
+            false,
+            protocol.flow_kind,
+          );
           if (action.kind === 'fail') {
             fail(action.failureClass, `SessionState 失败关闭: ${json({
               session_status: protocol.session_status,
@@ -1187,7 +1277,7 @@ async function runCampaign({
             return;
           }
           if (action.kind === 'complete') {
-            completeConfirmedSession();
+            finalizeFromDurableSession('session_state_terminal');
             return;
           }
         }
@@ -1198,6 +1288,17 @@ async function runCampaign({
         }
         if (!sessionProtocolSeen) {
           fail('session_state_missing', `自动处理前必须先收到并校验 session_state，实际为 ${String(message.type)}`);
+          return;
+        }
+        const legacyDecision = result.flow_kind === 'single_candidate'
+          ? legacySingleCandidateDecisionMessage(message)
+          : null;
+        if (legacyDecision) {
+          result.legacy_decision_messages.push(legacyDecision);
+          fail(
+            'legacy_single_candidate_decision',
+            `SingleCandidate 收到旧决策消息，拒绝自动应答: ${String(legacyDecision.type)}`,
+          );
           return;
         }
         collectUsageByRole(message, usageByRole);
@@ -1414,14 +1515,18 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 }
 
 export {
+  applyResultTiming,
   authorConfirmAction,
   collectUsageByRole,
+  confirmedCountForPlanStatus,
   generationModeSelectionForNode,
+  legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
   humanConfirmAction,
   humanConfirmRequestChangeMessage,
   providerRolesForSelection,
   prepareOptionsForProvider,
+  resultTemplate,
   reviewCompleteAction,
   reviewCycleId,
   reviewDecisionAction,

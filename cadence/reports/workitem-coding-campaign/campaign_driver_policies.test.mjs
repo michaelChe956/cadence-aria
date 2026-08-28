@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   authorConfirmAction,
+  applyResultTiming,
+  confirmedCountForPlanStatus,
   collectUsageByRole,
   generationModeSelectionForNode,
+  legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
   humanConfirmAction,
   humanConfirmRequestChangeMessage,
@@ -14,10 +21,13 @@ import {
   reviewRepairAction,
   reviewCycleId,
   prepareOptionsForProvider,
+  resultTemplate,
   sessionStateProtocol,
   skipOptionalFindingsOption,
   terminalSessionAction,
 } from './workitem_run_campaign.mjs';
+
+const CAMPAIGN_DIR = path.dirname(fileURLToPath(import.meta.url));
 import { preflightFailureOutDir } from './coding_run_campaign.mjs';
 
 const EXPECTED_FLOW_KIND = process.env.ARIA_EXPECTED_FLOW_KIND ?? 'legacy';
@@ -336,6 +346,11 @@ test('session state protocol locks the configured flow policy and reads durable 
     },
     policy_diagnostics: [],
     human_gate_snapshot: null,
+    provider_start_ledger: [
+      { provider_start_idempotency_key: 'provider-start-1', started: true },
+      { provider_start_idempotency_key: 'provider-start-2', started: true },
+      { provider_start_idempotency_key: 'reserved-only', started: false },
+    ],
     provider_start_count: 2,
   });
 });
@@ -447,12 +462,12 @@ test('terminal session states classify durable terminal outcomes and retain stru
     'a pre-review waiting state must not close the campaign',
   );
   assert.deepEqual(
-    terminalSessionAction(sessionState({ session_status: 'waiting_for_human' }), false, true),
+    terminalSessionAction(sessionState({ session_status: 'waiting_for_human' }), false, true, 'legacy'),
     { kind: 'terminal', failureClass: 'awaiting_human' },
     'a completed stage must finish after durable readback records a human gate',
   );
   assert.deepEqual(
-    terminalSessionAction(sessionState({ session_status: 'waiting_for_human' }), true),
+    terminalSessionAction(sessionState({ session_status: 'waiting_for_human' }), true, false, 'legacy'),
     { kind: 'terminal', failureClass: 'awaiting_human' },
     'a needs_human review must close only after the server records waiting_for_human',
   );
@@ -533,4 +548,137 @@ test('prepare request serializes the auto policy using the server snake_case fie
       require_execution_plan_confirm: false,
     },
   );
+});
+
+test('SingleCandidate 的 result 模板承载确认数、持续时间、完整去重账本与旧决策审计', () => {
+  const result = resultTemplate('codex', 1, '/tmp/out', {}, 'digest', 'auto_if_valid');
+
+  assert.equal(result.confirmed_count, 0);
+  assert.equal(result.duration_ms, null);
+  assert.deepEqual(result.provider_start_ledger, []);
+  assert.deepEqual(result.legacy_decision_messages, []);
+  const single = sessionState({ flow_kind: 'single_candidate' });
+  assert.deepEqual(
+    sessionStateProtocol(single, 'auto_if_valid', 'single_candidate').provider_start_ledger,
+    [
+      { provider_start_idempotency_key: 'provider-start-1', started: true },
+      { provider_start_idempotency_key: 'provider-start-2', started: true },
+      { provider_start_idempotency_key: 'reserved-only', started: false },
+    ],
+    'durable ledger 必须按 idempotency key 保留完整规范化条目，而不是只保留 count',
+  );
+  assert.equal(
+    sessionStateProtocol(single, 'auto_if_valid', 'single_candidate').provider_start_count,
+    2,
+    'provider_start_count 仅是去重账本的派生观测字段',
+  );
+});
+
+test('SingleCandidate 首个 durable session state 对 flow/policy/history 失败关闭', () => {
+  const single = sessionState({ flow_kind: 'single_candidate' });
+  assert.equal(
+    sessionStateProtocol(single, 'auto_if_valid', 'single_candidate').flow_kind,
+    'single_candidate',
+  );
+  assert.throws(
+    () => sessionStateProtocol(sessionState({ flow_kind: 'legacy' }), 'auto_if_valid', 'single_candidate'),
+    /flow_kind.*single_candidate/i,
+  );
+  assert.throws(
+    () => sessionStateProtocol(single, 'interactive', 'single_candidate'),
+    /run_policy.*interactive/i,
+  );
+  assert.throws(
+    () => sessionStateProtocol(sessionState({ flow_kind: 'single_candidate', run_history: null }), 'auto_if_valid', 'single_candidate'),
+    /run_history/i,
+  );
+});
+
+test('SingleCandidate 只接受规定终态，并对旧决策请求记录协议回归而不自动应答', () => {
+  assert.deepEqual(
+    terminalSessionAction(sessionState({ flow_kind: 'single_candidate', session_status: 'confirmed' }), false, false, 'single_candidate'),
+    { kind: 'complete' },
+  );
+  assert.deepEqual(
+    terminalSessionAction(sessionState({ flow_kind: 'single_candidate', session_status: 'stopped_needs_human' }), false, false, 'single_candidate'),
+    { kind: 'terminal', failureClass: 'stopped_needs_human' },
+  );
+  assert.deepEqual(
+    terminalSessionAction(sessionState({ flow_kind: 'single_candidate', session_status: 'failed' }), false, false, 'single_candidate'),
+    { kind: 'terminal', failureClass: 'policy_failed' },
+  );
+  assert.deepEqual(
+    terminalSessionAction(sessionState({ flow_kind: 'single_candidate', session_status: 'waiting_for_human' }), true, true, 'single_candidate'),
+    { kind: 'continue' },
+    'waiting_for_human 不是 SingleCandidate 接受的终态',
+  );
+  for (const message of [
+    { type: 'provider_select_request' },
+    { type: 'review_decision_required' },
+    { type: 'stage_change', stage: 'human_confirm' },
+    { type: 'timeline_node_created', node: { node_type: 'human_confirm' } },
+    { type: 'timeline_node_created', node: { node_type: 'work_item_generation_mode' } },
+    { type: 'timeline_node_created', node: { node_type: 'work_item_plan_outline_confirm' } },
+    { type: 'timeline_node_created', node: { node_type: 'work_item_draft_confirm' } },
+    { type: 'timeline_node_created', node: { node_type: 'work_item_batch_confirm' } },
+  ]) {
+    assert.deepEqual(legacySingleCandidateDecisionMessage(message), message);
+  }
+  assert.equal(legacySingleCandidateDecisionMessage({ type: 'review_complete' }), null);
+});
+
+test('Confirmed lifecycle plan 仅在验证确认后将每案 confirmed_count 写为 1，并记录真实 duration_ms', () => {
+  assert.equal(confirmedCountForPlanStatus('Confirmed'), 1);
+  assert.equal(confirmedCountForPlanStatus('confirmed'), 1);
+  assert.equal(confirmedCountForPlanStatus('failed'), 0);
+  assert.equal(confirmedCountForPlanStatus(null), 0);
+  const result = { finishedAt: null, elapsedSec: null, duration_ms: null };
+  applyResultTiming(result, 1_234);
+  assert.equal(result.duration_ms, 1_234);
+  assert.equal(result.elapsedSec, 1.234);
+  assert.match(result.finishedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('dry-run 忽略 ARIA_DATA_ROOT，固定报告当前 worktree 的 .aria 且不连接服务', () => {
+  const driver = path.join(CAMPAIGN_DIR, 'workitem_run_campaign.mjs');
+  const repoRoot = path.resolve(CAMPAIGN_DIR, '../../..');
+  const run = spawnSync(
+    process.execPath,
+    [driver, 'codex', '1', '/tmp/aria-phase2-policy-test', '--dry-run'],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ARIA_DATA_ROOT: '/tmp/must-not-be-used-by-workitem-driver',
+        ARIA_EXPECTED_FLOW_KIND: 'single_candidate',
+        ARIA_RUN_POLICY: 'auto_if_valid',
+        ARIA_WORKITEM_HARD_TIMEOUT_MS: '720000',
+      },
+    },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const output = JSON.parse(run.stdout);
+  assert.equal(output.aria_data_root, path.join(repoRoot, '.aria'));
+  assert.equal(output.no_http_or_websocket_requests, true);
+  assert.equal(output.prepare_options.run_policy, 'auto_if_valid');
+});
+
+test('coding driver 只消费 Confirmed handoff，不读取 WorkItem SingleCandidate 协议也不发送其旧决策', () => {
+  const source = fs.readFileSync(path.join(CAMPAIGN_DIR, 'coding_run_campaign.mjs'), 'utf8');
+  assert.match(source, /只消费已确认的 Work Item Plan handoff/);
+  for (const forbiddenProtocolField of [
+    'flow_kind',
+    'generation_mode',
+    'review_scope',
+    'run_history',
+    'provider_start_ledger',
+    'author_decision',
+    'select_work_item_generation_mode',
+    'work_item_draft_decision',
+    'work_item_batch_decision',
+    'review_decision_response',
+  ]) {
+    assert.doesNotMatch(source, new RegExp(forbiddenProtocolField));
+  }
 });
