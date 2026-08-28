@@ -258,6 +258,74 @@ mod phase_machine {
     }
 
     #[tokio::test]
+    async fn interactive_approval_confirmation_compiles_and_reaches_completed() {
+        let (_tmp, lifecycle, plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        assert_eq!(
+            engine.session().single_candidate_phase,
+            Some(SingleCandidatePhase::Approval)
+        );
+
+        let outcome = engine
+            .handle_confirm()
+            .await
+            .expect("interactive Approval confirmation compiles and confirms");
+        assert_eq!(outcome, WorkspaceConfirmOutcome::None);
+        let persisted = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load completed session");
+        assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+        assert_eq!(
+            persisted.single_candidate_phase,
+            Some(SingleCandidatePhase::Completed)
+        );
+        assert_eq!(persisted.status, WorkspaceSessionStatus::Confirmed);
+        assert_eq!(
+            lifecycle
+                .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+                .expect("confirmed plan")
+                .status,
+            crate::product::models::IssueWorkItemPlanStatus::Confirmed
+        );
+        let transaction_count = engine
+            .work_item_plan_store()
+            .expect("plan store")
+            .list_compile_transactions("project_0001", "issue_0001", &engine.session().entity_id)
+            .expect("compile transactions")
+            .len();
+        assert_eq!(transaction_count, 1, "confirmation compiles exactly once");
+
+        let replay = engine
+            .handle_confirm()
+            .await
+            .expect("Completed confirmation is absorbing");
+        assert_eq!(replay, WorkspaceConfirmOutcome::None);
+        assert_eq!(
+            engine
+                .work_item_plan_store()
+                .expect("plan store")
+                .list_compile_transactions(
+                    "project_0001",
+                    "issue_0001",
+                    &engine.session().entity_id
+                )
+                .expect("compile transactions")
+                .len(),
+            transaction_count,
+            "terminal confirmation must not run compile again"
+        );
+    }
+
+    #[tokio::test]
     async fn repairable_runs_once_then_verification_uses_real_mechanical_report_ref() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();

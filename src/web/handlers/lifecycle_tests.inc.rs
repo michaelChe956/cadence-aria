@@ -460,10 +460,11 @@
                 .collect::<Vec<_>>();
             assert!(
                 new_files.iter().all(|path| {
-                    !path.contains("source-revision")
-                        && !path.contains("plan-candidate")
-                        && !path.contains("mechanical-report")
-                        && !path.contains("compile-transaction")
+                    !path.contains("work-item-plan-sources/")
+                        && !path.contains("source_revision/")
+                        && !path.contains("plan_candidate_ir/")
+                        && !path.contains("mechanical_report/")
+                        && !path.contains("work_item_plan_compiles")
                 }),
                 "preflight fallback must not create single-candidate artifacts: {new_files:?}"
             );

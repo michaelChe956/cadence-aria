@@ -425,14 +425,21 @@ impl WorkspaceEngine {
                     "Final Compile 完成，已创建 {work_item_count} 个 Work Item"
                 )))
                 .await;
-                if auto_confirm && self.session.run_policy == RunPolicy::AutoIfValid {
+                let single_candidate_approval = self.session.flow_kind
+                    == WorkItemPlanFlowKind::SingleCandidate
+                    && self.session.single_candidate_phase
+                        == Some(crate::product::models::SingleCandidatePhase::Approval);
+                if auto_confirm
+                    && (self.session.run_policy == RunPolicy::AutoIfValid
+                        || single_candidate_approval)
+                {
                     if let Err(message) = self
                         .complete_policy_valid_work_item_plan(work_item_count)
                         .await
                     {
                         let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                         self.enter_human_confirm(Some(
-                            "Final Compile 已完成，但自动确认失败，等待人工确认".to_string(),
+                            "Final Compile 已完成，但确认落盘失败，等待人工确认".to_string(),
                         ))
                         .await;
                     }
@@ -469,7 +476,11 @@ impl WorkspaceEngine {
         work_item_count: usize,
     ) -> Result<(), String> {
         self.validate_confirm_aggregate_spec_gate()?;
-        self.mark_latest_artifact_confirmed(Some("auto_if_valid".to_string()));
+        let confirmed_by = match self.session.run_policy {
+            RunPolicy::AutoIfValid => "auto_if_valid",
+            RunPolicy::Interactive => "human",
+        };
+        self.mark_latest_artifact_confirmed(Some(confirmed_by.to_string()));
         let (plan, child_sessions) = self.confirm_work_item_plan().await?;
         self.transition_stage(WorkspaceStage::Completed).await;
         self.persist_single_candidate_terminal_phase(
@@ -480,9 +491,9 @@ impl WorkspaceEngine {
             agent: None,
             stage: WorkspaceStage::Completed,
             round: None,
-            title: "WorkItemPlan 已自动确认".to_string(),
+            title: "WorkItemPlan 已确认".to_string(),
             summary: Some(format!(
-                "Final Compile 完成，plan {} 已自动确认；已创建 {work_item_count} 个 Work Item 和 {} 个子 WorkItem session",
+                "Final Compile 完成，plan {} 已确认；已创建 {work_item_count} 个 Work Item 和 {} 个子 WorkItem session",
                 plan.id,
                 child_sessions.len()
             )),
