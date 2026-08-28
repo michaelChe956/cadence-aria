@@ -29,7 +29,7 @@ fn golden_findings_classify_to_the_expected_typed_outcomes() {
 
     for fixture in fixtures {
         let envelope = envelope(fixture.verdict, vec![fixture.finding]);
-        let classified = classify_review(&envelope, &invocation)
+        let classified = classify_review(&envelope, &invocation, None)
             .unwrap_or_else(|error| panic!("fixture {} failed to classify: {error:?}", fixture.id));
 
         assert_eq!(classified.len(), 1, "fixture {}", fixture.id);
@@ -109,7 +109,7 @@ fn hint_precedes_raw_verdict_and_fallback_rules_are_deterministic() {
 
     for (envelope, expected_class) in cases {
         assert_eq!(
-            classify_review(&envelope, &invocation).unwrap()[0].class,
+            classify_review(&envelope, &invocation, None).unwrap()[0].class,
             expected_class
         );
     }
@@ -130,7 +130,12 @@ fn raw_verdict_is_retained_when_strong_findings_require_a_normalized_revision_ga
     assert_eq!(envelope.raw_verdict, ReviewVerdictType::NeedsHuman);
     assert_eq!(envelope.normalized_gate, ReviewGate::RequiresRevision);
     assert_eq!(
-        classify_review(&envelope, &ReviewInvocationScope::initial("revision-001")).unwrap()[0]
+        classify_review(
+            &envelope,
+            &ReviewInvocationScope::initial("revision-001"),
+            None,
+        )
+        .unwrap()[0]
             .class,
         FindingClass::HumanRequired
     );
@@ -158,12 +163,16 @@ fn verification_scope_allows_new_findings_but_rejects_missing_mechanical_report(
             Some("contract.field"),
         )],
     );
-    assert!(classify_review(&new_finding, &invocation).is_ok());
+    assert!(classify_review(&new_finding, &invocation, Some("mechanical-report-002"),).is_ok());
 
     let missing_report = ReviewInvocationScope::verification(BTreeSet::new(), "revision-002", "");
     let pass = envelope(ReviewVerdictType::Pass, Vec::new());
     assert!(matches!(
-        classify_review(&pass, &missing_report),
+        classify_review(&pass, &missing_report, None),
+        Err(ClassificationError::VerificationScopeViolation(_))
+    ));
+    assert!(matches!(
+        classify_review(&pass, &invocation, Some("another-mechanical-report")),
         Err(ClassificationError::VerificationScopeViolation(_))
     ));
 }

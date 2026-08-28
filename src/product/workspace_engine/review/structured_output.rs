@@ -16,6 +16,7 @@ pub(crate) enum ReviewCompletionError {
     Schema(ReviewStructuredOutputErrorCode),
     NotRequested,
     RepairPayloadChanged,
+    VerificationScopeViolation(String),
 }
 
 impl ReviewCompletionError {
@@ -25,6 +26,7 @@ impl ReviewCompletionError {
             Self::Schema(error) => error.as_str(),
             Self::NotRequested => "structured_output_not_requested",
             Self::RepairPayloadChanged => "repair_payload_changed",
+            Self::VerificationScopeViolation(_) => "verification_scope_violation",
         }
     }
 
@@ -34,13 +36,17 @@ impl ReviewCompletionError {
             Self::Schema(error) => error.message().to_string(),
             Self::NotRequested => "审核输入未请求结构化输出".to_string(),
             Self::RepairPayloadChanged => "结构化输出修复改变了审核业务内容".to_string(),
+            Self::VerificationScopeViolation(message) => message.clone(),
         }
     }
 
     pub(crate) fn recoverable_value(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Syntax(error) => error.recoverable_value.as_ref(),
-            Self::Schema(_) | Self::NotRequested | Self::RepairPayloadChanged => None,
+            Self::Schema(_)
+            | Self::NotRequested
+            | Self::RepairPayloadChanged
+            | Self::VerificationScopeViolation(_) => None,
         }
     }
 
@@ -51,7 +57,7 @@ impl ReviewCompletionError {
                 ReviewStructuredOutputErrorCode::UnknownFindingCategory
                     | ReviewStructuredOutputErrorCode::UnknownFindingClassHint
             )
-        )
+        ) || matches!(self, Self::VerificationScopeViolation(_))
     }
 
     pub(crate) fn is_repairable(&self) -> bool {
@@ -119,18 +125,50 @@ pub(crate) fn structured_output_repair_event(
 }
 
 impl WorkspaceEngine {
+    /// SingleCandidate 的 Verification 已有 immutable scope；任何 parser/schema
+    /// 失败都不能退化成可人工继续的 reviewer fallback，必须由路由层作为
+    /// ProtocolViolation durable failed 收口。
+    pub(crate) fn review_parse_error_requires_verification_protocol_fatal(&self) -> bool {
+        self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.session.flow_kind
+                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            && matches!(
+                self.session.review_invocation_scope,
+                Some(
+                    crate::product::work_item_plan_policy::ReviewInvocationScope::Verification { .. }
+                )
+            )
+    }
+
+    fn verification_scope_error_if_needed(
+        &self,
+        error: ReviewCompletionError,
+    ) -> ReviewCompletionError {
+        if self.review_parse_error_requires_verification_protocol_fatal()
+            && !error.is_classification_fatal()
+        {
+            ReviewCompletionError::VerificationScopeViolation(format!(
+                "verification review output rejected: {}",
+                error.message()
+            ))
+        } else {
+            error
+        }
+    }
+
     pub(crate) fn parse_review_completion_for_active_node(
         &self,
         completion: &ProviderCompletion,
     ) -> Result<ReviewVerdict, ReviewCompletionError> {
         let StructuredOutputState::Parsed(value) = &completion.structured_output else {
-            return match &completion.structured_output {
+            let error = match &completion.structured_output {
                 StructuredOutputState::Failed(error) => {
-                    Err(ReviewCompletionError::Syntax(error.clone()))
+                    ReviewCompletionError::Syntax(error.clone())
                 }
-                StructuredOutputState::NotRequested => Err(ReviewCompletionError::NotRequested),
+                StructuredOutputState::NotRequested => ReviewCompletionError::NotRequested,
                 StructuredOutputState::Parsed(_) => unreachable!(),
             };
+            return Err(self.verification_scope_error_if_needed(error));
         };
 
         if self.session.workspace_type == WorkspaceType::WorkItemPlan {
@@ -148,11 +186,13 @@ impl WorkspaceEngine {
                 &self.current_work_item_plan_outline_ids(),
                 scope,
             )
-            .map_err(ReviewCompletionError::Schema);
+            .map_err(ReviewCompletionError::Schema)
+            .map_err(|error| self.verification_scope_error_if_needed(error));
         }
 
         parse_review_value(value, &completion.readable_output)
             .map_err(ReviewCompletionError::Schema)
+            .map_err(|error| self.verification_scope_error_if_needed(error))
     }
 }
 

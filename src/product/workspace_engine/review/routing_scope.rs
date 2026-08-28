@@ -1,7 +1,11 @@
+use super::policy_routing::{GateSnapshotContext, route_outcome};
 use super::*;
 use crate::product::lifecycle_store::workspace::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
     FatalReason, PolicyDiagnostic, ReviewInvocationScope, ReviewPhase, WorkItemPlanFlowKind,
+};
+use crate::product::work_item_plan_source_store::{
+    SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
 };
 
 fn scope_for_action(
@@ -58,6 +62,55 @@ fn validate_single_candidate_scope(
 }
 
 impl WorkspaceEngine {
+    /// 当 worker 已持有本 invocation 的 scope 时，必须在 reload durable state
+    /// 之前拒绝坏 digest；否则 reload 会静默覆盖该 protocol violation。
+    pub(super) fn fail_invalid_single_candidate_scope(
+        &mut self,
+        expected: Option<&WorkspaceSessionRecord>,
+    ) -> Option<RoutingAction> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return None;
+        }
+        let scope = self.session.review_invocation_scope.clone()?;
+        if scope.validate_digest().is_ok() {
+            return None;
+        }
+
+        let action = RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: vec![PolicyDiagnostic {
+                code: "verification_scope_violation".to_string(),
+                message: "review invocation scope digest invalid".to_string(),
+                field: Some("scope_digest".to_string()),
+            }],
+        };
+        let history = expected
+            .map(|record| record.run_history.clone())
+            .unwrap_or_else(|| self.session.run_history.clone());
+        match self.persist_policy_route(expected, &scope, &action, &history) {
+            Ok(record) => {
+                if let Some(record) = record.as_ref() {
+                    self.refresh_policy_state(record);
+                } else {
+                    self.apply_policy_route_state(&scope, &action, history);
+                }
+                Some(action)
+            }
+            Err(error) => {
+                let action = RoutingAction::AbortFatal {
+                    reason: FatalReason::PersistenceFailure,
+                    diagnostics: vec![PolicyDiagnostic {
+                        code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                        message: error.to_string(),
+                        field: Some("workspace_session".to_owned()),
+                    }],
+                };
+                self.apply_policy_route_state(&scope, &action, history);
+                Some(action)
+            }
+        }
+    }
+
     pub(super) fn policy_scope_for_action(
         &self,
         invocation: &ReviewInvocationScope,
@@ -212,6 +265,74 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    /// 对 SingleCandidate 的复评，只接受本 invocation scope 精确指向的 immutable
+    /// mechanical report，且该 report 必须绑定 scope 所声明的 repaired IR。这里不做
+    /// changed-path/region 归因：finding 的身份边界由阶段 1 fingerprint classifier 保持。
+    pub(super) fn verified_mechanical_report_ref(
+        &self,
+        invocation: &ReviewInvocationScope,
+    ) -> Result<Option<String>, RoutingAction> {
+        let ReviewInvocationScope::Verification {
+            mechanical_report_ref,
+            repaired_revision_id,
+            ..
+        } = invocation
+        else {
+            return Ok(None);
+        };
+
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            // legacy 没有 source-store mechanical report；保持其既有评审路径，但让
+            // classifier 仍可确认 invocation 内的 ref 未被调用方替换。
+            return Ok(Some(mechanical_report_ref.clone()));
+        }
+
+        if self.session.plan_candidate_ir_ref.as_deref() != Some(repaired_revision_id)
+            || self.session.mechanical_report_ref.as_deref() != Some(mechanical_report_ref)
+        {
+            return Err(verification_scope_store_error(
+                "verification invocation scope does not match durable IR/report refs".to_string(),
+                false,
+            ));
+        }
+
+        let Some(lifecycle_store) = self.lifecycle_store.as_ref() else {
+            return Err(verification_scope_store_error(
+                "lifecycle_store unavailable for verification mechanical report".to_string(),
+                false,
+            ));
+        };
+        let scope = SourceStoreScope {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+        };
+        let source_store = WorkItemPlanSourceStore::new(lifecycle_store.app_paths());
+        let report = source_store
+            .get_mechanical_report(&scope, mechanical_report_ref)
+            .map_err(|error| {
+                verification_scope_source_store_error(error, "mechanical_report_ref")
+            })?;
+        let repaired_ir = source_store
+            .get_plan_candidate_ir(&scope, repaired_revision_id)
+            .map_err(|error| {
+                verification_scope_source_store_error(error, "repaired_revision_id")
+            })?;
+
+        if report.ir_id != repaired_ir.id
+            || report.source_revision_id != repaired_ir.source_revision_id
+            || report.report.source_revision_hash != repaired_ir.ir.source_revision_hash
+            || report.report.compiler_version != repaired_ir.ir.compiler_version
+        {
+            return Err(verification_scope_store_error(
+                "verification mechanical report does not match the repaired IR".to_string(),
+                false,
+            ));
+        }
+
+        Ok(Some(mechanical_report_ref.clone()))
+    }
+
     fn review_revision_id(&self, node_id: &str, initial: bool) -> String {
         if !initial
             && let Some(ReviewInvocationScope::Verification {
@@ -249,6 +370,82 @@ impl WorkspaceEngine {
                 .unwrap_or_else(|_| format!("draft:{node_id}")),
             _ => format!("review:{node_id}"),
         }
+    }
+}
+
+pub(super) fn route_outcome_from_decision(
+    decision: EvaluationDecision,
+    policy: RunPolicy,
+    history: &RunHistory,
+    invocation: &ReviewInvocationScope,
+    findings: Vec<ClassifiedFinding>,
+) -> RoutingAction {
+    let (outcome, outcome_findings, repeated_fingerprints, trigger) = match &decision.outcome {
+        PlanOutcome::HumanRequired {
+            findings,
+            repeated_fingerprints,
+            reason,
+        } => (
+            decision.outcome.clone(),
+            findings.clone(),
+            repeated_fingerprints.clone(),
+            *reason,
+        ),
+        PlanOutcome::Repairable { findings } => (
+            decision.outcome.clone(),
+            findings.clone(),
+            Vec::new(),
+            HumanReason::RepairBudgetExhausted,
+        ),
+        _ => (
+            decision.outcome.clone(),
+            findings,
+            Vec::new(),
+            HumanReason::NativeHumanRequired,
+        ),
+    };
+    route_outcome(
+        outcome,
+        policy,
+        GateSnapshotContext {
+            history: history.clone(),
+            budgets: RunBudgets::default(),
+            invocation: invocation.clone(),
+            findings: outcome_findings,
+            repeated_fingerprints,
+            trigger,
+        },
+    )
+}
+
+fn verification_scope_source_store_error(error: SourceStoreError, field: &str) -> RoutingAction {
+    let persistence_failure = matches!(
+        error,
+        SourceStoreError::Io(_) | SourceStoreError::Json(_) | SourceStoreError::Serialize(_)
+    );
+    verification_scope_store_error(
+        format!("verification {field} rejected: {}", error.code()),
+        persistence_failure,
+    )
+}
+
+fn verification_scope_store_error(message: String, persistence_failure: bool) -> RoutingAction {
+    let reason = if persistence_failure {
+        FatalReason::PersistenceFailure
+    } else {
+        FatalReason::ProtocolViolation
+    };
+    RoutingAction::AbortFatal {
+        reason,
+        diagnostics: vec![PolicyDiagnostic {
+            code: if persistence_failure {
+                FatalReason::PersistenceFailure.as_code().to_string()
+            } else {
+                "verification_scope_violation".to_string()
+            },
+            message,
+            field: Some("review_invocation_scope".to_string()),
+        }],
     }
 }
 

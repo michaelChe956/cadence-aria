@@ -60,8 +60,9 @@ impl From<ReviewStructuredOutputError> for ClassificationError {
 pub(crate) fn classify_review(
     envelope: &ParsedReviewEnvelope,
     invocation: &ReviewInvocationScope,
+    verified_mechanical_report_ref: Option<&str>,
 ) -> Result<Vec<ClassifiedFinding>, ClassificationError> {
-    validate_invocation_scope(invocation)?;
+    validate_invocation_scope(invocation, verified_mechanical_report_ref)?;
 
     let findings = envelope
         .findings
@@ -79,6 +80,7 @@ pub(crate) fn classify_review(
 
 fn validate_invocation_scope(
     invocation: &ReviewInvocationScope,
+    verified_mechanical_report_ref: Option<&str>,
 ) -> Result<(), ClassificationError> {
     invocation
         .validate_digest()
@@ -89,15 +91,29 @@ fn validate_invocation_scope(
         )
         .map_err(ClassificationError::from)?;
 
-    if let ReviewInvocationScope::Verification {
-        mechanical_report_ref,
-        ..
-    } = invocation
-        && mechanical_report_ref.trim().is_empty()
-    {
-        return Err(ClassificationError::VerificationScopeViolation(
-            "verification invocation is missing mechanical_report_ref".to_string(),
-        ));
+    match invocation {
+        ReviewInvocationScope::Initial { .. } => {
+            if verified_mechanical_report_ref.is_some() {
+                return Err(ClassificationError::VerificationScopeViolation(
+                    "initial invocation must not carry a mechanical report".to_string(),
+                ));
+            }
+        }
+        ReviewInvocationScope::Verification {
+            mechanical_report_ref,
+            ..
+        } => {
+            if mechanical_report_ref.trim().is_empty() {
+                return Err(ClassificationError::VerificationScopeViolation(
+                    "verification invocation is missing mechanical_report_ref".to_string(),
+                ));
+            }
+            if verified_mechanical_report_ref != Some(mechanical_report_ref.as_str()) {
+                return Err(ClassificationError::VerificationScopeViolation(
+                    "verification mechanical report does not match invocation scope".to_string(),
+                ));
+            }
+        }
     }
 
     Ok(())

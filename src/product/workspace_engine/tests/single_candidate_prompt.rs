@@ -1,5 +1,197 @@
-use crate::product::work_item_plan_policy::{FindingFingerprint, ReviewInvocationScope};
+use crate::cross_cutting::streaming_provider::ProviderCompletion;
+use crate::product::json_store::write_json;
+use crate::product::models::{WorkItemSplitFinding, WorkspaceSessionStatus};
+use crate::product::work_item_plan_compiler::{
+    PlanCandidateIr, PlanCandidateMechanicalReport, WORK_ITEM_PLAN_COMPILER_VERSION,
+};
+use crate::product::work_item_plan_policy::{
+    FatalReason, FindingClass, FindingFingerprint, HumanReason, ProviderStartLedgerEntry,
+    ReviewCycleState, ReviewFindingCategory, ReviewInvocationScope, RunHistory,
+    WorkItemPlanFlowKind,
+};
+use crate::product::work_item_plan_source_store::{
+    PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+    WorkItemPlanSourceStore,
+};
+use crate::product::workspace_engine::review::policy_routing::RoutingAction;
+use crate::web::workspace_ws_types::review::{
+    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+
+fn persist_verification_scope(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    engine: &mut crate::product::workspace_engine::WorkspaceEngine,
+    scope: ReviewInvocationScope,
+) {
+    persist_verification_scope_with_cycle(lifecycle, engine, scope, 0);
+}
+
+fn persist_verification_scope_with_cycle(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    engine: &mut crate::product::workspace_engine::WorkspaceEngine,
+    scope: ReviewInvocationScope,
+    verification_count: u32,
+) {
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load persistent workspace session");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.review_invocation_scope = Some(scope.clone());
+    if let ReviewInvocationScope::Verification {
+        repaired_revision_id,
+        mechanical_report_ref,
+        ..
+    } = &scope
+    {
+        record.plan_candidate_ir_ref = Some(repaired_revision_id.clone());
+        record.mechanical_report_ref = Some(mechanical_report_ref.clone());
+    }
+    record.run_history = RunHistory {
+        review_cycles: std::collections::BTreeMap::from([(
+            "review:verification-node".to_string(),
+            ReviewCycleState {
+                initial_count: 1,
+                verification_count,
+                ..ReviewCycleState::default()
+            },
+        )]),
+        ..RunHistory::default()
+    };
+    engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    engine.session.review_invocation_scope = Some(scope);
+    engine.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
+    engine.session.mechanical_report_ref = record.mechanical_report_ref.clone();
+    engine.session.run_history = record.run_history.clone();
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist verification scope");
+}
+
+fn source_hash(source: &str) -> String {
+    hex::encode(Sha256::digest(source.as_bytes()))
+}
+
+fn persist_verification_artifacts(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    plan_id: &str,
+) -> (String, String) {
+    let source = "# immutable repaired Work Item Plan\n";
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let mut source_revision = SourceRevisionRecord {
+        id: "source-001".to_string(),
+        source: source.to_string(),
+        source_revision_hash: source_hash(source),
+        content_hash: String::new(),
+    };
+    source_revision.content_hash = source_revision.content_hash().expect("source hash");
+    source_store
+        .put_source_revision("project_0001", "issue_0001", plan_id, &source_revision)
+        .expect("persist source revision");
+
+    let mut ir = PlanCandidateIrRecord {
+        id: "ir-001".to_string(),
+        source_revision_id: source_revision.id.clone(),
+        ir: PlanCandidateIr {
+            source_revision_hash: source_revision.source_revision_hash.clone(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: Vec::new(),
+        },
+        content_hash: String::new(),
+    };
+    ir.content_hash = ir.content_hash().expect("IR content hash");
+    let ir_ref = source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", plan_id, &ir)
+        .expect("persist repaired IR");
+
+    let mut report = PlanCandidateMechanicalReportRecord {
+        id: "report-001".to_string(),
+        source_revision_id: source_revision.id,
+        ir_id: ir.id,
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: ir.ir.source_revision_hash,
+            compiler_version: ir.ir.compiler_version,
+            findings: Vec::<WorkItemSplitFinding>::new(),
+        },
+        content_hash: String::new(),
+    };
+    report.content_hash = report.content_hash().expect("report content hash");
+    let report_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", plan_id, &report)
+        .expect("persist mechanical report");
+
+    (ir_ref, report_ref)
+}
+
+fn repairable_verdict(message: &str) -> ReviewVerdict {
+    repairable_verdict_for_field(message, "contract.field")
+}
+
+fn repairable_verdict_for_field(message: &str, contract_field: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "verification finding".to_string(),
+        summary: "verification revise".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::MustFix,
+            message: message.to_string(),
+            evidence: "evidence".to_string(),
+            required_action: "repair".to_string(),
+            category: Some(ReviewFindingCategory::ContractGap),
+            class_hint: None,
+            contract_field: Some(contract_field.to_string()),
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+fn fingerprint(message: &str) -> FindingFingerprint {
+    FindingFingerprint::for_finding(
+        Some(ReviewFindingCategory::ContractGap),
+        FindingClass::Repairable,
+        message,
+        Some("contract.field"),
+    )
+}
+
+fn assert_durable_protocol_failure(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    engine: &crate::product::workspace_engine::WorkspaceEngine,
+) {
+    assert_eq!(
+        engine.session().session_status,
+        WorkspaceSessionStatus::Failed
+    );
+    let persisted = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("persisted failed session");
+    assert_eq!(persisted.status, WorkspaceSessionStatus::Failed);
+    assert_eq!(
+        persisted.policy_diagnostics[0].code,
+        "verification_scope_violation"
+    );
+}
+
+fn pass_verdict() -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Pass,
+        comments: "verification complete".to_string(),
+        summary: "verification pass".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserConfirmAllowed,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
 
 #[test]
 fn single_candidate_initial_prompt_is_derived_from_server_scope() {
@@ -56,4 +248,360 @@ fn single_candidate_scope_instructions_reject_empty_verification_report() {
     let error = crate::product::workspace_engine::review_scope_instructions(&scope)
         .expect_err("missing mechanical report must be fatal");
     assert!(error.contains("mechanical report"));
+}
+
+#[test]
+fn verification_scope_missing_mechanical_report_fails_protocol_and_durably_marks_failed() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("verification_scope_missing_report");
+    let report_ref = format!(
+        "project/project_0001/issue/issue_0001/plan/{plan_id}/mechanical_report/report-001"
+    );
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), "ir-001", report_ref),
+    );
+
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("verification policy action");
+
+    assert!(
+        matches!(
+            action,
+            RoutingAction::AbortFatal {
+                reason: FatalReason::ProtocolViolation,
+                ..
+            }
+        ),
+        "expected verification protocol fatal, got {action:?}"
+    );
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[test]
+fn verification_scope_rejects_mismatched_mechanical_report_ref() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_wrong_report_ref",
+        );
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let report_path = lifecycle
+        .app_paths()
+        .issue_root("project_0001", "issue_0001")
+        .join("work-item-plan-sources")
+        .join(&plan_id)
+        .join("mechanical_report")
+        .join("report-001.json");
+    let mut report: PlanCandidateMechanicalReportRecord =
+        crate::product::json_store::read_json(&report_path).expect("load report");
+    report.content_hash = report
+        .content_hash()
+        .expect("recalculate report content hash");
+    let wrong_report_ref = format!(
+        "project/project_0001/issue/issue_0001/plan/{plan_id}/mechanical_report/report-002"
+    );
+    write_json(
+        &report_path
+            .parent()
+            .expect("report parent")
+            .join("report-002.json"),
+        &report,
+    )
+    .expect("inject ref-to-record identity mismatch");
+    assert_ne!(report_ref, wrong_report_ref);
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, wrong_report_ref),
+    );
+
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("verification policy action");
+
+    assert!(matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[test]
+fn verification_scope_rejects_report_version_mismatched_with_repaired_ir() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_report_version_mismatch",
+        );
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: plan_id.clone(),
+    };
+    let mut report = source_store
+        .get_mechanical_report(&scope, &report_ref)
+        .expect("load valid report before mutation");
+    report.report.compiler_version = "work-item-plan-compiler@wrong".to_string();
+    report.content_hash = report
+        .content_hash()
+        .expect("recalculate report content hash");
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root("project_0001", "issue_0001")
+            .join("work-item-plan-sources")
+            .join(&plan_id)
+            .join("mechanical_report")
+            .join("report-001.json"),
+        &report,
+    )
+    .expect("inject report version mismatch");
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref),
+    );
+
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("verification policy action");
+
+    assert!(matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[test]
+fn verification_scope_rejects_report_hash_mismatched_with_repaired_ir() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_report_hash_mismatch",
+        );
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: plan_id.clone(),
+    };
+    let mut report = source_store
+        .get_mechanical_report(&scope, &report_ref)
+        .expect("load valid report before mutation");
+    report.report.source_revision_hash = source_hash("different source");
+    report.content_hash = report
+        .content_hash()
+        .expect("recalculate report content hash");
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root("project_0001", "issue_0001")
+            .join("work-item-plan-sources")
+            .join(&plan_id)
+            .join("mechanical_report")
+            .join("report-001.json"),
+        &report,
+    )
+    .expect("inject report hash mismatch");
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref),
+    );
+
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("verification policy action");
+
+    assert!(matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[tokio::test]
+async fn verification_scope_parser_error_is_protocol_fatal_instead_of_needs_human_fallback() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("verification_scope_parser_error");
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref),
+    );
+    let completion = ProviderCompletion::plain("reviewer omitted structured output", None);
+
+    let error = engine
+        .parse_review_completion_for_active_node(&completion)
+        .expect_err("verification parser failure must reject the invocation");
+
+    assert_eq!(error.code(), "verification_scope_violation");
+    let verdict = ReviewVerdict {
+        verdict: ReviewVerdictType::NeedsHuman,
+        comments: completion.readable_output.clone(),
+        summary: "verification parser error".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserTriageRequired,
+        work_item_plan_review: None,
+        structured_output_diagnostic: Some(
+            crate::web::workspace_ws_types::review::StructuredOutputDiagnostic {
+                code: error.code().to_string(),
+                message: error.message(),
+                repair_attempted: false,
+                repair_succeeded: false,
+                raw_output_preview: None,
+            },
+        ),
+    };
+    engine.complete_review(completion, verdict).await;
+
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[test]
+fn verification_scope_rejects_invalid_scope_digest() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("verification_scope_invalid_digest");
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let valid_scope = ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref);
+    let ReviewInvocationScope::Verification {
+        repaired_revision_id,
+        mechanical_report_ref,
+        ..
+    } = valid_scope
+    else {
+        unreachable!("verification scope")
+    };
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(
+            BTreeSet::new(),
+            repaired_revision_id.clone(),
+            mechanical_report_ref.clone(),
+        ),
+    );
+    engine.session.review_invocation_scope = Some(ReviewInvocationScope::Verification {
+        original_fingerprints: BTreeSet::new(),
+        repaired_revision_id,
+        mechanical_report_ref,
+        scope_digest: "review_scope_v1:invalid".to_string(),
+    });
+
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("verification policy action");
+
+    assert!(matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[test]
+fn verification_scope_repeated_original_fingerprint_enters_human_without_second_repair() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_repeated_original_fingerprint",
+        );
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let original = fingerprint("original finding");
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::from([original.clone()]), ir_ref, report_ref),
+    );
+    engine
+        .session
+        .run_history
+        .seen_fingerprints
+        .insert(original);
+    engine.session.provider_start_ledger = vec![ProviderStartLedgerEntry {
+        provider_start_idempotency_key: "repair-001".to_string(),
+        started: true,
+    }];
+    let mut persisted = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load persisted session");
+    persisted.run_history = engine.session.run_history.clone();
+    persisted.provider_start_ledger = engine.session.provider_start_ledger.clone();
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&persisted.project_id, &persisted.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", persisted.id)),
+        &persisted,
+    )
+    .expect("persist original fingerprint history");
+
+    let action = engine
+        .work_item_policy_action("verification-node", &repairable_verdict("original finding"))
+        .expect("verification policy action");
+
+    assert!(
+        matches!(action, RoutingAction::EnterHumanGate { ref snapshot }
+        if snapshot.trigger == HumanReason::RepeatedFingerprint)
+    );
+    assert_eq!(engine.session().provider_start_ledger.len(), 1);
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("persisted session")
+            .provider_start_ledger
+            .len(),
+        1,
+        "verification must not create a second automatic repair provider start"
+    );
+}
+
+#[test]
+fn verification_scope_new_fingerprint_requires_human_without_second_repair() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_new_fingerprint",
+        );
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    persist_verification_scope_with_cycle(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(
+            BTreeSet::from([fingerprint("original finding")]),
+            ir_ref,
+            report_ref,
+        ),
+        0,
+    );
+
+    let action = engine
+        .work_item_policy_action(
+            "verification-node",
+            &repairable_verdict_for_field("new finding", "new.contract.field"),
+        )
+        .expect("verification policy action");
+
+    assert!(
+        matches!(action, RoutingAction::EnterHumanGate { ref snapshot }
+            if snapshot.trigger == HumanReason::VerificationNewFindings),
+        "new fingerprint must preserve evaluator reason, got {action:?}"
+    );
+    assert!(engine.session().provider_start_ledger.is_empty());
 }

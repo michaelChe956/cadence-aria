@@ -1,15 +1,16 @@
 #[path = "routing_scope.rs"]
 mod routing_scope;
 use super::feedback::format_review_feedback;
-use super::policy_routing::{GateSnapshotContext, RoutingAction, route_outcome};
+use super::policy_routing::RoutingAction;
 use super::*;
 use crate::product::lifecycle_store::workspace::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
     ClassificationError, ClassifiedFinding, EvaluationDecision, FatalReason, FindingClass,
     FindingFingerprint, HumanReason, PlanOutcome, PolicyDiagnostic, ReviewCycleState,
     ReviewEvaluationInput, ReviewFindingCategory, ReviewInvocationScope, ReviewPhase, RunBudgets,
-    RunHistory, RunHistoryDelta, RunPolicy, classify_review, evaluate,
+    RunHistory, RunHistoryDelta, RunPolicy, WorkItemPlanFlowKind, classify_review, evaluate,
 };
+use routing_scope::route_outcome_from_decision;
 impl WorkspaceEngine {
     pub(crate) async fn complete_review(
         &mut self,
@@ -91,6 +92,9 @@ impl WorkspaceEngine {
                 .lifecycle_store
                 .as_ref()
                 .and_then(|store| store.get_workspace_session(&self.session.session_id).ok());
+            if let Some(action) = self.fail_invalid_single_candidate_scope(expected.as_ref()) {
+                return Some(action);
+            }
             if let Some(record) = expected.as_ref() {
                 self.refresh_policy_state(record);
             }
@@ -166,29 +170,44 @@ impl WorkspaceEngine {
                 return Some((scope, action, self.session.run_history.clone()));
             }
         };
-        if let Some(diagnostic) = verdict.structured_output_diagnostic.as_ref()
-            && matches!(
-                diagnostic.code.as_str(),
-                "unknown_finding_category" | "unknown_class_hint"
-            )
-        {
-            let reason = if diagnostic.code == "unknown_finding_category" {
-                FatalReason::UnknownCategory
-            } else {
-                FatalReason::UnknownClassHint
+        if let Some(diagnostic) = verdict.structured_output_diagnostic.as_ref() {
+            let fatal = match diagnostic.code.as_str() {
+                "unknown_finding_category" => Some((
+                    FatalReason::UnknownCategory,
+                    diagnostic.code.clone(),
+                    diagnostic.message.clone(),
+                )),
+                "unknown_class_hint" => Some((
+                    FatalReason::UnknownClassHint,
+                    diagnostic.code.clone(),
+                    diagnostic.message.clone(),
+                )),
+                "verification_scope_violation"
+                    if phase == ReviewPhase::Verification
+                        && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate =>
+                {
+                    Some((
+                        FatalReason::ProtocolViolation,
+                        diagnostic.code.clone(),
+                        diagnostic.message.clone(),
+                    ))
+                }
+                _ => None,
             };
-            return Some((
-                invocation,
-                RoutingAction::AbortFatal {
-                    reason,
-                    diagnostics: vec![PolicyDiagnostic {
-                        code: diagnostic.code.clone(),
-                        message: diagnostic.message.clone(),
-                        field: Some("findings".to_string()),
-                    }],
-                },
-                self.session.run_history.clone(),
-            ));
+            if let Some((reason, code, message)) = fatal {
+                return Some((
+                    invocation,
+                    RoutingAction::AbortFatal {
+                        reason,
+                        diagnostics: vec![PolicyDiagnostic {
+                            code,
+                            message,
+                            field: Some("findings".to_string()),
+                        }],
+                    },
+                    self.session.run_history.clone(),
+                ));
+            }
         }
         let raw_verdict = verdict.verdict.clone();
         let envelope =
@@ -209,7 +228,16 @@ impl WorkspaceEngine {
                     ));
                 }
             };
-        let mut findings = match classify_review(&envelope, &invocation) {
+        let verified_mechanical_report_ref = match self.verified_mechanical_report_ref(&invocation)
+        {
+            Ok(reference) => reference,
+            Err(action) => return Some((invocation, action, self.session.run_history.clone())),
+        };
+        let mut findings = match classify_review(
+            &envelope,
+            &invocation,
+            verified_mechanical_report_ref.as_deref(),
+        ) {
             Ok(findings) => findings,
             Err(error) => {
                 return Some((
@@ -1145,49 +1173,4 @@ fn classification_error_action(error: ClassificationError) -> RoutingAction {
             field: Some("findings".to_string()),
         }],
     }
-}
-
-fn route_outcome_from_decision(
-    decision: EvaluationDecision,
-    policy: RunPolicy,
-    history: &RunHistory,
-    invocation: &ReviewInvocationScope,
-    findings: Vec<crate::product::work_item_plan_policy::ClassifiedFinding>,
-) -> RoutingAction {
-    let (outcome, outcome_findings, repeated_fingerprints, trigger) = match &decision.outcome {
-        PlanOutcome::HumanRequired {
-            findings,
-            repeated_fingerprints,
-            reason,
-        } => (
-            decision.outcome.clone(),
-            findings.clone(),
-            repeated_fingerprints.clone(),
-            *reason,
-        ),
-        PlanOutcome::Repairable { findings } => (
-            decision.outcome.clone(),
-            findings.clone(),
-            Vec::new(),
-            HumanReason::RepairBudgetExhausted,
-        ),
-        _ => (
-            decision.outcome.clone(),
-            findings,
-            Vec::new(),
-            HumanReason::NativeHumanRequired,
-        ),
-    };
-    route_outcome(
-        outcome,
-        policy,
-        GateSnapshotContext {
-            history: history.clone(),
-            budgets: RunBudgets::default(),
-            invocation: invocation.clone(),
-            findings: outcome_findings,
-            repeated_fingerprints,
-            trigger,
-        },
-    )
 }
