@@ -278,6 +278,13 @@ export type WorkspaceSessionStatus =
   | "failed";
 export type WorkItemPlanFlowKind = "legacy" | "single_candidate";
 export type WorkItemPlanRunPolicy = "interactive" | "auto_if_valid";
+export type WorkItemPlanSingleCandidatePhase =
+  | "prepare"
+  | "generate"
+  | "evaluate"
+  | "approval"
+  | "completed"
+  | "failed";
 export interface WorkItemPlanRunHistory {
   seen_fingerprints: string[];
   repairs_used: number;
@@ -344,6 +351,11 @@ export interface WorkspaceWsState {
   repairReservation: WorkItemPlanRepairReservation | null;
   policyDiagnostics: WorkItemPlanPolicyDiagnostic[];
   providerStartLedger: WorkItemPlanProviderStartLedgerEntry[];
+  singleCandidatePhase: WorkItemPlanSingleCandidatePhase | null;
+  workItemPlanSourceRevisionRef: string | null;
+  planCandidateIrRef: string | null;
+  mechanicalReportRef: string | null;
+  publicationProvenanceRef: string | null;
   visitedStages: string[];
   messages: WsMessage[];
   checkpoints: WsCheckpoint[];
@@ -406,6 +418,11 @@ export interface WorkspaceWsActions {
     repair_reservation?: WorkItemPlanRepairReservation | null;
     policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
     provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
+    single_candidate_phase?: WorkItemPlanSingleCandidatePhase | null;
+    work_item_plan_source_revision_ref?: string | null;
+    plan_candidate_ir_ref?: string | null;
+    mechanical_report_ref?: string | null;
+    publication_provenance_ref?: string | null;
     messages: WsMessage[];
     checkpoints: WsCheckpoint[];
     artifact: WorkspaceArtifact;

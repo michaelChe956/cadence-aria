@@ -509,6 +509,14 @@ impl WorkspaceEngine {
             repair_reservation: self.session.repair_reservation.clone().map(Box::new),
             policy_diagnostics: self.session.policy_diagnostics.clone(),
             provider_start_ledger: self.session.provider_start_ledger.clone(),
+            single_candidate_phase: self.session.single_candidate_phase.clone(),
+            work_item_plan_source_revision_ref: self
+                .session
+                .work_item_plan_source_revision_ref
+                .clone(),
+            plan_candidate_ir_ref: self.session.plan_candidate_ir_ref.clone(),
+            mechanical_report_ref: self.session.mechanical_report_ref.clone(),
+            publication_provenance_ref: self.session.publication_provenance_ref.clone(),
         }
     }
 }

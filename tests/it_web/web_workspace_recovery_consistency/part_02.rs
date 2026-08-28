@@ -138,6 +138,11 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");

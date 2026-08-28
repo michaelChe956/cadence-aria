@@ -61,11 +61,16 @@ fn default_run_policy() -> RunPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SingleCandidatePhase {
+    Prepare,
     Generate,
     Evaluate,
     Approval,
-    Compile,
+    Completed,
+    Failed,
 }
+
+/// 与 Work Item 单候选契约使用的名称保持兼容。
+pub type WorkItemPlanSingleCandidatePhase = SingleCandidatePhase;
 
 /// Approval 成功后确定性派生的编译三元组；同一 session 只能持久化同一值。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +124,8 @@ pub struct WorkspaceSessionRecord {
     pub plan_candidate_ir_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mechanical_report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -12,8 +12,64 @@ use crate::product::work_item_plan_source_store::{
 };
 
 impl WorkspaceEngine {
+    pub(crate) fn persist_single_candidate_terminal_phase(
+        &mut self,
+        phase: crate::product::models::SingleCandidatePhase,
+    ) {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return;
+        }
+        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+            self.session.single_candidate_phase = Some(phase);
+            return;
+        };
+        let Ok(expected) = lifecycle.get_workspace_session(&self.session.session_id) else {
+            return;
+        };
+        let status = match phase {
+            crate::product::models::SingleCandidatePhase::Completed => {
+                crate::product::models::WorkspaceSessionStatus::Confirmed
+            }
+            crate::product::models::SingleCandidatePhase::Failed => {
+                crate::product::models::WorkspaceSessionStatus::Failed
+            }
+            _ => return,
+        };
+        if let Ok(saved) =
+            lifecycle.compare_and_save_single_candidate_phase(&expected, phase, status)
+        {
+            self.session.single_candidate_phase = saved.single_candidate_phase;
+            self.session.session_status = saved.status;
+        }
+    }
+
+    /// 先以 durable ledger 保留 provider start，再允许 SingleCandidate author 启动。
+    pub(crate) fn reserve_single_candidate_author_start(&mut self) -> Result<bool, String> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return Err(
+                "single candidate provider reservation requires SingleCandidate flow".to_string(),
+            );
+        }
+        let lifecycle = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| format!("load session for provider reservation failed: {error}"))?;
+        let key = format!(
+            "single_candidate_author:{}:{}",
+            expected.id, expected.run_history.repairs_used
+        );
+        let (saved, should_start) = lifecycle
+            .reserve_single_candidate_provider_start(&expected, &key)
+            .map_err(|error| format!("persist provider reservation failed: {error}"))?;
+        self.session = WorkspaceSession::from_record(saved);
+        Ok(should_start)
+    }
+
     /// 将 SingleCandidate provider 的 markdown 原文通过 compiler 与 typed source store
-    /// 落盘。此处只完成 Generate→Evaluate：review/approval/compile 的推进由 WP5 负责。
+    /// 落盘，并在 durable Evaluate 后启动阶段 1 的 reviewer 路由。
     pub(crate) async fn complete_single_candidate_work_item_plan_author(
         &mut self,
         source: String,
@@ -103,6 +159,15 @@ impl WorkspaceEngine {
                 )
             })?;
 
+        let expected = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!("reload workspace session before generated refs CAS failed: {error}")
+            })?;
+        let generated = lifecycle
+            .compare_and_save_single_candidate_generation(&expected, &source_ref, &ir_ref)
+            .map_err(|error| format!("persist single candidate generated refs failed: {error}"))?;
+
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = validate_plan_candidate_ir(
             &ir_record.ir,
@@ -138,23 +203,15 @@ impl WorkspaceEngine {
                     error.code()
                 )
             })?;
-
-        let expected = lifecycle
-            .get_workspace_session(&self.session.session_id)
-            .map_err(|error| {
-                format!("reload workspace session before source refs CAS failed: {error}")
-            })?;
         let saved = lifecycle
-            .compare_and_save_single_candidate_generation(
-                &expected,
-                &source_ref,
-                &ir_ref,
-                &report_ref,
-            )
-            .map_err(|error| format!("persist single candidate source refs failed: {error}"))?;
+            .compare_and_save_single_candidate_evaluation(&generated, &report_ref)
+            .map_err(|error| {
+                format!("persist single candidate Evaluate report ref failed: {error}")
+            })?;
         self.session.work_item_plan_source_revision_ref = saved.work_item_plan_source_revision_ref;
         self.session.plan_candidate_ir_ref = saved.plan_candidate_ir_ref;
         self.session.mechanical_report_ref = saved.mechanical_report_ref;
+        self.session.publication_provenance_ref = saved.publication_provenance_ref;
         self.session.single_candidate_phase = saved.single_candidate_phase;
         self.session.session_status = saved.status;
 
@@ -167,10 +224,15 @@ impl WorkspaceEngine {
             "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string(),
         ))
         .await;
-        self.enter_author_confirm(Some(
-            "SingleCandidate source 已生成；后续 Evaluate/Review/Approval 由工作流推进".to_string(),
-        ))
-        .await;
+        if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
+            self.route_single_candidate_evaluate_without_reviewer()
+                .await;
+        } else {
+            self.start_review().await;
+            if self.session.stage == WorkspaceStage::CrossReview {
+                self.request_provider_run(ProviderRunKind::ReviewOnly).await;
+            }
+        }
         Ok(())
     }
 }

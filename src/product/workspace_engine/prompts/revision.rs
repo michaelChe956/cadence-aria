@@ -212,6 +212,7 @@ mod revision_routing_reference_tests {
             work_item_plan_source_revision_ref: None,
             plan_candidate_ir_ref: None,
             mechanical_report_ref: None,
+            publication_provenance_ref: None,
             approval_attempt_id: None,
             approved_at: None,
             compile_reservation: None,

@@ -86,6 +86,7 @@ fn stopped_takeover_parent(
             &parent,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::StoppedNeedsHuman,
+                single_candidate_phase: None,
                 run_history: parent.run_history.clone(),
                 scope: Some(crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
                     format!("outline:{entity_id}"),
@@ -125,6 +126,7 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
             &expected,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::Running,
+                single_candidate_phase: None,
                 run_history: expected.run_history.clone(),
                 scope: expected.review_invocation_scope.clone(),
                 gate: expected.human_gate_snapshot.clone(),
@@ -159,6 +161,7 @@ fn policy_cas_conflict_rejects_stale_record_and_routing_reloads_then_reevaluates
             &stale,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::StoppedNeedsHuman,
+                single_candidate_phase: None,
                 run_history: stale.run_history.clone(),
                 scope: stale.review_invocation_scope.clone(),
                 gate: Some(recovery_gate(true)),
@@ -217,6 +220,7 @@ fn awaiting_human_reconnect_restores_durable_gate_without_provider_restart_or_ev
             &parent,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::WaitingForHuman,
+                single_candidate_phase: None,
                 run_history: parent.run_history.clone(),
                 scope: Some(crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
                     "outline:awaiting".to_string(),
@@ -277,6 +281,7 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
             &parent,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::StoppedNeedsHuman,
+                single_candidate_phase: None,
                 run_history: history,
                 scope: Some(crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
                     "outline:takeover".to_string(),
@@ -454,6 +459,7 @@ fn completed_and_failed_replay_do_not_recreate_human_gate_or_start_provider() {
                 &parent,
                 PolicyRoutePersist {
                     status: status.clone(),
+                    single_candidate_phase: None,
                     run_history: parent.run_history.clone(),
                     scope: None,
                     gate: None,
@@ -521,6 +527,7 @@ fn provider_start_ledger_claim_is_idempotent_across_generate_and_repair_recovery
                 &session,
                 PolicyRoutePersist {
                     status: WorkspaceSessionStatus::Running,
+                    single_candidate_phase: None,
                     run_history: session.run_history.clone(),
                     scope: session.review_invocation_scope.clone(),
                     gate: None,

@@ -85,6 +85,7 @@ fn stopped_takeover_fixture_with_resumable_gate(resumable: bool) -> TakeoverFixt
             &parent,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::StoppedNeedsHuman,
+                single_candidate_phase: None,
                 run_history: parent.run_history.clone(),
                 scope: Some(ReviewInvocationScope::initial("outline:takeover")),
                 gate: Some(human_gate(resumable)),

@@ -242,6 +242,11 @@ fn review_messages_and_session_state_serialize_as_contract() {
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
     })
     .unwrap();
     assert_eq!(state["type"], "session_state");
@@ -818,6 +823,11 @@ fn session_state_artifact_accepts_markdown_payload() {
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");

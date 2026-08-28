@@ -17,6 +17,17 @@ impl WorkspaceEngine {
         completion: ProviderCompletion,
         verdict: ReviewVerdict,
     ) {
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && matches!(
+                self.session.single_candidate_phase,
+                Some(
+                    crate::product::models::SingleCandidatePhase::Completed
+                        | crate::product::models::SingleCandidatePhase::Failed
+                )
+            )
+        {
+            return;
+        }
         let node_id = self
             .active_node_id
             .clone()
@@ -263,6 +274,10 @@ impl WorkspaceEngine {
         {
             return None;
         }
+        let mechanical = match self.single_candidate_mechanical_findings() {
+            Ok(findings) => findings,
+            Err(action) => return Some((invocation, action, self.session.run_history.clone())),
+        };
         let mut decision = if cycle.initial_count == 1 && cycle.verification_count >= 1 {
             EvaluationDecision {
                 outcome: PlanOutcome::HumanRequired {
@@ -275,7 +290,7 @@ impl WorkspaceEngine {
         } else {
             evaluate(
                 &ReviewEvaluationInput {
-                    mechanical: &[],
+                    mechanical: &mechanical,
                     review: &findings,
                     cycle_key: &cycle_key,
                     phase,
@@ -386,70 +401,9 @@ impl WorkspaceEngine {
             _ => format!("review:{node_id}"),
         }
     }
-    fn persist_policy_route(
-        &self,
-        expected: Option<&WorkspaceSessionRecord>,
-        invocation: &ReviewInvocationScope,
-        action: &RoutingAction,
-        history: &RunHistory,
-    ) -> Result<Option<WorkspaceSessionRecord>, ProductStoreError> {
-        let (status, gate, diagnostics) = policy_route_record_values(action);
-        let scope = self.policy_scope_for_action(
-            invocation,
-            action,
-            expected.and_then(|record| record.review_invocation_scope.as_ref()),
-        );
-        let Some(store) = &self.lifecycle_store else {
-            return Ok(None);
-        };
-        let Some(expected) = expected else {
-            return Ok(None);
-        };
-        store
-            .compare_and_save_policy_route(
-                expected,
-                PolicyRoutePersist {
-                    status,
-                    run_history: history.clone(),
-                    scope,
-                    gate,
-                    diagnostics,
-                    repair_reservation: expected.repair_reservation.clone(),
-                    provider_start_ledger: expected.provider_start_ledger.clone(),
-                },
-            )
-            .map(Some)
-    }
-    fn apply_policy_route_state(
-        &mut self,
-        invocation: &ReviewInvocationScope,
-        action: &RoutingAction,
-        history: RunHistory,
-    ) {
-        let (status, gate, diagnostics) = policy_route_record_values(action);
-        self.session.run_history = history;
-        self.session.review_invocation_scope =
-            self.policy_scope_for_action(invocation, action, None);
-        self.session.human_gate_snapshot = gate;
-        self.session.policy_diagnostics = diagnostics;
-        self.session.session_status = status;
-    }
-    pub(super) fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {
-        self.session.session_status = record.status.clone();
-        self.session.run_history = record.run_history.clone();
-        self.session.review_invocation_scope = record.review_invocation_scope.clone();
-        self.session.human_gate_snapshot = record.human_gate_snapshot.clone();
-        self.session.repair_reservation = record.repair_reservation.clone();
-        self.session.policy_diagnostics = record.policy_diagnostics.clone();
-        self.session.provider_start_ledger = record.provider_start_ledger.clone();
-        // stale worker CAS retry 重新评估前必须完整恢复 SingleCandidate immutable refs；
-        // 否则 durable scope 已更新而内存仍指向旧 IR/report，会被误判为 protocol violation。
-        self.session.work_item_plan_source_revision_ref =
-            record.work_item_plan_source_revision_ref.clone();
-        self.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
-        self.session.mechanical_report_ref = record.mechanical_report_ref.clone();
-    }
-    async fn apply_policy_route(
+    /// 未启用 reviewer 时，SingleCandidate 的真实机械报告仍必须经阶段 1
+    /// evaluate/route_outcome/CAS 进入 Approval；不得由 provider 完成回调直接跳阶段。
+    pub(super) async fn apply_policy_route(
         &mut self,
         action: RoutingAction,
         verdict: ReviewVerdict,
@@ -458,8 +412,26 @@ impl WorkspaceEngine {
     ) {
         let stage_before = self.session.stage.clone();
         match action {
+            RoutingAction::ContinueToCompleted
+                if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate =>
+            {
+                if self.session.run_policy == RunPolicy::AutoIfValid {
+                    self.enter_policy_valid_work_item_plan_compile().await;
+                } else {
+                    self.enter_human_confirm(Some(
+                        "SingleCandidate 已通过 Evaluate，等待 Approval".to_string(),
+                    ))
+                    .await;
+                }
+            }
             RoutingAction::ContinueToCompleted => {
                 self.route_legacy_review(verdict, active_node_type, round, true)
+                    .await;
+            }
+            RoutingAction::TriggerAggregateRepair { .. }
+                if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate =>
+            {
+                self.request_provider_run(ProviderRunKind::WorkItemPlanSingleCandidateAuthor)
                     .await;
             }
             RoutingAction::TriggerAggregateRepair { .. } => {
@@ -503,7 +475,7 @@ impl WorkspaceEngine {
                     )
                 })
     }
-    async fn request_provider_run(&mut self, kind: ProviderRunKind) {
+    pub(crate) async fn request_provider_run(&mut self, kind: ProviderRunKind) {
         let _ = self
             .event_tx
             .send(EngineEvent::ProviderRunRequested {
@@ -587,6 +559,7 @@ impl WorkspaceEngine {
                 &record,
                 PolicyRoutePersist {
                     status: record.status.clone(),
+                    single_candidate_phase: record.single_candidate_phase.clone(),
                     run_history: history,
                     scope: record.review_invocation_scope.clone(),
                     gate: record.human_gate_snapshot.clone(),
@@ -1043,7 +1016,7 @@ impl WorkspaceEngine {
             .await;
     }
 
-    async fn finish_policy_failure(
+    pub(super) async fn finish_policy_failure(
         &mut self,
         reason: FatalReason,
         diagnostics: Vec<PolicyDiagnostic>,
@@ -1088,7 +1061,7 @@ fn provider_run_kind_for_batch_outcome(
     }
 }
 
-fn policy_route_record_values(
+pub(super) fn policy_route_record_values(
     action: &RoutingAction,
 ) -> (
     WorkspaceSessionStatus,

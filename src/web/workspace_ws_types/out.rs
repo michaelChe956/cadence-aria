@@ -40,6 +40,9 @@ pub struct RecoverableInterruptedRun {
     pub label: String,
 }
 
+// SessionState 必须按既有 WebSocket wire schema 内联完整 durable snapshot；为节省
+// Rust 内存布局而装箱会改变公共枚举字段，故保留现有表示。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsOutMessage {
@@ -161,6 +164,16 @@ pub enum WsOutMessage {
         policy_diagnostics: Vec<PolicyDiagnostic>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         provider_start_ledger: Vec<ProviderStartLedgerEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        single_candidate_phase: Option<crate::product::models::SingleCandidatePhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_item_plan_source_revision_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_candidate_ir_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mechanical_report_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        publication_provenance_ref: Option<String>,
     },
     Error {
         message: String,
@@ -220,6 +233,11 @@ mod tests {
             repair_reservation: None,
             policy_diagnostics: Vec::new(),
             provider_start_ledger: Vec::new(),
+            single_candidate_phase: Some(crate::product::models::SingleCandidatePhase::Evaluate),
+            work_item_plan_source_revision_ref: Some("source-ref".to_string()),
+            plan_candidate_ir_ref: Some("ir-ref".to_string()),
+            mechanical_report_ref: Some("report-ref".to_string()),
+            publication_provenance_ref: Some("provenance-ref".to_string()),
         };
 
         let value = serde_json::to_value(message).unwrap();

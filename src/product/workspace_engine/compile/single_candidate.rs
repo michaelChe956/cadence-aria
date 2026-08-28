@@ -268,6 +268,10 @@ impl WorkspaceEngine {
         self.maybe_fail_single_candidate_compile(
             SingleCandidateCompileCheckpoint::ReservationPersisted,
         )?;
+        self.session.approval_attempt_id = reserved.approval_attempt_id.clone();
+        self.session.approved_at = reserved.approved_at.clone();
+        self.session.compile_reservation = reserved.compile_reservation.clone();
+        self.session.publication_provenance_ref = reserved.publication_provenance_ref.clone();
         let reservation = reserved
             .compile_reservation
             .as_ref()
@@ -652,6 +656,7 @@ impl WorkspaceEngine {
             &record,
             PolicyRoutePersist {
                 status: WorkspaceSessionStatus::Failed,
+                single_candidate_phase: Some(crate::product::models::SingleCandidatePhase::Failed),
                 run_history: record.run_history.clone(),
                 scope: record.review_invocation_scope.clone(),
                 gate: record.human_gate_snapshot.clone(),
@@ -661,6 +666,7 @@ impl WorkspaceEngine {
             },
         ) {
             self.session.session_status = saved.status;
+            self.session.single_candidate_phase = saved.single_candidate_phase;
             self.session.policy_diagnostics = saved.policy_diagnostics;
         }
     }

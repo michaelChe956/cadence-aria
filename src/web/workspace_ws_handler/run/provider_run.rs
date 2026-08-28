@@ -586,6 +586,36 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 }
             }
             ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
+                let should_start = match engine.reserve_single_candidate_author_start() {
+                    Ok(should_start) => should_start,
+                    Err(message) => {
+                        engine.persist_single_candidate_terminal_phase(
+                            crate::product::models::SingleCandidatePhase::Failed,
+                        );
+                        engine
+                            .finish_active_run_with_failed_node(message.clone())
+                            .await;
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::Error { message },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if !should_start {
+                    engine.mark_active_run_finished(&run_label);
+                    drop(engine);
+                    clear_active_run_if_token(
+                        &current_run_for_task,
+                        &workspace_runs_for_task,
+                        &session_id_for_task,
+                        run_token,
+                    )
+                    .await;
+                    return;
+                }
                 let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
                 let app_paths_for_run = run_context_clone.app_paths.clone();
                 let session_record_for_run = run_context_clone.session_record.clone();
@@ -802,6 +832,9 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     .complete_single_candidate_work_item_plan_author(full_output, repository.id)
                     .await
                 {
+                    engine.persist_single_candidate_terminal_phase(
+                        crate::product::models::SingleCandidatePhase::Failed,
+                    );
                     engine
                         .finish_active_run_with_failed_node(message.clone())
                         .await;

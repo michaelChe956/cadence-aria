@@ -472,6 +472,9 @@ impl WorkspaceEngine {
         self.mark_latest_artifact_confirmed(Some("auto_if_valid".to_string()));
         let (plan, child_sessions) = self.confirm_work_item_plan().await?;
         self.transition_stage(WorkspaceStage::Completed).await;
+        self.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Completed,
+        );
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::Completed,
             agent: None,

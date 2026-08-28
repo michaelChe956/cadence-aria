@@ -1,8 +1,10 @@
 use super::policy_routing::{GateSnapshotContext, route_outcome};
+use super::routing::policy_route_record_values;
 use super::*;
 use crate::product::lifecycle_store::workspace::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
-    FatalReason, PolicyDiagnostic, ReviewInvocationScope, ReviewPhase, WorkItemPlanFlowKind,
+    FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,
+    ReviewInvocationScope, ReviewPhase, WorkItemPlanFlowKind,
 };
 use crate::product::work_item_plan_source_store::{
     SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
@@ -252,6 +254,7 @@ impl WorkspaceEngine {
                 &expected,
                 PolicyRoutePersist {
                     status: expected.status.clone(),
+                    single_candidate_phase: expected.single_candidate_phase.clone(),
                     run_history: expected.run_history.clone(),
                     scope: Some(scope),
                     gate: expected.human_gate_snapshot.clone(),
@@ -370,6 +373,223 @@ impl WorkspaceEngine {
                 .unwrap_or_else(|_| format!("draft:{node_id}")),
             _ => format!("review:{node_id}"),
         }
+    }
+
+    pub(super) fn single_candidate_mechanical_findings(
+        &self,
+    ) -> Result<Vec<ClassifiedFinding>, RoutingAction> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.single_candidate_phase.clone()
+                != Some(crate::product::models::SingleCandidatePhase::Evaluate)
+        {
+            return Ok(Vec::new());
+        }
+        let Some(report_ref) = self.session.mechanical_report_ref.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let lifecycle = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| RoutingAction::AbortFatal {
+                reason: FatalReason::PersistenceFailure,
+                diagnostics: vec![PolicyDiagnostic {
+                    code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                    message: "lifecycle_store unavailable for mechanical report".to_string(),
+                    field: Some("mechanical_report_ref".to_string()),
+                }],
+            })?;
+        let scope = SourceStoreScope {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+        };
+        let report = WorkItemPlanSourceStore::new(lifecycle.app_paths())
+            .get_mechanical_report(&scope, report_ref)
+            .map_err(|error| RoutingAction::AbortFatal {
+                reason: FatalReason::ProtocolViolation,
+                diagnostics: vec![PolicyDiagnostic {
+                    code: "mechanical_report_invalid".to_string(),
+                    message: format!("mechanical report rejected: {}", error.code()),
+                    field: Some("mechanical_report_ref".to_string()),
+                }],
+            })?;
+        Ok(report
+            .report
+            .findings
+            .into_iter()
+            .filter(|finding| {
+                finding.severity == crate::product::models::WorkItemSplitFindingSeverity::Error
+            })
+            .map(|finding| ClassifiedFinding {
+                class: FindingClass::MechanicalError,
+                fingerprint: FindingFingerprint::for_finding(
+                    Some(ReviewFindingCategory::Other),
+                    FindingClass::MechanicalError,
+                    &finding.message,
+                    Some(&finding.code),
+                ),
+                category: Some(ReviewFindingCategory::Other),
+                severity: "error".to_string(),
+                message: finding.message,
+                evidence: Some(report_ref.to_string()),
+                required_action: Some(finding.code.clone()),
+                contract_field: Some(finding.code),
+            })
+            .collect())
+    }
+
+    pub(super) fn persist_policy_route(
+        &self,
+        expected: Option<&WorkspaceSessionRecord>,
+        invocation: &ReviewInvocationScope,
+        action: &RoutingAction,
+        history: &RunHistory,
+    ) -> Result<Option<WorkspaceSessionRecord>, ProductStoreError> {
+        let (mut status, mut gate, diagnostics) = policy_route_record_values(action);
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.run_policy == RunPolicy::Interactive
+            && matches!(action, RoutingAction::ContinueToCompleted)
+        {
+            status = WorkspaceSessionStatus::WaitingForHuman;
+            gate = Some(self.single_candidate_approval_gate(history));
+        }
+        let scope = self.policy_scope_for_action(
+            invocation,
+            action,
+            expected.and_then(|record| record.review_invocation_scope.as_ref()),
+        );
+        let Some(store) = &self.lifecycle_store else {
+            return Ok(None);
+        };
+        let Some(expected) = expected else {
+            return Ok(None);
+        };
+        store
+            .compare_and_save_policy_route(
+                expected,
+                PolicyRoutePersist {
+                    status,
+                    single_candidate_phase: self.single_candidate_phase_for_action(action),
+                    run_history: history.clone(),
+                    scope,
+                    gate,
+                    diagnostics,
+                    repair_reservation: expected.repair_reservation.clone(),
+                    provider_start_ledger: expected.provider_start_ledger.clone(),
+                },
+            )
+            .map(Some)
+    }
+
+    pub(super) fn apply_policy_route_state(
+        &mut self,
+        invocation: &ReviewInvocationScope,
+        action: &RoutingAction,
+        history: RunHistory,
+    ) {
+        let (mut status, mut gate, diagnostics) = policy_route_record_values(action);
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.run_policy == RunPolicy::Interactive
+            && matches!(action, RoutingAction::ContinueToCompleted)
+        {
+            status = WorkspaceSessionStatus::WaitingForHuman;
+            gate = Some(self.single_candidate_approval_gate(&history));
+        }
+        self.session.run_history = history;
+        self.session.review_invocation_scope =
+            self.policy_scope_for_action(invocation, action, None);
+        self.session.human_gate_snapshot = gate;
+        self.session.policy_diagnostics = diagnostics;
+        self.session.session_status = status;
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+            self.session.single_candidate_phase = self.single_candidate_phase_for_action(action);
+        }
+    }
+
+    pub(super) fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {
+        self.session.session_status = record.status.clone();
+        self.session.run_history = record.run_history.clone();
+        self.session.review_invocation_scope = record.review_invocation_scope.clone();
+        self.session.human_gate_snapshot = record.human_gate_snapshot.clone();
+        self.session.repair_reservation = record.repair_reservation.clone();
+        self.session.policy_diagnostics = record.policy_diagnostics.clone();
+        self.session.provider_start_ledger = record.provider_start_ledger.clone();
+        // stale worker CAS retry 重新评估前必须完整恢复 SingleCandidate immutable refs；
+        // 否则 durable scope 已更新而内存仍指向旧 IR/report，会被误判为 protocol violation。
+        self.session.work_item_plan_source_revision_ref =
+            record.work_item_plan_source_revision_ref.clone();
+        self.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
+        self.session.mechanical_report_ref = record.mechanical_report_ref.clone();
+        self.session.publication_provenance_ref = record.publication_provenance_ref.clone();
+        self.session.single_candidate_phase = record.single_candidate_phase.clone();
+    }
+
+    pub(super) fn single_candidate_approval_gate(&self, history: &RunHistory) -> HumanGateSnapshot {
+        HumanGateSnapshot {
+            findings: Vec::new(),
+            repeated_fingerprints: Vec::new(),
+            attempts_used: history
+                .repairs_used
+                .saturating_add(history.manual_repairs_used),
+            manual_repairs_remaining: RunBudgets::default()
+                .max_manual_repairs
+                .saturating_sub(history.manual_repairs_used),
+            // 阶段 1 的 gate schema 是唯一的人工审批快照载体；有效候选无 finding，
+            // 仍用其既有 trigger 以避免新增决策协议。
+            trigger: HumanReason::NativeHumanRequired,
+            resumable: true,
+        }
+    }
+
+    pub(super) fn single_candidate_phase_for_action(
+        &self,
+        action: &RoutingAction,
+    ) -> Option<crate::product::models::SingleCandidatePhase> {
+        use crate::product::models::SingleCandidatePhase;
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return None;
+        }
+        match action {
+            RoutingAction::ContinueToCompleted => Some(SingleCandidatePhase::Approval),
+            RoutingAction::AbortFatal { .. } => Some(SingleCandidatePhase::Failed),
+            RoutingAction::TriggerAggregateRepair { .. } => Some(SingleCandidatePhase::Generate),
+            RoutingAction::EnterHumanGate { .. } | RoutingAction::StopNeedsHuman { .. } => {
+                self.session.single_candidate_phase.clone()
+            }
+        }
+    }
+
+    pub(crate) async fn route_single_candidate_evaluate_without_reviewer(&mut self) {
+        let verdict = ReviewVerdict {
+            verdict: ReviewVerdictType::Pass,
+            comments: "未启用 reviewer；仅执行 SingleCandidate mechanical Evaluate".to_string(),
+            summary: "SingleCandidate mechanical Evaluate 已完成，等待 Approval".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserConfirmAllowed,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        };
+        let node_id = self
+            .active_node_id
+            .clone()
+            .unwrap_or_else(|| "single_candidate_evaluate".to_string());
+        let active_node_type = self.active_node_type();
+        let round = self.active_review_round().unwrap_or(1);
+        if let Some(action) = self.work_item_policy_action(&node_id, &verdict) {
+            self.apply_policy_route(action, verdict, active_node_type, round)
+                .await;
+            return;
+        }
+        let diagnostics = vec![PolicyDiagnostic {
+            code: FatalReason::StateCorruption.as_code().to_string(),
+            message: "SingleCandidate Evaluate did not produce a policy route".to_string(),
+            field: Some("single_candidate_phase".to_string()),
+        }];
+        self.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Failed,
+        );
+        self.finish_policy_failure(FatalReason::StateCorruption, diagnostics)
+            .await;
     }
 }
 

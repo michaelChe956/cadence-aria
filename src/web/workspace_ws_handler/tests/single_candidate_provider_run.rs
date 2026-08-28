@@ -407,7 +407,7 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
     assert!(input.prompt.contains("[markdown_grammar]"));
     assert!(input.prompt.contains("[routing_reference]"));
     assert!(!input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
-    wait_for_stage(&fixture.engine, WorkspaceStage::AuthorConfirm).await;
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
     assert_eq!(
         work_item_plan_parser_paths_for_session(&fixture.record.id),
         vec!["single_candidate_markdown"],
@@ -419,7 +419,7 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
         .expect("reload single-candidate session");
     assert_eq!(
         durable.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Evaluate),
+        Some(crate::product::models::SingleCandidatePhase::Approval),
     );
     let source_ref = durable
         .work_item_plan_source_revision_ref

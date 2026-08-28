@@ -33,12 +33,24 @@ impl WorkspaceEngine {
             WorkspaceStage::HumanConfirm => {
                 self.validate_confirm_aggregate_spec_gate()?;
                 match self.session.workspace_type {
+                    WorkspaceType::WorkItemPlan
+                        if self.session.flow_kind
+                            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+                            && self.session.single_candidate_phase
+                                == Some(crate::product::models::SingleCandidatePhase::Approval) =>
+                    {
+                        self.enter_policy_valid_work_item_plan_compile().await;
+                        return Ok(WorkspaceConfirmOutcome::None);
+                    }
                     WorkspaceType::WorkItemPlan => {
                         self.complete_active_node(Some("已确认通过".to_string()))
                             .await;
                         self.mark_latest_artifact_confirmed(Some("human".to_string()));
                         let (plan, new_sessions) = self.confirm_work_item_plan().await?;
                         self.transition_stage(WorkspaceStage::Completed).await;
+                        self.persist_single_candidate_terminal_phase(
+                            crate::product::models::SingleCandidatePhase::Completed,
+                        );
                         let _ = self
                             .create_timeline_node(TimelineNodeDraft {
                                 node_type: TimelineNodeType::Completed,

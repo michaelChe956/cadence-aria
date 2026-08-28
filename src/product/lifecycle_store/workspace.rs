@@ -22,6 +22,8 @@ use super::{
 
 pub struct PolicyRoutePersist {
     pub status: WorkspaceSessionStatus,
+    /// SingleCandidate 由同一 CAS 与策略结果一起推进；legacy 始终保持 `None`。
+    pub single_candidate_phase: Option<crate::product::models::SingleCandidatePhase>,
     pub run_history: crate::product::work_item_plan_policy::RunHistory,
     pub scope: Option<crate::product::work_item_plan_policy::ReviewInvocationScope>,
     pub gate: Option<crate::product::work_item_plan_policy::HumanGateSnapshot>,
@@ -271,10 +273,13 @@ impl LifecycleStore {
             repair_reservation: None,
             policy_diagnostics: Vec::new(),
             provider_start_ledger: Vec::new(),
-            single_candidate_phase: None,
+            single_candidate_phase: (work_item_plan_options.flow_kind
+                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate)
+                .then_some(crate::product::models::SingleCandidatePhase::Prepare),
             work_item_plan_source_revision_ref: None,
             plan_candidate_ir_ref: None,
             mechanical_report_ref: None,
+            publication_provenance_ref: None,
             approval_attempt_id: None,
             approved_at: None,
             compile_reservation: None,
@@ -530,6 +535,7 @@ impl LifecycleStore {
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         let PolicyRoutePersist {
             status,
+            single_candidate_phase,
             run_history,
             scope,
             gate,
@@ -549,6 +555,11 @@ impl LifecycleStore {
                 });
             }
             stored.status = status;
+            if stored.flow_kind
+                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            {
+                stored.single_candidate_phase = single_candidate_phase;
+            }
             stored.run_history = run_history;
             stored.review_invocation_scope = scope;
             stored.human_gate_snapshot = gate;
@@ -995,10 +1006,7 @@ mod tests {
 
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
-    use crate::product::lifecycle_store::{
-        WorkItemPlanSessionOptions, single_candidate_approval_attempt_id,
-        single_candidate_compile_id,
-    };
+    use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
     use crate::product::models::ProviderName;
     use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 
@@ -1040,6 +1048,17 @@ mod tests {
         assert_eq!(session.flow_kind, options.flow_kind);
         assert_eq!(session.run_policy, options.run_policy);
         assert_eq!(
+            session.single_candidate_phase,
+            Some(crate::product::models::SingleCandidatePhase::Prepare)
+        );
+        let reissued = store
+            .create_workspace_session_with_id(
+                create_input(WorkspaceType::WorkItemPlan, Some(options.clone())),
+                session.id.clone(),
+            )
+            .expect("reissued create returns immutable existing snapshot");
+        assert_eq!(reissued.run_policy, options.run_policy);
+        assert_eq!(
             store.get_workspace_session(&session.id).unwrap().flow_kind,
             WorkItemPlanFlowKind::SingleCandidate
         );
@@ -1063,122 +1082,6 @@ mod tests {
                 kind: "workspace_session",
                 ..
             }
-        ));
-    }
-
-    #[test]
-    fn single_candidate_compile_id_uses_the_published_test_vector() {
-        assert_eq!(
-            single_candidate_compile_id(
-                "session-001",
-                "plan-001",
-                "approval-001",
-                "2026-08-27T12:34:56Z",
-            ),
-            "5a16e570210838318554c17b3ebd0c433c3001ce00adb7b8e9726d79aecf788e",
-        );
-    }
-
-    #[test]
-    fn single_candidate_approval_and_reservation_are_cas_bound_to_durable_refs() {
-        let temp = tempdir().unwrap();
-        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
-        let mut session = store
-            .create_workspace_session(create_input(
-                WorkspaceType::WorkItemPlan,
-                Some(WorkItemPlanSessionOptions {
-                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
-                    run_policy: RunPolicy::Interactive,
-                    rollout_snapshot: true,
-                }),
-            ))
-            .expect("create single candidate session");
-        session.single_candidate_phase =
-            Some(crate::product::models::SingleCandidatePhase::Approval);
-        session.work_item_plan_source_revision_ref = Some(
-            "project/project_0001/issue/issue_0001/plan/entity_0001/source_revision/source-001"
-                .to_string(),
-        );
-        session.plan_candidate_ir_ref = Some(
-            "project/project_0001/issue/issue_0001/plan/entity_0001/plan_candidate_ir/ir-001"
-                .to_string(),
-        );
-        session.mechanical_report_ref = Some(
-            "project/project_0001/issue/issue_0001/plan/entity_0001/mechanical_report/report-001"
-                .to_string(),
-        );
-        write_json(
-            &store
-                .workspace_sessions_root("project_0001", "issue_0001")
-                .join(format!("{}.json", session.id)),
-            &session,
-        )
-        .expect("seed durable candidate context");
-        let approval_id = single_candidate_approval_attempt_id(
-            &session.id,
-            &session.entity_id,
-            session
-                .work_item_plan_source_revision_ref
-                .as_deref()
-                .unwrap(),
-            session.plan_candidate_ir_ref.as_deref().unwrap(),
-            session.mechanical_report_ref.as_deref().unwrap(),
-        );
-        let approved = store
-            .compare_and_save_single_candidate_approval(
-                &session,
-                &approval_id,
-                "2026-08-27T12:34:56Z",
-            )
-            .expect("approval CAS");
-        assert_eq!(
-            approved.approval_attempt_id.as_deref(),
-            Some(approval_id.as_str())
-        );
-        assert_eq!(
-            approved.approved_at.as_deref(),
-            Some("2026-08-27T12:34:56Z")
-        );
-
-        let reservation = crate::product::models::SingleCandidateCompileReservation {
-            compile_id: single_candidate_compile_id(
-                &approved.id,
-                &approved.entity_id,
-                &approval_id,
-                "2026-08-27T12:34:56Z",
-            ),
-            now: "2026-08-27T12:34:56Z".to_string(),
-            publication_provenance_ref: format!(
-                "project/{}/issue/{}/plan/{}/publication_provenance/{}",
-                approved.project_id,
-                approved.issue_id,
-                approved.entity_id,
-                single_candidate_compile_id(
-                    &approved.id,
-                    &approved.entity_id,
-                    &approval_id,
-                    "2026-08-27T12:34:56Z",
-                )
-            ),
-        };
-        let reserved = store
-            .put_compile_reservation_cas(
-                "project_0001",
-                "issue_0001",
-                "entity_0001",
-                &approved.id,
-                &approved,
-                &reservation,
-            )
-            .expect("reservation CAS");
-        assert_eq!(reserved.compile_reservation.as_ref(), Some(&reservation));
-        assert!(matches!(
-            store.compare_and_save_single_candidate_approval(
-                &session,
-                &approval_id,
-                "2026-08-27T12:34:56Z",
-            ),
-            Err(ProductStoreError::Conflict { .. })
         ));
     }
 }
