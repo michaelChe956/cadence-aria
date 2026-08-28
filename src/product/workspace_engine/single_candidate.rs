@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::product::models::ProviderName;
 use crate::product::work_item_plan_compiler::{
     PlanCandidateValidationContext, WorkItemPlanSourceContext, compile_work_item_plan,
     validate_plan_candidate_ir,
@@ -10,6 +11,45 @@ use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
     WorkItemPlanSourceStore,
 };
+use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
+
+/// 仅由服务端 outline 机械计数与 provider profile 驱动的内部 generation 选择输入。
+///
+/// 该输入不通过 WebSocket 反序列化；客户端不能提交候选数、prompt 大小或 mode。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleCandidateGenerationDecisionInput {
+    pub provider: ProviderName,
+    pub candidate_item_count: usize,
+    pub prompt_bytes: usize,
+    pub provider_input_budget_bytes: usize,
+}
+
+/// 根据当前已注册 provider profile 的静态输入预算返回服务端能力值。
+///
+/// `ProviderRegistry` 目前只注册 adapter，没有 capability/profile 查询接口；因此预算
+/// 固定在服务端而非从客户端读取。后续 registry 暴露 profile 时可收敛到该接口，选择
+/// 规则和 WebSocket 边界不变。
+pub(crate) const fn single_candidate_provider_input_budget_bytes(provider: &ProviderName) -> usize {
+    match provider {
+        ProviderName::ClaudeCode | ProviderName::Codex | ProviderName::KimiCode => 131_072,
+        ProviderName::Pi | ProviderName::Fake => 65_536,
+    }
+}
+
+/// 在 outline 已成功由本地 compiler parser 计数后，确定性选择后续 author 的内部模式。
+///
+/// 阈值是内部诊断策略，不是 WS/OpenSpec 对外契约；相同输入始终产生相同输出。
+pub(crate) fn select_internal_generation_mode(
+    input: &SingleCandidateGenerationDecisionInput,
+) -> WorkItemGenerationModeDto {
+    let prompt_within_budget =
+        input.prompt_bytes.saturating_mul(4) <= input.provider_input_budget_bytes.saturating_mul(3);
+    if input.candidate_item_count <= 3 && prompt_within_budget {
+        WorkItemGenerationModeDto::Batch
+    } else {
+        WorkItemGenerationModeDto::Serial
+    }
+}
 
 impl WorkspaceEngine {
     pub(crate) fn persist_single_candidate_terminal_phase(

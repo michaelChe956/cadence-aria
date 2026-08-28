@@ -139,6 +139,19 @@ pub(crate) fn planning_resume_run_kind(
 /// `WsInMessage` intentionally remains the typed business payload. The envelope records
 /// only field names (never client values) so protocol handlers can reject fields that are
 /// forbidden for a durable flow before any state mutation occurs.
+pub(crate) fn single_candidate_generation_decision_bypasses_stage_validation(
+    flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind,
+    message: &WsInMessage,
+) -> bool {
+    flow_kind == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+        && matches!(
+            message,
+            WsInMessage::SelectWorkItemGenerationMode { .. }
+                | WsInMessage::WorkItemDraftDecision { .. }
+                | WsInMessage::WorkItemBatchDecision { .. }
+        )
+}
+
 pub(crate) fn parse_workspace_inbound_text(
     text: &str,
 ) -> Result<WorkspaceInboundEnvelope, serde_json::Error> {
@@ -152,6 +165,58 @@ pub(crate) fn parse_workspace_inbound_text(
         message,
         submitted_fields,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    use crate::web::workspace_ws_types::{
+        WorkItemBatchDecisionDto, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
+    };
+
+    #[test]
+    fn single_candidate_legacy_generation_decisions_bypass_stage_validation_only_for_precise_rejection()
+     {
+        let messages = [
+            WsInMessage::SelectWorkItemGenerationMode {
+                mode: WorkItemGenerationModeDto::Serial,
+            },
+            WsInMessage::WorkItemDraftDecision {
+                outline_id: "outline_client_supplied".to_string(),
+                decision: WorkItemDraftDecisionDto::Accept,
+                feedback: None,
+            },
+            WsInMessage::WorkItemBatchDecision {
+                decision: WorkItemBatchDecisionDto::AcceptAll,
+                feedback: None,
+                first_affected_outline_id: None,
+            },
+        ];
+
+        for message in messages {
+            assert!(requires_stage_validation(&message));
+            assert!(
+                single_candidate_generation_decision_bypasses_stage_validation(
+                    WorkItemPlanFlowKind::SingleCandidate,
+                    &message,
+                )
+            );
+            assert!(
+                !single_candidate_generation_decision_bypasses_stage_validation(
+                    WorkItemPlanFlowKind::Legacy,
+                    &message,
+                )
+            );
+        }
+        assert!(
+            !single_candidate_generation_decision_bypasses_stage_validation(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &WsInMessage::RequestOutlineRevision { feedback: None },
+            )
+        );
+    }
 }
 
 pub(crate) async fn handle_workspace_socket(
@@ -514,7 +579,11 @@ pub(crate) async fn handle_workspace_socket(
         let in_msg = &envelope.message;
         *last_client_message_at.lock().await = tokio::time::Instant::now();
 
-        let stage_type_and_cancel_replay = if requires_stage_validation(in_msg) {
+        let stage_type_and_cancel_replay = if requires_stage_validation(in_msg)
+            && !single_candidate_generation_decision_bypasses_stage_validation(
+                session_record.flow_kind,
+                in_msg,
+            ) {
             Some({
                 let engine = engine.lock().await;
                 let completed_cancel_replay = matches!(

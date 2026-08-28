@@ -224,6 +224,78 @@ async fn complete_single_candidate_review(engine: &mut WorkspaceEngine, verdict:
         .await;
 }
 
+mod internal_generation_mode {
+    use super::*;
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_split_engine::parse::count_work_item_plan_candidates;
+    use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
+
+    fn generation_input(
+        candidate_item_count: usize,
+        prompt_bytes: usize,
+    ) -> SingleCandidateGenerationDecisionInput {
+        SingleCandidateGenerationDecisionInput {
+            provider: ProviderName::Codex,
+            candidate_item_count,
+            prompt_bytes,
+            provider_input_budget_bytes: 100,
+        }
+    }
+
+    #[test]
+    fn internal_generation_mode_uses_parsed_outline_count_and_budget_boundaries() {
+        let three_items = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
+        ));
+        let fourth_item = format!(
+            "## Work Item WI-003{}",
+            three_items
+                .split("## Work Item WI-003")
+                .nth(1)
+                .expect("third item fixture")
+        )
+        .replace("WI-003", "WI-004")
+        .replace("TASK-003", "TASK-004")
+        .replace("AC-003", "AC-004")
+        .replace("CHECK-003", "CHECK-004")
+        .replace("contract.levels-integration", "contract.levels-fourth")
+        .replace("REQ-WSC-07", "REQ-WSC-08");
+        let four_items = format!("{three_items}\n\n{fourth_item}");
+
+        let parsed_three =
+            count_work_item_plan_candidates(three_items).expect("three-item fixture must parse");
+        let parsed_four =
+            count_work_item_plan_candidates(&four_items).expect("four-item fixture must parse");
+        assert_eq!(parsed_three, 3);
+        assert_eq!(parsed_four, 4);
+        assert_eq!(
+            select_internal_generation_mode(&generation_input(parsed_three, 75)),
+            WorkItemGenerationModeDto::Batch,
+            "75% input budget and three parsed candidates remain batch-eligible"
+        );
+        assert_eq!(
+            select_internal_generation_mode(&generation_input(parsed_three, 76)),
+            WorkItemGenerationModeDto::Serial,
+            "over 75% input budget must be serial"
+        );
+        assert_eq!(
+            select_internal_generation_mode(&generation_input(parsed_four, 1)),
+            WorkItemGenerationModeDto::Serial,
+            "four parsed candidates must be serial regardless of prompt budget"
+        );
+    }
+
+    #[test]
+    fn internal_generation_mode_is_deterministic_for_identical_input() {
+        let input = generation_input(3, 75);
+        assert_eq!(
+            select_internal_generation_mode(&input),
+            select_internal_generation_mode(&input)
+        );
+    }
+}
+
 mod phase_machine {
     use super::*;
 

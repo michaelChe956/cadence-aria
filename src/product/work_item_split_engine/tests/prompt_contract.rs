@@ -894,6 +894,35 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
 }
 
 #[test]
+fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_author_few_shot() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt = crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        "story_spec_0001: level selection",
+        "design_spec_0001: levels API",
+        "src/product/levels; web/src/levels; tests/integration",
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("markdown outline prompt");
+
+    assert!(prompt.contains("用于服务端机械计数"));
+    assert!(prompt.contains("[markdown_grammar]"));
+    assert!(prompt.contains("[minimum_legal_source]"));
+    assert!(prompt.contains("不得输出 JSON、code fence、解释、source hash"));
+    assert!(
+        !prompt.contains("[real_finding_few_shot]"),
+        "轻量 outline 不得携带完整 author 的 few-shot"
+    );
+    assert!(
+        !prompt.contains("原始输出直接成为 source revision"),
+        "轻量 outline 不得伪装成 full markdown source author"
+    );
+    assert!(prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES);
+}
+
+#[test]
 fn work_item_plan_markdown_mechanical_count_uses_compiler_parser() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

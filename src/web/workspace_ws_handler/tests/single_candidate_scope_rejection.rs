@@ -3,6 +3,7 @@ use crate::product::models::{
     WorkspaceRolePermissionModes, WorkspaceSessionRecord, WorkspaceSessionStatus,
 };
 use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
+use crate::web::workspace_ws_types::{WorkItemBatchDecisionDto, WorkItemDraftDecisionDto};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -65,6 +66,68 @@ async fn single_candidate_scope_rejection_rejects_all_forbidden_markers_without_
         );
         assert_eq!(scope_test_snapshot(&engine).await, before, "field={field}");
         assert!(events.try_recv().is_err(), "field={field}");
+    }
+}
+
+#[tokio::test]
+async fn single_candidate_scope_rejection_precedes_generation_decision_rejection() {
+    let (context, engine, mut outbound_rx, mut events) =
+        scope_test_context(WorkItemPlanFlowKind::SingleCandidate);
+    let envelope = parse_workspace_inbound_text(
+        r#"{"type":"select_work_item_generation_mode","mode":"batch","scope":{"client":"forbidden"}}"#,
+    )
+    .expect("raw envelope should parse");
+    let before = scope_test_snapshot(&engine).await;
+
+    handle_workspace_inbound_message(context, envelope).await;
+
+    let outbound = outbound_rx.recv().await.expect("protocol error outbound");
+    let OutboundControl::Text(json) = outbound else {
+        panic!("expected protocol error text");
+    };
+    let value: serde_json::Value = serde_json::from_str(&json).expect("protocol error json");
+    assert_eq!(value["code"], "SINGLE_CANDIDATE_SCOPE_FORBIDDEN");
+    assert_eq!(scope_test_snapshot(&engine).await, before);
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn single_candidate_generation_decision_rejection_preserves_phase_history_and_events() {
+    let messages = [
+        WsInMessage::SelectWorkItemGenerationMode {
+            mode: WorkItemGenerationModeDto::Batch,
+        },
+        WsInMessage::WorkItemDraftDecision {
+            outline_id: "outline_client_supplied".to_string(),
+            decision: WorkItemDraftDecisionDto::Accept,
+            feedback: None,
+        },
+        WsInMessage::WorkItemBatchDecision {
+            decision: WorkItemBatchDecisionDto::AcceptAll,
+            feedback: None,
+            first_affected_outline_id: None,
+        },
+    ];
+
+    for message in messages {
+        let (context, engine, mut outbound_rx, mut events) =
+            scope_test_context(WorkItemPlanFlowKind::SingleCandidate);
+        let before = scope_test_snapshot(&engine).await;
+
+        handle_workspace_inbound_message(context, message).await;
+
+        let outbound = outbound_rx.recv().await.expect("protocol error outbound");
+        let OutboundControl::Text(json) = outbound else {
+            panic!("expected protocol error text");
+        };
+        let value: serde_json::Value = serde_json::from_str(&json).expect("protocol error json");
+        assert_eq!(value["type"], "protocol_error");
+        assert_eq!(
+            value["code"],
+            "SINGLE_CANDIDATE_GENERATION_DECISION_FORBIDDEN"
+        );
+        assert_eq!(scope_test_snapshot(&engine).await, before);
+        assert!(events.try_recv().is_err());
     }
 }
 
@@ -140,6 +203,7 @@ async fn scope_test_snapshot(engine: &Arc<Mutex<WorkspaceEngine>>) -> Vec<u8> {
         &engine.session().session_status,
         engine.session().flow_kind,
         &engine.session().run_history,
+        &engine.session().single_candidate_phase,
         &engine.session().review_invocation_scope,
         engine
             .session()

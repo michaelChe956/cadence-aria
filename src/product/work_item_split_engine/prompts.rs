@@ -195,13 +195,60 @@ fn work_item_plan_real_few_shot() -> Result<String, String> {
     Ok(cases)
 }
 
+/// 构造 SingleCandidate 的轻量 markdown outline prompt。
+///
+/// compiler 当前只有完整 markdown grammar，因此 outline 仍须是可机械解析的最小合法
+/// source；它只用于本地 item count，绝不作为 source revision、IR 或 WS artifact。完整
+/// author prompt 仍由 `build_work_item_plan_markdown_prompt` 构造。
+pub(crate) fn build_work_item_plan_markdown_outline_prompt(
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    story_context: &str,
+    design_context: &str,
+    repository_structure: &str,
+    routing_context: &RoutingReferenceContext,
+) -> Result<String, String> {
+    let (story_context, design_context, repository_structure) =
+        budget_markdown_outline_context(story_context, design_context, repository_structure);
+    let prompt = format!(
+        "只输出用于服务端机械计数的最小合法 `work-item-plan.md` outline；不得输出 JSON、code fence、解释、source hash、target_repository_id 或 trusted command catalog。\n\\
+         该 outline 绝不发布、绝不写 source revision；但必须按 markdown grammar 让每个候选 Work Item 都可被 compiler parser 计数。\n\\
+         [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\\
+         [routing_reference]\n{routing_reference}\n\\
+         [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\\
+         story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\\
+         {grammar}\\
+         [minimum_legal_source] 每个候选复用该完整 grammar 形状并使用唯一 WI/TASK/AC/CHECK/contract ID；不要省略 section 或必填字段。\n{minimum_source}\n\\
+         [output] 现在只输出轻量、可 parser 的 markdown outline。",
+        issue_title = issue.title,
+        issue_description = issue.description.as_deref().unwrap_or("无"),
+        repository_id = repository.id,
+        repository_path = repository.path.display(),
+        routing_reference = generation_cadence_routing_rules_reference(routing_context),
+        story_context = story_context,
+        design_context = design_context,
+        repository_structure = repository_structure,
+        story_spec_ids = request.story_spec_ids.join(", "),
+        design_spec_ids = request.design_spec_ids.join(", "),
+        grammar = work_item_plan_markdown_grammar(),
+        minimum_source = work_item_plan_minimum_legal_source(),
+    );
+    if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
+        return Err(format!(
+            "work item plan markdown outline prompt exceeds hard budget: {} > {} bytes",
+            prompt.len(),
+            WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES
+        ));
+    }
+    Ok(prompt)
+}
+
 /// 构造单候选路径专用的 markdown source author prompt。
 ///
 /// 该 prompt 只描述待编译的 `work-item-plan.md` 产物：Provider 原始输出直接进入
 /// source revision 与 compiler，不携带旧 JSON/sentinel/draft 契约，也不从上下文补齐
 /// markdown 字段。legacy builder 仍由旧 flow 使用。
-// Task 4.2a 才将 SingleCandidate provider runner 接到此 builder；当前任务只固定 prompt 契约。
-#[allow(dead_code)]
 pub(crate) fn build_work_item_plan_markdown_prompt(
     request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
@@ -252,6 +299,18 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         ));
     }
     Ok(prompt)
+}
+
+fn budget_markdown_outline_context(
+    story_context: &str,
+    design_context: &str,
+    repository_structure: &str,
+) -> (String, String, String) {
+    (
+        truncate_markdown_context(story_context, 2_000),
+        truncate_markdown_context(design_context, 2_000),
+        truncate_markdown_context(repository_structure, 1_000),
+    )
 }
 
 fn budget_markdown_context(

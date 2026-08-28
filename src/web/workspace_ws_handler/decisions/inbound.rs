@@ -66,6 +66,13 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
         let _ = send_json_outbound(&outbound_tx, &err).await;
         return;
     }
+    if let Some(err) = single_candidate_generation_decision_error(
+        run_context.session_record.flow_kind,
+        &envelope.message,
+    ) {
+        let _ = send_json_outbound(&outbound_tx, &err).await;
+        return;
+    }
 
     match envelope.message {
         WsInMessage::UserMessage { content } => {

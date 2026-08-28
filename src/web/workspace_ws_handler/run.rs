@@ -17,12 +17,19 @@ mod gateway_start;
 pub(crate) use gateway_start::{resolve_plan_author_launch, start_work_item_plan_author};
 #[path = "run/provider_run.rs"]
 mod provider_run;
+#[path = "run/single_candidate.rs"]
+mod single_candidate;
 pub(crate) use provider_run::{spawn_provider_run_from_event, spawn_provider_run_from_handler};
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 static WORK_ITEM_PLAN_PARSER_PATHS: std::sync::OnceLock<
+    std::sync::Mutex<Vec<(String, &'static str)>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static SINGLE_CANDIDATE_GENERATION_STEPS: std::sync::OnceLock<
     std::sync::Mutex<Vec<(String, &'static str)>>,
 > = std::sync::OnceLock::new();
 
@@ -44,6 +51,28 @@ pub(crate) fn work_item_plan_parser_paths_for_session(session_id: &str) -> Vec<&
         .iter()
         .filter_map(|(recorded_session_id, path)| {
             (recorded_session_id == session_id).then_some(*path)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn record_single_candidate_generation_step(session_id: &str, step: &'static str) {
+    SINGLE_CANDIDATE_GENERATION_STEPS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("single candidate generation order spy")
+        .push((session_id.to_string(), step));
+}
+
+#[cfg(test)]
+pub(crate) fn single_candidate_generation_steps_for_session(session_id: &str) -> Vec<&'static str> {
+    SINGLE_CANDIDATE_GENERATION_STEPS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("single candidate generation order spy")
+        .iter()
+        .filter_map(|(recorded_session_id, step)| {
+            (recorded_session_id == session_id).then_some(*step)
         })
         .collect()
 }

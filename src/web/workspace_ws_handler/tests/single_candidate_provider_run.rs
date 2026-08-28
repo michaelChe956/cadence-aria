@@ -129,13 +129,14 @@ impl ProviderRunFixture {
                 validator_findings: Vec::new(),
             })
             .expect("create plan");
-        let session_id = match flow_kind {
-            WorkItemPlanFlowKind::Legacy => "workspace_session_legacy_provider_run",
-            WorkItemPlanFlowKind::SingleCandidate => {
-                "workspace_session_single_candidate_provider_run"
-            }
-        }
-        .to_string();
+        let session_id = format!(
+            "workspace_session_{}_provider_run_{}",
+            match flow_kind {
+                WorkItemPlanFlowKind::Legacy => "legacy",
+                WorkItemPlanFlowKind::SingleCandidate => "single_candidate",
+            },
+            uuid::Uuid::new_v4().simple(),
+        );
         let record = lifecycle
             .create_workspace_session_with_id(
                 CreateWorkspaceSessionInput {
@@ -255,6 +256,40 @@ fn legacy_outline_output(story_id: &str, design_id: &str) -> String {
     structured_output_sentinel("legacy-flow", &output)
 }
 
+fn single_candidate_context(
+    fixture: &ProviderRunFixture,
+    provider: Arc<RecordingOutputProvider>,
+) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider);
+    let run_context = ProviderRunContext {
+        provider_registry: Arc::new(registry),
+        engine: fixture.engine.clone(),
+        current_run: fixture.current_run.clone(),
+        workspace_runs: fixture.workspace_runs.clone(),
+        session_id: fixture.record.id.clone(),
+        next_run_id: Arc::new(Mutex::new(0)),
+        app_paths: fixture.app_paths.clone(),
+        session_record: fixture.record.clone(),
+    };
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    (
+        WorkspaceInboundContext {
+            app_state: WebAppState::new(
+                fixture.root.path().to_path_buf(),
+                crate::web::runtime::WebRuntime::new_fake(fixture.root.path().to_path_buf()),
+            ),
+            engine: fixture.engine.clone(),
+            run_context,
+            outbound_tx,
+            current_run: fixture.current_run.clone(),
+            workspace_runs: fixture.workspace_runs.clone(),
+            session_id: fixture.record.id.clone(),
+        },
+        outbound_rx,
+    )
+}
+
 fn single_candidate_markdown(story_id: &str, design_id: &str) -> String {
     format!(
         "# Work Item Plan\n\
@@ -365,31 +400,7 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
         output,
         inputs: input_tx,
     });
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::ClaudeCode, provider);
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: fixture.engine.clone(),
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
-        session_id: fixture.record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: fixture.app_paths.clone(),
-        session_record: fixture.record.clone(),
-    };
-    let (outbound_tx, _outbound_rx) = mpsc::channel(64);
-    let context = WorkspaceInboundContext {
-        app_state: WebAppState::new(
-            fixture.root.path().to_path_buf(),
-            crate::web::runtime::WebRuntime::new_fake(fixture.root.path().to_path_buf()),
-        ),
-        engine: fixture.engine.clone(),
-        run_context,
-        outbound_tx,
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
-        session_id: fixture.record.id.clone(),
-    };
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
 
     handle_workspace_inbound_message(
         context,
@@ -400,18 +411,50 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
     )
     .await;
 
-    let input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+    let outline_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
         .await
-        .expect("single-candidate provider must receive input")
-        .expect("single-candidate provider input");
-    assert!(input.prompt.contains("[markdown_grammar]"));
-    assert!(input.prompt.contains("[routing_reference]"));
-    assert!(!input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
+        .expect("single-candidate outline provider must receive input")
+        .expect("single-candidate outline provider input");
+    let full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("single-candidate full author provider must receive input")
+        .expect("single-candidate full author provider input");
+    assert!(outline_input.prompt.contains("用于服务端机械计数"));
+    assert!(outline_input.prompt.contains("[markdown_grammar]"));
+    assert!(!outline_input.prompt.contains("[real_finding_few_shot]"));
+    assert!(full_input.prompt.contains("[markdown_grammar]"));
+    assert!(full_input.prompt.contains("[routing_reference]"));
+    assert!(full_input.prompt.contains("[real_finding_few_shot]"));
+    assert!(!full_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
     wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
     assert_eq!(
+        single_candidate_generation_steps_for_session(&fixture.record.id),
+        vec![
+            "outline",
+            "parse_count",
+            "selector",
+            "full_markdown_author",
+            "parse_source_revision",
+        ],
+        "single-candidate invocation order must stay outline → parse/count → selector → full author → parse/source revision",
+    );
+    assert_eq!(
         work_item_plan_parser_paths_for_session(&fixture.record.id),
-        vec!["single_candidate_markdown"],
-        "single-candidate run must not reach the legacy outline parser",
+        vec!["single_candidate_outline", "single_candidate_markdown"],
+        "single-candidate run must parse the outline before the full markdown source and never reach the legacy parser",
+    );
+    assert!(
+        !fixture
+            .engine
+            .lock()
+            .await
+            .timeline_nodes
+            .iter()
+            .any(|node| {
+                node.node_type
+                    == crate::web::workspace_ws_types::TimelineNodeType::WorkItemGenerationMode
+            }),
+        "internal selection must not create a generation decision request node"
     );
     let durable = fixture
         .lifecycle
@@ -451,6 +494,89 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
     source_store
         .get_mechanical_report(&scope, report_ref)
         .expect("stored mechanical report");
+}
+
+#[tokio::test]
+async fn single_candidate_outline_parse_failure_is_fatal_and_never_starts_full_author() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(RecordingOutputProvider {
+        output: "# Work Item Plan\n\n## Work Item WI-001: malformed\n".to_string(),
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let outline_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("outline provider must receive input")
+        .expect("outline provider input");
+    assert!(outline_input.prompt.contains("用于服务端机械计数"));
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "outline parse failure must not start the full markdown author"
+    );
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let outbound = outbound_rx
+                .recv()
+                .await
+                .expect("outline parse failure outbound");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == "error" {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("outline parse failure error");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("outline parse failed")
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+}
+
+async fn wait_for_single_candidate_phase(
+    fixture: &ProviderRunFixture,
+    expected: crate::product::models::SingleCandidatePhase,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if fixture
+                .lifecycle
+                .get_workspace_session(&fixture.record.id)
+                .expect("reload session")
+                .single_candidate_phase
+                == Some(expected.clone())
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider run must reach expected single-candidate phase");
 }
 
 async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expected: WorkspaceStage) {

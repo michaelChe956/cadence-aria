@@ -6,6 +6,28 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 const CLIENT_SUBMITTED_SCOPE_FIELDS: [&str; 3] =
     ["scope", "review_invocation_scope", "review_scope"];
 
+pub(crate) fn single_candidate_generation_decision_error(
+    flow_kind: WorkItemPlanFlowKind,
+    message: &WsInMessage,
+) -> Option<WsOutMessage> {
+    if flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        || !matches!(
+            message,
+            WsInMessage::SelectWorkItemGenerationMode { .. }
+                | WsInMessage::WorkItemDraftDecision { .. }
+                | WsInMessage::WorkItemBatchDecision { .. }
+        )
+    {
+        return None;
+    }
+
+    Some(WsOutMessage::ProtocolError {
+        code: "SINGLE_CANDIDATE_GENERATION_DECISION_FORBIDDEN".to_string(),
+        message: "single-candidate generation mode is selected internally".to_string(),
+        context: Some(serde_json::json!({ "message_type": message_type(message) })),
+    })
+}
+
 pub(crate) fn single_candidate_scope_submission_error(
     flow_kind: WorkItemPlanFlowKind,
     submitted_fields: &BTreeSet<String>,
@@ -160,5 +182,50 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    use crate::web::workspace_ws_types::{
+        WorkItemBatchDecisionDto, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
+    };
+
+    #[test]
+    fn single_candidate_generation_decision_messages_are_forbidden_but_legacy_remains_compatible() {
+        let messages = [
+            WsInMessage::SelectWorkItemGenerationMode {
+                mode: WorkItemGenerationModeDto::Serial,
+            },
+            WsInMessage::WorkItemDraftDecision {
+                outline_id: "outline_client_supplied".to_string(),
+                decision: WorkItemDraftDecisionDto::Accept,
+                feedback: None,
+            },
+            WsInMessage::WorkItemBatchDecision {
+                decision: WorkItemBatchDecisionDto::AcceptAll,
+                feedback: None,
+                first_affected_outline_id: None,
+            },
+        ];
+
+        for message in messages {
+            let error = single_candidate_generation_decision_error(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &message,
+            )
+            .expect("single-candidate must reject client generation decisions");
+            let WsOutMessage::ProtocolError { code, .. } = error else {
+                panic!("expected protocol error");
+            };
+            assert_eq!(code, "SINGLE_CANDIDATE_GENERATION_DECISION_FORBIDDEN");
+            assert!(
+                single_candidate_generation_decision_error(WorkItemPlanFlowKind::Legacy, &message)
+                    .is_none(),
+                "legacy generation decision protocol must remain compatible"
+            );
+        }
     }
 }

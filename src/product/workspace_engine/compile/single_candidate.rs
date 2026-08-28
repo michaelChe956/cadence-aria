@@ -12,6 +12,7 @@ pub(crate) enum SingleCandidateCompileCheckpoint {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SingleCandidateCompileFailpointKey {
+    session_id: String,
     project_id: String,
     issue_id: String,
     plan_id: String,
@@ -40,6 +41,7 @@ impl WorkspaceEngine {
         checkpoint: SingleCandidateCompileCheckpoint,
     ) -> SingleCandidateCompileFailpointGuard {
         let key = SingleCandidateCompileFailpointKey {
+            session_id: self.session.session_id.clone(),
             project_id: self.session.project_id.clone(),
             issue_id: self.session.issue_id.clone(),
             plan_id: self.session.entity_id.clone(),
@@ -67,6 +69,7 @@ impl WorkspaceEngine {
         checkpoint: SingleCandidateCompileCheckpoint,
     ) -> Result<(), String> {
         let key = SingleCandidateCompileFailpointKey {
+            session_id: self.session.session_id.clone(),
             project_id: self.session.project_id.clone(),
             issue_id: self.session.issue_id.clone(),
             plan_id: self.session.entity_id.clone(),
