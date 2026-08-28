@@ -210,13 +210,10 @@ impl WorkspaceEngine {
             )
             .ok()??;
         if index.outline_state != "confirmed" {
-            let failed_author_index =
-                self.failed_disconnect_node_index(TimelineNodeType::WorkItemPlanOutlineRun)?;
-            return Some(RecoverableInterruptedRun {
-                failed_node_id: self.timeline_nodes[failed_author_index].node_id.clone(),
-                operation: RecoverableInterruptedOperation::WorkItemPlanAuthorGeneration,
-                label: "重新生成中断的 Work Item Plan Outline".to_string(),
-            });
+            // Legacy outline recovery retains the pre-4.2a contract: an unconfirmed
+            // outline has no resumable provider run. SingleCandidate is handled by
+            // the explicit durable-flow branch above and does not depend on this.
+            return None;
         }
 
         if let Some(ArtifactPayload::WorkItemDraftCandidate { draft_candidate }) =

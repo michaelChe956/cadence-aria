@@ -823,13 +823,28 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
     )))
     .expect("golden findings JSON");
-    for finding in golden
+    let expected_few_shot_ids = crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_FEW_SHOT_IDS
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected_few_shot_ids = golden
         .as_array()
         .expect("golden findings array")
         .iter()
-        .take(11)
-    {
-        let finding = finding.get("finding").expect("finding payload");
+        .filter_map(|entry| {
+            let id = entry.get("id")?.as_str()?;
+            expected_few_shot_ids.contains(id).then_some((id, entry))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_few_shot_ids
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_few_shot_ids,
+        "markdown few-shot selection must be keyed by the exported raw-provider ID set, not fixture order"
+    );
+    for (id, entry) in selected_few_shot_ids {
+        let finding = entry.get("finding").expect("finding payload");
         for field in ["message", "evidence", "required_action"] {
             let value = finding
                 .get(field)
@@ -837,7 +852,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
                 .expect("provider raw finding field");
             assert!(
                 prompt.contains(value),
-                "markdown prompt must inline provider raw few-shot field {field}: {value}"
+                "markdown prompt must inline provider raw few-shot {id} field {field}: {value}"
             );
         }
     }
@@ -846,6 +861,12 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "<ARIA_STRUCTURED_OUTPUT",
         "canonical_field_contract",
         "class_hint",
+        "annotated_variant",
+        "human_annotation",
+        "annotated_fields",
+        "rep2-f1-annotated",
+        "rep3-f1-annotated",
+        "rep4-f1-annotated",
     ] {
         assert!(
             !prompt.contains(forbidden),
