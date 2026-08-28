@@ -370,6 +370,88 @@
         (lifecycle, story.id, design.id)
     }
 
+    /// 播种普通单物理仓项目：没有 logical codebase manifest/selection，issue 只通过
+    /// 唯一的 repo_id 归属物理 RepositoryRecord。
+    fn seed_single_physical_prepare_work_item_plan_fixture(
+        paths: &ProductAppPaths,
+    ) -> (LifecycleStore, String, String) {
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "single physical preflight project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some(REPOSITORY_ID.to_string()),
+                logical_codebase_id: None,
+                title: "single physical preflight issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let now = "2026-08-27T00:00:00Z".to_string();
+        crate::product::json_store::write_json(
+            &paths.project_root(PROJECT_ID).join("repos.json"),
+            &vec![RepositoryRecord {
+                id: REPOSITORY_ID.to_string(),
+                project_id: PROJECT_ID.to_string(),
+                name: "single physical repository".to_string(),
+                path: paths.root().join("single-physical-repository"),
+                repo_hash: "sha256:single-physical-repository".to_string(),
+                runtime_root: paths
+                    .root()
+                    .join("single-physical-repository/.aria/runtime"),
+                default_policy_preset: "manual-write".to_string(),
+                default_provider_mode: "fake".to_string(),
+                created_at: now.clone(),
+                logical_repository_id: None,
+                primary_checkout_id: None,
+                identity_schema_version: 0,
+                updated_at: now,
+            }],
+        )
+        .unwrap();
+
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                title: "single physical preflight story".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        lifecycle
+            .update_spec_confirmation_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &story.id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        let design = lifecycle
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                title: "single physical preflight design".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        lifecycle
+            .update_spec_confirmation_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &design.id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        (lifecycle, story.id, design.id)
+    }
+
     async fn post_prepare_work_item_plan(
         app: &axum::Router,
         story_spec_id: String,
@@ -426,6 +508,37 @@
         let mut files = std::collections::BTreeSet::new();
         collect(root, root, &mut files);
         files
+    }
+
+    #[tokio::test]
+    async fn prepare_single_physical_repository_uses_rollout_flow_snapshot_without_logical_manifest() {
+        for (rollout_enabled, expected_flow_kind) in [
+            (true, WorkItemPlanFlowKind::SingleCandidate),
+            (false, WorkItemPlanFlowKind::Legacy),
+        ] {
+            let root = TempDir::new().unwrap();
+            let paths = ProductAppPaths::new(root.path().join(".aria"));
+            let (lifecycle, story_spec_id, design_spec_id) =
+                seed_single_physical_prepare_work_item_plan_fixture(&paths);
+            let state = WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            )
+            .with_work_item_plan_single_candidate(rollout_enabled);
+            let app = build_web_router(state);
+
+            let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let sessions = lifecycle
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(
+                sessions[0].flow_kind, expected_flow_kind,
+                "rollout_enabled={rollout_enabled}"
+            );
+        }
     }
 
     #[tokio::test]

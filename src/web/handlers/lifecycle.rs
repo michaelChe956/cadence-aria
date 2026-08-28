@@ -649,8 +649,20 @@ pub async fn prepare_work_item_plan(
             let repository_id = issue.repo_id.clone().ok_or_else(|| {
                 ApiError::validation("repository_required", "repository_id is required")
             })?;
-            find_repository(&app_paths, &project_id, &repository_id)?;
-            WorkItemPlanFlowKind::Legacy
+            let repository = find_repository(&app_paths, &project_id, &repository_id)?;
+            if rollout_snapshot {
+                match preflight_single_repository_candidate(&[repository.id]) {
+                    SingleCandidatePreflightDecision::Eligible { .. } => {
+                        WorkItemPlanFlowKind::SingleCandidate
+                    }
+                    SingleCandidatePreflightDecision::LegacyFallback { reason } => {
+                        tracing::info!(%reason, "single-candidate preflight selected legacy flow");
+                        WorkItemPlanFlowKind::Legacy
+                    }
+                }
+            } else {
+                WorkItemPlanFlowKind::Legacy
+            }
         }
         RepositoryRouting::Logical {
             manifest,
