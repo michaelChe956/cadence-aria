@@ -346,7 +346,9 @@ impl WorkspaceEngine {
                 payload,
             })
         } else {
-            let update = self.append_artifact_version_without_event(payload).await;
+            let update = self
+                .append_artifact_version_without_event(payload, created_at)
+                .await;
             let version = self.artifact_versions.last_mut().ok_or_else(|| {
                 "compile report artifact version missing after update".to_string()
             })?;
@@ -364,22 +366,31 @@ impl WorkspaceEngine {
         let mut updates = vec![compile_report_update];
         for item in &outcome.work_items {
             updates.push(
-                self.ensure_initial_projection_artifact(ArtifactPayload::WorkItemProjection {
-                    projection: Box::new(item.projection_bundle.clone()),
-                })
+                self.ensure_initial_projection_artifact(
+                    ArtifactPayload::WorkItemProjection {
+                        projection: Box::new(item.projection_bundle.clone()),
+                    },
+                    &outcome.plan_revision.created_at,
+                )
                 .await?,
             );
         }
         updates.push(
-            self.ensure_initial_projection_artifact(ArtifactPayload::ProjectionValidation {
-                report: Box::new(outcome.projection_validation.clone()),
-            })
+            self.ensure_initial_projection_artifact(
+                ArtifactPayload::ProjectionValidation {
+                    report: Box::new(outcome.projection_validation.clone()),
+                },
+                &outcome.plan_revision.created_at,
+            )
             .await?,
         );
         updates.push(
-            self.ensure_initial_projection_artifact(ArtifactPayload::WorkItemRevisionHistory {
-                history: Box::new(self.initial_revision_history(outcome)),
-            })
+            self.ensure_initial_projection_artifact(
+                ArtifactPayload::WorkItemRevisionHistory {
+                    history: Box::new(self.initial_revision_history(outcome)),
+                },
+                &outcome.plan_revision.created_at,
+            )
             .await?,
         );
         let plan_payload = ArtifactPayload::WorkItemPlanProjection {
@@ -401,8 +412,11 @@ impl WorkspaceEngine {
             }
         } else {
             self.ensure_projection_identity_is_immutable(&plan_payload)?;
-            self.append_artifact_version_without_event(plan_payload)
-                .await
+            self.append_artifact_version_without_event(
+                plan_payload,
+                &outcome.plan_revision.created_at,
+            )
+            .await
         };
         updates.push(plan_update);
         lifecycle
@@ -418,6 +432,7 @@ impl WorkspaceEngine {
     async fn ensure_initial_projection_artifact(
         &mut self,
         payload: ArtifactPayload,
+        created_at: &str,
     ) -> Result<ArtifactUpdateEvent, String> {
         if let Some(version) = self
             .artifact_versions
@@ -430,12 +445,15 @@ impl WorkspaceEngine {
             });
         }
         self.ensure_projection_identity_is_immutable(&payload)?;
-        Ok(self.append_artifact_version_without_event(payload).await)
+        Ok(self
+            .append_artifact_version_without_event(payload, created_at)
+            .await)
     }
 
     async fn append_artifact_version_without_event(
         &mut self,
         payload: ArtifactPayload,
+        created_at: &str,
     ) -> ArtifactUpdateEvent {
         self.session.artifact = Some(payload.clone());
         for version in &mut self.artifact_versions {
@@ -454,7 +472,7 @@ impl WorkspaceEngine {
             review_verdict: None,
             confirmed_by: None,
             is_current: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: created_at.to_string(),
             source_node_id: source_node_id.clone(),
         });
         let _ = self

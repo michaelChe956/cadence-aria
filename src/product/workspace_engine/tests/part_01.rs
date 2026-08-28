@@ -331,6 +331,13 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
         provider_conversations: Vec::new(),
         repository_path: None,
     }
@@ -438,7 +445,11 @@ impl StreamingProviderAdapter for ImmediateOutputRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -478,12 +489,18 @@ impl StreamingProviderAdapter for SessionRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let output = if call_no == 1 {
-                "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n".to_string()
+                "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n"
+                    .to_string()
             } else {
                 complete_story_artifact("对 n <= 0 返回 0。", "n <= 0 时返回 0。")
             };
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("provider-author-session-1".to_string()))))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output,
+                        Some("provider-author-session-1".to_string()),
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -755,7 +772,12 @@ async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifa
                 "{workspace_type:?} should forward choice response to provider"
             );
             provider_event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(artifact, Some("provider-author-session-1".to_string()))))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        artifact,
+                        Some("provider-author-session-1".to_string()),
+                    ),
+                ))
                 .await
                 .expect("send completed");
         };
@@ -790,14 +812,18 @@ async fn persistent_engine_recovers_pending_text_fallback_choice_after_restart()
     let app_paths = ProductAppPaths::new(app_root.path().join(".aria"));
     let lifecycle_store = LifecycleStore::new(app_paths.clone());
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: "story_spec_0001".to_string(),
-        workspace_type: WorkspaceType::Story,
-        author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
-        review_rounds: 1,
-        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            work_item_plan_options: None,
+        })
         .expect("workspace session");
     lifecycle_store
         .replace_workspace_messages(

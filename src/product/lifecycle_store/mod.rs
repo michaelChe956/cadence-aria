@@ -17,6 +17,10 @@ mod tests;
 pub use inputs::*;
 pub use spec::{ConfirmAggregateGateError, ConfirmGateViolation};
 pub(crate) use utils::*;
+pub use workspace::{
+    CompileReservationError, PolicyRoutePersist, single_candidate_approval_attempt_id,
+    single_candidate_compile_id,
+};
 
 #[derive(Debug, Clone)]
 pub struct LifecycleStore {

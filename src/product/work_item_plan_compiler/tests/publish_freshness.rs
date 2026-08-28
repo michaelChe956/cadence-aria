@@ -205,6 +205,26 @@ fn source_store_round_trips_typed_immutable_records_and_provenance() {
 }
 
 #[test]
+fn source_store_put_rejects_malformed_scope_and_object_ids_with_stable_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkItemPlanSourceStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let revision = source_revision("bad/id", "source");
+    assert_code(
+        store
+            .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+            .unwrap_err(),
+        "SOURCE_STORE_MALFORMED_REF",
+    );
+    let revision = source_revision("source-001", "source");
+    assert_code(
+        store
+            .put_source_revision("bad/scope", ISSUE_ID, PLAN_ID, &revision)
+            .unwrap_err(),
+        "SOURCE_STORE_MALFORMED_REF",
+    );
+}
+
+#[test]
 fn source_store_ref_error_precedence_and_immutable_hashes_are_stable() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));

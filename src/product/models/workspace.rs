@@ -57,6 +57,24 @@ fn default_run_policy() -> RunPolicy {
     RunPolicy::Interactive
 }
 
+/// 单候选路径的 durable 阶段。旧 session 缺失该字段时维持 legacy 语义。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SingleCandidatePhase {
+    Generate,
+    Evaluate,
+    Approval,
+    Compile,
+}
+
+/// Approval 成功后确定性派生的编译三元组；同一 session 只能持久化同一值。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SingleCandidateCompileReservation {
+    pub compile_id: String,
+    pub now: String,
+    pub publication_provenance_ref: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionRecord {
@@ -93,6 +111,20 @@ pub struct WorkspaceSessionRecord {
     pub policy_diagnostics: Vec<PolicyDiagnostic>,
     #[serde(default)]
     pub provider_start_ledger: Vec<ProviderStartLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_candidate_phase: Option<SingleCandidatePhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_plan_source_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical_report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile_reservation: Option<SingleCandidateCompileReservation>,
     #[serde(default)]
     pub work_item_runtime_binding: Option<WorkItemRuntimeBinding>,
     #[serde(default)]

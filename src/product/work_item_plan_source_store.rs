@@ -30,6 +30,23 @@ pub struct SourceStoreScope {
     pub plan_id: String,
 }
 
+/// 仅校验 canonical ref 的语法、对象种类和业务 scope；不读取对象。
+/// 生命周期 CAS 以它阻止把错误 durable ref 写入 single-candidate session。
+pub fn validate_canonical_ref_for_scope(
+    expected_scope: &SourceStoreScope,
+    canonical_ref: &str,
+    expected_kind: &str,
+) -> Result<(), SourceStoreError> {
+    let parsed = parse_canonical_ref(canonical_ref)?;
+    if parsed.object_kind != expected_kind {
+        return Err(SourceStoreError::WrongKind);
+    }
+    if parsed.scope != *expected_scope {
+        return Err(SourceStoreError::ScopeMismatch);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRevisionRecord {
     pub id: String,
@@ -109,6 +126,10 @@ impl From<ProductStoreError> for SourceStoreError {
         match error {
             ProductStoreError::Io(message) => Self::Io(message),
             ProductStoreError::Json(message) => Self::Json(message),
+            ProductStoreError::InvalidRecord { .. } | ProductStoreError::PathEscape(_) => {
+                Self::MalformedRef
+            }
+            ProductStoreError::NotFound { .. } => Self::DanglingRef,
             other => Self::Io(other.to_string()),
         }
     }
@@ -660,7 +681,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn validate_id(value: &str) -> Result<(), SourceStoreError> {
-    validate_relative_id(value).map_err(|error| SourceStoreError::Io(error.to_string()))
+    validate_relative_id(value).map_err(|_| SourceStoreError::MalformedRef)
 }
 
 fn path_exists(path: &Path) -> Result<bool, SourceStoreError> {

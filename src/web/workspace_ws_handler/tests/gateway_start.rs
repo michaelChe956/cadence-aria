@@ -194,6 +194,13 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         repair_reservation: None,
         policy_diagnostics: vec![],
         provider_start_ledger: vec![],
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
         provider_conversations: vec![],
         repository_path: Some(repository_path),
     }

@@ -325,6 +325,8 @@ pub struct InitialPlanPublicationInput {
     pub compile_id: String,
     pub now: String,
     pub allocated_ids: crate::product::work_item_revision_store::InitialPlanPublicationIds,
+    pub publication_provenance_ref: Option<String>,
+    pub publication_provenance_content_hash: Option<String>,
 }
 
 /// 只依赖已装配输入的 initial publication 投影。此函数不读取 lifecycle、outline、
@@ -486,7 +488,7 @@ pub fn prepare_initial_plan_publication(
         dependency_graph_revision_id: input.allocated_ids.dependency_graph_revision_id.clone(),
         validation_report_ref: input.allocated_ids.validation_report_id.clone(),
         plan_projection_bundle_id: plan_projection_bundle.id.clone(),
-        publication_provenance_ref: None,
+        publication_provenance_ref: input.publication_provenance_ref.clone(),
         created_at: input.now.clone(),
     };
     let validation_report = PlanValidationReportArtifact {
@@ -541,8 +543,8 @@ pub fn prepare_initial_plan_publication(
             dependency_graph_revision,
             validation_report,
             plan_projection_bundle,
-            publication_provenance_ref: None,
-            publication_provenance_content_hash: None,
+            publication_provenance_ref: input.publication_provenance_ref,
+            publication_provenance_content_hash: input.publication_provenance_content_hash,
             work_items: publication_work_items,
         },
     )
@@ -645,6 +647,8 @@ impl WorkspaceEngine {
             compile_id: tx.compile_id.clone(),
             now: tx.created_at.clone(),
             allocated_ids,
+            publication_provenance_ref: tx.publication_provenance_ref.clone(),
+            publication_provenance_content_hash: tx.publication_provenance_content_hash.clone(),
         })?;
         let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
         publish_initial_plan_revision(&revision_store, &journal)
