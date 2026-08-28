@@ -3,6 +3,8 @@
 //! 这些类型只描述 compiler 的稳定边界。parser 构造带行号的 AST，lowering 由后续
 //! 任务实现；本模块本身不读取 source，也不生成诊断。
 
+use crate::product::models::{RepositoryProfile, WorkItemSplitFinding};
+
 /// 带 1-based source 行号的 AST 值。
 ///
 /// parser 只在语法阶段构造本类型；公开诊断不暴露 parser 内部 token。
@@ -69,4 +71,33 @@ pub struct CompilerDiagnostic {
     pub message: String,
     /// 恰好一个可回喂的修复示例。
     pub repair_example: String,
+}
+
+/// 将编译后的 IR 投影为既有机械 validator 输入时由外层注入的已确认上下文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanCandidateValidationContext<'a> {
+    pub project_id: &'a str,
+    pub issue_id: &'a str,
+    pub plan_id: &'a str,
+    pub source_story_spec_ids: &'a [String],
+    pub source_design_spec_ids: &'a [String],
+    pub repository_profile: Option<&'a RepositoryProfile>,
+    pub now: &'a str,
+}
+
+/// 既有机械 validator 对单一候选 IR 的原样 findings 报告。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanCandidateMechanicalReport {
+    pub source_revision_hash: String,
+    pub compiler_version: String,
+    pub findings: Vec<WorkItemSplitFinding>,
+}
+
+impl PlanCandidateMechanicalReport {
+    /// Error finding 存在时，调用方不得发布该候选。
+    pub fn has_errors(&self) -> bool {
+        self.findings.iter().any(|finding| {
+            finding.severity == crate::product::models::WorkItemSplitFindingSeverity::Error
+        })
+    }
 }

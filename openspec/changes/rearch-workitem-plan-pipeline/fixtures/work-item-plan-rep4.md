@@ -91,7 +91,7 @@
 ### Tasks
 - task_id: TASK-002
 - statement: WHEN the levels page loads THE SYSTEM SHALL create the level selector browser behavior.
-- requirement_refs: REQ-WSC-02
+- requirement_refs: REQ-WSC-06
 - done_when_refs: AC-002
 
 ### Write Policy

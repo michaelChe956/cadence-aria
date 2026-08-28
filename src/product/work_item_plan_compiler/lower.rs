@@ -2,17 +2,16 @@ use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 
+use super::{
+    grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
+    types::{CompilerDiagnostic, WorkItemPlanAst, WorkItemPlanFieldAst, WorkItemPlanItemAst},
+};
 use crate::product::models::{TrustedDraftVerificationCommand, WorkItemDraftVerificationPlan};
 use crate::product::work_item_contract::{
     AcceptanceCriterion, BlockerRoute, BlockerRule, CanonicalWorkItemContract,
     ContractCompatibilityPolicy, DesignTraceabilityRef, EvidenceKind, HandoffContract,
     PromisedOutputContract, RequiredInputContract, VerificationCheck, WorkItemContractIdentity,
     WorkItemGoal, WorkItemTask, WorkItemWritePolicy,
-};
-
-use super::{
-    grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
-    types::{CompilerDiagnostic, WorkItemPlanAst, WorkItemPlanFieldAst, WorkItemPlanItemAst},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -74,7 +73,8 @@ pub fn lower_work_item_plan(
         ));
     }
 
-    let mut catalog_by_ref = HashMap::new();
+    let mut catalog_by_command = HashMap::new();
+    let mut source_refs = HashSet::new();
     for command in &context.trusted_command_catalog {
         if command.source_ref.trim().is_empty() {
             diagnostics.push(diagnostic(
@@ -84,15 +84,23 @@ pub fn lower_work_item_plan(
                 "source_ref: catalog-entry-001",
             ));
         }
-        if catalog_by_ref
-            .insert(command.source_ref.as_str(), command)
-            .is_some()
-        {
+        if !source_refs.insert(command.source_ref.as_str()) {
             diagnostics.push(diagnostic(
                 "trusted_commands",
                 "trusted command source_ref 不得重复。",
                 1,
                 "source_ref: catalog-entry-001",
+            ));
+        }
+        if catalog_by_command
+            .insert(command.command.as_str(), command)
+            .is_some()
+        {
+            diagnostics.push(diagnostic(
+                "trusted_commands",
+                "trusted command command 不得重复。",
+                1,
+                "command: cargo test --locked --lib target",
             ));
         }
     }
@@ -101,7 +109,7 @@ pub fn lower_work_item_plan(
     for item in &ast.items {
         if let Some(item) = lower_item(
             item,
-            &catalog_by_ref,
+            &catalog_by_command,
             context.target_repository_id.clone(),
             &mut diagnostics,
         ) {
