@@ -4,14 +4,18 @@
 
     use crate::product::coding_models::{RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind};
     use crate::product::issue_store::CreateProductIssueInput;
-    use crate::product::lifecycle_store::CreateWorkItemInput;
+    use crate::product::lifecycle_store::{
+        CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput,
+    };
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
         IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
         LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
         RepositorySourceIdentity, RepositoryType,
     };
-    use crate::product::models::{RepositoryRecord, WorkItemPlanLineage};
+    use crate::product::models::{
+        LifecycleConfirmationStatus, RepositoryRecord, WorkItemPlanLineage,
+    };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::product::work_item_revision_store::WorkItemRevisionStore;
     use crate::web::app::build_web_router;
@@ -264,6 +268,238 @@
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn single_candidate_preflight_is_deterministic_and_only_allows_one_repository() {
+        assert_eq!(
+            preflight_single_repository_candidate(&["logical-repository-1".to_string()]),
+            SingleCandidatePreflightDecision::Eligible {
+                repository_id: "logical-repository-1".to_string(),
+            }
+        );
+
+        for repository_ids in [
+            Vec::<String>::new(),
+            vec![
+                "logical-repository-1".to_string(),
+                "logical-repository-2".to_string(),
+            ],
+        ] {
+            assert_eq!(
+                preflight_single_repository_candidate(&repository_ids),
+                SingleCandidatePreflightDecision::LegacyFallback {
+                    reason: format!(
+                        "single-candidate preflight requires exactly one logical repository; found {}",
+                        repository_ids.len()
+                    ),
+                }
+            );
+        }
+    }
+
+    fn seed_prepare_work_item_plan_fixture(
+        paths: &ProductAppPaths,
+        repository_count: usize,
+    ) -> (LifecycleStore, String, String) {
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "preflight project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some(REPOSITORY_ID.to_string()),
+                logical_codebase_id: None,
+                title: "preflight issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let repository_names = ["checkout-preflight-a", "checkout-preflight-b"];
+        let members = repository_names
+            .into_iter()
+            .take(repository_count)
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    LogicalRepositoryId(Uuid::from_u128((index + 1) as u128)),
+                    name,
+                )
+            })
+            .collect::<Vec<_>>();
+        seed_logical_codebase(paths, &members);
+
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                title: "preflight story".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        lifecycle
+            .update_spec_confirmation_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &story.id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        let design = lifecycle
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                title: "preflight design".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        lifecycle
+            .update_spec_confirmation_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &design.id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        (lifecycle, story.id, design.id)
+    }
+
+    async fn post_prepare_work_item_plan(
+        app: &axum::Router,
+        story_spec_id: String,
+        design_spec_id: String,
+    ) -> axum::http::Response<Body> {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/work-item-plans:prepare"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "title": "preflight plan",
+                            "story_spec_ids": [story_spec_id],
+                            "design_spec_ids": [design_spec_id],
+                            "author_provider": "claude_code",
+                            "reviewer_provider": "codex",
+                            "review_rounds": 1,
+                            "superpowers_enabled": false,
+                            "openspec_enabled": false,
+                            "include_integration_tests": true,
+                            "include_e2e_tests": false,
+                            "force_frontend_backend_split": false,
+                            "require_execution_plan_confirm": false
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn data_root_files(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+        fn collect(root: &std::path::Path, current: &std::path::Path, files: &mut std::collections::BTreeSet<String>) {
+            let entries = match std::fs::read_dir(current) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => panic!("read {}: {error}", current.display()),
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    files.insert(path.strip_prefix(root).unwrap().display().to_string());
+                }
+            }
+        }
+
+        let mut files = std::collections::BTreeSet::new();
+        collect(root, root, &mut files);
+        files
+    }
+
+    #[tokio::test]
+    async fn prepare_preflight_falls_back_only_before_session_and_never_afterwards() {
+        for repository_count in [0, 2] {
+            let root = TempDir::new().unwrap();
+            let paths = ProductAppPaths::new(root.path().join(".aria"));
+            let (lifecycle, story_spec_id, design_spec_id) =
+                seed_prepare_work_item_plan_fixture(&paths, repository_count);
+            let mut state = WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            );
+            state.work_item_plan_single_candidate = true;
+            let app = build_web_router(state);
+            let before_files = data_root_files(paths.root());
+
+            let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
+            assert!(response.status().is_server_error());
+            let sessions = lifecycle
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::Legacy);
+            assert!(sessions[0].provider_start_ledger.is_empty());
+            assert!(sessions[0].work_item_plan_source_revision_ref.is_none());
+            assert!(sessions[0].plan_candidate_ir_ref.is_none());
+            assert!(sessions[0].mechanical_report_ref.is_none());
+            let after_files = data_root_files(paths.root());
+            let new_files = after_files
+                .difference(&before_files)
+                .collect::<Vec<_>>();
+            assert!(
+                new_files.iter().all(|path| {
+                    !path.contains("source-revision")
+                        && !path.contains("plan-candidate")
+                        && !path.contains("mechanical-report")
+                        && !path.contains("compile-transaction")
+                }),
+                "preflight fallback must not create single-candidate artifacts: {new_files:?}"
+            );
+        }
+
+        let root = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let (lifecycle, story_spec_id, design_spec_id) =
+            seed_prepare_work_item_plan_fixture(&paths, 1);
+        let mut state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        state.work_item_plan_single_candidate = true;
+        let app = build_web_router(state);
+
+        let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
+        assert!(response.status().is_server_error());
+        let sessions = lifecycle
+            .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].flow_kind,
+            WorkItemPlanFlowKind::SingleCandidate,
+            "a post-session error must not silently recreate a legacy session"
+        );
+        assert_eq!(sessions[0].status, WorkspaceSessionStatus::Failed);
+        assert!(sessions[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("single-candidate prepare failed")));
+        assert!(sessions[0].provider_start_ledger.is_empty());
+        assert!(sessions[0].work_item_plan_source_revision_ref.is_none());
+        assert!(sessions[0].plan_candidate_ir_ref.is_none());
+        assert!(sessions[0].mechanical_report_ref.is_none());
     }
 
     #[tokio::test]

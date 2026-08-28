@@ -6,7 +6,8 @@ use crate::product::lifecycle_store::{
     WorkItemPlanSessionOptions,
 };
 use crate::product::logical_codebase::{
-    LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
+    IssueCodebaseSelection, LogicalCodebaseManifest, LogicalRepositoryId, PlanningContextResolver,
+    PlanningContextSetResolver, RepositoryRouting, SelectionPolicy,
 };
 use crate::product::models::WorkItemRuntimeBinding;
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
@@ -572,6 +573,50 @@ pub async fn generate_design_specs(
     }))
 }
 
+/// 只基于已加载的 logical codebase manifest/selection 做单候选 preflight。
+///
+/// 这个函数刻意不使用 `PlanningContextSetResolver`：后者会在发现失效成员时写入
+/// invalidation，因此不能置于创建 SingleCandidate session 前的只读分流边界。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SingleCandidatePreflightDecision {
+    Eligible { repository_id: String },
+    LegacyFallback { reason: String },
+}
+
+pub(crate) fn preflight_single_repository_candidate(
+    repository_ids: &[String],
+) -> SingleCandidatePreflightDecision {
+    match repository_ids {
+        [repository_id] => SingleCandidatePreflightDecision::Eligible {
+            repository_id: repository_id.clone(),
+        },
+        _ => SingleCandidatePreflightDecision::LegacyFallback {
+            reason: format!(
+                "single-candidate preflight requires exactly one logical repository; found {}",
+                repository_ids.len()
+            ),
+        },
+    }
+}
+
+fn logical_repository_ids_for_preflight(
+    manifest: &LogicalCodebaseManifest,
+    selection: &IssueCodebaseSelection,
+) -> Vec<String> {
+    let selected_ids = match selection.selection_policy {
+        SelectionPolicy::AllMembers => manifest.member_ids.clone(),
+        SelectionPolicy::Explicit => selection.resolve_effective_members(),
+    };
+    let manifest_ids = manifest.member_ids.iter().collect::<BTreeSet<_>>();
+    selected_ids
+        .into_iter()
+        .filter(|repository_id| manifest_ids.contains(repository_id))
+        .map(|repository_id| repository_id.0.to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 pub async fn prepare_work_item_plan(
     State(state): State<WebAppState>,
     Path((project_id, issue_id)): Path<(String, String)>,
@@ -585,6 +630,8 @@ pub async fn prepare_work_item_plan(
         request.openspec_enabled,
         &*state.provider_availability,
     )?;
+    // rollout flag 只在创建 session 前读取一次；之后所有分支仅消费这份快照。
+    let rollout_snapshot = state.work_item_plan_single_candidate;
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
@@ -592,22 +639,27 @@ pub async fn prepare_work_item_plan(
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
     validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
-    // 方案 X 阶段1：按 RepositoryRouting 三态分流（与 generate_story/design 一致）。
-    // Legacy（单仓）保持原 repository_id 校验 + find_repository；Logical（多仓）targets =
-    // confirmed design 的 involved，经 PlanningContextResolver 校验 target ∈ selection
-    // （REQ-TGT-01），无单仓 repo_id；FailClosed 报稳定错误码 repository_routing_*。
+
+    // 在任何 plan/session/source/IR/run-history/transaction/provider 副作用之前确定 flow。
+    // Logical 路径只读 manifest + selection；不得在此调用会写 invalidation 的 resolver。
     let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    match routing {
+    let flow_kind = match routing {
         RepositoryRouting::Legacy { .. } => {
             let repository_id = issue.repo_id.clone().ok_or_else(|| {
                 ApiError::validation("repository_required", "repository_id is required")
             })?;
             find_repository(&app_paths, &project_id, &repository_id)?;
+            WorkItemPlanFlowKind::Legacy
         }
-        RepositoryRouting::Logical { .. } => {
-            // targets = confirmed design 的 involved（validate_confirmed_design_specs 已保证
-            // design_spec_ids 非空且 Confirmed，首项必存在）。
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            // 保留 REQ-TGT-01：确认的 Design 只能引用当前 selection 中的目标。这里
+            // 只读取已落盘的 Design/selection，不调用会写 invalidation 的 resolver。
+            let selected_ids = logical_repository_ids_for_preflight(&manifest, &selection);
+            let selected_ids = selected_ids.iter().collect::<BTreeSet<_>>();
             let designs = lifecycle
                 .list_design_specs(&project_id, &issue_id)
                 .map_err(product_store_api_error)?;
@@ -620,18 +672,27 @@ pub async fn prepare_work_item_plan(
                         id: request.design_spec_ids[0].clone(),
                     })
                 })?;
-            let resolved = PlanningContextResolver::new(app_paths.clone())
-                .build_with_fresh_index(&project_id, &issue_id, &design.involved_repository_ids)
-                .await
-                .map_err(product_store_api_error)?;
-            // REQ-TGT-01：design involved 必须 ⊆ selection 有效成员，否则 4xx blocker。
             for target in &design.involved_repository_ids {
-                if !resolved.snapshot.effective_member_ids.contains(target) {
+                if !selected_ids.contains(&target.0.to_string()) {
                     return Err(ApiError::validation(
                         "target_not_in_selection",
                         format!("design involved {target:?} is not in issue codebase selection"),
                     ));
                 }
+            }
+            let repository_ids = selected_ids.into_iter().cloned().collect::<Vec<_>>();
+            if rollout_snapshot {
+                match preflight_single_repository_candidate(&repository_ids) {
+                    SingleCandidatePreflightDecision::Eligible { .. } => {
+                        WorkItemPlanFlowKind::SingleCandidate
+                    }
+                    SingleCandidatePreflightDecision::LegacyFallback { reason } => {
+                        tracing::info!(%reason, "single-candidate preflight selected legacy flow");
+                        WorkItemPlanFlowKind::Legacy
+                    }
+                }
+            } else {
+                WorkItemPlanFlowKind::Legacy
             }
         }
         RepositoryRouting::FailClosed { code, reason } => {
@@ -676,24 +737,42 @@ pub async fn prepare_work_item_plan(
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
             work_item_plan_options: Some(WorkItemPlanSessionOptions {
-                flow_kind: if state.work_item_plan_single_candidate {
-                    WorkItemPlanFlowKind::SingleCandidate
-                } else {
-                    WorkItemPlanFlowKind::Legacy
-                },
+                flow_kind,
                 run_policy: request.run_policy.unwrap_or(RunPolicy::Interactive),
-                rollout_snapshot: state.work_item_plan_single_candidate,
+                rollout_snapshot,
             }),
         })
         .map_err(product_store_api_error)?;
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .await
-        .map_err(product_store_api_error)?;
+    let session_id = session.id.clone();
+    let session = match ensure_workspace_context_message(&app_paths, &lifecycle, session).await {
+        Ok(session) => session,
+        Err(error) => {
+            // Session 已落盘即跨过 fallback 屏障；永不重试 legacy prepare。尽力把错误写成
+            // durable terminal + diagnostic，保留原始 HTTP 错误给调用方。
+            if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                mark_single_candidate_prepare_failure(&lifecycle, &session_id, &error);
+            }
+            return Err(product_store_api_error(error));
+        }
+    };
 
     Ok(Json(PrepareWorkItemPlanResponse {
         work_item_plan: issue_work_item_plan_detail_dto(&plan),
         workspace_session: workspace_session_dto(session),
     }))
+}
+
+fn mark_single_candidate_prepare_failure(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    error: &ProductStoreError,
+) {
+    let _ = lifecycle.append_workspace_message(
+        session_id,
+        "system".to_string(),
+        format!("single-candidate prepare failed after session persistence: {error}"),
+    );
+    let _ = lifecycle.update_workspace_session_status(session_id, WorkspaceSessionStatus::Failed);
 }
 
 pub async fn delete_story_spec(
