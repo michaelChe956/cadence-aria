@@ -76,21 +76,17 @@ fn plan_repair_parent_engine(
     revision_store
         .put_plan_revision(
             &plan,
-            &crate::product::models::WorkItemPlanRevision {
-                id: "plan_revision_0001".to_string(),
-                plan_id: plan.id.clone(),
-                revision_no: 1,
-                supersedes: None,
-                reason: crate::product::models::PlanRevisionReason::InitialCompile,
-                work_item_bindings: std::collections::BTreeMap::from([(
-                    "logical_work_item_0001".to_string(),
-                    "work_item_revision_0001".to_string(),
-                )]),
-                dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
-                validation_report_ref: "plan_validation_report_0001".to_string(),
-                plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-                created_at: "2026-07-18T00:00:01Z".to_string(),
-            },
+            &crate::product::models::WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+            plan_id: plan.id.clone(),
+            revision_no: 1,
+            supersedes: None,
+            reason: crate::product::models::PlanRevisionReason::InitialCompile,
+            work_item_bindings: std::collections::BTreeMap::from([(
+                "logical_work_item_0001".to_string(),
+                "work_item_revision_0001".to_string(),
+            )]),
+            dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
+            validation_report_ref: "plan_validation_report_0001".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:01Z".to_string(),  },
         )
         .unwrap();
     revision_store

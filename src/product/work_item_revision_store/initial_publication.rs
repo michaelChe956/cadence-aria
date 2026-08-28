@@ -56,6 +56,10 @@ pub struct InitialPlanPublicationArtifacts {
     pub dependency_graph_revision: DependencyGraphRevision,
     pub validation_report: PlanValidationReportArtifact,
     pub plan_projection_bundle: PlanProjectionBundle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_content_hash: Option<String>,
     pub work_items: Vec<InitialWorkItemPublicationArtifacts>,
 }
 
@@ -658,6 +662,13 @@ fn validate_initial_publication_journal(
             != journal.allocated_ids.validation_report_id
         || journal.artifacts.plan_revision.plan_projection_bundle_id
             != journal.allocated_ids.plan_projection_bundle_id
+        || journal.artifacts.plan_revision.publication_provenance_ref
+            != journal.artifacts.publication_provenance_ref
+        || journal.artifacts.publication_provenance_ref.is_some()
+            != journal
+                .artifacts
+                .publication_provenance_content_hash
+                .is_some()
         || journal.artifacts.dependency_graph_revision.id
             != journal.allocated_ids.dependency_graph_revision_id
         || journal.artifacts.validation_report.id != journal.allocated_ids.validation_report_id

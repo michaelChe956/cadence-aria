@@ -141,6 +141,7 @@ fn work_item_revision_models_plan_revision_roundtrip_without_legacy_fields() {
         dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
         validation_report_ref: "validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-17T00:00:00Z".to_string(),
     };
 

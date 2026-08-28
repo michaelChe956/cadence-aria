@@ -507,18 +507,14 @@ async fn plan_repair_refresh_rejects_stale_base_or_active_amendment_as_failed() 
             revision_store
                 .put_plan_revision(
                     &plan,
-                    &crate::product::models::WorkItemPlanRevision {
-                        id: "plan_revision_external".to_string(),
-                        plan_id: plan.id.clone(),
-                        revision_no: 2,
-                        supersedes: Some(request.base_plan_revision_id.clone()),
-                        reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
-                        work_item_bindings: std::collections::BTreeMap::new(),
-                        dependency_graph_revision_id: "dependency_graph_external".to_string(),
-                        validation_report_ref: "validation_external".to_string(),
-                        plan_projection_bundle_id: "projection_external".to_string(),
-                        created_at: "2026-07-18T00:00:03Z".to_string(),
-                    },
+                    &crate::product::models::WorkItemPlanRevision { id: "plan_revision_external".to_string(),
+                    plan_id: plan.id.clone(),
+                    revision_no: 2,
+                    supersedes: Some(request.base_plan_revision_id.clone()),
+                    reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+                    work_item_bindings: std::collections::BTreeMap::new(),
+                    dependency_graph_revision_id: "dependency_graph_external".to_string(),
+                    validation_report_ref: "validation_external".to_string(), plan_projection_bundle_id: "projection_external".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:03Z".to_string(),  },
                 )
                 .unwrap();
             revision_store

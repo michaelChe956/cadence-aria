@@ -6,6 +6,7 @@ use crate::product::models::TrustedDraftVerificationCommand;
 use serde_json::Value;
 
 mod full_lowering_validator;
+mod publish_freshness;
 mod reviewer_finding_channel_boundary;
 
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}

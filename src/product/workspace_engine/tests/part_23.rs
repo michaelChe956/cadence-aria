@@ -309,21 +309,17 @@ async fn plan_repair_cancel_rejects_active_revision_already_published_without_jo
     revision_store
         .put_plan_revision(
             &plan,
-            &crate::product::models::WorkItemPlanRevision {
-                id: package.amendment.new_plan_revision_id.clone(),
-                plan_id: plan.id.clone(),
-                revision_no: 2,
-                supersedes: Some(request.base_plan_revision_id.clone()),
-                reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
-                work_item_bindings: std::collections::BTreeMap::new(),
-                dependency_graph_revision_id: package
-                    .projection
-                    .dependency_graph_revision_id
-                    .clone(),
-                validation_report_ref: package.validation.id.clone(),
-                plan_projection_bundle_id: package.projection.id.clone(),
-                created_at: "2026-07-18T00:00:03Z".to_string(),
-            },
+            &crate::product::models::WorkItemPlanRevision { id: package.amendment.new_plan_revision_id.clone(),
+            plan_id: plan.id.clone(),
+            revision_no: 2,
+            supersedes: Some(request.base_plan_revision_id.clone()),
+            reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+            work_item_bindings: std::collections::BTreeMap::new(),
+            dependency_graph_revision_id: package
+                .projection
+                .dependency_graph_revision_id
+                .clone(),
+            validation_report_ref: package.validation.id.clone(), plan_projection_bundle_id: package.projection.id.clone(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:03Z".to_string(),  },
         )
         .unwrap();
     revision_store
@@ -382,21 +378,17 @@ async fn plan_repair_cancel_journal_restores_request_when_publication_wins_after
     revision_store
         .put_plan_revision(
             &plan,
-            &crate::product::models::WorkItemPlanRevision {
-                id: package.amendment.new_plan_revision_id.clone(),
-                plan_id: plan.id.clone(),
-                revision_no: 2,
-                supersedes: Some(request.base_plan_revision_id.clone()),
-                reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
-                work_item_bindings: std::collections::BTreeMap::new(),
-                dependency_graph_revision_id: package
-                    .projection
-                    .dependency_graph_revision_id
-                    .clone(),
-                validation_report_ref: package.validation.id.clone(),
-                plan_projection_bundle_id: package.projection.id.clone(),
-                created_at: "2026-07-18T00:00:03Z".to_string(),
-            },
+            &crate::product::models::WorkItemPlanRevision { id: package.amendment.new_plan_revision_id.clone(),
+            plan_id: plan.id.clone(),
+            revision_no: 2,
+            supersedes: Some(request.base_plan_revision_id.clone()),
+            reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+            work_item_bindings: std::collections::BTreeMap::new(),
+            dependency_graph_revision_id: package
+                .projection
+                .dependency_graph_revision_id
+                .clone(),
+            validation_report_ref: package.validation.id.clone(), plan_projection_bundle_id: package.projection.id.clone(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:03Z".to_string(),  },
         )
         .unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());

@@ -176,18 +176,14 @@ fn seed_authoritative_group_plan_fixture(
         .put_dependency_graph_revision(&lineage, &graph)
         .expect("dependency graph");
     let ordered_logical_work_item_ids = bindings.keys().cloned().collect::<Vec<_>>();
-    let plan_revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: bindings,
-        dependency_graph_revision_id: graph.id,
-        validation_report_ref: "validation_report_0001".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-    };
+    let plan_revision = WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+    plan_id: lineage.id.clone(),
+    revision_no: 1,
+    supersedes: None,
+    reason: PlanRevisionReason::InitialCompile,
+    work_item_bindings: bindings,
+    dependency_graph_revision_id: graph.id,
+    validation_report_ref: "validation_report_0001".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:00Z".to_string(),  };
     let compiled_plan = CompiledPlanProjections {
         human: HumanGroupProjection {
             plan_id: lineage.id.clone(),

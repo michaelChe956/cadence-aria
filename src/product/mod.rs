@@ -30,6 +30,7 @@ pub mod test_executor;
 pub mod work_item_contract;
 pub mod work_item_plan_compiler;
 pub mod work_item_plan_policy;
+pub mod work_item_plan_source_store;
 pub mod work_item_plan_store;
 pub mod work_item_projection;
 pub(crate) mod work_item_revision_history;

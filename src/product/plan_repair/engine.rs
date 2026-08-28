@@ -319,6 +319,7 @@ impl PlanRepairEngine {
             dependency_graph_revision_id,
             validation_report_ref: validation_report_id,
             plan_projection_bundle_id: plan_projection_bundle.id.clone(),
+            publication_provenance_ref: None,
             created_at: self.created_at.clone(),
         };
         let base_graph = self

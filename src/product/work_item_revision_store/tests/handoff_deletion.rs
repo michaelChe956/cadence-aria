@@ -395,6 +395,7 @@ fn deletion_fixture_with_compiled_plan() -> (TempDir, WorkItemRevisionStore, Wor
         dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
         validation_report_ref: "plan_validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-28T00:00:03Z".to_string(),
     };
     store.put_plan_revision(&lineage, &plan_revision).unwrap();

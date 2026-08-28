@@ -101,3 +101,18 @@ impl PlanCandidateMechanicalReport {
         })
     }
 }
+
+/// 已发布单候选 plan revision 对 immutable source/IR/report 的可审计绑定。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanCandidatePublicationProvenance {
+    pub id: String,
+    pub plan_id: String,
+    pub plan_revision_id: String,
+    pub source_revision_ref: String,
+    pub plan_candidate_ir_ref: String,
+    pub mechanical_report_ref: String,
+    pub source_revision_hash: String,
+    pub compiler_version: String,
+    pub published_at: String,
+    pub content_hash: String,
+}

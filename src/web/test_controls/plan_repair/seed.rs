@@ -297,6 +297,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         dependency_graph_revision_id: dependency_graph.id.clone(),
         validation_report_ref: "plan_validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: CREATED_AT.to_string(),
     };
     let plan_projection = super::seed_projection::compile_plan_projection_bundle(

@@ -79,6 +79,40 @@ fn initial_plan_publication_store_allocates_ids_deterministically_without_live_w
 }
 
 #[test]
+fn initial_publication_fingerprint_covers_optional_provenance_binding() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let journal = initial_publication_journal(&store);
+    let mut artifacts = journal.artifacts.clone();
+    artifacts.publication_provenance_ref = Some(
+        "project/project_0001/issue/issue_0001/plan/work_item_plan_0001/publication_provenance/compile_0001"
+            .to_string(),
+    );
+    artifacts.publication_provenance_content_hash = Some("provenance-content-hash".to_string());
+    artifacts.plan_revision.publication_provenance_ref =
+        artifacts.publication_provenance_ref.clone();
+
+    let bound = store
+        .build_initial_plan_publication_journal(
+            "compile_0001",
+            "outline_0001",
+            BTreeMap::from([(WORK_ITEM_ID.to_string(), "draft_revision_0001".to_string())]),
+            "2026-07-17T00:00:20Z",
+            artifacts.clone(),
+        )
+        .unwrap();
+    assert_ne!(bound.artifact_fingerprint, journal.artifact_fingerprint);
+    assert_eq!(
+        bound.artifacts.publication_provenance_ref,
+        artifacts.publication_provenance_ref
+    );
+    assert_eq!(
+        bound.artifacts.publication_provenance_content_hash,
+        artifacts.publication_provenance_content_hash
+    );
+}
+
+#[test]
 fn initial_plan_publication_resumes_each_store_write_failure_after_restart() {
     for checkpoint in [
         InitialPlanPublicationCheckpoint::LineageWritten,
@@ -378,6 +412,7 @@ fn initial_publication_journal(
             dependency_graph_revision_id: ids.dependency_graph_revision_id.clone(),
             validation_report_ref: ids.validation_report_id.clone(),
             plan_projection_bundle_id: ids.plan_projection_bundle_id.clone(),
+            publication_provenance_ref: None,
             created_at: timestamp.to_string(),
         },
         dependency_graph_revision: DependencyGraphRevision {
@@ -396,6 +431,8 @@ fn initial_publication_journal(
             created_at: timestamp.to_string(),
         },
         plan_projection_bundle: plan_projection,
+        publication_provenance_ref: None,
+        publication_provenance_content_hash: None,
         work_items: vec![InitialWorkItemPublicationArtifacts {
             logical_work_item: LogicalWorkItem {
                 id: WORK_ITEM_ID.to_string(),

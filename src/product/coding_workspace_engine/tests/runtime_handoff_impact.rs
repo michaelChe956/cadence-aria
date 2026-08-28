@@ -220,6 +220,7 @@ fn runtime_handoff_fixture(
         dependency_graph_revision_id: graph.id,
         validation_report_ref: "validation_report_0002".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-20T00:00:02Z".to_string(),
     };
     revision_store

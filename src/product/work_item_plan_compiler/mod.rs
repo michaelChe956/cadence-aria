@@ -1,9 +1,11 @@
+pub mod freshness;
 pub mod grammar;
 mod lower;
 mod parse;
 pub mod types;
 mod validate;
 
+pub use freshness::{FreshnessError, verify_publish_freshness};
 pub use grammar::*;
 pub use lower::{
     PlanCandidateIr, PlanCandidateItemIr, WorkItemPlanSourceContext, compile_work_item_plan,

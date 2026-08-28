@@ -315,6 +315,7 @@ impl PlanRepairEngine {
             dependency_graph_revision_id: dependency_graph_revision.id.clone(),
             validation_report_ref: validation_report.id.clone(),
             plan_projection_bundle_id: plan_projection_bundle.id.clone(),
+            publication_provenance_ref: None,
             created_at: self.created_at.clone(),
         };
 

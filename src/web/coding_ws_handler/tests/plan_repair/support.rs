@@ -211,6 +211,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         dependency_graph_revision_id: dependency_graph.id.clone(),
         validation_report_ref: "validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-19T00:00:00Z".to_string(),
     };
     let ordered_logical_work_item_ids = vec![upstream.id.clone(), current.id.clone()];

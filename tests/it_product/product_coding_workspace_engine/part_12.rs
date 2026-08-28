@@ -439,18 +439,14 @@ fn seed_authoritative_group_terminal_fixture(
             },
         )
         .expect("put plan projection bundle");
-    let plan_revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: bindings,
-        dependency_graph_revision_id: graph.id,
-        validation_report_ref: "validation_report_0001".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-06-27T00:00:00Z".to_string(),
-    };
+    let plan_revision = WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+    plan_id: lineage.id.clone(),
+    revision_no: 1,
+    supersedes: None,
+    reason: PlanRevisionReason::InitialCompile,
+    work_item_bindings: bindings,
+    dependency_graph_revision_id: graph.id,
+    validation_report_ref: "validation_report_0001".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-06-27T00:00:00Z".to_string(),  };
     revision_store
         .put_plan_revision(&lineage, &plan_revision)
         .expect("put plan revision");

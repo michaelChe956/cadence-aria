@@ -38,7 +38,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
 fn seed_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -442,6 +441,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
         dependency_graph_revision_id: graph.id,
         validation_report_ref: "validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
     revision_store

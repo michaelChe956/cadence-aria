@@ -143,6 +143,7 @@ pub(super) fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &Coding
         dependency_graph_revision_id: dependency_graph.id.clone(),
         validation_report_ref: "validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-12T00:00:00Z".to_string(),
     };
     let compiled_plan = CompiledPlanProjections {

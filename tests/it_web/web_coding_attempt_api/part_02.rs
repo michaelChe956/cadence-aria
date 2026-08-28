@@ -621,27 +621,23 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
             ]),
         })
         .expect("compile group plan projection");
-    let revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: BTreeMap::from([
-            (
-                "work_item_0001".to_string(),
-                "work_item_revision_0001".to_string(),
-            ),
-            (
-                "work_item_0002".to_string(),
-                "work_item_revision_0002".to_string(),
-            ),
-        ]),
-        dependency_graph_revision_id: dependency.id,
-        validation_report_ref: "plan-validation-report.json".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-    };
+    let revision = WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+    plan_id: lineage.id.clone(),
+    revision_no: 1,
+    supersedes: None,
+    reason: PlanRevisionReason::InitialCompile,
+    work_item_bindings: BTreeMap::from([
+        (
+            "work_item_0001".to_string(),
+            "work_item_revision_0001".to_string(),
+        ),
+        (
+            "work_item_0002".to_string(),
+            "work_item_revision_0002".to_string(),
+        ),
+    ]),
+    dependency_graph_revision_id: dependency.id,
+    validation_report_ref: "plan-validation-report.json".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:00Z".to_string(),  };
     let plan_projection = PlanProjectionBundle {
         id: revision.plan_projection_bundle_id.clone(),
         plan_revision_id: revision.id.clone(),

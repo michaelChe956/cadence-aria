@@ -748,6 +748,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         dependency_graph_revision_id: previous_plan.dependency_graph_revision_id,
         validation_report_ref: "validation_report_0002".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-19T00:00:01Z".to_string(),
     };
     let previous_plan_projection = revision_store

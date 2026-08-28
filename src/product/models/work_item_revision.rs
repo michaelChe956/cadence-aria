@@ -45,6 +45,8 @@ pub struct WorkItemPlanRevision {
     pub dependency_graph_revision_id: String,
     pub validation_report_ref: String,
     pub plan_projection_bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_ref: Option<String>,
     pub created_at: String,
 }
 

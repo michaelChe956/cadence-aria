@@ -486,6 +486,7 @@ pub fn prepare_initial_plan_publication(
         dependency_graph_revision_id: input.allocated_ids.dependency_graph_revision_id.clone(),
         validation_report_ref: input.allocated_ids.validation_report_id.clone(),
         plan_projection_bundle_id: plan_projection_bundle.id.clone(),
+        publication_provenance_ref: None,
         created_at: input.now.clone(),
     };
     let validation_report = PlanValidationReportArtifact {
@@ -540,6 +541,8 @@ pub fn prepare_initial_plan_publication(
             dependency_graph_revision,
             validation_report,
             plan_projection_bundle,
+            publication_provenance_ref: None,
+            publication_provenance_content_hash: None,
             work_items: publication_work_items,
         },
     )
