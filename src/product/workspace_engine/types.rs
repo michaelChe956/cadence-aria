@@ -209,7 +209,12 @@ pub enum ProviderRunKind {
     },
     Revision,
     ReviewOnly,
-    WorkItemPlanAuthor,
+    /// Legacy WorkItemPlan 的 outline JSON author。该 variant 已固化 durable flow，
+    /// provider runner 不得再读取 rollout/feature flag 重新判定。
+    WorkItemPlanLegacyAuthor,
+    /// SingleCandidate 的 markdown source author。该 variant 已固化 durable flow，
+    /// provider runner 只走 markdown compiler/source-store 链路。
+    WorkItemPlanSingleCandidateAuthor,
     WorkItemPlanOutlineRevision {
         feedback: Option<String>,
     },
@@ -225,6 +230,30 @@ pub enum ProviderRunKind {
     WorkItemPlanRevision {
         feedback: Option<String>,
     },
+}
+
+impl ProviderRunKind {
+    pub(crate) fn work_item_plan_author_for_durable_flow(
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind,
+    ) -> Self {
+        match flow_kind {
+            crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy => {
+                Self::WorkItemPlanLegacyAuthor
+            }
+            crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate => {
+                Self::WorkItemPlanSingleCandidateAuthor
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_legacy_work_item_plan_author(&self) -> bool {
+        matches!(self, Self::WorkItemPlanLegacyAuthor)
+    }
+
+    pub(crate) const fn is_single_candidate_work_item_plan_author(&self) -> bool {
+        matches!(self, Self::WorkItemPlanSingleCandidateAuthor)
+    }
 }
 
 pub enum EngineEvent {

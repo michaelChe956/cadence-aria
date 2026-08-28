@@ -16,6 +16,9 @@ pub(crate) fn provider_run_kind_for_interrupted_recovery(
 ) -> ProviderRunKind {
     match outcome {
         InterruptedRunRecoveryOutcome::Review => ProviderRunKind::ReviewOnly,
+        InterruptedRunRecoveryOutcome::WorkItemPlanAuthorGeneration { flow_kind } => {
+            ProviderRunKind::work_item_plan_author_for_durable_flow(flow_kind)
+        }
         InterruptedRunRecoveryOutcome::WorkItemDraftGeneration => {
             ProviderRunKind::WorkItemPlanDraft { feedback: None }
         }
@@ -549,7 +552,9 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                     let run_kind = {
                         let engine = engine.lock().await;
                         if engine.session().workspace_type == WorkspaceType::WorkItemPlan {
-                            ProviderRunKind::WorkItemPlanAuthor
+                            ProviderRunKind::work_item_plan_author_for_durable_flow(
+                                run_context.session_record.flow_kind,
+                            )
                         } else {
                             ProviderRunKind::Author {
                                 content: String::new(),
@@ -640,9 +645,12 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 };
                 match result {
                     Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
+                        let run_kind = ProviderRunKind::work_item_plan_author_for_durable_flow(
+                            run_context.session_record.flow_kind,
+                        );
                         if let Err(message) = spawn_provider_run_from_handler(
                             run_context.clone(),
-                            ProviderRunKind::WorkItemPlanAuthor,
+                            run_kind,
                             outbound_tx.clone(),
                         )
                         .await

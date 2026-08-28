@@ -28,6 +28,7 @@ use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
 #[serde(rename_all = "snake_case")]
 pub enum RecoverableInterruptedOperation {
     Review,
+    WorkItemPlanAuthorGeneration,
     WorkItemDraftGeneration,
     Revision,
 }

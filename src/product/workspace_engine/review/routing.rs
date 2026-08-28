@@ -442,6 +442,12 @@ impl WorkspaceEngine {
         self.session.repair_reservation = record.repair_reservation.clone();
         self.session.policy_diagnostics = record.policy_diagnostics.clone();
         self.session.provider_start_ledger = record.provider_start_ledger.clone();
+        // stale worker CAS retry 重新评估前必须完整恢复 SingleCandidate immutable refs；
+        // 否则 durable scope 已更新而内存仍指向旧 IR/report，会被误判为 protocol violation。
+        self.session.work_item_plan_source_revision_ref =
+            record.work_item_plan_source_revision_ref.clone();
+        self.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
+        self.session.mechanical_report_ref = record.mechanical_report_ref.clone();
     }
     async fn apply_policy_route(
         &mut self,

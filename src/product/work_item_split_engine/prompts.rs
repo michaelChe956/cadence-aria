@@ -36,6 +36,10 @@ pub const WORK_ITEM_DRAFT_PROMPT_VERSION: &str = "work_item_draft_v2";
 /// 质量预算不由本常量承担，见 WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES 的预算测试。
 /// prompt 经 stdin JSON 发送给 Provider，无 OS ARG_MAX 约束；真实物理边界是模型上下文窗口。
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
+/// SingleCandidate markdown author 同样通过 stdin 传递，但必须为固定 grammar/few-shot
+/// 预留空间；超过硬兜底时拒绝 provider 启动，而不是静默丢失规范层内容。
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 65_536;
+const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
 /// 路由 target_contract_refs 必非空且逐字）上调至 12_600。
@@ -70,7 +74,7 @@ const WORK_ITEM_PLAN_FEW_SHOT_FINDINGS: &str = include_str!(concat!(
     "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
 ));
 
-const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
+pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
     "rep1-f1", "rep1-f2", "rep2-f1", "rep2-f2", "rep2-f3", "rep2-f4", "rep2-f5", "rep2-f6",
     "rep3-f1", "rep4-f1", "rep4-f2",
 ];
@@ -205,12 +209,17 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     story_context: &str,
     design_context: &str,
     repository_structure: &str,
-    _routing_context: &RoutingReferenceContext,
+    routing_context: &RoutingReferenceContext,
 ) -> Result<String, String> {
     let few_shot = work_item_plan_real_few_shot()?;
-    Ok(format!(
+    // story/design 真实上下文可能远大于旧 JSON outline 路径。固定 grammar、最小合法
+    // source 与 few-shot 永不截断；只按确定性配额压缩可再加载的上下文，并显式标记。
+    let (story_context, design_context, repository_structure) =
+        budget_markdown_context(story_context, design_context, repository_structure);
+    let prompt = format!(
         "只输出完整 `work-item-plan.md` source；原始输出直接成为 source revision 并交 compiler parse。\n\
          [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\
+         [routing_reference]\n{routing_reference}\n\
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
          story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
          [source_boundary]\n\
@@ -225,6 +234,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         issue_description = issue.description.as_deref().unwrap_or("无"),
         repository_id = repository.id,
         repository_path = repository.path.display(),
+        routing_reference = generation_cadence_routing_rules_reference(routing_context),
         story_context = story_context,
         design_context = design_context,
         repository_structure = repository_structure,
@@ -233,7 +243,50 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         grammar = work_item_plan_markdown_grammar(),
         minimum_source = work_item_plan_minimum_legal_source(),
         few_shot = few_shot,
-    ))
+    );
+    if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
+        return Err(format!(
+            "work item plan markdown prompt exceeds hard budget: {} > {} bytes",
+            prompt.len(),
+            WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES
+        ));
+    }
+    Ok(prompt)
+}
+
+fn budget_markdown_context(
+    story_context: &str,
+    design_context: &str,
+    repository_structure: &str,
+) -> (String, String, String) {
+    (
+        truncate_markdown_context(
+            story_context,
+            WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES * 9 / 20,
+        ),
+        truncate_markdown_context(
+            design_context,
+            WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES * 9 / 20,
+        ),
+        truncate_markdown_context(
+            repository_structure,
+            WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 10,
+        ),
+    )
+}
+
+fn truncate_markdown_context(value: &str, budget: usize) -> String {
+    if value.len() <= budget {
+        return value.to_string();
+    }
+    let marker =
+        "\n[上下文因 prompt 预算截断；请仅依据保留内容和 source_spec_ids 输出，不得猜测。]\n";
+    let keep = budget.saturating_sub(marker.len());
+    let mut end = keep.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], marker)
 }
 
 fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String {

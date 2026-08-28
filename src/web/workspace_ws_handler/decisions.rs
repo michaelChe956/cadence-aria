@@ -100,12 +100,11 @@ pub(crate) async fn handle_review_decision_from_handler(
             // Review decision path never produces child sessions; defensive no-op.
         }
         Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanAuthor,
-                outbound_tx.clone(),
-            )
-            .await
+            let run_kind = ProviderRunKind::work_item_plan_author_for_durable_flow(
+                run_context.session_record.flow_kind,
+            );
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -253,12 +252,11 @@ pub(crate) async fn handle_human_confirm_from_handler(
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
         Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanAuthor,
-                outbound_tx.clone(),
-            )
-            .await
+            let run_kind = ProviderRunKind::work_item_plan_author_for_durable_flow(
+                run_context.session_record.flow_kind,
+            );
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;

@@ -21,6 +21,33 @@ pub(crate) use provider_run::{spawn_provider_run_from_event, spawn_provider_run_
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+static WORK_ITEM_PLAN_PARSER_PATHS: std::sync::OnceLock<
+    std::sync::Mutex<Vec<(String, &'static str)>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn record_work_item_plan_parser_path(session_id: &str, path: &'static str) {
+    WORK_ITEM_PLAN_PARSER_PATHS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("work item plan parser spy")
+        .push((session_id.to_string(), path));
+}
+
+#[cfg(test)]
+pub(crate) fn work_item_plan_parser_paths_for_session(session_id: &str) -> Vec<&'static str> {
+    WORK_ITEM_PLAN_PARSER_PATHS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("work item plan parser spy")
+        .iter()
+        .filter_map(|(recorded_session_id, path)| {
+            (recorded_session_id == session_id).then_some(*path)
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub(crate) struct ProviderRunContext {
     pub(crate) provider_registry: Arc<ProviderRegistry>,
@@ -70,6 +97,8 @@ pub(crate) async fn complete_work_item_plan_outline_author_from_output(
     engine: &mut WorkspaceEngine,
     full_output: &str,
 ) -> Result<WorkItemPlanAuthorOutcome, String> {
+    #[cfg(test)]
+    record_work_item_plan_parser_path(&engine.session().session_id, "legacy_outline");
     let structured_output = match parse_work_item_split_structured_output(full_output) {
         Ok(output) => output,
         Err(message) => {

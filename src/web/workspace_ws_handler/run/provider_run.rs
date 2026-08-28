@@ -63,7 +63,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 .reviewer_provider
                 .clone()
                 .unwrap_or(ProviderName::Codex),
-            ProviderRunKind::WorkItemPlanAuthor
+            ProviderRunKind::WorkItemPlanLegacyAuthor
+            | ProviderRunKind::WorkItemPlanSingleCandidateAuthor
             | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
             | ProviderRunKind::WorkItemPlanOutlineRebuild { .. }
             | ProviderRunKind::WorkItemPlanDraft { .. }
@@ -157,7 +158,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         .await;
                 }
             }
-            ProviderRunKind::WorkItemPlanAuthor
+            ProviderRunKind::WorkItemPlanLegacyAuthor
             | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
             | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => {
                 let rebuilt = rebuild_context.as_ref();
@@ -582,6 +583,233 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             };
                         }
                     }
+                }
+            }
+            ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
+                let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
+                let app_paths_for_run = run_context_clone.app_paths.clone();
+                let session_record_for_run = run_context_clone.session_record.clone();
+                let mut command_rx = command_rx;
+                let request =
+                    match build_work_item_plan_generate_request(&engine, &lifecycle_for_run)
+                        .map_err(|error| format!("build single candidate request failed: {error}"))
+                    {
+                        Ok(request) => request,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error { message },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                let repository = match workspace_repository_for_session(
+                    &app_paths_for_run,
+                    &lifecycle_for_run,
+                    &session_record_for_run,
+                ) {
+                    Ok(repository) => repository,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::Error {
+                                message: format!("load repository failed: {error}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let issue = match IssueStore::new(app_paths_for_run.clone()).get(
+                    &session_record_for_run.project_id,
+                    &session_record_for_run.issue_id,
+                ) {
+                    Ok(issue) => issue,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::Error {
+                                message: format!("load issue failed: {error}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let story_context =
+                    match crate::product::work_item_split_engine::context::collect_story_context(
+                        &lifecycle_for_run,
+                        &request,
+                        &issue,
+                    ) {
+                        Ok(context) => context.join("\n\n"),
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error {
+                                    message: format!(
+                                        "load story context failed: {}",
+                                        error.message
+                                    ),
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                let design_context =
+                    match crate::product::work_item_split_engine::context::collect_design_context(
+                        &lifecycle_for_run,
+                        &request,
+                        &issue,
+                    ) {
+                        Ok(context) => context.join("\n\n"),
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error {
+                                    message: format!(
+                                        "load design context failed: {}",
+                                        error.message
+                                    ),
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                let plan_launch = match resolve_plan_author_launch(
+                    &engine,
+                    repository
+                        .logical_repository_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                    repository
+                        .primary_checkout_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                ) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::Error {
+                                message: format!("logical plan launch failed: {error}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let author_provider = engine.session().author_provider.clone();
+                let prompt = match crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+                    &request,
+                    &issue,
+                    &repository,
+                    &story_context,
+                    &design_context,
+                    &crate::product::work_item_split_engine::context::summarize_repository_structure(&repository.path),
+                    &plan_launch.routing_context(),
+                ) {
+                    Ok(prompt) => prompt,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(&outbound_tx_for_task, &WsOutMessage::Error { message }).await;
+                        return;
+                    }
+                };
+                let node_id = if engine.active_node_type()
+                    == Some(
+                        crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
+                    ) {
+                    match engine.active_timeline_node_id() {
+                        Some(node_id) => node_id,
+                        None => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::Error {
+                                    message: "single candidate author run node unavailable"
+                                        .to_string(),
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                } else {
+                    engine.begin_work_item_plan_outline_run().await
+                };
+                engine
+                    .emit_provider_prompt_event(
+                        &node_id,
+                        prompt.clone(),
+                        "发送给 SingleCandidate markdown author 的完整提示词",
+                        Some(author_provider.clone()),
+                    )
+                    .await;
+                let provider_input = engine.build_work_item_plan_streaming_input(
+                    crate::product::work_item_split_engine::types::provider_name_to_type(
+                        &author_provider,
+                    ),
+                    prompt,
+                    repository.path.to_string_lossy().to_string(),
+                    author_provider.clone(),
+                );
+                let provider_session = start_work_item_plan_author(
+                    plan_launch,
+                    provider_for_run.clone(),
+                    provider_input,
+                    run_cancel.clone(),
+                )
+                .await;
+                let full_output = match engine
+                    .drive_work_item_plan_provider_session_to_output(
+                        provider_session,
+                        &mut command_rx,
+                        node_id,
+                        author_provider,
+                    )
+                    .await
+                {
+                    Ok(output) => output,
+                    Err(_) => {
+                        engine.mark_active_run_finished(&run_label);
+                        return;
+                    }
+                };
+                #[cfg(test)]
+                super::record_work_item_plan_parser_path(
+                    &engine.session().session_id,
+                    "single_candidate_markdown",
+                );
+                if let Err(message) = engine
+                    .complete_single_candidate_work_item_plan_author(full_output, repository.id)
+                    .await
+                {
+                    engine
+                        .finish_active_run_with_failed_node(message.clone())
+                        .await;
+                    drop(engine);
+                    let _ =
+                        send_json_outbound(&outbound_tx_for_task, &WsOutMessage::Error { message })
+                            .await;
+                    return;
                 }
             }
             ProviderRunKind::WorkItemPlanDraft { feedback } => {

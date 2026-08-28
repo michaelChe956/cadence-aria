@@ -425,7 +425,7 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
 
     spawn_provider_run_from_handler(
         run_context,
-        ProviderRunKind::WorkItemPlanAuthor,
+        ProviderRunKind::WorkItemPlanLegacyAuthor,
         outbound_tx,
     )
     .await

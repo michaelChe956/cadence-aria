@@ -100,6 +100,7 @@ mod prompts;
 mod provider_drive;
 mod review;
 mod session_state;
+mod single_candidate;
 mod types;
 
 #[cfg(test)]

@@ -136,6 +136,78 @@ fn valid_single_candidate_session(
 }
 
 impl LifecycleStore {
+    /// Atomically bind a successful SingleCandidate markdown generation to the
+    /// immutable source/IR/mechanical-report tuple. A stale worker may never
+    /// overwrite a newer candidate tuple; an identical retry is idempotent.
+    pub fn compare_and_save_single_candidate_generation(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        source_revision_ref: &str,
+        plan_candidate_ir_ref: &str,
+        mechanical_report_ref: &str,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "single_candidate_generation",
+                reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
+            });
+        }
+        let scope = SourceStoreScope {
+            project_id: expected.project_id.clone(),
+            issue_id: expected.issue_id.clone(),
+            plan_id: expected.entity_id.clone(),
+        };
+        for (reference, kind) in [
+            (source_revision_ref, "source_revision"),
+            (plan_candidate_ir_ref, "plan_candidate_ir"),
+            (mechanical_report_ref, "mechanical_report"),
+        ] {
+            validate_canonical_ref_for_scope(&scope, reference, kind).map_err(|error| {
+                ProductStoreError::InvalidRecord {
+                    kind: "single_candidate_generation",
+                    reason: error.code().to_string(),
+                }
+            })?;
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            let tuple_matches = stored.work_item_plan_source_revision_ref.as_deref()
+                == Some(source_revision_ref)
+                && stored.plan_candidate_ir_ref.as_deref() == Some(plan_candidate_ir_ref)
+                && stored.mechanical_report_ref.as_deref() == Some(mechanical_report_ref);
+            if tuple_matches
+                && stored.single_candidate_phase == Some(SingleCandidatePhase::Evaluate)
+            {
+                return Ok(stored);
+            }
+            if stored.work_item_plan_source_revision_ref.is_some()
+                || stored.plan_candidate_ir_ref.is_some()
+                || stored.mechanical_report_ref.is_some()
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "single_candidate_generation",
+                    id: stored.id.clone(),
+                });
+            }
+            stored.work_item_plan_source_revision_ref = Some(source_revision_ref.to_string());
+            stored.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.to_string());
+            stored.mechanical_report_ref = Some(mechanical_report_ref.to_string());
+            stored.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     pub fn compare_and_save_single_candidate_approval(
         &self,
         expected: &WorkspaceSessionRecord,

@@ -25,6 +25,7 @@ mod planning_resume;
 mod projection_artifact_batch;
 #[path = "tests/provider_run_events.rs"]
 mod provider_run_events;
+mod single_candidate_provider_run;
 mod single_candidate_scope_rejection;
 
 fn provider_config() -> ProviderConfigSnapshot {

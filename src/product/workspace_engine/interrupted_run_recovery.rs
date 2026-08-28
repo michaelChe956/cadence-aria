@@ -3,6 +3,10 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptedRunRecoveryOutcome {
     Review,
+    /// WorkItemPlan author run 的 durable flow 已在恢复结果中固定，handler 不能再次读 flag。
+    WorkItemPlanAuthorGeneration {
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind,
+    },
     WorkItemDraftGeneration,
     Revision,
 }
@@ -103,6 +107,27 @@ impl WorkspaceEngine {
                 .await;
                 Ok(InterruptedRunRecoveryOutcome::Review)
             }
+            RecoverableInterruptedOperation::WorkItemPlanAuthorGeneration => {
+                self.transition_stage(WorkspaceStage::Running).await;
+                self.create_timeline_node_with_retry(
+                    TimelineNodeDraft {
+                        node_type: TimelineNodeType::WorkItemPlanOutlineRun,
+                        agent: Some(self.session.author_provider.clone()),
+                        stage: WorkspaceStage::Running,
+                        round: source_node.round,
+                        title: source_node.title,
+                        summary: Some("重试断线中止的 Work Item Plan author".to_string()),
+                        status: TimelineNodeStatus::Active,
+                    },
+                    Some(retry),
+                )
+                .await;
+                Ok(
+                    InterruptedRunRecoveryOutcome::WorkItemPlanAuthorGeneration {
+                        flow_kind: self.session.flow_kind,
+                    },
+                )
+            }
             RecoverableInterruptedOperation::WorkItemDraftGeneration => {
                 self.transition_stage(WorkspaceStage::Running).await;
                 self.create_timeline_node_with_retry(
@@ -163,6 +188,18 @@ impl WorkspaceEngine {
     }
 
     fn recoverable_work_item_plan_interrupted_run(&self) -> Option<RecoverableInterruptedRun> {
+        if self.session.flow_kind
+            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+        {
+            let failed_author_index =
+                self.failed_disconnect_node_index(TimelineNodeType::WorkItemPlanOutlineRun)?;
+            return Some(RecoverableInterruptedRun {
+                failed_node_id: self.timeline_nodes[failed_author_index].node_id.clone(),
+                operation: RecoverableInterruptedOperation::WorkItemPlanAuthorGeneration,
+                label: "重新生成中断的 Work Item Plan source".to_string(),
+            });
+        }
+
         let index = self
             .work_item_plan_store()
             .ok()?
@@ -173,7 +210,13 @@ impl WorkspaceEngine {
             )
             .ok()??;
         if index.outline_state != "confirmed" {
-            return None;
+            let failed_author_index =
+                self.failed_disconnect_node_index(TimelineNodeType::WorkItemPlanOutlineRun)?;
+            return Some(RecoverableInterruptedRun {
+                failed_node_id: self.timeline_nodes[failed_author_index].node_id.clone(),
+                operation: RecoverableInterruptedOperation::WorkItemPlanAuthorGeneration,
+                label: "重新生成中断的 Work Item Plan Outline".to_string(),
+            });
         }
 
         if let Some(ArtifactPayload::WorkItemDraftCandidate { draft_candidate }) =

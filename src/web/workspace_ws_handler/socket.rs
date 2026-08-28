@@ -119,6 +119,11 @@ pub(crate) fn planning_resume_run_kind(
     decision: &Option<ResumeDecision>,
     fallback: ProviderRunKind,
 ) -> ProviderRunKind {
+    // SingleCandidate 已在 durable run kind 中固化 markdown 链路；逻辑 planning
+    // snapshot 漂移不能将其静默改写为 legacy OutlineRebuild。
+    if fallback.is_single_candidate_work_item_plan_author() {
+        return fallback;
+    }
     match decision {
         None | Some(ResumeDecision::SameContext(_)) => fallback,
         Some(ResumeDecision::StaleContext { rebuilt, .. }) => {
@@ -402,6 +407,7 @@ pub(crate) async fn handle_workspace_socket(
 
     let outline_resume_kind: Result<Option<ProviderRunKind>, String> = {
         let engine = engine.lock().await;
+        let durable_flow_kind = session_record.flow_kind;
         if let Some(error) = engine.outline_revision_recovery_error() {
             Err(format!("outline revision recovery failed: {error}"))
         } else {
@@ -417,15 +423,21 @@ pub(crate) async fn handle_workspace_socket(
             } else if let Some(node_id) = engine.active_timeline_node_id() {
                 match LifecycleStore::new(app_paths.clone()).load_node_detail(&session_id, &node_id)
                 {
-                    Ok(detail) => Ok(Some(if detail.is_revision {
+                    Ok(detail) => Ok(Some(if durable_flow_kind
+                        == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+                    {
+                        ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
+                    } else if detail.is_revision {
                         ProviderRunKind::WorkItemPlanOutlineRevision {
                             feedback: detail.revision_feedback,
                         }
                     } else {
-                        ProviderRunKind::WorkItemPlanAuthor
+                        ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
                     })),
                     Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
-                        Ok(Some(ProviderRunKind::WorkItemPlanAuthor))
+                        Ok(Some(ProviderRunKind::work_item_plan_author_for_durable_flow(
+                            durable_flow_kind,
+                        )))
                     }
                     Err(error) => Err(format!(
                         "resume outline run detail failed for {node_id}: {error}"
