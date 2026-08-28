@@ -211,6 +211,7 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
 ) -> Result<String, String> {
     let (story_context, design_context, repository_structure) =
         budget_markdown_outline_context(story_context, design_context, repository_structure);
+    let dependencies_key = grammar::DEPENDENCIES_KEY;
     let prompt = format!(
         "只输出用于服务端机械计数的最小合法 `work-item-plan.md` outline；不得输出 JSON、code fence、解释、source hash、target_repository_id 或 trusted command catalog。\n\\
          该 outline 绝不发布、绝不写 source revision；但必须按 markdown grammar 让每个候选 Work Item 都可被 compiler parser 计数。\n\\
@@ -219,6 +220,10 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\\
          story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\\
          {grammar}\\
+         [outline_identifier_and_dependency_rules]\n\
+         每个 Work Item 必须以 `{item_id_prefix}<三位数字>` 编号，从 `{item_id_prefix}001` 起，按递增顺序且全局唯一。\n\
+         Dependencies 只能使用结构化 key `{dependencies_key}`；合法行示例：`- {dependencies_key}: []`（无依赖）或 `- {dependencies_key}: [{item_id_prefix}001]`（依赖前项）。\n\
+         除 `[]` 外，`{dependencies_key}` 中的每个依赖必须是 `{item_id_prefix}{item_id_suffix}`；禁止在 `{dependencies_key}` 中写自由文本依赖、标题、说明或其他非 `{item_id_prefix}{item_id_suffix}` 内容。\n\
          [minimum_legal_source] 每个候选复用该完整 grammar 形状并使用唯一 WI/TASK/AC/CHECK/contract ID；不要省略 section 或必填字段。\n{minimum_source}\n\\
          [output] 现在只输出轻量、可 parser 的 markdown outline。",
         issue_title = issue.title,
@@ -232,6 +237,9 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
         grammar = work_item_plan_markdown_grammar(),
+        item_id_prefix = grammar::ITEM_ID_PREFIX,
+        item_id_suffix = grammar::ITEM_ID_SUFFIX,
+        dependencies_key = dependencies_key,
         minimum_source = work_item_plan_minimum_legal_source(),
     );
     if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {

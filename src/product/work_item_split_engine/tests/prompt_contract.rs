@@ -911,6 +911,32 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
     assert!(prompt.contains("[markdown_grammar]"));
     assert!(prompt.contains("[minimum_legal_source]"));
     assert!(prompt.contains("不得输出 JSON、code fence、解释、source hash"));
+
+    let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
+    assert!(
+        crate::product::work_item_plan_compiler::grammar::STRUCTURED_KEYS.contains(&dependency_key),
+        "Dependencies key must remain part of the markdown grammar whitelist"
+    );
+    let item_id_prefix = crate::product::work_item_plan_compiler::grammar::ITEM_ID_PREFIX;
+    assert!(
+        prompt.contains(&format!(
+            "每个 Work Item 必须以 `{item_id_prefix}<三位数字>` 编号，从 `{item_id_prefix}001` 起"
+        )),
+        "轻量 outline 必须明确从 WI-001 开始的编号规则"
+    );
+    for example in [
+        format!("`- {dependency_key}: []`"),
+        format!("`- {dependency_key}: [{item_id_prefix}001]`"),
+    ] {
+        assert!(
+            prompt.contains(&example),
+            "轻量 outline 必须给出合法 Dependencies 行示例：{example}"
+        );
+    }
+    assert!(
+        prompt.contains(&format!("禁止在 `{dependency_key}` 中写自由文本")),
+        "轻量 outline 必须禁止自由文本依赖"
+    );
     assert!(
         !prompt.contains("[real_finding_few_shot]"),
         "轻量 outline 不得携带完整 author 的 few-shot"

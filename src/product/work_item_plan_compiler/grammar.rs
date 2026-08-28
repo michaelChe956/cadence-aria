@@ -43,6 +43,9 @@ pub const STRUCTURED_SECTIONS: [&str; 13] = [
 /// 文档或项目尾部允许自由文本的 section。
 pub const FREE_TEXT_SECTIONS: [&str; 2] = ["Notes", "Rationale"];
 
+/// Dependencies section 的结构化依赖 key。
+pub const DEPENDENCIES_KEY: &str = "depends_on";
+
 /// 结构化区域允许的 key 白名单。
 ///
 /// 这些 key 与 `field-source-matrix.md` 中由 markdown 提供的字段一一对应；
@@ -54,7 +57,7 @@ pub const STRUCTURED_KEYS: [&str; 34] = [
     "kind",
     "summary",
     "non_goals",
-    "depends_on",
+    DEPENDENCIES_KEY,
     "contract_id",
     "provider_logical_work_item_id",
     "required_capabilities",
