@@ -1,7 +1,7 @@
 # Task 3.4 实施报告
 
 ## 状态
-已完成实现并准备原子提交。提交 SHA 将在提交后补入本报告。
+已完成实现并完成恰好一个原子提交：`60879f15`。
 
 ## 变更
 - 新增 `compile/ir_adapter.rs`：将已验证 `PlanCandidateIr` 确定性组装为契约 13 字段 `InitialPlanCompileInput`，并组装 durable context。
@@ -17,14 +17,17 @@
 - GREEN：实现 session schema、hash vector、Approval CAS、reservation CAS 后通过。
 - `cargo test --locked --lib single_candidate_compile_id_uses_the_published_test_vector`：通过。
 - `cargo test --locked --lib single_candidate_approval_and_reservation_are_cas_bound_to_durable_refs`：通过。
-- `cargo test --locked --lib ir_adapter`：3/3 通过。
+- `cargo test --locked --lib ir_adapter`：8/8 通过。
 - `cargo test --locked --lib work_item_plan_compiler::tests::publish_freshness`：4/4 通过。
 - `cargo test --locked --lib work_item_plan_initial_compile`：13/13 通过。
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`：通过。
-- 共享 worktree 的 `cargo test --locked --lib` 被 4.4 未暂存 policy 中间态的既有失败阻断；该失败与本任务路径无关。全量证据使用提交后隔离导出采集。
+- 隔离导出 `cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`：均通过。
+- 隔离导出 `work_item_plan_initial_compile -- --list`：18 项；`work_item_revision_store::tests::initial_publication -- --list`：11 项。
+- 隔离导出定向 initial compile 与 initial publication 测试：通过。
+- 隔离导出首次 `cargo test --locked` 被 Kimi flaky `timeout_terminates_process_group` 阻断；按要求单跑该测试及 `output_is_capped_and_truncation_flagged_once` 均通过。共享 worktree 的 `cargo test --locked --lib` 被 4.4 未暂存 policy 中间态的既有失败阻断；该失败与本任务路径无关。全量证据来自隔离导出，记录上述 flaky 单跑复核。
 
 ## Acceptance evidence
 - changed-files：见最终 `git show --stat`，不含 policy 并行文件。
 - tests-added：`compile/ir_adapter_tests.rs`、CAS/hash/source-store 回归测试。
 - residual-risks：SingleCandidate 端到端 provider/四 crash 边界仍需集成 fixture 进一步覆盖；共享树 policy 中间态需 controller 合并后复跑。
-- no-staged-files：提交后复核。
+- no-staged-files：提交后 index 复核为空；本报告在提交后补入最终 SHA，故工作树仅保留该报告的未暂存文字更新。
