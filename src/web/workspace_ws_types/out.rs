@@ -162,7 +162,7 @@ pub enum WsOutMessage {
         repair_reservation: Option<Box<RepairReservation>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         policy_diagnostics: Vec<PolicyDiagnostic>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         provider_start_ledger: Vec<ProviderStartLedgerEntry>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         single_candidate_phase: Option<crate::product::models::SingleCandidatePhase>,
@@ -196,11 +196,12 @@ mod tests {
 
     use super::*;
     use crate::product::models::ProviderName;
-    use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
+    use crate::product::work_item_plan_policy::{
+        ProviderStartLedgerEntry, RunHistory, RunPolicy, WorkItemPlanFlowKind,
+    };
 
-    #[test]
-    fn session_state_serializes_work_item_plan_durable_fields() {
-        let message = WsOutMessage::SessionState {
+    fn work_item_plan_session_state() -> WsOutMessage {
+        WsOutMessage::SessionState {
             session_id: "session_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             stage: "prepare_context".to_string(),
@@ -238,13 +239,17 @@ mod tests {
             plan_candidate_ir_ref: Some("ir-ref".to_string()),
             mechanical_report_ref: Some("report-ref".to_string()),
             publication_provenance_ref: Some("provenance-ref".to_string()),
-        };
+        }
+    }
 
-        let value = serde_json::to_value(message).unwrap();
+    #[test]
+    fn session_state_serializes_work_item_plan_durable_fields() {
+        let value = serde_json::to_value(work_item_plan_session_state()).unwrap();
 
         assert_eq!(value["session_status"], "stopped_needs_human");
         assert_eq!(value["flow_kind"], "single_candidate");
         assert_eq!(value["run_policy"], "auto_if_valid");
+        assert_eq!(value["provider_start_ledger"], serde_json::json!([]));
         assert_eq!(
             value["run_history"],
             serde_json::json!({
@@ -256,6 +261,32 @@ mod tests {
                 "verification_review_count": 0,
                 "review_cycles": {},
             })
+        );
+    }
+
+    #[test]
+    fn session_state_preserves_nonempty_provider_start_ledger() {
+        let mut message = work_item_plan_session_state();
+        let WsOutMessage::SessionState {
+            provider_start_ledger,
+            ..
+        } = &mut message
+        else {
+            unreachable!("fixture must be a session_state message");
+        };
+        provider_start_ledger.push(ProviderStartLedgerEntry {
+            provider_start_idempotency_key: "start:author:round-1".to_string(),
+            started: true,
+        });
+
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            value["provider_start_ledger"],
+            serde_json::json!([{
+                "provider_start_idempotency_key": "start:author:round-1",
+                "started": true,
+            }])
         );
     }
 }

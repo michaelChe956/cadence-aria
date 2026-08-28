@@ -255,6 +255,10 @@ fn review_messages_and_session_state_serialize_as_contract() {
     assert_eq!(state["openspec_enabled"], true);
     assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
     assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        state.get("provider_start_ledger"),
+        Some(&serde_json::json!([]))
+    );
 }
 
 #[test]
