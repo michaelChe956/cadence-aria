@@ -5,6 +5,8 @@ use super::{
 use crate::product::models::TrustedDraftVerificationCommand;
 use serde_json::Value;
 
+mod reviewer_finding_channel_boundary;
+
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
 
 #[test]
@@ -970,6 +972,50 @@ fn lower_typed_ir() {
         1,
     );
     assert!(compile_work_item_plan(&markdown_owned, &context).is_err());
+}
+
+#[test]
+fn untrusted_command_diagnostic_points_to_its_own_command_line() {
+    let source = REP4_FIXTURE.replacen(
+        "### Handoff Schema\n- required_fields: commit_sha",
+        "- check_id: CHECK-004\n- command: unknown-command-ref\n- manual_instruction: Confirm the extra check.\n- required: true\n- non_zero_test_execution_required: true\n\n### Handoff Schema\n- required_fields: commit_sha",
+        1,
+    );
+    let expected_line = source
+        .lines()
+        .position(|line| line == "- command: unknown-command-ref")
+        .expect("测试输入必须包含未知 command")
+        + 1;
+    let context = WorkItemPlanSourceContext {
+        target_repository_id: "repo-levels".to_string(),
+        trusted_command_catalog: vec![
+            TrustedDraftVerificationCommand {
+                command: "cargo test --locked --lib levels_api".to_string(),
+                cwd: "backend".to_string(),
+                purpose: "backend checks".to_string(),
+                source_ref: "cargo test --locked --lib levels_api".to_string(),
+            },
+            TrustedDraftVerificationCommand {
+                command: "pnpm test level-select".to_string(),
+                cwd: "frontend".to_string(),
+                purpose: "frontend checks".to_string(),
+                source_ref: "pnpm test level-select".to_string(),
+            },
+            TrustedDraftVerificationCommand {
+                command: "cargo test --locked --test levels_integration".to_string(),
+                cwd: "integration".to_string(),
+                purpose: "integration checks".to_string(),
+                source_ref: "cargo test --locked --test levels_integration".to_string(),
+            },
+        ],
+    };
+
+    let diagnostics = compile_work_item_plan(&source, &context)
+        .expect_err("未知 trusted command 必须让 lowering 失败关闭");
+    assert_eq!(diagnostics.len(), 1, "测试输入只能产生一个 lowering 诊断");
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.field, "trusted_commands");
+    assert_eq!(diagnostic.line, expected_line);
 }
 
 #[test]

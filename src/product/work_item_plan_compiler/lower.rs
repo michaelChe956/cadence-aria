@@ -40,11 +40,17 @@ type TaskState = (String, String, Vec<String>, Vec<String>, usize);
 type VerificationState = (
     String,
     Option<String>,
+    Option<usize>,
     Option<String>,
     Option<bool>,
     Option<bool>,
     usize,
 );
+
+struct LoweredVerificationCheck {
+    check: VerificationCheck,
+    command_line: usize,
+}
 type InputState = (
     String,
     Option<String>,
@@ -228,7 +234,10 @@ fn lower_item(
                     forbidden_scopes: split_values(values("Write Policy", "forbidden_scopes")),
                 },
                 acceptance_criteria,
-                verification_checks,
+                verification_checks: verification_checks
+                    .iter()
+                    .map(|entry| entry.check.clone())
+                    .collect(),
                 handoff_contract: HandoffContract {
                     required_fields: split_values(values("Handoff Schema", "required_fields")),
                     provided_contract_refs: split_values(values(
@@ -247,8 +256,7 @@ fn lower_item(
         _ => return None,
     };
 
-    let trusted_commands =
-        trusted_commands_for_checks(&contract.verification_checks, catalog, &line, diagnostics);
+    let trusted_commands = trusted_commands_for_checks(&verification_checks, catalog, diagnostics);
     Some(PlanCandidateItemIr {
         target_repository_id,
         verification_plan: WorkItemDraftVerificationPlan {
@@ -389,7 +397,7 @@ fn flush_acceptance(
 fn lower_verification_checks(
     fields: &[(&str, &WorkItemPlanFieldAst)],
     diagnostics: &mut Vec<CompilerDiagnostic>,
-) -> Vec<VerificationCheck> {
+) -> Vec<LoweredVerificationCheck> {
     let mut entries = Vec::new();
     let mut current: Option<VerificationState> = None;
     for field in section_fields(fields, "Verification") {
@@ -402,27 +410,29 @@ fn lower_verification_checks(
                     None,
                     None,
                     None,
+                    None,
                     field.value.line,
                 ));
             }
             "command" => {
                 if let Some(entry) = current.as_mut() {
                     entry.1 = nonempty(field.value.value.as_str());
+                    entry.2 = Some(field.value.line);
                 }
             }
             "manual_instruction" => {
                 if let Some(entry) = current.as_mut() {
-                    entry.2 = nonempty(field.value.value.as_str());
+                    entry.3 = nonempty(field.value.value.as_str());
                 }
             }
             "required" => {
                 if let Some(entry) = current.as_mut() {
-                    entry.3 = parse_bool_value(field, diagnostics);
+                    entry.4 = parse_bool_value(field, diagnostics);
                 }
             }
             "non_zero_test_execution_required" => {
                 if let Some(entry) = current.as_mut() {
-                    entry.4 = parse_bool_value(field, diagnostics);
+                    entry.5 = parse_bool_value(field, diagnostics);
                 }
             }
             _ => {}
@@ -434,10 +444,11 @@ fn lower_verification_checks(
 
 fn flush_verification(
     current: &mut Option<VerificationState>,
-    entries: &mut Vec<VerificationCheck>,
+    entries: &mut Vec<LoweredVerificationCheck>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) {
-    let Some((check_id, command, manual_instruction, required, non_zero, line)) = current.take()
+    let Some((check_id, command, command_line, manual_instruction, required, non_zero, line)) =
+        current.take()
     else {
         return;
     };
@@ -468,12 +479,15 @@ fn flush_verification(
         ));
         return;
     }
-    entries.push(VerificationCheck {
-        check_id,
-        command,
-        manual_instruction,
-        required,
-        non_zero_test_execution_required,
+    entries.push(LoweredVerificationCheck {
+        command_line: command_line.unwrap_or(line),
+        check: VerificationCheck {
+            check_id,
+            command,
+            manual_instruction,
+            required,
+            non_zero_test_execution_required,
+        },
     });
 }
 
@@ -728,22 +742,21 @@ fn flush_traceability(
 }
 
 fn trusted_commands_for_checks(
-    checks: &[VerificationCheck],
+    checks: &[LoweredVerificationCheck],
     catalog: &HashMap<&str, &TrustedDraftVerificationCommand>,
-    line: &impl Fn(&str, &str) -> usize,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Vec<TrustedDraftVerificationCommand> {
     let mut trusted_commands = Vec::new();
     let mut refs = HashSet::new();
-    for check in checks {
-        let Some(reference) = check.command.as_deref() else {
+    for entry in checks {
+        let Some(reference) = entry.check.command.as_deref() else {
             continue;
         };
         if !refs.insert(reference) {
             diagnostics.push(diagnostic(
                 "trusted_commands",
                 "同一 Work Item 不得重复引用 trusted command。",
-                line("Verification", "command"),
+                entry.command_line,
                 "- command: catalog-entry-001",
             ));
             continue;
@@ -753,7 +766,7 @@ fn trusted_commands_for_checks(
             None => diagnostics.push(diagnostic(
                 "trusted_commands",
                 "Verification command 未在 trusted command catalog 中找到。",
-                line("Verification", "command"),
+                entry.command_line,
                 "- command: catalog-entry-001",
             )),
         }
