@@ -111,7 +111,12 @@ fn ir_adapter_rejects_mechanical_error_before_pure_prepare() {
             message: "invalid candidate".to_string(),
             work_item_ids: Vec::new(),
         });
+    let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
     assert!(initial_plan_compile_input_from_ir(&context, &ir(), &report).is_err());
+    assert!(
+        journal.snapshots().is_empty(),
+        "stale/mechanical-error IR must fail before the first transaction put"
+    );
 }
 
 #[test]

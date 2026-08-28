@@ -1,5 +1,5 @@
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
@@ -76,6 +76,37 @@ pub struct WorkItemPlanStore {
     app_paths: ProductAppPaths,
 }
 
+#[cfg(test)]
+thread_local! {
+    static PANIC_ON_LEGACY_COMPILE_READ: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyCompileReadSpy;
+
+#[cfg(test)]
+impl Drop for LegacyCompileReadSpy {
+    fn drop(&mut self) {
+        PANIC_ON_LEGACY_COMPILE_READ.with(|flag| flag.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn panic_on_legacy_compile_reads() -> LegacyCompileReadSpy {
+    PANIC_ON_LEGACY_COMPILE_READ.with(|flag| flag.set(true));
+    LegacyCompileReadSpy
+}
+
+#[cfg(test)]
+fn assert_legacy_compile_read_allowed(operation: &str) {
+    PANIC_ON_LEGACY_COMPILE_READ.with(|flag| {
+        assert!(
+            !flag.get(),
+            "SingleCandidate accessed legacy compile store: {operation}"
+        );
+    });
+}
+
 impl WorkItemPlanStore {
     pub fn new(app_paths: ProductAppPaths) -> Self {
         Self { app_paths }
@@ -94,6 +125,8 @@ impl WorkItemPlanStore {
         generation_round_id: &str,
         draft_id: &str,
     ) -> Result<WorkItemDraftRecord, ProductStoreError> {
+        #[cfg(test)]
+        assert_legacy_compile_read_allowed("get_draft_record");
         validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
         validate_relative_id(generation_round_id)?;
         validate_relative_id(draft_id)?;
@@ -116,6 +149,8 @@ impl WorkItemPlanStore {
         issue_id: &str,
         plan_id: &str,
     ) -> Result<Vec<WorkItemDraftRecord>, ProductStoreError> {
+        #[cfg(test)]
+        assert_legacy_compile_read_allowed("list_draft_records");
         validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
         let root = self.draft_plan_root(project_id, issue_id, plan_id);
         let mut records = Vec::new();
@@ -135,6 +170,8 @@ impl WorkItemPlanStore {
         issue_id: &str,
         plan_id: &str,
     ) -> Result<Option<WorkItemPlanDraftActiveIndex>, ProductStoreError> {
+        #[cfg(test)]
+        assert_legacy_compile_read_allowed("load_active_index");
         validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
         read_optional_json(&self.active_index_path_for(project_id, issue_id, plan_id))
     }

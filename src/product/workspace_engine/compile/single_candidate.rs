@@ -307,7 +307,26 @@ impl WorkspaceEngine {
         store: &WorkItemPlanStore,
         tx: &mut WorkItemPlanCompileTransaction,
     ) -> Result<InitialPlanCompileOutcome, String> {
-        self.validate_single_candidate_transaction_refs(tx)?;
+        let result = self.resume_single_candidate_compile_transaction_inner(store, tx);
+        if let Err(error) = &result {
+            let lifecycle = self.lifecycle_store.clone();
+            if let Some(lifecycle) = lifecycle {
+                self.record_single_candidate_compile_failure(
+                    &lifecycle,
+                    "single_candidate_recovery_failed",
+                    error,
+                );
+            }
+        }
+        result
+    }
+
+    fn resume_single_candidate_compile_transaction_inner(
+        &mut self,
+        store: &WorkItemPlanStore,
+        tx: &mut WorkItemPlanCompileTransaction,
+    ) -> Result<InitialPlanCompileOutcome, String> {
+        self.validate_single_candidate_transaction_refs_inner(tx)?;
         let lifecycle = self
             .lifecycle_store
             .clone()
@@ -449,7 +468,25 @@ impl WorkspaceEngine {
         Ok(outcome)
     }
 
-    pub(super) fn validate_single_candidate_transaction_refs(
+    pub(crate) fn validate_single_candidate_transaction_refs(
+        &mut self,
+        tx: &WorkItemPlanCompileTransaction,
+    ) -> Result<(), String> {
+        let result = self.validate_single_candidate_transaction_refs_inner(tx);
+        if let Err(error) = &result {
+            let lifecycle = self.lifecycle_store.clone();
+            if let Some(lifecycle) = lifecycle {
+                self.record_single_candidate_compile_failure(
+                    &lifecycle,
+                    "single_candidate_recovery_failed",
+                    error,
+                );
+            }
+        }
+        result
+    }
+
+    fn validate_single_candidate_transaction_refs_inner(
         &self,
         tx: &WorkItemPlanCompileTransaction,
     ) -> Result<(), String> {
