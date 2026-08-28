@@ -28,11 +28,11 @@ fn persist_verification_scope(
     persist_verification_scope_with_cycle(lifecycle, engine, scope, 0);
 }
 
-fn persist_verification_scope_with_cycle(
+fn persist_single_candidate_scope(
     lifecycle: &crate::product::lifecycle_store::LifecycleStore,
     engine: &mut crate::product::workspace_engine::WorkspaceEngine,
     scope: ReviewInvocationScope,
-    verification_count: u32,
+    run_history: RunHistory,
 ) {
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)
@@ -48,17 +48,7 @@ fn persist_verification_scope_with_cycle(
         record.plan_candidate_ir_ref = Some(repaired_revision_id.clone());
         record.mechanical_report_ref = Some(mechanical_report_ref.clone());
     }
-    record.run_history = RunHistory {
-        review_cycles: std::collections::BTreeMap::from([(
-            "review:verification-node".to_string(),
-            ReviewCycleState {
-                initial_count: 1,
-                verification_count,
-                ..ReviewCycleState::default()
-            },
-        )]),
-        ..RunHistory::default()
-    };
+    record.run_history = run_history;
     engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
     engine.session.review_invocation_scope = Some(scope);
     engine.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
@@ -72,7 +62,31 @@ fn persist_verification_scope_with_cycle(
             .join(format!("{}.json", record.id)),
         &record,
     )
-    .expect("persist verification scope");
+    .expect("persist single-candidate scope");
+}
+
+fn persist_verification_scope_with_cycle(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    engine: &mut crate::product::workspace_engine::WorkspaceEngine,
+    scope: ReviewInvocationScope,
+    verification_count: u32,
+) {
+    persist_single_candidate_scope(
+        lifecycle,
+        engine,
+        scope,
+        RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:verification-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    verification_count,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        },
+    );
 }
 
 fn source_hash(source: &str) -> String {
@@ -205,6 +219,8 @@ fn single_candidate_initial_prompt_is_derived_from_server_scope() {
     assert!(instructions.contains("category"));
     assert!(instructions.contains("class_hint"));
     assert!(instructions.contains("must_fix"));
+    assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
+    assert!(instructions.contains("advisory"));
     assert!(instructions.contains(scope.scope_digest()));
     assert!(!instructions.contains("review_invocation_scope"));
 }
@@ -230,6 +246,7 @@ fn single_candidate_verification_prompt_replays_only_original_fingerprints() {
     assert!(instructions.contains("mechanical_report"));
     assert!(instructions.contains(fingerprint.0.as_str()));
     assert!(instructions.contains("仅复核原 fingerprints"));
+    assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
     assert!(instructions.contains("advisory"));
     assert!(instructions.contains(scope.scope_digest()));
 }
@@ -469,6 +486,102 @@ async fn verification_scope_parser_error_is_protocol_fatal_instead_of_needs_huma
     };
     engine.complete_review(completion, verdict).await;
 
+    assert_durable_protocol_failure(&lifecycle, &engine);
+}
+
+#[test]
+fn single_candidate_scope_json_roundtrip_and_reconnect_preserve_digest() {
+    let (_tmp, checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("scope_roundtrip_reconnect");
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let scope = ReviewInvocationScope::verification(
+        BTreeSet::from([fingerprint("original finding")]),
+        ir_ref,
+        report_ref,
+    );
+    let scope_json = serde_json::to_string(&scope).expect("serialize verification scope");
+    let round_tripped_scope = serde_json::from_str::<ReviewInvocationScope>(&scope_json)
+        .expect("deserialize verification scope");
+    assert_eq!(round_tripped_scope, scope);
+    assert_eq!(round_tripped_scope.scope_digest(), scope.scope_digest());
+    persist_verification_scope(&lifecycle, &mut engine, scope.clone());
+
+    let durable_record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load durable session through JSON store");
+    assert_eq!(
+        durable_record.review_invocation_scope.as_ref(),
+        Some(&scope)
+    );
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let reconnected = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle,
+        event_tx,
+        crate::product::workspace_engine::WorkspaceSession::from_record(durable_record),
+    );
+
+    let restored_scope = reconnected
+        .session()
+        .review_invocation_scope
+        .as_ref()
+        .expect("scope must survive engine reconstruction");
+    assert_eq!(restored_scope, &scope);
+    assert_eq!(restored_scope.scope_digest(), scope.scope_digest());
+    restored_scope
+        .validate_digest()
+        .expect("reconnected scope digest must remain valid");
+}
+
+#[test]
+fn single_candidate_scope_phase_violations_fail_closed_for_initial_and_verification() {
+    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("initial_scope_in_verification");
+    persist_single_candidate_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::initial("revision-001"),
+        RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:verification-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        },
+    );
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("initial scope in verification must be routed");
+    assert!(matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
+    assert_durable_protocol_failure(&lifecycle, &engine);
+
+    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("verification_scope_in_initial");
+    persist_single_candidate_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), "ir-001", "report-001"),
+        RunHistory::default(),
+    );
+    let action = engine
+        .work_item_policy_action("initial-node", &pass_verdict())
+        .expect("verification scope in initial must be routed");
+    assert!(matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
     assert_durable_protocol_failure(&lifecycle, &engine);
 }
 

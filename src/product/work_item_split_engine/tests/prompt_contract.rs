@@ -110,6 +110,55 @@ fn single_item_prompt_behavior_layer_removed_but_output_boundaries_retained() {
 }
 
 #[test]
+fn single_item_prompt_merge_gate_keeps_c_layer_and_excludes_b_layer_schema() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "[openspec_contract]",
+        "[canonical_field_contract]",
+        "[allowed_outputs]",
+        "[forbidden_outputs]",
+        "不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段",
+        "候选，不能写入 canonical artifact",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "prompt merge gate must retain C-layer contract: {required}"
+        );
+    }
+    for forbidden in [
+        "writing-plans 的拆分、TDD、验证与交接质量纪律",
+        "[superpowers_contract]",
+        "[output_schema]",
+        "[artifact_schema_contract]",
+    ] {
+        assert!(
+            !invocation.prompt.contains(forbidden),
+            "prompt merge gate must exclude B-layer or duplicated schema: {forbidden}"
+        );
+    }
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES
+            && invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "prompt must remain within quality and hard byte limits: {} bytes",
+        invocation.prompt.len()
+    );
+}
+
+#[test]
 fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
