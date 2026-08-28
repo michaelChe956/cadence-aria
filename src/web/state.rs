@@ -220,6 +220,16 @@ impl WebAppState {
         state
     }
 
+    /// 仅由 `web` 启动入口在构造 state 时设置；运行期不会提供可变控制面。
+    pub fn with_work_item_plan_single_candidate(mut self, enabled: bool) -> Self {
+        self.work_item_plan_single_candidate = enabled;
+        self
+    }
+
+    pub fn work_item_plan_single_candidate(&self) -> bool {
+        self.work_item_plan_single_candidate
+    }
+
     pub fn with_provider_availability<F>(
         workspace_root: PathBuf,
         runtime: WebRuntime,
@@ -690,6 +700,24 @@ mod tests {
         assert!(fake.get(&ProviderName::Fake).is_some());
         assert!(fake.get(&ProviderName::Pi).is_some());
         assert!(fake.get(&ProviderName::KimiCode).is_some());
+    }
+
+    #[test]
+    fn web_app_state_single_candidate_rollout_defaults_to_disabled_and_can_be_enabled_at_creation()
+    {
+        let root = tempdir().expect("root");
+        let disabled = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        let enabled = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        )
+        .with_work_item_plan_single_candidate(true);
+
+        assert!(!disabled.work_item_plan_single_candidate());
+        assert!(enabled.work_item_plan_single_candidate());
     }
 
     #[test]

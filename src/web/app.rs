@@ -516,6 +516,7 @@ pub async fn serve_web(
     workspace_root: std::path::PathBuf,
     host: String,
     port: Option<u16>,
+    work_item_plan_single_candidate: bool,
 ) -> anyhow::Result<()> {
     let product_paths = ProductAppPaths::new(workspace_root.join(".aria"));
     ensure_product_data_schema(&product_paths)
@@ -523,7 +524,7 @@ pub async fn serve_web(
 
     let addr: SocketAddr = format!("{}:{}", host, port.unwrap_or(0)).parse()?;
     let events = EventHub::new();
-    let state = WebAppState::with_events(
+    let state = web_app_state(
         workspace_root.clone(),
         crate::web::runtime::WebRuntime::new_real_with_events(
             workspace_root.clone(),
@@ -531,6 +532,7 @@ pub async fn serve_web(
         )
         .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
         events,
+        work_item_plan_single_candidate,
     );
     refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
@@ -547,6 +549,16 @@ pub async fn serve_web(
     eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn web_app_state(
+    workspace_root: PathBuf,
+    runtime: crate::web::runtime::WebRuntime,
+    events: EventHub,
+    work_item_plan_single_candidate: bool,
+) -> WebAppState {
+    WebAppState::with_events(workspace_root, runtime, events)
+        .with_work_item_plan_single_candidate(work_item_plan_single_candidate)
 }
 
 async fn refresh_provider_health_for_startup(state: &WebAppState) {
@@ -582,6 +594,7 @@ mod tests {
     };
     use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
     use crate::cross_cutting::provider_health::{ProviderHealthClock, ProviderHealthService};
+    use crate::web::events::EventHub;
     use crate::web::runtime::WebRuntime;
     use crate::web::state::WebAppState;
 
@@ -623,6 +636,26 @@ mod tests {
                 .with_provider_health(health, gate, runner);
         state.test_provider_enabled = false;
         state
+    }
+
+    #[test]
+    fn web_app_state_applies_single_candidate_rollout_only_when_requested_at_startup() {
+        let root = tempdir().expect("root");
+        let enabled = super::web_app_state(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            EventHub::new(),
+            true,
+        );
+        let disabled = super::web_app_state(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            EventHub::new(),
+            false,
+        );
+
+        assert!(enabled.work_item_plan_single_candidate());
+        assert!(!disabled.work_item_plan_single_candidate());
     }
 
     #[tokio::test]

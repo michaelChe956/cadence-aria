@@ -429,17 +429,39 @@
     }
 
     #[tokio::test]
+    async fn prepare_defaults_to_legacy_when_single_candidate_rollout_is_not_enabled_at_startup() {
+        let root = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let (lifecycle, story_spec_id, design_spec_id) =
+            seed_prepare_work_item_plan_fixture(&paths, 1);
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        let app = build_web_router(state);
+
+        let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
+
+        assert!(response.status().is_server_error());
+        let sessions = lifecycle
+            .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::Legacy);
+    }
+
+    #[tokio::test]
     async fn prepare_preflight_falls_back_only_before_session_and_never_afterwards() {
         for repository_count in [0, 2] {
             let root = TempDir::new().unwrap();
             let paths = ProductAppPaths::new(root.path().join(".aria"));
             let (lifecycle, story_spec_id, design_spec_id) =
                 seed_prepare_work_item_plan_fixture(&paths, repository_count);
-            let mut state = WebAppState::new(
+            let state = WebAppState::new(
                 root.path().to_path_buf(),
                 WebRuntime::new_fake(root.path().to_path_buf()),
-            );
-            state.work_item_plan_single_candidate = true;
+            )
+            .with_work_item_plan_single_candidate(true);
             let app = build_web_router(state);
             let before_files = data_root_files(paths.root());
 
@@ -474,11 +496,11 @@
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let (lifecycle, story_spec_id, design_spec_id) =
             seed_prepare_work_item_plan_fixture(&paths, 1);
-        let mut state = WebAppState::new(
+        let state = WebAppState::new(
             root.path().to_path_buf(),
             WebRuntime::new_fake(root.path().to_path_buf()),
-        );
-        state.work_item_plan_single_candidate = true;
+        )
+        .with_work_item_plan_single_candidate(true);
         let app = build_web_router(state);
 
         let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
