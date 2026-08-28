@@ -43,3 +43,9 @@
 - 新增测试态 legacy compile store panic spy，SingleCandidate normal/recovery 路径在删除 draft/index/outline 后仍通过，证明未读取 legacy active-index/outline/draft。
 - resume/validate 错误统一经过 `single_candidate_recovery_failed` durable Failed diagnostics 记录；保留原错误文本并与 `failure()` fail-closed 轨迹一致。
 - Fix round 定向门禁：`task_3_4` 8/8、`ir_adapter` 8/8、`work_item_plan_initial_compile` 18/18、`initial_publication` 11/11；fmt/clippy 通过。
+
+## Fix round 2
+- 按 `review-3.4-r1-verdict.md` Issue ③ 补齐 reservation 前、reservation 后/provenance 前、provenance 后/首个 transaction put 前三个 `#[cfg(test)]` SingleCandidate failpoint；每个边界销毁 engine 后由 `new_persistent` 重启，复用同一 compile_id/now/reservation/provenance/publication IDs。
+- 新增首个 transaction put、lineage/journal 空集与 provider ledger 不新增观察断言；补充 reservation/provenance 持久化边界检查。
+- 将已有 publication recovery 测试的 `publication_resumed` 改为由 recovery Continue 实际写入，并用 transaction put observer 独立捕获该 cursor，移除手工 seed 语义。
+- Fix round 2 定向门禁：`task_3_4 -- --list` 8 项且全部通过；fmt/clippy 通过。

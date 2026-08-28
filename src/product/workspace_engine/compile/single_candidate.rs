@@ -1,6 +1,88 @@
 use super::*;
 
+#[cfg(test)]
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SingleCandidateCompileCheckpoint {
+    ApprovalPersisted,
+    ReservationPersisted,
+    ProvenancePersisted,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SingleCandidateCompileFailpointKey {
+    project_id: String,
+    issue_id: String,
+    plan_id: String,
+    checkpoint: SingleCandidateCompileCheckpoint,
+}
+
+#[cfg(test)]
+pub(crate) struct SingleCandidateCompileFailpointGuard {
+    key: SingleCandidateCompileFailpointKey,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static SINGLE_CANDIDATE_COMPILE_FAILPOINTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<SingleCandidateCompileFailpointKey, u64>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static NEXT_SINGLE_CANDIDATE_COMPILE_FAILPOINT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 impl WorkspaceEngine {
+    #[cfg(test)]
+    pub(crate) fn register_single_candidate_compile_failpoint(
+        &self,
+        checkpoint: SingleCandidateCompileCheckpoint,
+    ) -> SingleCandidateCompileFailpointGuard {
+        let key = SingleCandidateCompileFailpointKey {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+            checkpoint,
+        };
+        let registration_id = NEXT_SINGLE_CANDIDATE_COMPILE_FAILPOINT_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let previous = single_candidate_compile_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), registration_id);
+        assert!(
+            previous.is_none(),
+            "single candidate compile failpoint already registered"
+        );
+        SingleCandidateCompileFailpointGuard {
+            key,
+            registration_id,
+        }
+    }
+
+    #[cfg(test)]
+    fn maybe_fail_single_candidate_compile(
+        &self,
+        checkpoint: SingleCandidateCompileCheckpoint,
+    ) -> Result<(), String> {
+        let key = SingleCandidateCompileFailpointKey {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+            checkpoint,
+        };
+        if single_candidate_compile_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key)
+            .is_some()
+        {
+            return Err(format!("single_candidate_compile_failpoint:{checkpoint:?}"));
+        }
+        Ok(())
+    }
+
     pub(super) async fn run_single_candidate_initial_plan_compile(
         &mut self,
     ) -> Result<InitialPlanCompileOutcome, String> {
@@ -137,6 +219,10 @@ impl WorkspaceEngine {
                 ));
             }
         };
+        #[cfg(test)]
+        self.maybe_fail_single_candidate_compile(
+            SingleCandidateCompileCheckpoint::ApprovalPersisted,
+        )?;
         let reservation = crate::product::models::SingleCandidateCompileReservation {
             compile_id: single_candidate_compile_id(
                 &approved.id,
@@ -178,6 +264,10 @@ impl WorkspaceEngine {
                     format!("save compile reservation failed: {error}"),
                 ),
             })?;
+        #[cfg(test)]
+        self.maybe_fail_single_candidate_compile(
+            SingleCandidateCompileCheckpoint::ReservationPersisted,
+        )?;
         let reservation = reserved
             .compile_reservation
             .as_ref()
@@ -288,6 +378,10 @@ impl WorkspaceEngine {
                     format!("reload provenance failed: {error:?}"),
                 )
             })?;
+        #[cfg(test)]
+        self.maybe_fail_single_candidate_compile(
+            SingleCandidateCompileCheckpoint::ProvenancePersisted,
+        )?;
         let durable_context = ir_adapter::durable_compile_context_from_ir(&context, &provenance)?;
         let input =
             ir_adapter::initial_plan_compile_input_from_ir(&context, &ir.ir, &report.report)?;
@@ -568,6 +662,25 @@ impl WorkspaceEngine {
         ) {
             self.session.session_status = saved.status;
             self.session.policy_diagnostics = saved.policy_diagnostics;
+        }
+    }
+}
+
+#[cfg(test)]
+fn single_candidate_compile_failpoints()
+-> &'static std::sync::Mutex<std::collections::HashMap<SingleCandidateCompileFailpointKey, u64>> {
+    SINGLE_CANDIDATE_COMPILE_FAILPOINTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+impl Drop for SingleCandidateCompileFailpointGuard {
+    fn drop(&mut self) {
+        let mut failpoints = single_candidate_compile_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if failpoints.get(&self.key) == Some(&self.registration_id) {
+            failpoints.remove(&self.key);
         }
     }
 }

@@ -14,6 +14,8 @@ use crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto;
 
 pub(crate) mod ir_adapter;
 mod single_candidate;
+#[cfg(test)]
+pub(crate) use single_candidate::SingleCandidateCompileCheckpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialPlanCompileInput {

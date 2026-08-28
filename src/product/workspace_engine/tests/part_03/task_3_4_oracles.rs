@@ -10,8 +10,8 @@ use crate::product::work_item_plan_source_store::{
 };
 use crate::product::work_item_revision_store::InitialPlanPublicationPhase;
 use crate::product::workspace_engine::compile::{
-    CompileStores, InitialPlanCompileDurableContext, execute_initial_plan_compile,
-    prepare_initial_plan_compile,
+    CompileStores, InitialPlanCompileDurableContext, SingleCandidateCompileCheckpoint,
+    execute_initial_plan_compile, prepare_initial_plan_compile,
 };
 use crate::product::workspace_engine::plan_projection::prepare_initial_plan_publication;
 use crate::product::workspace_engine::types::WorkspaceStage;
@@ -233,7 +233,22 @@ fn task_3_4_recovery_failure_records_durable_failed_diagnostic() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_provenance() {
+async fn task_3_4_single_candidate_crash_boundaries_reuse_durable_reservation() {
+    for checkpoint in [
+        SingleCandidateCompileCheckpoint::ApprovalPersisted,
+        SingleCandidateCompileCheckpoint::ReservationPersisted,
+        SingleCandidateCompileCheckpoint::ProvenancePersisted,
+    ] {
+        task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_provenance(
+            checkpoint,
+        )
+        .await;
+    }
+}
+
+async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_provenance(
+    checkpoint: SingleCandidateCompileCheckpoint,
+) {
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
@@ -366,52 +381,131 @@ async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_p
         &approval_id,
         approved.approved_at.as_deref().expect("approved at"),
     );
-    // Publication failpoint models the IR path stopping after PlanArtifactsWritten;
-    // the following restart must replay the same transaction rather than allocate another one.
-    let failpoint = engine.revision_store().register_initial_plan_publication_failpoint(
-        "project_0001",
-        "issue_0001",
-        &plan_id,
-        &compile_id,
-        crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::PlanArtifactsWritten,
-    );
+    // 每个 failpoint 都位于首个 transaction put 之前；重启后应从 durable session 继续。
+    let failpoint = engine.register_single_candidate_compile_failpoint(checkpoint);
+    let provider_ledger_before = provider_ledger_bytes(&lifecycle);
+    let compile_writes = crate::product::work_item_plan_store::observe_compile_transaction_writes();
     let first_error = {
         let _legacy_read_spy =
             crate::product::work_item_plan_store::panic_on_legacy_compile_reads();
         engine
             .run_work_item_plan_compile()
             .await
-            .expect_err("publication failpoint interrupts single candidate compile")
+            .expect_err("single candidate crash failpoint interrupts compile")
     };
     drop(failpoint);
-    assert!(first_error.contains("PlanArtifactsWritten"));
-    assert!(engine.mark_latest_compile_transaction_recovery_required(&first_error));
+    assert!(first_error.contains("single_candidate_compile_failpoint"));
+    assert!(compile_writes.snapshots().is_empty());
+    assert_eq!(provider_ledger_bytes(&lifecycle), provider_ledger_before);
+    assert!(matches!(
+        engine
+            .revision_store()
+            .get_plan_lineage("project_0001", "issue_0001", &plan_id),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        engine
+            .revision_store()
+            .get_initial_plan_publication_journal(
+                "project_0001",
+                "issue_0001",
+                &plan_id,
+                &compile_id,
+            ),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. })
+    ));
     let interrupted = engine
         .work_item_plan_store()
         .expect("plan store")
         .list_compile_transactions("project_0001", "issue_0001", &plan_id)
-        .expect("transactions")
-        .into_iter()
-        .next()
-        .expect("interrupted transaction");
-    assert_eq!(interrupted.compile_id, compile_id);
-    assert_eq!(
-        interrupted.status,
-        WorkItemPlanCompileStatus::RecoveryRequired
+        .expect("transactions");
+    assert!(interrupted.is_empty());
+    let persisted_after_crash = lifecycle
+        .get_workspace_session(&record.id)
+        .expect("session after crash");
+    match checkpoint {
+        SingleCandidateCompileCheckpoint::ApprovalPersisted => {
+            assert!(persisted_after_crash.approval_attempt_id.is_some());
+            assert!(persisted_after_crash.compile_reservation.is_none());
+        }
+        SingleCandidateCompileCheckpoint::ReservationPersisted
+        | SingleCandidateCompileCheckpoint::ProvenancePersisted => {
+            assert!(persisted_after_crash.compile_reservation.is_some());
+        }
+    }
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: plan_id.clone(),
+    };
+    let expected_provenance_ref = format!(
+        "project/project_0001/issue/issue_0001/plan/{plan_id}/publication_provenance/{compile_id}"
     );
-    assert_eq!(
-        interrupted.flow_kind,
-        Some(WorkItemPlanFlowKind::SingleCandidate)
+    match checkpoint {
+        SingleCandidateCompileCheckpoint::ApprovalPersisted
+        | SingleCandidateCompileCheckpoint::ReservationPersisted => {
+            assert!(matches!(
+                source_store.get_publication_provenance(&scope, &expected_provenance_ref),
+                Err(crate::product::work_item_plan_source_store::SourceStoreError::DanglingRef)
+            ));
+        }
+        SingleCandidateCompileCheckpoint::ProvenancePersisted => {
+            source_store
+                .get_publication_provenance(&scope, &expected_provenance_ref)
+                .expect("provenance must survive the provenance boundary");
+        }
+    }
+    drop(compile_writes);
+    let provider_ledger_before_restart = provider_ledger_before;
+    let session_record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("session for restart");
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let mut restarted = WorkspaceEngine::new_persistent(
+        engine.checkpoint_store.clone(),
+        lifecycle.clone(),
+        event_tx,
+        WorkspaceSession::from_record(session_record),
     );
-    let tx = engine
+    let resumed_outcome = {
+        let _legacy_read_spy =
+            crate::product::work_item_plan_store::panic_on_legacy_compile_reads();
+        restarted
+            .run_work_item_plan_compile()
+            .await
+            .expect("restart resumes session recovery")
+    };
+    assert!(!resumed_outcome.work_items.is_empty());
+    assert_eq!(
+        provider_ledger_bytes(&lifecycle),
+        provider_ledger_before_restart,
+        "reservation/session recovery must not start a provider"
+    );
+    let transactions = restarted
         .work_item_plan_store()
         .expect("plan store")
         .list_compile_transactions("project_0001", "issue_0001", &plan_id)
-        .expect("transactions")
-        .into_iter()
-        .next()
-        .expect("single transaction");
-    let journal = engine
+        .expect("transactions");
+    assert_eq!(transactions.len(), 1, "restart must not duplicate transaction");
+    let tx = transactions.into_iter().next().expect("single transaction");
+    assert_eq!(tx.compile_id, compile_id);
+    assert_eq!(tx.created_at, "2026-08-27T00:00:00Z");
+    let restarted_session = lifecycle
+        .get_workspace_session(&restarted.session().session_id)
+        .expect("restarted session");
+    let reservation = restarted_session
+        .compile_reservation
+        .as_ref()
+        .expect("durable reservation after restart");
+    assert_eq!(reservation.compile_id, compile_id);
+    assert_eq!(reservation.now, tx.created_at);
+    assert_eq!(
+        reservation.publication_provenance_ref,
+        format!(
+            "project/project_0001/issue/issue_0001/plan/{plan_id}/publication_provenance/{compile_id}"
+        )
+    );
+    let journal = restarted
         .revision_store()
         .get_initial_plan_publication_journal(
             "project_0001",
@@ -463,6 +557,29 @@ async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_p
         provenance.plan_revision_id,
         journal.artifacts.plan_revision.id
     );
+    let allocated = restarted
+        .revision_store()
+        .allocate_initial_plan_publication_ids(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            &compile_id,
+            &resumed_outcome
+                .work_items
+                .iter()
+                .map(|item| item.work_item_revision.logical_work_item_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .expect("allocated publication IDs");
+    assert_eq!(journal.allocated_ids, allocated);
+    assert_eq!(
+        journal
+            .artifacts
+            .plan_revision
+            .publication_provenance_ref
+            .as_deref(),
+        Some(provenance_ref.as_str())
+    );
 
     // 模拟 publication 已写入但 finalizer 尚未完成的重启：Continue 必须重载
     // canonical refs、复用同一 transaction/provenance，而不能回退 legacy stores。
@@ -472,7 +589,7 @@ async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_p
         .expect("completed transaction");
     interrupted.status = WorkItemPlanCompileStatus::RecoveryRequired;
     interrupted.failure_reason = Some("single candidate publication recovery oracle".to_string());
-    interrupted.step_cursor = "publication_resumed".to_string();
+    interrupted.step_cursor = "committing".to_string();
     store
         .put_compile_transaction(&interrupted)
         .expect("seed publication recovery boundary");
@@ -491,6 +608,40 @@ async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_p
         event_tx,
         WorkspaceSession::from_record(session_record),
     );
+    let publication_failpoint = recovered
+        .revision_store()
+        .register_initial_plan_publication_failpoint(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            &tx.compile_id,
+            crate::product::work_item_revision_store::InitialPlanPublicationCheckpoint::PlanArtifactsWritten,
+        );
+    let first_recovery_error = {
+        let _legacy_read_spy =
+            crate::product::work_item_plan_store::panic_on_legacy_compile_reads();
+        recovered
+            .handle_work_item_plan_compile_recovery_action(
+                crate::web::workspace_ws_types::WorkItemPlanCompileRecoveryActionDto::Continue,
+                None,
+            )
+            .await
+            .expect_err("publication failpoint interrupts recovery")
+    };
+    assert!(first_recovery_error.contains("PlanArtifactsWritten"));
+    drop(publication_failpoint);
+    let recovery_session = lifecycle
+        .get_workspace_session(&recovered.session().session_id)
+        .expect("failed recovery session");
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let mut recovered = WorkspaceEngine::new_persistent(
+        engine.checkpoint_store.clone(),
+        lifecycle.clone(),
+        event_tx,
+        WorkspaceSession::from_record(recovery_session),
+    );
+    let recovery_writes =
+        crate::product::work_item_plan_store::observe_compile_transaction_writes();
     let recovery = {
         let _legacy_read_spy =
             crate::product::work_item_plan_store::panic_on_legacy_compile_reads();
@@ -525,6 +676,17 @@ async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_p
         Some(provenance.content_hash.as_str())
     );
     assert_eq!(recovered_tx.step_cursor, "committed");
+    assert!(
+        recovery_writes
+            .snapshots()
+            .iter()
+            .any(|snapshot| snapshot.step_cursor == "publication_resumed"),
+        "resume path must persist publication_resumed through tx observer"
+    );
+    assert_eq!(
+        provider_ledger_bytes(&lifecycle),
+        provider_ledger_before_restart
+    );
     let resumed_journal = recovered
         .revision_store()
         .get_initial_plan_publication_journal(
