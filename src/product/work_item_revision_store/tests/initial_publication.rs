@@ -141,6 +141,11 @@ fn initial_plan_publication_resumes_each_store_write_failure_after_restart() {
                 .to_string()
                 .contains("initial_publication_failpoint")
         );
+        let interrupted = store
+            .get_initial_plan_publication_journal(PROJECT_ID, ISSUE_ID, PLAN_ID, "compile_0001")
+            .expect("checkpoint 前缀必须已 durable journal");
+        assert_eq!(interrupted.phase, InitialPlanPublicationPhase::Prepared);
+        assert!(interrupted.error.is_some());
         drop(failpoint);
 
         let restarted = WorkItemRevisionStore::new(paths);
@@ -150,6 +155,14 @@ fn initial_plan_publication_resumes_each_store_write_failure_after_restart() {
 
         assert_eq!(published.phase, InitialPlanPublicationPhase::PlanActivated);
         assert_eq!(published.error, None);
+        assert_eq!(published.id, interrupted.id);
+        assert_eq!(published.compile_id, interrupted.compile_id);
+        assert_eq!(published.allocated_ids, interrupted.allocated_ids);
+        assert_eq!(
+            published.artifact_fingerprint,
+            interrupted.artifact_fingerprint
+        );
+        assert_eq!(published.artifacts, interrupted.artifacts);
         assert_initial_publication_is_complete(&restarted, &journal);
     }
 }

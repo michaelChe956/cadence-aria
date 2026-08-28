@@ -43,3 +43,4 @@ mod review_repair_prompt;
 mod single_candidate;
 mod single_candidate_flow_dispatch;
 mod single_candidate_prompt;
+mod single_candidate_recovery;
