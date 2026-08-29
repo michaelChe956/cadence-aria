@@ -711,6 +711,7 @@ fn draft_prompt_requires_input_contract_ids_to_reference_upstream_output_contrac
         "input_contracts 的 contract_id 与 required_capabilities 元素都是对上游的引用而非新命名",
         "不得改写前缀（如 oc_ 换成 ic_）、意译或自行描述",
         "provider_logical_work_item_id 必须是真正声明该 contract 的上游 logical_work_item_id",
+        "provider_logical_work_item_id 必须逐字取自本计划中被依赖 item 的 logical_work_item_id（如 WI-001）；不得使用 story_spec/design_spec 或其他 id。",
         "输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找",
     ] {
         assert!(
@@ -847,6 +848,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     }
     for required in [
         crate::product::work_item_plan_compiler::grammar::EARS_STATEMENT_TEMPLATE,
+        "所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 13 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。",
         "未知结构化 key 必须拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
         "[design_requirements] REQ-002、NFR-001",

@@ -52,9 +52,9 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
-/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格及 Inputs 形状教学注入后上调至 14_400。
+/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状及标题逐字英文教学注入后上调至 14_600。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 14_400;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 14_600;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -94,6 +94,7 @@ fn work_item_plan_markdown_grammar() -> String {
         "[markdown_grammar]\n\
          输出的第一行必须精确为 `{document_heading}`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）。\n\
          标题 `{document_heading}`；item `{item_heading_prefix}{item_id_suffix}: <title>`（ID 前缀 `{item_id_prefix}`）。\n\
+         所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 13 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。\n\
          输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。\n\
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
@@ -1058,6 +1059,7 @@ pub(crate) fn build_work_item_draft_prompt(
          [projection]\n\
          done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致；blocker target_contract_refs 只能引用 input/output contract_id；plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\
          input_contracts 的 contract_id 与 required_capabilities 元素都是对上游的引用而非新命名：必须逐字取自 [直接依赖的可消费交接合同] 中该 provider 的 output_contracts（含标点空格），不得改写前缀（如 oc_ 换成 ic_）、意译或自行描述——两者均按字符串精确匹配，任何差异都会失配；provider_logical_work_item_id 必须是真正声明该 contract 的上游 logical_work_item_id。被消费的 output_contracts.contract_id 还须出现在其 handoff_contract.provided_contract_refs 中。\n\n\
+         Inputs 条目中，provider_logical_work_item_id 必须逐字取自本计划中被依赖 item 的 logical_work_item_id（如 WI-001）；不得使用 story_spec/design_spec 或其他 id。\n\n\
          [self_check]\n\
          输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等。可信目录为空时所有 check 必须 command=null。需人工操作或目视确认的 verification_intent 必须表达为 acceptance_criteria 的 required_evidence=[manual_check]；verification_checks 的 required=true 仅限 Coder 可自行执行的命令或只读检查。人工事项由末端人工确认，不构成自动阶段阻塞；不得把可由人工确认的事项升级为 operational_gate。可信目录为空时，必须输出 route=operational_gate blocker；manual check 不能替代该 blocker，否则整体被拒。\n\
          输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找，找不到即为错误。\n\n\
