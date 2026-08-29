@@ -108,6 +108,49 @@ fn full_lowering_validator_projects_rep4_through_all_existing_validator_layers()
 }
 
 #[test]
+fn full_lowering_validator_rejects_unregistered_requirement_and_missing_reviewer_check() {
+    let catalog = rep4_trusted_command_catalog();
+    let source = REP4_FIXTURE
+        .replacen(
+            "- requirement_refs: REQ-WSC-02",
+            "- requirement_refs: REQ-003",
+            1,
+        )
+        .replacen(
+            "- reviewer_check_refs: AC-001",
+            "- reviewer_check_refs: []",
+            1,
+        );
+    let ir = compile_work_item_plan(
+        &source,
+        &WorkItemPlanSourceContext {
+            target_repository_id: "repo-levels".to_string(),
+            trusted_command_catalog: catalog,
+        },
+    )
+    .expect("交叉引用错误必须可 lower 为供 validator 拒绝的 typed IR");
+    let profile = rep4_repository_profile();
+    let story_ids = vec!["story_spec_levels_0001".to_string()];
+    let design_ids = vec!["design_spec_levels_0001".to_string()];
+
+    let diagnostics = validate_plan_candidate_ir(
+        &ir,
+        &rep4_validation_context(Some(&profile), &story_ids, &design_ids),
+    )
+    .expect_err("未登记 requirement 或缺少 reviewer check 的文档必须被 validator 拒绝");
+
+    for code in [
+        "unknown_requirement_ref",
+        "acceptance_criterion_without_reviewer_check",
+    ] {
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == code),
+            "缺少预期交叉引用校验 {code}，实际为 {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn full_lowering_validator_preserves_existing_unknown_provider_code() {
     let catalog = rep4_trusted_command_catalog();
     let mut ir = compile_work_item_plan(

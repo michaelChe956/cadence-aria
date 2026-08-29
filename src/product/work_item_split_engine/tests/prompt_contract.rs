@@ -783,6 +783,38 @@ fn single_item_prompt_names_both_verification_check_owners() {
 }
 
 #[test]
+fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_list_is_empty() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &[],
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                routing_context: &RoutingReferenceContext::Legacy,
+                trusted_command_catalog: &[],
+            },
+        )
+        .expect("markdown author prompt");
+
+    for required in [
+        "[design_requirements] （无；不得编造）",
+        "[cross_reference_discipline]",
+        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "markdown prompt must retain cross-reference discipline with an empty design list; missing {required}: {prompt}"
+        );
+    }
+}
+
+#[test]
 fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings() {
     let (request, issue, repository) = split_prompt_fixture();
     let design_requirement_ids = vec!["REQ-002".to_string(), "NFR-001".to_string()];
@@ -818,9 +850,12 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "未知结构化 key 必须拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
         "[design_requirements] REQ-002、NFR-001",
+        "[cross_reference_discipline]",
         "done_when_refs 仅引用先定义 criterion_id",
         "target_contract_refs 仅逐字引用已登记 input/output contract_id",
         "requirement_refs 仅引用清单；清单外 REQ-* 拒绝",
+        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
         "不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段",
         "明确允许新增和维护 tests/integration/**",
         "GET / 只验证三个容器与 level-select.js 加载",

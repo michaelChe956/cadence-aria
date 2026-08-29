@@ -133,7 +133,9 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          [cross_reference_discipline]\n\
          done_when_refs 仅引用先定义 criterion_id。\n\
          target_contract_refs 仅逐字引用已登记 input/output contract_id。\n\
-         requirement_refs 仅引用清单；清单外 REQ-* 拒绝。\n\n"
+         requirement_refs 仅引用清单；清单外 REQ-* 拒绝。\n\
+         handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）。\n\
+         每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单。\n\n"
     )
 }
 
