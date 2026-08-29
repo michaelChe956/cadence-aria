@@ -10,7 +10,22 @@ use crate::product::models::PlanProjectionBundle;
 use super::review_context::{
     PlanReviewSource, append_review_context_section, load_plan_review_context,
 };
-use crate::product::work_item_plan_policy::ReviewInvocationScope;
+use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocationScope};
+
+fn review_finding_category_whitelist() -> String {
+    [
+        ReviewFindingCategory::ContractGap,
+        ReviewFindingCategory::SelfContradiction,
+        ReviewFindingCategory::ScopeConflict,
+        ReviewFindingCategory::VerificationUnattributable,
+        ReviewFindingCategory::Completeness,
+        ReviewFindingCategory::Other,
+    ]
+    .into_iter()
+    .map(ReviewFindingCategory::as_str)
+    .collect::<Vec<_>>()
+    .join("、")
+}
 
 /// 根据服务端持久化的 invocation scope 生成 reviewer 的范围指令。
 ///
@@ -21,6 +36,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
     scope
         .validate_digest()
         .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
+    let category_whitelist = review_finding_category_whitelist();
 
     match scope {
         ReviewInvocationScope::Initial {
@@ -38,7 +54,8 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
              - scope digest: {scope_digest}\n\
              - 只允许一次全候选评估；不得自行增加候选、范围或 provider/campaign 指令。\n\
              - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
-             - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n",
+             - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
+             - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n",
         )),
         ReviewInvocationScope::Verification {
             original_fingerprints,
@@ -75,7 +92,8 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
                  - 仅复核原 fingerprints，不得将新 finding 伪装为原 finding：[{fingerprints}]\n\
                  - mechanical report 是本次 invocation 的唯一机械证据来源。\n\
                  - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
-                 - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n",
+                 - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
+                 - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n",
             ))
         }
     }

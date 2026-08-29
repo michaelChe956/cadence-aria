@@ -864,6 +864,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
         "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
         "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
+        "Inputs 四行且 contract_id 首行",
+        "provider_logical_work_item_id、required_capabilities、compatibility_policy",
+        "require_all|require_any",
+        "四行缺一不可",
     ] {
         assert!(
             prompt.contains(required),

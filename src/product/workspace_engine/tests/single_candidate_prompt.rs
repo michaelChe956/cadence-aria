@@ -216,7 +216,21 @@ fn single_candidate_initial_prompt_is_derived_from_server_scope() {
     assert!(instructions.contains("Initial"));
     assert!(instructions.contains("revision-001"));
     assert!(instructions.contains("一次全候选评估"));
-    assert!(instructions.contains("category"));
+    for category in [
+        ReviewFindingCategory::ContractGap,
+        ReviewFindingCategory::SelfContradiction,
+        ReviewFindingCategory::ScopeConflict,
+        ReviewFindingCategory::VerificationUnattributable,
+        ReviewFindingCategory::Completeness,
+        ReviewFindingCategory::Other,
+    ] {
+        assert!(
+            instructions.contains(category.as_str()),
+            "initial review prompt must teach category whitelist value {}",
+            category.as_str()
+        );
+    }
+    assert!(instructions.contains("category 只能取以上六值之一；无法归类时用 other"));
     assert!(instructions.contains("class_hint"));
     assert!(instructions.contains("must_fix"));
     assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
@@ -245,6 +259,21 @@ fn single_candidate_verification_prompt_replays_only_original_fingerprints() {
     assert!(instructions.contains("revision-002"));
     assert!(instructions.contains("mechanical_report"));
     assert!(instructions.contains(fingerprint.0.as_str()));
+    for category in [
+        ReviewFindingCategory::ContractGap,
+        ReviewFindingCategory::SelfContradiction,
+        ReviewFindingCategory::ScopeConflict,
+        ReviewFindingCategory::VerificationUnattributable,
+        ReviewFindingCategory::Completeness,
+        ReviewFindingCategory::Other,
+    ] {
+        assert!(
+            instructions.contains(category.as_str()),
+            "verification review prompt must teach category whitelist value {}",
+            category.as_str()
+        );
+    }
+    assert!(instructions.contains("category 只能取以上六值之一；无法归类时用 other"));
     assert!(instructions.contains("仅复核原 fingerprints"));
     assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
     assert!(instructions.contains("advisory"));
