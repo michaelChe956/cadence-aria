@@ -802,6 +802,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         )
         .expect("markdown author prompt");
 
+    assert!(prompt.contains(
+        "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
+    ));
+
     for section in crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS {
         let heading = format!("### {section}");
         assert!(
@@ -946,6 +950,9 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
     )
     .expect("markdown outline prompt");
 
+    assert!(prompt.contains(
+        "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
+    ));
     assert!(prompt.contains("用于服务端机械计数"));
     assert!(prompt.contains("[markdown_grammar]"));
     assert!(prompt.contains("[minimum_legal_source]"));

@@ -92,6 +92,7 @@ pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
 fn work_item_plan_markdown_grammar() -> String {
     format!(
         "[markdown_grammar]\n\
+         输出的第一行必须精确为 `{document_heading}`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）。\n\
          标题 `{document_heading}`；item `{item_heading_prefix}{item_id_suffix}: <title>`（ID 前缀 `{item_id_prefix}`）。\n\
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
