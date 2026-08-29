@@ -52,9 +52,9 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
-/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状及标题逐字英文教学注入后上调至 14_600。
+/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状、标题逐字英文及 trusted command 唯一引用教学注入后上调至 14_750。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 14_600;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 14_750;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -102,6 +102,7 @@ fn work_item_plan_markdown_grammar() -> String {
          CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。
 \
          Inputs 四行且 contract_id 首行：provider_logical_work_item_id、required_capabilities、compatibility_policy（require_all|require_any）各一行；四行缺一不可。\n\
+         同一 Work Item 内每条 trusted command 至多被一个 check 引用；需要复合验证时合并为一条 check 或改用 manual_instruction。\n\
          key 白名单：{structured_keys}。\n\
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",

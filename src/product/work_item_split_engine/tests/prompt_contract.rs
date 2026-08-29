@@ -806,6 +806,7 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
         "[design_requirements] （无；不得编造）",
         "[cross_reference_discipline]",
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "同一 Work Item 内每条 trusted command 至多被一个 check 引用；需要复合验证时合并为一条 check 或改用 manual_instruction。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
     ] {
         assert!(

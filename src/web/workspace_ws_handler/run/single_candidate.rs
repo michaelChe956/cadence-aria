@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::work_item_plan_compiler::grammar;
 
 pub(crate) enum SingleCandidateProviderRunOutcome {
     Completed,
@@ -12,22 +13,14 @@ pub(crate) enum SingleCandidateProviderRunError {
 
 /// 丢弃 provider 在 markdown 文档标题前输出的前言，保留既有 parser 的失败语义。
 ///
-/// 只有完整匹配固定文档标题的行才会触发修剪；找不到标题时原样返回，避免把
+/// 定位首个固定文档标题的字节偏移并从该处修剪；找不到标题时原样返回，避免把
 /// 缺少标题的输出静默转换成另一种错误。
 fn trim_provider_preamble(source: &str) -> &str {
-    let document_heading = crate::product::work_item_plan_compiler::grammar::DOCUMENT_HEADING;
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        let line_without_ending = line.strip_suffix('\n').unwrap_or(line);
-        let line_without_ending = line_without_ending
-            .strip_suffix('\r')
-            .unwrap_or(line_without_ending);
-        if line_without_ending == document_heading {
-            return &source[offset..];
-        }
-        offset += line.len();
-    }
+    let document_heading = format!("{}\n", grammar::DOCUMENT_HEADING);
     source
+        .find(&document_heading)
+        .map(|offset| &source[offset..])
+        .unwrap_or(source)
 }
 
 /// SingleCandidate 的内部两阶段 author 链路。
@@ -371,6 +364,16 @@ mod tests {
     #[test]
     fn trims_provider_preamble_before_document_heading() {
         let source = "我会先读取上下文，再生成计划。\n\n# Work Item Plan\n## Work Item WI-001: x\n";
+
+        assert_eq!(
+            trim_provider_preamble(source),
+            "# Work Item Plan\n## Work Item WI-001: x\n"
+        );
+    }
+
+    #[test]
+    fn trims_glued_preamble_before_document_heading() {
+        let source = "我会先读取上下文，再生成计划。# Work Item Plan\n## Work Item WI-001: x\n";
 
         assert_eq!(
             trim_provider_preamble(source),
