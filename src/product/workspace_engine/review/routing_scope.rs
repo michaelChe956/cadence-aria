@@ -200,32 +200,14 @@ impl WorkspaceEngine {
             }
         } else {
             let repaired_revision_id = self.review_revision_id(&node_id, false);
+            // Verification scope must bind the durable report produced by compile/evaluate,
+            // rather than reusing a prior invocation scope (which may still be Initial after
+            // a repair). Missing durable evidence is a protocol failure, fail-closed.
             let mechanical_report_ref = self
                 .session
-                .review_invocation_scope
-                .as_ref()
-                .and_then(|scope| match scope {
-                    ReviewInvocationScope::Verification {
-                        mechanical_report_ref,
-                        ..
-                    } => Some(mechanical_report_ref.clone()),
-                    ReviewInvocationScope::Initial { .. } => None,
-                })
-                .ok_or_else(|| {
-                    "verification review requires a durable mechanical report".to_string()
-                })
-                .map_err(|error| {
-                    // The scope is constructed server-side; an absent report is a
-                    // protocol failure rather than a provider-controlled fallback.
-                    (
-                        ReviewInvocationScope::initial(repaired_revision_id.clone()),
-                        error,
-                    )
-                });
-            let mechanical_report_ref = match mechanical_report_ref {
-                Ok(reference) => reference,
-                Err((_, error)) => return Err(error),
-            };
+                .mechanical_report_ref
+                .clone()
+                .ok_or("verification review requires a durable mechanical report")?;
             ReviewInvocationScope::verification(
                 self.session.run_history.seen_fingerprints.clone(),
                 repaired_revision_id,

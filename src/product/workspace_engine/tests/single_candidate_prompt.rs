@@ -207,6 +207,68 @@ fn pass_verdict() -> ReviewVerdict {
     }
 }
 
+#[tokio::test]
+async fn repaired_review_upgrades_initial_scope_from_durable_session_report_ref() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("verification_scope_upgrade");
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    persist_single_candidate_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::initial(ir_ref.clone()),
+        RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:verification-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        },
+    );
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.plan_candidate_ir_ref = Some(ir_ref);
+    record.mechanical_report_ref = Some(report_ref.clone());
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist durable mechanical report ref");
+    engine.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
+    engine.session.mechanical_report_ref = Some(report_ref.clone());
+    engine.active_node_id = Some("verification-node".to_string());
+
+    engine
+        .ensure_review_invocation_scope()
+        .await
+        .expect("verification scope upgrades from session report ref");
+
+    assert!(matches!(
+        engine.session().review_invocation_scope,
+        Some(ReviewInvocationScope::Verification {
+            ref mechanical_report_ref,
+            ..
+        }) if mechanical_report_ref == &report_ref
+    ));
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("verification policy invocation matches upgraded scope");
+    assert!(!matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn single_candidate_initial_prompt_is_derived_from_server_scope() {
     let scope = ReviewInvocationScope::initial("revision-001");
