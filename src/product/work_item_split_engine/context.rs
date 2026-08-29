@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::json;
@@ -91,6 +92,26 @@ pub(crate) fn collect_design_context(
             ))
         })
         .collect::<ApiResult<Vec<_>>>()
+}
+
+/// 从已确认 Design Spec 的 markdown 上下文提取已登记的需求 ID。
+///
+/// DesignSpecRecord 本身只保存 spec 元数据，需求正文位于其 latest version markdown；
+/// 因此这里只接受 markdown 中显式出现的 REQ-/NFR- token，不为 prompt 生成任何 ID。
+pub(crate) fn extract_design_requirement_ids(design_context: &[String]) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for context in design_context {
+        for token in context
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
+        {
+            if (token.starts_with("REQ-") || token.starts_with("NFR-"))
+                && token.len() > "REQ-".len()
+            {
+                ids.insert(token.to_string());
+            }
+        }
+    }
+    ids.into_iter().collect()
 }
 
 fn latest_markdown(

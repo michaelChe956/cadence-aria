@@ -67,16 +67,21 @@ pub(crate) async fn run_single_candidate_author(
         ))
     })?
     .join("\n\n");
-    let design_context = crate::product::work_item_split_engine::context::collect_design_context(
-        &lifecycle, &request, &issue,
-    )
-    .map_err(|error| {
-        SingleCandidateProviderRunError::Message(format!(
-            "load design context failed: {}",
-            error.message
-        ))
-    })?
-    .join("\n\n");
+    let design_context_blocks =
+        crate::product::work_item_split_engine::context::collect_design_context(
+            &lifecycle, &request, &issue,
+        )
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "load design context failed: {}",
+                error.message
+            ))
+        })?;
+    let design_requirement_ids =
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(
+            &design_context_blocks,
+        );
+    let design_context = design_context_blocks.join("\n\n");
     let repository_structure =
         crate::product::work_item_split_engine::context::summarize_repository_structure(
             &repository.path,
@@ -218,6 +223,7 @@ pub(crate) async fn run_single_candidate_author(
             crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
                 story_context: &story_context,
                 design_context: &design_context,
+                design_requirement_ids: &design_requirement_ids,
                 repository_structure: &repository_structure,
                 routing_context: &full_launch.routing_context(),
                 trusted_command_catalog: &trusted_command_catalog,

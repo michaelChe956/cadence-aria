@@ -37,6 +37,19 @@ fn grammar_contract() {
         "EARS 模板必须稳定"
     );
     assert_eq!(
+        grammar::ALLOWED_ITEM_KINDS,
+        [
+            "backend",
+            "frontend",
+            "integration",
+            "e2e",
+            "docs",
+            "infra",
+            "other",
+        ],
+        "Work Item kind 必须与 WorkItemKind 枚举保持一致"
+    );
+    assert_eq!(
         grammar::STRUCTURED_SECTIONS,
         [
             "Identity",

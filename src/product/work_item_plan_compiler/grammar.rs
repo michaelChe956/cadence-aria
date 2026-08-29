@@ -87,6 +87,17 @@ pub const STRUCTURED_KEYS: [&str; 34] = [
     "requirement_id",
 ];
 
+/// `kind` 的现有契约允许值，与 [`crate::product::models::WorkItemKind`] 保持一致。
+pub const ALLOWED_ITEM_KINDS: [&str; 7] = [
+    crate::product::models::WorkItemKind::Backend.as_str(),
+    crate::product::models::WorkItemKind::Frontend.as_str(),
+    crate::product::models::WorkItemKind::Integration.as_str(),
+    crate::product::models::WorkItemKind::E2e.as_str(),
+    crate::product::models::WorkItemKind::Docs.as_str(),
+    crate::product::models::WorkItemKind::Infra.as_str(),
+    crate::product::models::WorkItemKind::Other.as_str(),
+];
+
 /// `compatibility_policy` 的现有契约允许值。
 pub const ALLOWED_COMPATIBILITY_POLICIES: [&str; 2] = ["require_all", "require_any"];
 /// `required_evidence` 的现有契约允许值。

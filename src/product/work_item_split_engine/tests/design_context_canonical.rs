@@ -327,6 +327,27 @@ Rust + TypeScript。
 }
 
 #[test]
+fn design_context_extracts_only_explicit_requirement_ids_in_stable_order() {
+    let context = vec![
+        "Design Spec: x\n[REQ-003] and [NFR-001], then REQ-003 again".to_string(),
+        "## Traceability\n[REQ-002] -> DEC-001; unrelated requirement text".to_string(),
+    ];
+
+    assert_eq!(
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(&context),
+        vec!["NFR-001", "REQ-002", "REQ-003"]
+    );
+}
+
+#[test]
+fn design_context_does_not_invent_requirement_ids_when_none_are_present() {
+    assert!(crate::product::work_item_split_engine::context::extract_design_requirement_ids(&[
+        "Design Spec: no explicit requirement references".to_string(),
+    ])
+    .is_empty());
+}
+
+#[test]
 fn empty_design_spec_has_no_capabilities() {
     let capabilities = extract_design_context_capabilities("");
     assert!(!capabilities.has_architecture);

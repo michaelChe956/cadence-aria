@@ -52,7 +52,7 @@ pub enum WorkItemKind {
 }
 
 impl WorkItemKind {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Backend => "backend",
             Self::Frontend => "frontend",

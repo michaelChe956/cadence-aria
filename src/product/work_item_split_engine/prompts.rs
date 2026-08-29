@@ -44,6 +44,7 @@ const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
 pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub story_context: &'a str,
     pub design_context: &'a str,
+    pub design_requirement_ids: &'a [String],
     pub repository_structure: &'a str,
     pub routing_context: &'a RoutingReferenceContext,
     pub trusted_command_catalog: &'a [crate::product::models::TrustedDraftVerificationCommand],
@@ -51,9 +52,9 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
-/// 路由 target_contract_refs 必非空且逐字）上调至 12_600。
+/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律注入后上调至 13_000。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 12_600;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 13_000;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -95,7 +96,7 @@ fn work_item_plan_markdown_grammar() -> String {
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
          key 白名单：{structured_keys}。\n\
-         值域：compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
+         值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
         item_heading_prefix = grammar::ITEM_HEADING_PREFIX,
@@ -109,11 +110,26 @@ fn work_item_plan_markdown_grammar() -> String {
         ears_template = grammar::EARS_STATEMENT_TEMPLATE,
         ears_keywords = grammar::EARS_KEYWORDS.join("、"),
         structured_keys = grammar::STRUCTURED_KEYS.join("、"),
+        item_kinds = grammar::ALLOWED_ITEM_KINDS.join("、"),
         compatibility_policies = grammar::ALLOWED_COMPATIBILITY_POLICIES.join("、"),
         evidence_kinds = grammar::ALLOWED_EVIDENCE_KINDS.join("、"),
         blocker_routes = grammar::ALLOWED_BLOCKER_ROUTES.join("、"),
         unknown_key_policy = grammar::UNKNOWN_STRUCTURED_KEY_POLICY,
         diagnostic_codes = grammar::DIAGNOSTIC_CODES.join("、"),
+    )
+}
+
+fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String]>) -> String {
+    let requirement_ids = requirement_ids
+        .filter(|ids| !ids.is_empty())
+        .map(|ids| ids.join("、"))
+        .unwrap_or_else(|| "（无；不得编造）".to_string());
+    format!(
+        "[design_requirements] {requirement_ids}\n\
+         [cross_reference_discipline]\n\
+         done_when_refs 仅引用先定义 criterion_id。\n\
+         target_contract_refs 仅逐字引用已登记 input/output contract_id。\n\
+         requirement_refs 仅引用清单；清单外 REQ-* 拒绝。\n\n"
     )
 }
 
@@ -147,7 +163,7 @@ fn work_item_plan_minimum_legal_source() -> &'static str {
      ### Tasks\n\
      - task_id: TASK-001\n\
      - statement: WHEN x THE SYSTEM SHALL y.\n\
-     - requirement_refs: REQ-001\n\
+     - requirement_refs: design_requirement_placeholder\n\
      - done_when_refs: AC-001\n\
      ### Write Policy\n\
      - exclusive_scopes: x\n\
@@ -173,7 +189,7 @@ fn work_item_plan_minimum_legal_source() -> &'static str {
      ### Traceability\n\
      - source_type: x\n\
      - source_id: x\n\
-     - requirement_id: REQ-001\n"
+     - requirement_id: design_requirement_placeholder\n"
 }
 
 fn work_item_plan_real_few_shot() -> Result<String, String> {
@@ -288,6 +304,8 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
+    let reference_discipline =
+        work_item_plan_markdown_reference_discipline(Some(context.design_requirement_ids));
     // story/design 真实上下文可能远大于旧 JSON outline 路径。固定 grammar、最小合法
     // source 与 few-shot 永不截断；只按确定性配额压缩可再加载的上下文，并显式标记。
     let (story_context, design_context, repository_structure) = budget_markdown_context(
@@ -307,6 +325,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
          Verification.command 必须已在 outline 阶段登记；仅逐字引用 [outline_commands]。证据不足写 manual_instruction 或 blocker，禁止臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
          {dependency_syntax_rules}\n\n\
+         {reference_discipline}
          {grammar}\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
@@ -322,6 +341,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
         trusted_command_catalog = trusted_command_catalog,
+        reference_discipline = reference_discipline,
         grammar = work_item_plan_markdown_grammar(),
         dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),
