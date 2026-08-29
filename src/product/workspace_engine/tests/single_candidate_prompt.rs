@@ -437,6 +437,7 @@ fn single_candidate_initial_prompt_is_derived_from_server_scope() {
     assert!(instructions.contains("Initial"));
     assert!(instructions.contains("revision-001"));
     assert!(instructions.contains("一次全候选评估"));
+    assert!(instructions.contains("每个 finding 对象只能包含以下字段：severity、message、evidence（可选）、required_action（可选）、category、class_hint、contract_field（可选）——不得添加 finding_id、code、work_item_ids 或其他字段"));
     for category in [
         ReviewFindingCategory::ContractGap,
         ReviewFindingCategory::SelfContradiction,
@@ -513,6 +514,7 @@ fn single_candidate_verification_prompt_replays_only_original_fingerprints() {
         "class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）"
     ));
     assert!(instructions.contains("仅复核原 fingerprints"));
+    assert!(instructions.contains("每个 finding 对象只能包含以下字段：severity、message、evidence（可选）、required_action（可选）、category、class_hint、contract_field（可选）——不得添加 finding_id、code、work_item_ids 或其他字段"));
     assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
     assert!(instructions.contains("advisory"));
     assert!(instructions.contains(scope.scope_digest()));

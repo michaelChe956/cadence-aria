@@ -2,18 +2,17 @@ use super::history_compaction::{
     HistoryCompactionInput, HistoryCompactionMode, compact_history,
     render_intermediate_artifact_diffs, render_open_required_findings,
 };
+use super::review_context::{
+    PlanReviewSource, append_review_context_section, load_plan_review_context,
+};
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
+use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocationScope};
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-
-use super::review_context::{
-    PlanReviewSource, append_review_context_section, load_plan_review_context,
-};
-use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocationScope};
 
 fn single_candidate_dependency_graph(
     items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
@@ -32,7 +31,6 @@ fn single_candidate_dependency_graph(
             ));
         }
     }
-
     let mut remaining_dependencies = BTreeMap::new();
     let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
     let mut edges = Vec::new();
@@ -61,7 +59,6 @@ fn single_candidate_dependency_graph(
         remaining_dependencies.insert(item_id, dependencies);
     }
     edges.sort();
-
     let mut ready = remaining_dependencies
         .iter()
         .filter_map(|(item_id, dependencies)| dependencies.is_empty().then_some(item_id.clone()))
@@ -83,7 +80,6 @@ fn single_candidate_dependency_graph(
     if topological_order.len() != items.len() {
         return Err("single-candidate review IR dependency graph contains a cycle".to_string());
     }
-
     Ok(json!({
         "topological_order": topological_order,
         "edges": edges,
@@ -104,7 +100,6 @@ fn review_finding_category_whitelist() -> String {
     .collect::<Vec<_>>()
     .join("、")
 }
-
 /// 根据服务端持久化的 invocation scope 生成 reviewer 的范围指令。
 ///
 /// scope 是协议边界的一部分：provider 只能消费这里生成的指令，不能在请求中
@@ -115,7 +110,6 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
         .validate_digest()
         .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
     let category_whitelist = review_finding_category_whitelist();
-
     match scope {
         ReviewInvocationScope::Initial {
             initial_revision_id,
@@ -133,6 +127,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
              - 只允许一次全候选评估；不得自行增加候选、范围或 provider/campaign 指令。\n\
              - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
              - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
+             - 每个 finding 对象只能包含以下字段：severity、message、evidence（可选）、required_action（可选）、category、class_hint、contract_field（可选）——不得添加 finding_id、code、work_item_ids 或其他字段。\n\
              - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n\
              - class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）。\n",
         )),
@@ -172,6 +167,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
                  - mechanical report 是本次 invocation 的唯一机械证据来源。\n\
                  - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
                  - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
+                 - 每个 finding 对象只能包含以下字段：severity、message、evidence（可选）、required_action（可选）、category、class_hint、contract_field（可选）——不得添加 finding_id、code、work_item_ids 或其他字段。\n\
                  - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n\
                  - class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）。\n",
             ))
@@ -197,13 +193,11 @@ impl WorkspaceEngine {
             }
             return Ok(input);
         }
-
         let working_dir = match &self.session.repository_path {
             Some(path) => path.clone(),
             None => std::env::current_dir()
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
-
         let artifact = self
             .session
             .artifact
@@ -279,7 +273,6 @@ impl WorkspaceEngine {
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
             &self.routing_reference_context(),
         ));
-
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
@@ -303,30 +296,25 @@ impl WorkspaceEngine {
         if self.active_node_type() == Some(TimelineNodeType::WorkItemBatchReview) {
             return self.build_work_item_batch_review_input();
         }
-
         if self.active_node_type() == Some(TimelineNodeType::WorkItemDraftReview) {
             let draft_candidate = self.current_work_item_draft_candidate_payload()?;
             return self.build_work_item_draft_review_input(&draft_candidate);
         }
-
         if let Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) =
             self.session.artifact.as_ref()
         {
             return self.build_work_item_plan_outline_review_input(outline_candidate);
         }
-
         if let Some(ArtifactPayload::WorkItemPlanProjection { projection }) =
             self.session.artifact.as_ref()
         {
             return self.build_projection_plan_review_input(projection);
         }
-
         if self.session.flow_kind
             == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
         {
             return self.build_single_candidate_plan_review_input();
         }
-
         let lifecycle = self
             .lifecycle_store
             .as_ref()
@@ -338,7 +326,6 @@ impl WorkspaceEngine {
             &self.session.entity_id,
         )
         .map_err(|error| format!("build work_item_plan candidate dto failed: {error}"))?;
-
         let working_dir = match &self.session.repository_path {
             Some(path) => path.clone(),
             None => std::env::current_dir()
@@ -359,7 +346,6 @@ impl WorkspaceEngine {
             .map_err(|error| format!("load work item plan active index failed: {error}"))?
             .map(|index| index.current_generation_round_id)
             .unwrap_or_else(|| "legacy_work_item_plan_candidate".to_string());
-
         let mut prompt = String::new();
         prompt
             .push_str("请作为 reviewer 审核当前 WorkItemPlan 候选（整组 WorkItem 拆分计划）。\n\n");
@@ -376,7 +362,6 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("[{}]: {content}\n", msg.role));
         }
         self.append_missing_context_notes_to_prompt(&mut prompt);
-
         prompt.push_str("\n## 待审核候选\n\n");
         prompt.push_str(&format!(
             "### Plan\n- id: {}\n- status: {}\n",
@@ -389,7 +374,6 @@ impl WorkspaceEngine {
             candidate.plan.options.force_frontend_backend_split,
             candidate.plan.options.require_execution_plan_confirm,
         ));
-
         prompt.push_str("\n### WorkItems\n");
         for wi in &candidate.work_items {
             prompt.push_str(&format!(
@@ -402,7 +386,6 @@ impl WorkspaceEngine {
                 wi.verification_plan_ref.as_deref().unwrap_or("(none)"),
             ));
         }
-
         prompt.push_str("\n### dependency_graph\n");
         if candidate.plan.dependency_graph.is_empty() {
             prompt.push_str("(empty)\n");
@@ -414,7 +397,6 @@ impl WorkspaceEngine {
                 ));
             }
         }
-
         prompt.push_str("\n### validator_findings\n");
         if candidate.validator_findings.is_empty() {
             prompt.push_str("(none)\n");
@@ -429,7 +411,6 @@ impl WorkspaceEngine {
                 ));
             }
         }
-
         prompt.push_str("\n### Repository Profile (trimmed)\n");
         if let Some(rp) = &candidate.repository_profile {
             prompt.push_str(&format!(
@@ -440,7 +421,6 @@ impl WorkspaceEngine {
         } else {
             prompt.push_str("(none)\n");
         }
-
         prompt.push_str("\n### Verification Plans (summary)\n");
         if candidate.verification_plans.is_empty() {
             prompt.push_str("(none)\n");
@@ -455,7 +435,6 @@ impl WorkspaceEngine {
                 ));
             }
         }
-
         prompt.push_str(
             "\n\n审核边界说明：本候选是 WorkItemPlan 整组拆分计划，请从以下维度评估：\
              1) 拆分粒度合理性（是否过粗或过细）；\
@@ -488,7 +467,6 @@ impl WorkspaceEngine {
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
             &self.routing_reference_context(),
         ));
-
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
@@ -533,7 +511,6 @@ impl WorkspaceEngine {
                 missing_refs.join(" and ")
             ));
         }
-
         let ir_ref = self
             .session
             .plan_candidate_ir_ref
@@ -575,7 +552,6 @@ impl WorkspaceEngine {
                     .to_string(),
             );
         }
-
         let contract_candidates = ir_record
             .ir
             .items
@@ -625,7 +601,6 @@ impl WorkspaceEngine {
             },
             "findings": report_record.report.findings,
         });
-
         let mut prompt = String::from(
             "请作为 Plan Reviewer 审核当前 Canonical Contract 与 Projection 候选。\n\n## Plan Review Context\n",
         );
@@ -853,7 +828,6 @@ impl WorkspaceEngine {
             .map_err(|error| format!("load work item plan active index failed: {error}"))?
             .map(|index| index.current_generation_round_id)
             .unwrap_or_else(|| "generation_round_unknown".to_string());
-
         let outline = &outline_candidate.outline;
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前 WorkItemPlan Outline。\n\n");
@@ -871,7 +845,6 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("[{}]: {content}\n", msg.role));
         }
         self.append_missing_context_notes_to_prompt(&mut prompt);
-
         prompt.push_str("\n## Design context gaps\n");
         if outline_candidate.design_context_gaps.is_empty() {
             prompt.push_str("(none)\n");
@@ -880,7 +853,6 @@ impl WorkspaceEngine {
                 prompt.push_str(&format!("- {gap}\n"));
             }
         }
-
         prompt.push_str("\n## Validator findings\n");
         if outline_candidate.validator_findings.is_empty() {
             prompt.push_str("(none)\n");
@@ -892,10 +864,8 @@ impl WorkspaceEngine {
                 ));
             }
         }
-
         let outline_json = serde_json::to_string_pretty(outline)
             .map_err(|error| format!("serialize outline candidate error: {error}"))?;
-
         prompt.push_str("\n## Outline JSON (source of truth)\n");
         prompt.push_str(
             "以下 JSON 是审核事实来源，包含 author/rewriter 产出的完整 Outline 字段；如果后续可读摘要与 JSON 不一致，以 JSON 为准。\n",
@@ -903,7 +873,6 @@ impl WorkspaceEngine {
         prompt.push_str("<WORK_ITEM_PLAN_OUTLINE_JSON>\n");
         prompt.push_str(&outline_json);
         prompt.push_str("\n</WORK_ITEM_PLAN_OUTLINE_JSON>\n");
-
         prompt.push_str("\n## Outline summary\n");
         prompt.push_str(&format!(
             "- id: {}\n- source_story_spec_ids: [{}]\n- source_design_spec_ids: [{}]\n- strategy_summary: {}\n- handoff_strategy: {}\n- status: {}\n",
@@ -963,7 +932,6 @@ impl WorkspaceEngine {
         for risk in &outline.risks {
             prompt.push_str(&format!("- {risk}\n"));
         }
-
         prompt.push_str(
             "\n\n审核边界说明：请只检查拆分策略、覆盖 Story/Design、outline 粒度、依赖图、写入边界、上下文缺口补齐假设与 handoff 策略。\
              每个 outline 必须能由单个 Claude Code 或 Codex coding 会话可靠完成。estimated_context_tokens 必须存在：不超过 40k 属正常范围，40001..=50000 必须结合目标内聚性、写入范围、编码、测试、返修与验证判断是否能在单 session 闭环，超过 50k 必须返回 `revise` 并要求拆分。\
@@ -993,7 +961,6 @@ impl WorkspaceEngine {
              - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
             &self.routing_reference_context(),
         ));
-
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
@@ -1119,7 +1086,6 @@ impl WorkspaceEngine {
             .map_err(|error| format!("load work item plan active index failed: {error}"))?
             .ok_or_else(|| "work item plan active index missing".to_string())?;
         let accepted_drafts = self.accepted_work_item_plan_draft_records(&store, &index)?;
-
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前单个 Work Item Draft。\n\n");
         prompt.push_str("审核边界：只能审核当前 draft 是否符合对应 outline 以及是否正确消费已接受依赖。若需要修改当前 item，返回 `revise`；若需要修改前序 item 或拆分边界，必须返回 `plan_reopen_required`；不得用 `revise` 修改非当前 item。\n\n");
@@ -1180,7 +1146,6 @@ impl WorkspaceEngine {
                 ));
             }
         }
-
         let nonce = structured_output_nonce();
         let structured_output_contract = StructuredOutputContract {
             nonce: nonce.clone(),
@@ -1204,7 +1169,6 @@ impl WorkspaceEngine {
              - `needs_human`：需要用户做范围或产品判断。\n",
             &self.routing_reference_context(),
         ));
-
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,

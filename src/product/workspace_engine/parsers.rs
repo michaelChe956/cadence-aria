@@ -586,7 +586,7 @@ pub(crate) struct ParsedReviewFindings {
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct RawReviewFinding {
     severity: String,
     message: String,
@@ -600,6 +600,12 @@ struct RawReviewFinding {
     class_hint: Option<String>,
     #[serde(default)]
     contract_field: Option<String>,
+    #[serde(skip_deserializing)]
+    finding_id: Option<String>,
+    #[serde(skip_deserializing)]
+    code: Option<String>,
+    #[serde(skip_deserializing)]
+    work_item_ids: Vec<String>,
 }
 
 fn parse_review_findings_strict(
@@ -641,6 +647,9 @@ fn parse_raw_review_finding(
                 | "category"
                 | "class_hint"
                 | "contract_field"
+                | "finding_id"
+                | "code"
+                | "work_item_ids"
         ) {
             return Err(invalid_finding_field(
                 format!("{prefix}.{field}"),
@@ -971,6 +980,35 @@ mod tests {
         assert_eq!(envelope.findings[0].category, None);
         assert_eq!(envelope.findings[0].class_hint, None);
         assert_eq!(envelope.findings[0].contract_field, None);
+    }
+
+    #[test]
+    fn review_envelope_ignores_provider_finding_identity_fields() {
+        let envelope = parse_review_envelope(&serde_json::json!({
+            "verdict": "pass",
+            "findings": [{
+                "severity": "suggestion",
+                "message": "advisory finding",
+                "category": "completeness",
+                "class_hint": "advisory",
+                "finding_id": "provider-finding-001",
+                "code": "STYLE-001",
+                "work_item_ids": ["WT-001"]
+            }]
+        }))
+        .expect("provider identity fields should be tolerated");
+
+        assert_eq!(envelope.raw_verdict, ReviewVerdictType::Pass);
+        assert_eq!(envelope.findings.len(), 1);
+        assert_eq!(envelope.findings[0].message, "advisory finding");
+        assert_eq!(
+            envelope.findings[0].category,
+            Some(crate::product::work_item_plan_policy::ReviewFindingCategory::Completeness)
+        );
+        assert_eq!(
+            envelope.findings[0].class_hint,
+            Some(crate::product::work_item_plan_policy::FindingClassHint::Advisory)
+        );
     }
 
     #[test]
