@@ -159,24 +159,9 @@ pub(crate) async fn run_single_candidate_author(
             return Err(SingleCandidateProviderRunError::AlreadyFinished);
         }
     };
-    let candidate_item_count =
-        match crate::product::work_item_split_engine::parse::count_work_item_plan_candidates(
-            &outline_output,
-        ) {
-            Ok(count) => {
-                #[cfg(test)]
-                {
-                    super::record_work_item_plan_parser_path(
-                        &engine.session().session_id,
-                        "single_candidate_outline",
-                    );
-                    super::record_single_candidate_generation_step(
-                        &engine.session().session_id,
-                        "parse_count",
-                    );
-                }
-                count
-            }
+    let outline_ast =
+        match crate::product::work_item_plan_compiler::parse_work_item_plan(&outline_output) {
+            Ok(ast) => ast,
             Err(diagnostics) => {
                 let diagnostics = diagnostics
                     .iter()
@@ -196,6 +181,20 @@ pub(crate) async fn run_single_candidate_author(
                 )));
             }
         };
+    let candidate_item_count = outline_ast.items.len();
+    let trusted_command_catalog =
+        crate::product::work_item_plan_compiler::trusted_command_catalog_from_ast(
+            &outline_ast,
+            ".",
+        );
+    #[cfg(test)]
+    {
+        super::record_work_item_plan_parser_path(
+            &engine.session().session_id,
+            "single_candidate_outline",
+        );
+        super::record_single_candidate_generation_step(&engine.session().session_id, "parse_count");
+    }
 
     let full_launch = resolve_plan_author_launch(
         engine,
@@ -216,10 +215,13 @@ pub(crate) async fn run_single_candidate_author(
             &request,
             &issue,
             &repository,
-            &story_context,
-            &design_context,
-            &repository_structure,
-            &full_launch.routing_context(),
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: &story_context,
+                design_context: &design_context,
+                repository_structure: &repository_structure,
+                routing_context: &full_launch.routing_context(),
+                trusted_command_catalog: &trusted_command_catalog,
+            },
         )
         .map_err(SingleCandidateProviderRunError::Message)?;
     let decision_input = crate::product::workspace_engine::SingleCandidateGenerationDecisionInput {
@@ -308,7 +310,11 @@ pub(crate) async fn run_single_candidate_author(
         }
     };
     if let Err(message) = engine
-        .complete_single_candidate_work_item_plan_author(full_output, repository.id)
+        .complete_single_candidate_work_item_plan_author(
+            full_output,
+            repository.id,
+            trusted_command_catalog,
+        )
         .await
     {
         engine.persist_single_candidate_terminal_phase(

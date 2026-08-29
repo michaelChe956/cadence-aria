@@ -11,6 +11,8 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+use std::collections::VecDeque;
+use std::sync::Mutex as StdMutex;
 
 struct RecordingOutputProvider {
     output: String,
@@ -25,20 +27,7 @@ impl StreamingProviderAdapter for RecordingOutputProvider {
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let _ = self.inputs.send(input);
-        let (event_tx, event_rx) = mpsc::channel(4);
-        let (command_tx, _command_rx) = mpsc::channel(1);
-        let output = self.output.clone();
-        tokio::spawn(async move {
-            let _ = event_tx
-                .send(ProviderEvent::Completed(ProviderCompletion::plain(
-                    output, None,
-                )))
-                .await;
-        });
-        Ok(ProviderSession {
-            events: event_rx,
-            commands: command_tx,
-        })
+        provider_session_with_output(self.output.clone()).await
     }
 
     async fn run_streaming(
@@ -48,6 +37,55 @@ impl StreamingProviderAdapter for RecordingOutputProvider {
     ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
         unreachable!("workspace provider-run tests use start")
     }
+}
+
+struct SequencedOutputProvider {
+    outputs: StdMutex<VecDeque<String>>,
+    inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SequencedOutputProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let _ = self.inputs.send(input);
+        let output = self
+            .outputs
+            .lock()
+            .expect("sequential provider outputs")
+            .pop_front()
+            .expect("each single-candidate author invocation needs an output");
+        provider_session_with_output(output).await
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("workspace provider-run tests use start")
+    }
+}
+
+async fn provider_session_with_output(
+    output: String,
+) -> Result<ProviderSession, ProviderAdapterError> {
+    let (event_tx, event_rx) = mpsc::channel(4);
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _ = event_tx
+            .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                output, None,
+            )))
+            .await;
+    });
+    Ok(ProviderSession {
+        events: event_rx,
+        commands: command_tx,
+    })
 }
 
 struct ProviderRunFixture {
@@ -258,7 +296,7 @@ fn legacy_outline_output(story_id: &str, design_id: &str) -> String {
 
 fn single_candidate_context(
     fixture: &ProviderRunFixture,
-    provider: Arc<RecordingOutputProvider>,
+    provider: Arc<dyn StreamingProviderAdapter>,
 ) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, provider);
@@ -309,6 +347,20 @@ fn single_candidate_markdown(story_id: &str, design_id: &str) -> String {
          ### Traceability\n- source_type: design_spec\n- source_id: {design_id}\n- requirement_id: REQ-001\n\n\
          ### Notes\nGenerated from Story {story_id}.\n\n\
          ### Rationale\nA single backend item owns the API boundary.\n"
+    )
+}
+
+fn single_candidate_markdown_with_command(
+    story_id: &str,
+    design_id: &str,
+    command: &str,
+) -> String {
+    single_candidate_markdown(story_id, design_id).replacen(
+        "- check_id: CHECK-001\n- manual_instruction: Inspect the backend API response manually.",
+        &format!(
+            "- check_id: CHECK-001\n- command: {command}\n- manual_instruction: Inspect the backend API response manually."
+        ),
+        1,
     )
 }
 
@@ -494,6 +546,125 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
     source_store
         .get_mechanical_report(&scope, report_ref)
         .expect("stored mechanical report");
+}
+
+#[tokio::test]
+async fn single_candidate_threads_outline_trusted_command_catalog_to_full_plan_compilation() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let markdown = single_candidate_markdown_with_command(
+        &fixture.story_id,
+        &fixture.design_id,
+        "node --test tests/backend/",
+    );
+    let provider = Arc::new(SequencedOutputProvider {
+        outputs: StdMutex::new(VecDeque::from([markdown.clone(), markdown])),
+        inputs: input_tx,
+    });
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let outline_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("outline provider must receive input")
+        .expect("outline provider input");
+    let full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("full author provider must receive input")
+        .expect("full author provider input");
+    assert!(
+        outline_input
+            .prompt
+            .contains("仅登记已确认仓库/Design/Outline 证据支持")
+    );
+    assert!(
+        full_input
+            .prompt
+            .contains("Verification.command 必须已在 outline 阶段登记")
+    );
+    assert!(
+        full_input.prompt.contains("node --test tests/backend/"),
+        "完整 author 必须接收 outline 已登记的命令目录"
+    );
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload single-candidate session");
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: durable.project_id.clone(),
+        issue_id: durable.issue_id.clone(),
+        plan_id: durable.entity_id.clone(),
+    };
+    let source_store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+        fixture.app_paths.clone(),
+    );
+    let ir = source_store
+        .get_plan_candidate_ir(
+            &scope,
+            durable.plan_candidate_ir_ref.as_deref().expect("IR ref"),
+        )
+        .expect("outline 已登记的 full-plan command 必须通过 lowering");
+    assert_eq!(
+        ir.ir.items[0].trusted_commands[0].command,
+        "node --test tests/backend/"
+    );
+}
+
+#[tokio::test]
+async fn single_candidate_rejects_full_plan_command_not_registered_by_outline() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let outline = single_candidate_markdown_with_command(
+        &fixture.story_id,
+        &fixture.design_id,
+        "node --test tests/backend/",
+    );
+    let full = single_candidate_markdown_with_command(
+        &fixture.story_id,
+        &fixture.design_id,
+        "node --test tests/frontend/",
+    );
+    let provider = Arc::new(SequencedOutputProvider {
+        outputs: StdMutex::new(VecDeque::from([outline, full])),
+        inputs: input_tx,
+    });
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    for stage in ["outline", "full author"] {
+        tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{stage} provider must receive input"))
+            .unwrap_or_else(|| panic!("{stage} provider input"));
+    }
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload failed single-candidate session");
+    assert!(durable.plan_candidate_ir_ref.is_none());
 }
 
 #[tokio::test]

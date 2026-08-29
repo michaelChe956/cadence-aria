@@ -790,10 +790,13 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
             &request,
             &issue,
             &repository,
-            "story_spec_0001: level selection",
-            "design_spec_0001: levels API",
-            "src/product/levels; web/src/levels; tests/integration",
-            &RoutingReferenceContext::Legacy,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                routing_context: &RoutingReferenceContext::Legacy,
+                trusted_command_catalog: &[],
+            },
         )
         .expect("markdown author prompt");
 

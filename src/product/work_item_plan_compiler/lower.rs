@@ -142,6 +142,128 @@ pub fn compile_work_item_plan(
     lower_work_item_plan(source, ast, context)
 }
 
+/// 从 SingleCandidate 轻量 outline 的 Verification.command 行构造完整 author 可消费的
+/// 受信命令目录。目录只登记已在 outline 中出现的命令，避免完整 author 从上下文臆造。
+pub fn trusted_command_catalog_from_outline(
+    source: &str,
+    cwd: &str,
+) -> Result<Vec<TrustedDraftVerificationCommand>, Vec<CompilerDiagnostic>> {
+    let ast = super::parse_work_item_plan(source)?;
+    Ok(trusted_command_catalog_from_ast(&ast, cwd))
+}
+
+/// 复用已完成 grammar 校验的 AST，避免 SingleCandidate 为命令目录再次解析 outline。
+pub fn trusted_command_catalog_from_ast(
+    ast: &WorkItemPlanAst,
+    cwd: &str,
+) -> Vec<TrustedDraftVerificationCommand> {
+    let mut catalog = Vec::new();
+    let mut commands = HashSet::new();
+    let mut source_refs = HashSet::new();
+
+    for item in &ast.items {
+        let Some(verification) = item
+            .sections
+            .iter()
+            .find(|section| section.name.value == "Verification")
+        else {
+            continue;
+        };
+        let mut current_check_id = None;
+        let mut command = None;
+        let mut command_line = 0;
+        let mut manual_instruction = None;
+        let mut flush = |check_id: Option<&str>,
+                         command: &mut Option<String>,
+                         command_line: usize,
+                         manual_instruction: Option<&str>| {
+            let Some(command) = command.take() else {
+                return;
+            };
+            let command = command.trim();
+            if command.is_empty() || !commands.insert(command.to_string()) {
+                return;
+            }
+            let source_ref = unique_outline_command_source_ref(
+                &mut source_refs,
+                item.id.value.as_str(),
+                check_id.unwrap_or_default(),
+                command_line,
+                command,
+            );
+            catalog.push(TrustedDraftVerificationCommand {
+                command: command.to_string(),
+                cwd: cwd.to_string(),
+                purpose: truncated_command_purpose(manual_instruction),
+                source_ref,
+            });
+        };
+
+        for field in &verification.fields {
+            match field.key.value.as_str() {
+                "check_id" => {
+                    flush(
+                        current_check_id.as_deref(),
+                        &mut command,
+                        command_line,
+                        manual_instruction.as_deref(),
+                    );
+                    current_check_id = Some(field.value.value.clone());
+                    command_line = 0;
+                    manual_instruction = None;
+                }
+                "command" => {
+                    command = Some(field.value.value.clone());
+                    command_line = field.value.line;
+                }
+                "manual_instruction" => {
+                    manual_instruction = Some(field.value.value.clone());
+                }
+                _ => {}
+            }
+        }
+        flush(
+            current_check_id.as_deref(),
+            &mut command,
+            command_line,
+            manual_instruction.as_deref(),
+        );
+    }
+
+    catalog
+}
+
+fn unique_outline_command_source_ref(
+    source_refs: &mut HashSet<String>,
+    item_id: &str,
+    check_id: &str,
+    command_line: usize,
+    command: &str,
+) -> String {
+    let mut collision_attempt = 0usize;
+    loop {
+        let fingerprint =
+            format!("{item_id}\0{check_id}\0{command_line}\0{command}\0{collision_attempt}");
+        let digest = hex::encode(Sha256::digest(fingerprint.as_bytes()));
+        let source_ref = format!("outline-{}", &digest[..24]);
+        if source_refs.insert(source_ref.clone()) {
+            return source_ref;
+        }
+        collision_attempt += 1;
+    }
+}
+
+fn truncated_command_purpose(manual_instruction: Option<&str>) -> String {
+    let purpose = manual_instruction
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("registered at outline stage");
+    purpose
+        .chars()
+        .take(crate::product::models::MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH)
+        .collect()
+}
+
 fn lower_item(
     item: &WorkItemPlanItemAst,
     catalog: &HashMap<&str, &TrustedDraftVerificationCommand>,

@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::product::models::ProviderName;
+use crate::product::models::{ProviderName, TrustedDraftVerificationCommand};
 use crate::product::work_item_plan_compiler::{
     PlanCandidateValidationContext, WorkItemPlanSourceContext, compile_work_item_plan,
     validate_plan_candidate_ir,
@@ -114,6 +114,7 @@ impl WorkspaceEngine {
         &mut self,
         source: String,
         target_repository_id: String,
+        trusted_command_catalog: Vec<TrustedDraftVerificationCommand>,
     ) -> Result<(), String> {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
@@ -172,9 +173,7 @@ impl WorkspaceEngine {
             &source,
             &WorkItemPlanSourceContext {
                 target_repository_id,
-                // Provider 不得从 prompt 伪造 trusted catalog；本轮没有 durable catalog
-                // 投影时只接受 manual/blocker，后续 WP5 再接真正的 catalog 选择。
-                trusted_command_catalog: Vec::new(),
+                trusted_command_catalog,
             },
         )
         .map_err(|diagnostics| {

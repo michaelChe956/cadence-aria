@@ -1,8 +1,13 @@
 use super::{
     WorkItemPlanSourceContext, grammar, types,
-    {compile_work_item_plan, lint_work_item_plan_source, parse_work_item_plan},
+    {
+        compile_work_item_plan, lint_work_item_plan_source, parse_work_item_plan,
+        trusted_command_catalog_from_outline,
+    },
 };
-use crate::product::models::TrustedDraftVerificationCommand;
+use crate::product::models::{
+    MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH, TrustedDraftVerificationCommand,
+};
 use serde_json::Value;
 
 mod full_lowering_validator;
@@ -974,6 +979,74 @@ fn lower_typed_ir() {
         1,
     );
     assert!(compile_work_item_plan(&markdown_owned, &context).is_err());
+}
+
+#[test]
+fn outline_command_catalog_derives_deterministic_unique_nonempty_source_refs() {
+    let catalog = trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
+        .expect("完整 outline source 必须可解析并派生受信命令目录");
+
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|entry| entry.command.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "cargo test --locked --lib levels_api",
+            "pnpm test level-select",
+            "cargo test --locked --test levels_integration",
+        ]
+    );
+    assert!(catalog.iter().all(|entry| {
+        entry.cwd == "."
+            && !entry.purpose.is_empty()
+            && entry.purpose.chars().count() <= 32
+            && !entry.source_ref.is_empty()
+            && entry.source_ref.chars().count() <= MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH
+    }));
+    let unique_source_refs = catalog
+        .iter()
+        .map(|entry| entry.source_ref.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique_source_refs.len(), catalog.len());
+    assert_eq!(
+        catalog,
+        trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
+            .expect("相同 outline 必须确定性派生同一目录")
+    );
+}
+
+#[test]
+fn trusted_catalog_rejects_duplicate_or_empty_source_ref() {
+    let mut duplicate_source_ref = trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
+        .expect("完整 outline source 必须可解析并派生受信命令目录");
+    duplicate_source_ref[1].source_ref = duplicate_source_ref[0].source_ref.clone();
+    let duplicate = compile_work_item_plan(
+        REP4_FIXTURE,
+        &WorkItemPlanSourceContext {
+            target_repository_id: "repo-levels".to_string(),
+            trusted_command_catalog: duplicate_source_ref,
+        },
+    )
+    .expect_err("重复 source_ref 必须由 lowering 拒绝");
+    assert!(duplicate.iter().any(|diagnostic| {
+        diagnostic.field == "trusted_commands" && diagnostic.message.contains("source_ref 不得重复")
+    }));
+
+    let mut empty_source_ref = trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
+        .expect("完整 outline source 必须可解析并派生受信命令目录");
+    empty_source_ref[0].source_ref.clear();
+    let empty = compile_work_item_plan(
+        REP4_FIXTURE,
+        &WorkItemPlanSourceContext {
+            target_repository_id: "repo-levels".to_string(),
+            trusted_command_catalog: empty_source_ref,
+        },
+    )
+    .expect_err("空 source_ref 必须由 lowering 拒绝");
+    assert!(empty.iter().any(|diagnostic| {
+        diagnostic.field == "trusted_commands" && diagnostic.message.contains("source_ref 不得为空")
+    }));
 }
 
 #[test]

@@ -40,6 +40,15 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
 /// 预留空间；超过硬兜底时拒绝 provider 启动，而不是静默丢失规范层内容。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 65_536;
 const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
+
+pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
+    pub story_context: &'a str,
+    pub design_context: &'a str,
+    pub repository_structure: &'a str,
+    pub routing_context: &'a RoutingReferenceContext,
+    pub trusted_command_catalog: &'a [crate::product::models::TrustedDraftVerificationCommand],
+}
+
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
 /// 路由 target_contract_refs 必非空且逐字）上调至 12_600。
@@ -231,6 +240,7 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
          {grammar}\\
          [outline_identifier_and_dependency_rules]\n\
          每个 Work Item 必须以 `{item_id_prefix}<三位数字>` 编号，从 `{item_id_prefix}001` 起，按递增顺序且全局唯一。\n\
+         Verification.command 仅登记已确认仓库/Design/Outline 证据支持的命令；证据不足时不写 command，改用 manual_instruction 或 blocker，绝不根据 WorkItemKind 猜测命令。\n\
          {dependency_syntax_rules}\n\
          [minimum_legal_source] 每个候选复用该完整 grammar 形状并使用唯一 WI/TASK/AC/CHECK/contract ID；不要省略 section 或必填字段。\n{minimum_source}\n\\
          [output] 现在只输出轻量、可 parser 的 markdown outline。",
@@ -268,27 +278,34 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
     repository: &RepositoryRecord,
-    story_context: &str,
-    design_context: &str,
-    repository_structure: &str,
-    routing_context: &RoutingReferenceContext,
+    context: WorkItemPlanMarkdownAuthorContext<'_>,
 ) -> Result<String, String> {
     let few_shot = work_item_plan_real_few_shot()?;
+    let trusted_command_catalog = context
+        .trusted_command_catalog
+        .iter()
+        .map(|entry| format!("- {}", entry.command))
+        .collect::<Vec<_>>()
+        .join("\n");
     let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
     // story/design 真实上下文可能远大于旧 JSON outline 路径。固定 grammar、最小合法
     // source 与 few-shot 永不截断；只按确定性配额压缩可再加载的上下文，并显式标记。
-    let (story_context, design_context, repository_structure) =
-        budget_markdown_context(story_context, design_context, repository_structure);
+    let (story_context, design_context, repository_structure) = budget_markdown_context(
+        context.story_context,
+        context.design_context,
+        context.repository_structure,
+    );
     let prompt = format!(
         "只输出完整 `work-item-plan.md` source；原始输出直接成为 source revision 并交 compiler parse。\n\
          [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\
          [routing_reference]\n{routing_reference}\n\
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
          story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
+         [outline_commands]\n{trusted_command_catalog}\n\
          [source_boundary]\n\
-         只写 markdown 字段；不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段，且不得输出 target_repository_id、durable ID、source hash 或 trusted command catalog。\n\
+         只写 markdown 字段；不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段。\n\
          exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
-         command 仅取已确认可信仓库证据；不足写 manual_instruction 或 blocker，不得臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
+         Verification.command 必须已在 outline 阶段登记；仅逐字引用 [outline_commands]。证据不足写 manual_instruction 或 blocker，禁止臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
          {dependency_syntax_rules}\n\n\
          {grammar}\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
@@ -298,12 +315,13 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         issue_description = issue.description.as_deref().unwrap_or("无"),
         repository_id = repository.id,
         repository_path = repository.path.display(),
-        routing_reference = generation_cadence_routing_rules_reference(routing_context),
+        routing_reference = generation_cadence_routing_rules_reference(context.routing_context),
         story_context = story_context,
         design_context = design_context,
         repository_structure = repository_structure,
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
+        trusted_command_catalog = trusted_command_catalog,
         grammar = work_item_plan_markdown_grammar(),
         dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),
