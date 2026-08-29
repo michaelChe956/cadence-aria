@@ -38,7 +38,7 @@
 | contract.acceptance_criteria[].statement | markdown | 条目缺失→diagnostic（required） | prompt 改写、task 派生 | 解析 EARS acceptance statement | FSM-021 |
 | contract.acceptance_criteria[].required_evidence[] | markdown | 条目缺失→显式空集合 | validator 补齐、runtime 推断 | 解析 EvidenceKind 列表 | FSM-022 |
 | contract.verification_checks[].check_id | markdown | 条目缺失→diagnostic（required） | runtime 生成、command 派生 | 解析 verification check ID | FSM-023 |
-| contract.verification_checks[].command | markdown | 缺失→显式 None；与 manual_instruction 均缺失→diagnostic | trusted command catalog、prompt 补齐 | 解析命令；只保留作者明写值 | FSM-024 |
+| contract.verification_checks[].command | markdown | 缺失→显式 None；与 manual_instruction 均缺失→diagnostic | prompt 补齐 | 解析命令；只保留作者明写值（授权由 plan 审批门承载，非独立目录） | FSM-024（2026-08-29 简化裁决） |
 | contract.verification_checks[].manual_instruction | markdown | 缺失→显式 None；与 command 均缺失→diagnostic | prompt 补齐、runtime 指令 | 解析人工检查说明；只保留作者明写值 | FSM-025 |
 | contract.verification_checks[].required | markdown | 条目缺失→diagnostic（required） | compiler 默认 true、runtime 覆盖 | 解析布尔值 | FSM-026 |
 | contract.verification_checks[].non_zero_test_execution_required | markdown | 条目缺失→diagnostic（required） | compiler 默认值、runtime 覆盖 | 解析布尔值 | FSM-027 |
@@ -52,10 +52,10 @@
 | contract.design_traceability[].source_id | markdown | 条目缺失→diagnostic（required） | session context、runtime 推断 | 解析 traceability source ID | FSM-035 |
 | contract.design_traceability[].requirement_id | markdown | 条目缺失→diagnostic（required） | prompt 补齐、runtime 推断 | 解析 requirement ID | FSM-036 |
 | verification_plan.checks[] | compiler_derived | canonical verification_checks 缺失→diagnostic | markdown 第二份 checks、runtime 补齐 | 从 canonical verification_checks 确定性投影为 WorkItemDraftVerificationPlan.checks | FSM-037 |
-| trusted_commands[].command | session_confirmed_context | catalog 缺失→显式空集合 | markdown、prompt | 从已确认 catalog 原样投影 command | FSM-038 |
-| trusted_commands[].cwd | session_confirmed_context | catalog 缺失→显式空集合 | markdown、prompt、runtime 猜测 path | 从已确认 catalog 原样投影 cwd | FSM-039 |
-| trusted_commands[].purpose | session_confirmed_context | catalog 缺失→显式空集合 | markdown、prompt | 从已确认 catalog 原样投影 purpose | FSM-040 |
-| trusted_commands[].source_ref | session_confirmed_context | catalog 缺失→显式空集合 | markdown、prompt | 从已确认 catalog 原样投影 source_ref | FSM-041 |
+| trusted_commands[].command | markdown（Verification 段声明；plan 审批门为授权锚） | 声明缺失→显式空集合 | prompt、仓库配置、独立目录文件 | 从本 item Verification.command 声明确定性投影（去重） | FSM-038（2026-08-29 简化裁决） |
+| trusted_commands[].cwd | compiler_derived | — | markdown 明写、runtime 猜测 path | 固定投影为 "."（与 plan 相对） | FSM-039（同上） |
+| trusted_commands[].purpose | compiler_derived | — | markdown 明写 | 由对应 check 的语句派生（确定性截断） | FSM-040（同上） |
+| trusted_commands[].source_ref | compiler_derived | — | markdown 明写 | 由 source revision hash 确定性派生 | FSM-041（同上） |
 | target_repository_id | session_confirmed_context | 缺失→diagnostic（required） | markdown、prompt、runtime 猜测 path | 从已确认 target repository binding 原样注入 item | FSM-042 |
 | ir.source_revision_hash | compiler_derived | 源 markdown 不可读→diagnostic | prompt hash、runtime 覆盖 | 对规范化 source revision 字节确定性计算 hash 并只置于顶层 IR | FSM-043 |
 | ir.compiler_version | compiler_derived | 编译器版本未定义→diagnostic | markdown、runtime 覆盖 | 由编译器常量确定性写入顶层 IR | FSM-044 |

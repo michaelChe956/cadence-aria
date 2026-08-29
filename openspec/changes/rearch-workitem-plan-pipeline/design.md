@@ -93,3 +93,12 @@ session 创建时写入 `RunPolicy`：`interactive`（手动最终批准）或 `
 ## Open Questions
 
 （无——D-A~D-E 五项决策已于 2026-08-26 经 oracle 裁决、用户批准。）
+
+## 架构简化裁决（2026-08-29，用户批准：砍 outline 与受信目录）
+
+实测驱动（6.2 验收 r5–r15 十轮）：outline 双会话使慢 provider 固定开销翻倍（pi 三次硬超时）；outline 派生目录链（catalogfix/gatefix/重复命令教学/空目录规则）七轮修补暴露其为 legacy 仪式搬迁。裁决：
+
+1. **单次 provider 生成**：删除 outline 阶段（轻量 outline prompt/解析/计数/selector 前置），完整 plan 一次生成；selector 保留为编译后内部诊断（按 IR item 数+provider profile 记录，不改变 REQ-WSC-01 的「内部选择、不对外决策」语义）。
+2. **命令声明即授权载体**：plan 的 Verification 段 `command` 字段=唯一声明处；`PlanCandidateItemIr.trusted_commands` 由该 item 声明确定性投影（去重；cwd="."；purpose 由 check 语句确定性截断派生；source_ref 由 source revision hash 派生）。删除 outline→目录→lowering 校验链与 `WorkItemPlanSourceContext.trusted_command_catalog`。授权锚=plan 审批门（人工/auto 策略批准 plan 即批准其命令集）；执行边界=coding 安全门（消费 trusted_commands，不变）。
+3. **不动**：编译器语法/lowering 的结构校验、三层 validator 规则本身、确定性编译/发布/恢复链、review/人工门、flow_kind/preflight。
+4. **已知取舍**：失去「命令事前清单」审计形式（改为审批门时人工直接看到 Verification 段）；同 item 重复命令的编译规则保留为卫生规则。

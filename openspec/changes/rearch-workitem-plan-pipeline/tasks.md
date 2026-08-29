@@ -67,3 +67,5 @@ pub struct InitialPlanCompileInput {
 - [ ] 6.2 codex + pi 各 1 案例实跑（naruto 单仓）：2/2 Confirmed、≤12 分钟、`initial_review_count ≤ 1`、`verification_review_count ≤ 1`、`repairs_used ≤ 1`
 - [ ] 6.3 核对阶段 1 的 14 条 classifier golden（11 原始 + 3 个带人工 class_hint 的 Repairable 变体）；只核对 9 个 reviewer finding 映射集合中已明确归入 grammar/lowering 的 compiler diagnostic golden。其余 reviewer finding 只作为 prompt few-shot 素材；usage/token 基线对比（含注入内容占比测量）
 - [ ] 6.4 验收报告落盘；达标后移交阶段 3 立项（对话流人工门与 `advance` 接口），未达标不得退役旧协议
+
+> **2026-08-29 简化裁决补记**（用户批准）：工作包 5.2 的「轻量 outline→计数→selector→完整 author」两阶段生成简化为**单次 provider 生成完整 plan**；selector 降级为编译后内部诊断。工作包 2.5/5.x 期间落地的 outline 派生受信目录链（catalogfix b2aaf24e 及其后续教学）标记 superseded——trusted_commands 改为 plan Verification 段声明确定性投影，授权锚=plan 审批门（见 design.md 架构简化裁决节与 field-source-matrix FSM-024/038~041 更新）。
