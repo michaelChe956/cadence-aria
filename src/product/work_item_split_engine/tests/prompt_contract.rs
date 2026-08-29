@@ -871,6 +871,8 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "provider_logical_work_item_id、required_capabilities、compatibility_policy",
         "require_all|require_any",
         "四行缺一不可",
+        "示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n- contract_id: <逐字复制 WI-001 Outputs 的 contract_id>\n- provider_logical_work_item_id: WI-001\n- required_capabilities: <该契约的能力>\n- compatibility_policy: require_all\n无依赖时 Inputs 留空 section。",
+        "反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。",
         "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
     ] {
         assert!(
@@ -1005,6 +1007,8 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
         "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
         "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
         "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
+        "示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n- contract_id: <逐字复制 WI-001 Outputs 的 contract_id>\n- provider_logical_work_item_id: WI-001\n- required_capabilities: <该契约的能力>\n- compatibility_policy: require_all\n无依赖时 Inputs 留空 section。",
+        "反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。",
         "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
     ] {
         assert!(
