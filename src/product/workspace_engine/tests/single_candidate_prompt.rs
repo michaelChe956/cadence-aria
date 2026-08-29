@@ -2,7 +2,8 @@ use crate::cross_cutting::streaming_provider::ProviderCompletion;
 use crate::product::json_store::write_json;
 use crate::product::models::{WorkItemSplitFinding, WorkspaceSessionStatus};
 use crate::product::work_item_plan_compiler::{
-    PlanCandidateIr, PlanCandidateMechanicalReport, WORK_ITEM_PLAN_COMPILER_VERSION,
+    PlanCandidateIr, PlanCandidateItemIr, PlanCandidateMechanicalReport,
+    WORK_ITEM_PLAN_COMPILER_VERSION,
 };
 use crate::product::work_item_plan_policy::{
     FatalReason, FindingClass, FindingFingerprint, HumanReason, ProviderStartLedgerEntry,
@@ -267,6 +268,164 @@ async fn repaired_review_upgrades_initial_scope_from_durable_session_report_ref(
             ..
         }
     ));
+}
+
+#[test]
+fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("single_candidate_review_artifacts");
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source = "# immutable single candidate review source\\n";
+    let mut source_revision = SourceRevisionRecord {
+        id: "source-review".to_string(),
+        source: source.to_string(),
+        source_revision_hash: source_hash(source),
+        content_hash: String::new(),
+    };
+    source_revision.content_hash = source_revision.content_hash().expect("source content hash");
+    source_store
+        .put_source_revision("project_0001", "issue_0001", &plan_id, &source_revision)
+        .expect("persist source revision");
+
+    let contract_a = crate::product::work_item_contract::canonical_contract_fixture("wi-a");
+    let mut contract_b = crate::product::work_item_contract::canonical_contract_fixture("wi-b");
+    contract_b.depends_on = vec!["wi-a".to_string()];
+    let ir = PlanCandidateIr {
+        source_revision_hash: source_revision.source_revision_hash.clone(),
+        compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+        items: vec![
+            PlanCandidateItemIr {
+                target_repository_id: "repository_0001".to_string(),
+                contract: contract_a,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: Vec::new(),
+                },
+                trusted_commands: Vec::new(),
+            },
+            PlanCandidateItemIr {
+                target_repository_id: "repository_0001".to_string(),
+                contract: contract_b,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: Vec::new(),
+                },
+                trusted_commands: Vec::new(),
+            },
+        ],
+    };
+    let mut ir_record = PlanCandidateIrRecord {
+        id: "ir-review".to_string(),
+        source_revision_id: source_revision.id.clone(),
+        ir,
+        content_hash: String::new(),
+    };
+    ir_record.content_hash = ir_record.content_hash().expect("IR content hash");
+    let ir_ref = source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", &plan_id, &ir_record)
+        .expect("persist compiled IR");
+    let mut report = PlanCandidateMechanicalReportRecord {
+        id: "report-review".to_string(),
+        source_revision_id: source_revision.id,
+        ir_id: ir_record.id,
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: ir_record.ir.source_revision_hash.clone(),
+            compiler_version: ir_record.ir.compiler_version.clone(),
+            findings: vec![WorkItemSplitFinding {
+                severity: crate::product::models::WorkItemSplitFindingSeverity::Warning,
+                code: "review_warning".to_string(),
+                message: "mechanical summary evidence".to_string(),
+                work_item_ids: vec!["wi-b".to_string()],
+            }],
+        },
+        content_hash: String::new(),
+    };
+    report.content_hash = report.content_hash().expect("report content hash");
+    let report_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", &plan_id, &report)
+        .expect("persist mechanical report");
+
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.plan_candidate_ir_ref = Some(ir_ref);
+    record.mechanical_report_ref = Some(report_ref);
+    record.work_item_plan_source_revision_ref = Some(format!(
+        "project/project_0001/issue/issue_0001/plan/{plan_id}/source_revision/source-review"
+    ));
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist session refs");
+    engine.session = crate::product::workspace_engine::types::WorkspaceSession::from_record(record);
+    engine.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "compiled markdown is not authoritative".to_string(),
+        diff: None,
+    });
+
+    let input = engine
+        .build_work_item_plan_review_input()
+        .expect("single-candidate review input");
+    assert!(input.prompt.contains("wi-a"));
+    assert!(
+        input
+            .prompt
+            .contains("Provide the canonical work item contract")
+    );
+    for required_field in [
+        "tasks",
+        "write_policy",
+        "acceptance_criteria",
+        "verification_checks",
+        "depends_on",
+        "contract.canonical",
+        "contract.source",
+    ] {
+        assert!(
+            input.prompt.contains(required_field),
+            "single-candidate reviewer view must include {required_field}"
+        );
+    }
+    assert!(input.prompt.contains("wi-a -> wi-b"));
+    assert!(input.prompt.contains("mechanical summary evidence"));
+    assert!(
+        !input
+            .prompt
+            .contains("compiled markdown is not authoritative")
+    );
+}
+
+#[test]
+fn single_candidate_review_prompt_fails_closed_when_artifact_refs_are_missing() {
+    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "single_candidate_review_missing_refs",
+        );
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.plan_candidate_ir_ref = None;
+    record.mechanical_report_ref = None;
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist session");
+    engine.session = crate::product::workspace_engine::types::WorkspaceSession::from_record(record);
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("missing refs must fail closed");
+    assert!(error.contains("plan_candidate_ir_ref"));
+    assert!(error.contains("mechanical_report_ref"));
 }
 
 #[test]

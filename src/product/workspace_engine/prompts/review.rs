@@ -6,11 +6,89 @@ use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
+use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
+use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::review_context::{
     PlanReviewSource, append_review_context_section, load_plan_review_context,
 };
 use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocationScope};
+
+fn single_candidate_dependency_graph(
+    items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
+) -> Result<serde_json::Value, String> {
+    let mut item_ids = BTreeSet::new();
+    for item in items {
+        let item_id = item.contract.identity.logical_work_item_id.as_str();
+        if item_id.trim().is_empty() {
+            return Err(
+                "single-candidate review IR contains an empty work item identity".to_string(),
+            );
+        }
+        if !item_ids.insert(item_id.to_string()) {
+            return Err(format!(
+                "single-candidate review IR contains duplicate work item identity `{item_id}`"
+            ));
+        }
+    }
+
+    let mut remaining_dependencies = BTreeMap::new();
+    let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut edges = Vec::new();
+    for item in items {
+        let item_id = item.contract.identity.logical_work_item_id.clone();
+        let mut dependencies = BTreeSet::new();
+        for dependency in &item.contract.depends_on {
+            if !item_ids.contains(dependency) {
+                return Err(format!(
+                    "single-candidate review IR dependency `{dependency}` for `{item_id}` is missing"
+                ));
+            }
+            if dependency == &item_id {
+                return Err(format!(
+                    "single-candidate review IR work item `{item_id}` depends on itself"
+                ));
+            }
+            if dependencies.insert(dependency.clone()) {
+                dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .insert(item_id.clone());
+                edges.push(format!("{dependency} -> {item_id}"));
+            }
+        }
+        remaining_dependencies.insert(item_id, dependencies);
+    }
+    edges.sort();
+
+    let mut ready = remaining_dependencies
+        .iter()
+        .filter_map(|(item_id, dependencies)| dependencies.is_empty().then_some(item_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut topological_order = Vec::with_capacity(items.len());
+    while let Some(item_id) = ready.iter().next().cloned() {
+        ready.remove(&item_id);
+        topological_order.push(item_id.clone());
+        for dependent in dependents.get(&item_id).into_iter().flatten() {
+            let dependencies = remaining_dependencies
+                .get_mut(dependent)
+                .expect("dependent must be present in remaining dependency map");
+            dependencies.remove(&item_id);
+            if dependencies.is_empty() {
+                ready.insert(dependent.clone());
+            }
+        }
+    }
+    if topological_order.len() != items.len() {
+        return Err("single-candidate review IR dependency graph contains a cycle".to_string());
+    }
+
+    Ok(json!({
+        "topological_order": topological_order,
+        "edges": edges,
+    }))
+}
 
 fn review_finding_category_whitelist() -> String {
     [
@@ -243,6 +321,12 @@ impl WorkspaceEngine {
             return self.build_projection_plan_review_input(projection);
         }
 
+        if self.session.flow_kind
+            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+        {
+            return self.build_single_candidate_plan_review_input();
+        }
+
         let lifecycle = self
             .lifecycle_store
             .as_ref()
@@ -417,6 +501,199 @@ impl WorkspaceEngine {
                 self.session.permission_modes.reviewer.clone(),
             ),
             structured_output_contract: Some(structured_output_contract),
+            env_vars: BTreeMap::new(),
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        })
+    }
+
+    fn build_single_candidate_plan_review_input(&self) -> Result<StreamingProviderInput, String> {
+        let lifecycle = self.lifecycle_store.as_ref().ok_or_else(|| {
+            "lifecycle_store unavailable for single-candidate work_item_plan review".to_string()
+        })?;
+        let missing_refs = [
+            self.session
+                .plan_candidate_ir_ref
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .is_none()
+                .then_some("plan_candidate_ir_ref"),
+            self.session
+                .mechanical_report_ref
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .is_none()
+                .then_some("mechanical_report_ref"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if !missing_refs.is_empty() {
+            return Err(format!(
+                "single-candidate review requires durable {}",
+                missing_refs.join(" and ")
+            ));
+        }
+
+        let ir_ref = self
+            .session
+            .plan_candidate_ir_ref
+            .as_deref()
+            .expect("missing refs checked above");
+        let report_ref = self
+            .session
+            .mechanical_report_ref
+            .as_deref()
+            .expect("missing refs checked above");
+        let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+        let scope = SourceStoreScope {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+        };
+        let ir_record = source_store
+            .get_plan_candidate_ir(&scope, ir_ref)
+            .map_err(|error| {
+                format!(
+                    "load single-candidate plan_candidate_ir_ref failed ({}): {error:?}",
+                    error.code()
+                )
+            })?;
+        let report_record = source_store
+            .get_mechanical_report(&scope, report_ref)
+            .map_err(|error| {
+                format!(
+                    "load single-candidate mechanical_report_ref failed ({}): {error:?}",
+                    error.code()
+                )
+            })?;
+        if report_record.ir_id != ir_record.id
+            || report_record.report.source_revision_hash != ir_record.ir.source_revision_hash
+            || report_record.report.compiler_version != ir_record.ir.compiler_version
+        {
+            return Err(
+                "single-candidate review durable IR and mechanical report bindings mismatch"
+                    .to_string(),
+            );
+        }
+
+        let contract_candidates = ir_record
+            .ir
+            .items
+            .iter()
+            .map(|item| {
+                json!({
+                    "target_repository_id": item.target_repository_id,
+                    "identity": item.contract.identity,
+                    "goal": item.contract.goal,
+                    "tasks": item.contract.tasks,
+                    "write_policy": item.contract.write_policy,
+                    "acceptance_criteria": item.contract.acceptance_criteria,
+                    "verification_checks": item.contract.verification_checks,
+                    "depends_on": item.contract.depends_on,
+                    "input_contracts": item.contract.input_contracts,
+                    "output_contracts": item.contract.output_contracts,
+                })
+            })
+            .collect::<Vec<_>>();
+        let dependency_graph = single_candidate_dependency_graph(&ir_record.ir.items)?;
+        let cross_item_contracts = json!({
+            "supplies": ir_record.ir.items.iter().map(|item| json!({
+                "work_item_id": item.contract.identity.logical_work_item_id,
+                "provided_output_contracts": item.contract.output_contracts,
+            })).collect::<Vec<_>>(),
+            "demands": ir_record.ir.items.iter().map(|item| json!({
+                "work_item_id": item.contract.identity.logical_work_item_id,
+                "depends_on": item.contract.depends_on,
+                "required_input_contracts": item.contract.input_contracts,
+            })).collect::<Vec<_>>(),
+        });
+        let error_count = report_record
+            .report
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.severity == crate::product::models::WorkItemSplitFindingSeverity::Error
+            })
+            .count();
+        let warning_count = report_record.report.findings.len() - error_count;
+        let mechanical_report = json!({
+            "source_revision_hash": report_record.report.source_revision_hash,
+            "compiler_version": report_record.report.compiler_version,
+            "summary": {
+                "error_count": error_count,
+                "warning_count": warning_count,
+            },
+            "findings": report_record.report.findings,
+        });
+
+        let mut prompt = String::from(
+            "请作为 Plan Reviewer 审核当前 Canonical Contract 与 Projection 候选。\n\n## Plan Review Context\n",
+        );
+        append_review_context_section(
+            &mut prompt,
+            "Canonical Contract Candidates",
+            &contract_candidates,
+        )?;
+        append_review_context_section(&mut prompt, "Dependency Contract Graph", &dependency_graph)?;
+        append_review_context_section(
+            &mut prompt,
+            "Cross-Item Contract Supply / Demand",
+            &cross_item_contracts,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Projection Validation Report",
+            &mechanical_report,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Immutable Candidate Artifact Refs",
+            &json!({
+                "plan_candidate_ir_ref": ir_ref,
+                "mechanical_report_ref": report_ref,
+            }),
+        )?;
+        prompt.push_str(
+            "\n审核边界：只审核 Plan Review Context 中的权威 canonical contract、依赖拓扑、跨 WorkItem 契约供需与机械校验摘要；不得把 session markdown 或 lifecycle legacy DTO 当作候选事实来源。\n",
+        );
+        let nonce = structured_output_nonce();
+        let contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_review".to_string(),
+        };
+        let schema = format!(
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[]}}"#,
+            ir_record.id
+        );
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            &schema,
+            "\n只能在契约、依赖、供需匹配或机械校验影响发布时返回 revise；需要产品判断时返回 needs_human。",
+            &self.routing_reference_context(),
+        ));
+        let working_dir = self
+            .session
+            .repository_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        let provider = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        Ok(StreamingProviderInput {
+            provider_type: provider_type_for_name(&provider),
+            role: AdapterRole::Reviewer,
+            prompt,
+            working_dir,
+            workspace_session_id: Some(self.session.session_id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: permission_mode_for_provider(
+                &provider,
+                self.session.permission_modes.reviewer.clone(),
+            ),
+            structured_output_contract: Some(contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
