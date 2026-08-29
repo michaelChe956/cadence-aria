@@ -821,12 +821,23 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "明确允许新增和维护 tests/integration/**",
         "GET / 只验证三个容器与 level-select.js 加载",
         "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
+        "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
+        "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
+        "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
     ] {
         assert!(
             prompt.contains(required),
             "markdown prompt must retain grammar/boundary/few-shot evidence; missing {required}"
         );
     }
+
+    assert_eq!(
+        prompt
+            .matches("WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录")
+            .count(),
+        1,
+        "完整 author 的 CJK 反例只能出现在明确标记为非法的教学中"
+    );
 
     let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
     let item_id_prefix = crate::product::work_item_plan_compiler::grammar::ITEM_ID_PREFIX;
@@ -938,6 +949,23 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
     assert!(prompt.contains("[markdown_grammar]"));
     assert!(prompt.contains("[minimum_legal_source]"));
     assert!(prompt.contains("不得输出 JSON、code fence、解释、source hash"));
+    for required in [
+        "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
+        "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
+        "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "轻量 outline 必须教授 CJK EARS 边界空格规则；缺少 {required}"
+        );
+    }
+    assert_eq!(
+        prompt
+            .matches("WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录")
+            .count(),
+        1,
+        "轻量 outline 的 CJK 反例只能出现在明确标记为非法的教学中"
+    );
 
     let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
     assert!(
