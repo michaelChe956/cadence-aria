@@ -51,9 +51,9 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
-/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状与跨 item 引用 few-shot、标题逐字英文、trusted command 唯一引用及空目录 blocker 教学注入后上调至 15_500。
+/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状与跨 item 引用 few-shot、标题逐字英文、trusted command 唯一引用及空目录 blocker 教学注入后上调至 15_600。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_500;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -99,6 +99,7 @@ fn work_item_plan_markdown_grammar() -> String {
          Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
          Verification.command 直接声明，将按声明执行；命令证据不足时改用 manual_instruction 或 blocker，禁止臆造命令。\n\
          行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
+         task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。\n\
          CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。
 \
          Inputs 四行且 contract_id 首行：provider_logical_work_item_id、required_capabilities、compatibility_policy（require_all|require_any）各一行；四行缺一不可。\n\

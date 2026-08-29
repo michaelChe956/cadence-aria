@@ -807,6 +807,7 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
         "同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
+        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
     ] {
         assert!(
             prompt.contains(required),
@@ -863,6 +864,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "requirement_refs 仅引用清单；清单外 REQ-* 拒绝",
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
+        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
         "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
         "明确允许新增和维护 tests/integration/**",
         "GET / 只验证三个容器与 level-select.js 加载",
