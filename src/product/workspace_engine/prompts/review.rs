@@ -55,7 +55,8 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
              - 只允许一次全候选评估；不得自行增加候选、范围或 provider/campaign 指令。\n\
              - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
              - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
-             - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n",
+             - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n\
+             - class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）。\n",
         )),
         ReviewInvocationScope::Verification {
             original_fingerprints,
@@ -93,7 +94,8 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
                  - mechanical report 是本次 invocation 的唯一机械证据来源。\n\
                  - must_fix 仅限机械漏网硬错误或明确自相矛盾；完备度意见只能是 advisory。\n\
                  - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
-                 - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n",
+                 - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n\
+                 - class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）。\n",
             ))
         }
     }

@@ -231,7 +231,15 @@ fn single_candidate_initial_prompt_is_derived_from_server_scope() {
         );
     }
     assert!(instructions.contains("category 只能取以上六值之一；无法归类时用 other"));
-    assert!(instructions.contains("class_hint"));
+    for class_hint in ["repairable", "human_required", "advisory"] {
+        assert!(
+            instructions.contains(class_hint),
+            "initial review prompt must teach class_hint value {class_hint}"
+        );
+    }
+    assert!(instructions.contains(
+        "class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）"
+    ));
     assert!(instructions.contains("must_fix"));
     assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
     assert!(instructions.contains("advisory"));
@@ -274,6 +282,15 @@ fn single_candidate_verification_prompt_replays_only_original_fingerprints() {
         );
     }
     assert!(instructions.contains("category 只能取以上六值之一；无法归类时用 other"));
+    for class_hint in ["repairable", "human_required", "advisory"] {
+        assert!(
+            instructions.contains(class_hint),
+            "verification review prompt must teach class_hint value {class_hint}"
+        );
+    }
+    assert!(instructions.contains(
+        "class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）"
+    ));
     assert!(instructions.contains("仅复核原 fingerprints"));
     assert!(instructions.contains("机械漏网硬错误或明确自相矛盾"));
     assert!(instructions.contains("advisory"));
