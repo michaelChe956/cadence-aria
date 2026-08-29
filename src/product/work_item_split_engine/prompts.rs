@@ -94,12 +94,13 @@ fn work_item_plan_markdown_grammar() -> String {
         "[markdown_grammar]\n\
          标题 `{document_heading}`；item `{item_heading_prefix}{item_id_suffix}: <title>`（ID 前缀 `{item_id_prefix}`）。\n\
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
+         Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
          行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
          CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。
 \
          key 白名单：{structured_keys}。\n\
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
-         未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
+         未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
         item_heading_prefix = grammar::ITEM_HEADING_PREFIX,
         item_id_suffix = grammar::ITEM_ID_SUFFIX,

@@ -756,7 +756,13 @@ fn lower_blocker_rules(
 ) -> Vec<BlockerRule> {
     let mut entries = Vec::new();
     let mut current: Option<(String, Option<BlockerRoute>, Vec<String>, usize)> = None;
-    for field in section_fields(fields, "Blockers") {
+    let blocker_fields = section_fields(fields, "Blockers");
+    // Parser 将唯一允许为空的 Blockers section 解释为“无 blocker”；这里保持
+    // 空字段集合到空 Vec 的投影，不触发 blocker rule 的 lowering 诊断。
+    if blocker_fields.is_empty() {
+        return entries;
+    }
+    for field in blocker_fields {
         match field.key.value.as_str() {
             "reason_code" => {
                 flush_blocker(&mut current, &mut entries, diagnostics);

@@ -2,7 +2,8 @@
 //!
 //! linter 只处理 grammar 层的 source 形状：结构化 heading/key、必填 section/field、
 //! identifier、dependency 与 EARS。自由文本 section 保留原样，不把其中的冒号或表格
-//! 解释为结构化 token；typed lowering 由后续阶段负责。
+//! 解释为结构化 token；`Blockers` 是唯一允许零字段的结构化 section，用于表达无阻塞；
+//! typed lowering 由后续阶段负责。
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,6 +20,10 @@ const UNKNOWN_STRUCTURED_KEY_CODE: &str = grammar::DIAGNOSTIC_CODES[1];
 const INVALID_WORK_ITEM_ID_CODE: &str = grammar::DIAGNOSTIC_CODES[2];
 const INVALID_EARS_CODE: &str = grammar::DIAGNOSTIC_CODES[3];
 
+/// 每个结构化 section 的字段要求。
+///
+/// `Blockers` 存在字段时仍要求其完整的 blocker rule 字段；但它作为唯一例外允许零字段，
+/// 由 `validate_required_parts` 将空 section 解释为“无 blocker”。
 pub(super) const REQUIRED_FIELDS: [(&str, &[&str]); 13] = [
     (
         "Identity",
@@ -357,6 +362,13 @@ fn validate_required_parts(items: &[ParsedItem], diagnostics: &mut Vec<CompilerD
                     "Work Item 缺少必需 section。",
                     &format!("### {section}"),
                 ));
+                continue;
+            }
+
+            // `Blockers` 的空 section 是“无 blocker”的唯一合法表达；任意非空
+            // Blockers section 仍按下面的完整字段要求失败关闭。
+            if *section == "Blockers" && !item.fields.iter().any(|entry| entry.section == *section)
+            {
                 continue;
             }
 

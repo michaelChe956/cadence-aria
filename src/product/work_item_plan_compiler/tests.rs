@@ -10,6 +10,7 @@ use crate::product::models::{
 };
 use serde_json::Value;
 
+mod blockers;
 mod full_lowering_validator;
 mod publish_freshness;
 mod reviewer_finding_channel_boundary;

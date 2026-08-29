@@ -822,6 +822,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "GET / 只验证三个容器与 level-select.js 加载",
         "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
         "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
+        "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
         "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
         "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
     ] {
@@ -951,6 +952,7 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
     assert!(prompt.contains("不得输出 JSON、code fence、解释、source hash"));
     for required in [
         "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
+        "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
         "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
         "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
     ] {
