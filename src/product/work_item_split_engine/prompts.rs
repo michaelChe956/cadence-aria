@@ -52,9 +52,9 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
-/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格及 Inputs 形状教学注入后上调至 14_200。
+/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格及 Inputs 形状教学注入后上调至 14_400。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 14_200;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 14_400;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -94,6 +94,7 @@ fn work_item_plan_markdown_grammar() -> String {
         "[markdown_grammar]\n\
          输出的第一行必须精确为 `{document_heading}`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）。\n\
          标题 `{document_heading}`；item `{item_heading_prefix}{item_id_suffix}: <title>`（ID 前缀 `{item_id_prefix}`）。\n\
+         输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。\n\
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
          行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\

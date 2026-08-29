@@ -868,6 +868,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "provider_logical_work_item_id、required_capabilities、compatibility_policy",
         "require_all|require_any",
         "四行缺一不可",
+        "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
     ] {
         assert!(
             prompt.contains(required),
@@ -1001,6 +1002,7 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
         "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
         "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
         "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
+        "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
     ] {
         assert!(
             prompt.contains(required),
