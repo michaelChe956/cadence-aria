@@ -52,9 +52,9 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
 /// Task 14 起为对齐现行校验器硬规则（空可信目录必含 operational_gate blocker + plan_repair
-/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状与跨 item 引用 few-shot、标题逐字英文及 trusted command 唯一引用教学注入后上调至 15_200。
+/// 路由 target_contract_refs 必非空且逐字）；markdown 交叉引用纪律、CJK EARS 空格、Inputs 形状与跨 item 引用 few-shot、标题逐字英文、trusted command 唯一引用及空目录 blocker 教学注入后上调至 15_500。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_200;
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_500;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -98,6 +98,7 @@ fn work_item_plan_markdown_grammar() -> String {
          输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。\n\
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
+         受信命令目录为空时（outline 未登记任何命令），每个含验证需求的 Work Item 必须包含一条 `route: operational_gate` 的 blocker；manual_instruction 检查不能替代该 blocker；不得虚构 required 命令。\n\
          行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
          CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。
 \

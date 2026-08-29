@@ -839,6 +839,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     assert!(prompt.contains(
         "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
     ));
+    assert!(
+        prompt.contains("受信命令目录为空时（outline 未登记任何命令），每个含验证需求的 Work Item 必须包含一条 `route: operational_gate` 的 blocker；manual_instruction 检查不能替代该 blocker；不得虚构 required 命令。"),
+        "完整 author 必须在共享 grammar 教授空受信目录的 operational_gate blocker 规则"
+    );
 
     for section in crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS {
         let heading = format!("### {section}");
@@ -999,6 +1003,10 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
         "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
     ));
     assert!(prompt.contains("用于服务端机械计数"));
+    assert!(
+        prompt.contains("受信命令目录为空时（outline 未登记任何命令），每个含验证需求的 Work Item 必须包含一条 `route: operational_gate` 的 blocker；manual_instruction 检查不能替代该 blocker；不得虚构 required 命令。"),
+        "轻量 outline 必须在共享 grammar 教授空受信目录的 operational_gate blocker 规则"
+    );
     assert!(prompt.contains("[markdown_grammar]"));
     assert!(prompt.contains("[minimum_legal_source]"));
     assert!(prompt.contains("不得输出 JSON、code fence、解释、source hash"));
