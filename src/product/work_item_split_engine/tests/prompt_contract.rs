@@ -797,7 +797,6 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
                 design_requirement_ids: &[],
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
                 routing_context: &RoutingReferenceContext::Legacy,
-                trusted_command_catalog: &[],
             },
         )
         .expect("markdown author prompt");
@@ -806,7 +805,7 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
         "[design_requirements] （无；不得编造）",
         "[cross_reference_discipline]",
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
-        "同一 Work Item 内每条 trusted command 至多被一个 check 引用；需要复合验证时合并为一条 check 或改用 manual_instruction。",
+        "同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
     ] {
         assert!(
@@ -831,7 +830,6 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
                 routing_context: &RoutingReferenceContext::Legacy,
-                trusted_command_catalog: &[],
             },
         )
         .expect("markdown author prompt");
@@ -840,9 +838,11 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
     ));
     assert!(
-        prompt.contains("受信命令目录为空时（outline 未登记任何命令），每个含验证需求的 Work Item 必须包含一条 `route: operational_gate` 的 blocker；manual_instruction 检查不能替代该 blocker；不得虚构 required 命令。"),
-        "完整 author 必须在共享 grammar 教授空受信目录的 operational_gate blocker 规则"
+        prompt.contains("Verification.command 直接声明，将按声明执行"),
+        "完整 author 必须说明 Verification.command 是直接声明的执行来源"
     );
+    assert!(!prompt.contains("受信命令目录"));
+    assert!(!prompt.contains("outline_commands"));
 
     for section in crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS {
         let heading = format!("### {section}");
@@ -863,7 +863,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "requirement_refs 仅引用清单；清单外 REQ-* 拒绝",
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
-        "不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段",
+        "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
         "明确允许新增和维护 tests/integration/**",
         "GET / 只验证三个容器与 level-select.js 加载",
         "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
@@ -982,125 +982,5 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
         "markdown prompt must remain below the existing quality budget: {} bytes",
         prompt.len()
-    );
-}
-
-#[test]
-fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_author_few_shot() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let prompt = crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_outline_prompt(
-        &request,
-        &issue,
-        &repository,
-        "story_spec_0001: level selection",
-        "design_spec_0001: levels API",
-        "src/product/levels; web/src/levels; tests/integration",
-        &RoutingReferenceContext::Legacy,
-    )
-    .expect("markdown outline prompt");
-
-    assert!(prompt.contains(
-        "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
-    ));
-    assert!(prompt.contains("用于服务端机械计数"));
-    assert!(
-        prompt.contains("受信命令目录为空时（outline 未登记任何命令），每个含验证需求的 Work Item 必须包含一条 `route: operational_gate` 的 blocker；manual_instruction 检查不能替代该 blocker；不得虚构 required 命令。"),
-        "轻量 outline 必须在共享 grammar 教授空受信目录的 operational_gate blocker 规则"
-    );
-    assert!(prompt.contains("[markdown_grammar]"));
-    assert!(prompt.contains("[minimum_legal_source]"));
-    assert!(prompt.contains("不得输出 JSON、code fence、解释、source hash"));
-    for required in [
-        "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
-        "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
-        "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
-        "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
-        "示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n- contract_id: <逐字复制 WI-001 Outputs 的 contract_id>\n- provider_logical_work_item_id: WI-001\n- required_capabilities: <该契约的能力>\n- compatibility_policy: require_all\n无依赖时 Inputs 留空 section。",
-        "反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。",
-        "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
-    ] {
-        assert!(
-            prompt.contains(required),
-            "轻量 outline 必须教授 CJK EARS 边界空格规则；缺少 {required}"
-        );
-    }
-    assert_eq!(
-        prompt
-            .matches("WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录")
-            .count(),
-        1,
-        "轻量 outline 的 CJK 反例只能出现在明确标记为非法的教学中"
-    );
-
-    let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
-    assert!(
-        crate::product::work_item_plan_compiler::grammar::STRUCTURED_KEYS.contains(&dependency_key),
-        "Dependencies key must remain part of the markdown grammar whitelist"
-    );
-    let item_id_prefix = crate::product::work_item_plan_compiler::grammar::ITEM_ID_PREFIX;
-    assert!(
-        prompt.contains(&format!(
-            "每个 Work Item 必须以 `{item_id_prefix}<三位数字>` 编号，从 `{item_id_prefix}001` 起"
-        )),
-        "轻量 outline 必须明确从 WI-001 开始的编号规则"
-    );
-    for example in [
-        format!("`- {dependency_key}: []`"),
-        format!("`- {dependency_key}: {item_id_prefix}001`"),
-        format!("`- {dependency_key}: {item_id_prefix}001`\n`- {dependency_key}: {item_id_prefix}002`"),
-    ] {
-        assert!(
-            prompt.contains(&example),
-            "轻量 outline 必须给出合法 Dependencies 形态：{example}"
-        );
-    }
-    assert!(
-        prompt.contains("禁止括号列表、空格或逗号分隔多值"),
-        "轻量 outline 必须禁止 parser 不接受的 Dependencies 多值写法"
-    );
-    assert!(
-        prompt.contains(&format!(
-            "值仅 `[]` 或 `{item_id_prefix}<digits>`",
-        )),
-        "轻量 outline 必须仅允许 grammar 定义的 Dependencies 值"
-    );
-    assert!(
-        !prompt.contains("[real_finding_few_shot]"),
-        "轻量 outline 不得携带完整 author 的 few-shot"
-    );
-    assert!(
-        !prompt.contains("原始输出直接成为 source revision"),
-        "轻量 outline 不得伪装成 full markdown source author"
-    );
-    assert!(prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES);
-}
-
-#[test]
-fn work_item_plan_markdown_mechanical_count_uses_compiler_parser() {
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
-    ));
-
-    assert_eq!(
-        crate::product::work_item_split_engine::parse::count_work_item_plan_candidates(source)
-            .expect("rep4 markdown must pass the compiler parser"),
-        3,
-        "candidate count must come from the parsed markdown AST rather than client input"
-    );
-}
-
-#[test]
-fn work_item_plan_markdown_mechanical_count_fails_closed_on_invalid_source() {
-    let error = crate::product::work_item_split_engine::parse::count_work_item_plan_candidates(
-        "# Work Item Plan\n\n## Work Item WI-001: invalid\n",
-    )
-    .expect_err("invalid markdown outline must not produce a guessed candidate count");
-
-    assert!(
-        error
-            .iter()
-            .any(|diagnostic| diagnostic.code == "missing_section"),
-        "compiler diagnostics must be returned for an invalid source: {error:?}"
     );
 }

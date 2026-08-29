@@ -11,8 +11,6 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
-use std::collections::VecDeque;
-use std::sync::Mutex as StdMutex;
 
 struct RecordingOutputProvider {
     output: String,
@@ -28,37 +26,6 @@ impl StreamingProviderAdapter for RecordingOutputProvider {
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let _ = self.inputs.send(input);
         provider_session_with_output(self.output.clone()).await
-    }
-
-    async fn run_streaming(
-        &self,
-        _input: &crate::protocol::contracts::AdapterInput,
-        _cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        unreachable!("workspace provider-run tests use start")
-    }
-}
-
-struct SequencedOutputProvider {
-    outputs: StdMutex<VecDeque<String>>,
-    inputs: mpsc::UnboundedSender<StreamingProviderInput>,
-}
-
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for SequencedOutputProvider {
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        let _ = self.inputs.send(input);
-        let output = self
-            .outputs
-            .lock()
-            .expect("sequential provider outputs")
-            .pop_front()
-            .expect("each single-candidate author invocation needs an output");
-        provider_session_with_output(output).await
     }
 
     async fn run_streaming(
@@ -463,37 +430,32 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
     )
     .await;
 
-    let outline_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
-        .await
-        .expect("single-candidate outline provider must receive input")
-        .expect("single-candidate outline provider input");
     let full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
         .await
-        .expect("single-candidate full author provider must receive input")
+        .expect("single-candidate full author provider must receive exactly one input")
         .expect("single-candidate full author provider input");
-    assert!(outline_input.prompt.contains("用于服务端机械计数"));
-    assert!(outline_input.prompt.contains("[markdown_grammar]"));
-    assert!(!outline_input.prompt.contains("[real_finding_few_shot]"));
     assert!(full_input.prompt.contains("[markdown_grammar]"));
     assert!(full_input.prompt.contains("[routing_reference]"));
     assert!(full_input.prompt.contains("[real_finding_few_shot]"));
+    assert!(!full_input.prompt.contains("[outline_commands]"));
     assert!(!full_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "single-candidate must not invoke an outline provider before the full author"
+    );
     wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
     assert_eq!(
         single_candidate_generation_steps_for_session(&fixture.record.id),
-        vec![
-            "outline",
-            "parse_count",
-            "selector",
-            "full_markdown_author",
-            "parse_source_revision",
-        ],
-        "single-candidate invocation order must stay outline → parse/count → selector → full author → parse/source revision",
+        vec!["full_markdown_author", "parse_source_revision", "selector"],
+        "single-candidate invocation order must stay full author → compile/source revision → internal selector diagnostic",
     );
     assert_eq!(
         work_item_plan_parser_paths_for_session(&fixture.record.id),
-        vec!["single_candidate_outline", "single_candidate_markdown"],
-        "single-candidate run must parse the outline before the full markdown source and never reach the legacy parser",
+        vec!["single_candidate_markdown"],
+        "single-candidate run must compile only the full markdown source and never reach the legacy or outline parser",
     );
     assert!(
         !fixture
@@ -549,7 +511,7 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
 }
 
 #[tokio::test]
-async fn single_candidate_threads_outline_trusted_command_catalog_to_full_plan_compilation() {
+async fn single_candidate_projects_declared_verification_command_without_outline_catalog() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let markdown = single_candidate_markdown_with_command(
@@ -557,8 +519,8 @@ async fn single_candidate_threads_outline_trusted_command_catalog_to_full_plan_c
         &fixture.design_id,
         "node --test tests/backend/",
     );
-    let provider = Arc::new(SequencedOutputProvider {
-        outputs: StdMutex::new(VecDeque::from([markdown.clone(), markdown])),
+    let provider = Arc::new(RecordingOutputProvider {
+        output: markdown,
         inputs: input_tx,
     });
     let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
@@ -572,28 +534,16 @@ async fn single_candidate_threads_outline_trusted_command_catalog_to_full_plan_c
     )
     .await;
 
-    let outline_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
-        .await
-        .expect("outline provider must receive input")
-        .expect("outline provider input");
     let full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
         .await
         .expect("full author provider must receive input")
         .expect("full author provider input");
     assert!(
-        outline_input
-            .prompt
-            .contains("仅登记已确认仓库/Design/Outline 证据支持")
-    );
-    assert!(
         full_input
             .prompt
-            .contains("Verification.command 必须已在 outline 阶段登记")
+            .contains("Verification.command 直接声明，将按声明执行")
     );
-    assert!(
-        full_input.prompt.contains("node --test tests/backend/"),
-        "完整 author 必须接收 outline 已登记的命令目录"
-    );
+    assert!(!full_input.prompt.contains("outline 阶段登记"));
     wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
 
     let durable = fixture
@@ -613,62 +563,16 @@ async fn single_candidate_threads_outline_trusted_command_catalog_to_full_plan_c
             &scope,
             durable.plan_candidate_ir_ref.as_deref().expect("IR ref"),
         )
-        .expect("outline 已登记的 full-plan command 必须通过 lowering");
-    assert_eq!(
-        ir.ir.items[0].trusted_commands[0].command,
-        "node --test tests/backend/"
-    );
+        .expect("full-plan declared command 必须通过 lowering");
+    let trusted = &ir.ir.items[0].trusted_commands[0];
+    assert_eq!(trusted.command, "node --test tests/backend/");
+    assert_eq!(trusted.cwd, ".");
+    assert_eq!(trusted.purpose, "Inspect the backend API response");
+    assert!(trusted.source_ref.starts_with("plan-"));
 }
 
 #[tokio::test]
-async fn single_candidate_rejects_full_plan_command_not_registered_by_outline() {
-    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let outline = single_candidate_markdown_with_command(
-        &fixture.story_id,
-        &fixture.design_id,
-        "node --test tests/backend/",
-    );
-    let full = single_candidate_markdown_with_command(
-        &fixture.story_id,
-        &fixture.design_id,
-        "node --test tests/frontend/",
-    );
-    let provider = Arc::new(SequencedOutputProvider {
-        outputs: StdMutex::new(VecDeque::from([outline, full])),
-        inputs: input_tx,
-    });
-    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
-
-    handle_workspace_inbound_message(
-        context,
-        WsInMessage::StartGeneration {
-            provider_config: provider_config(),
-            reviewer_enabled: false,
-        },
-    )
-    .await;
-
-    for stage in ["outline", "full author"] {
-        tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
-            .await
-            .unwrap_or_else(|_| panic!("{stage} provider must receive input"))
-            .unwrap_or_else(|| panic!("{stage} provider input"));
-    }
-    wait_for_single_candidate_phase(
-        &fixture,
-        crate::product::models::SingleCandidatePhase::Failed,
-    )
-    .await;
-    let durable = fixture
-        .lifecycle
-        .get_workspace_session(&fixture.record.id)
-        .expect("reload failed single-candidate session");
-    assert!(durable.plan_candidate_ir_ref.is_none());
-}
-
-#[tokio::test]
-async fn single_candidate_outline_parse_failure_is_fatal_and_never_starts_full_author() {
+async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_provider_call() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(RecordingOutputProvider {
@@ -686,24 +590,28 @@ async fn single_candidate_outline_parse_failure_is_fatal_and_never_starts_full_a
     )
     .await;
 
-    let outline_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+    let full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
         .await
-        .expect("outline provider must receive input")
-        .expect("outline provider input");
-    assert!(outline_input.prompt.contains("用于服务端机械计数"));
+        .expect("full author provider must receive input")
+        .expect("full author provider input");
+    assert!(
+        full_input
+            .prompt
+            .contains("完整 `work-item-plan.md` source")
+    );
     assert!(
         !matches!(
             tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
             Ok(Some(_))
         ),
-        "outline parse failure must not start the full markdown author"
+        "full-plan parse failure must not start another provider invocation"
     );
     let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             let outbound = outbound_rx
                 .recv()
                 .await
-                .expect("outline parse failure outbound");
+                .expect("full-plan parse failure outbound");
             let OutboundControl::Text(json) = outbound else {
                 continue;
             };
@@ -714,12 +622,12 @@ async fn single_candidate_outline_parse_failure_is_fatal_and_never_starts_full_a
         }
     })
     .await
-    .expect("outline parse failure error");
+    .expect("full-plan parse failure error");
     assert!(
         error["message"]
             .as_str()
             .expect("error message")
-            .contains("outline parse failed")
+            .contains("compile markdown source failed")
     );
     wait_for_single_candidate_phase(
         &fixture,

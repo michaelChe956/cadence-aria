@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::product::models::{ProviderName, TrustedDraftVerificationCommand};
+use crate::product::models::ProviderName;
 use crate::product::work_item_plan_compiler::{
     PlanCandidateValidationContext, WorkItemPlanSourceContext, compile_work_item_plan,
     validate_plan_candidate_ir,
@@ -13,38 +13,25 @@ use crate::product::work_item_plan_source_store::{
 };
 use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 
-/// 仅由服务端 outline 机械计数与 provider profile 驱动的内部 generation 选择输入。
+/// 仅由已编译 IR 的 item 数与服务端 provider profile 驱动的内部诊断输入。
 ///
-/// 该输入不通过 WebSocket 反序列化；客户端不能提交候选数、prompt 大小或 mode。
+/// 该输入不通过 WebSocket 反序列化；客户端不能提交候选数或 mode。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleCandidateGenerationDecisionInput {
     pub provider: ProviderName,
     pub candidate_item_count: usize,
-    pub prompt_bytes: usize,
-    pub provider_input_budget_bytes: usize,
 }
 
-/// 根据当前已注册 provider profile 的静态输入预算返回服务端能力值。
+/// 在完整 markdown 已编译为 IR 后，确定性记录内部 generation mode。
 ///
-/// `ProviderRegistry` 目前只注册 adapter，没有 capability/profile 查询接口；因此预算
-/// 固定在服务端而非从客户端读取。后续 registry 暴露 profile 时可收敛到该接口，选择
-/// 规则和 WebSocket 边界不变。
-pub(crate) const fn single_candidate_provider_input_budget_bytes(provider: &ProviderName) -> usize {
-    match provider {
-        ProviderName::ClaudeCode | ProviderName::Codex | ProviderName::KimiCode => 131_072,
-        ProviderName::Pi | ProviderName::Fake => 65_536,
-    }
-}
-
-/// 在 outline 已成功由本地 compiler parser 计数后，确定性选择后续 author 的内部模式。
-///
-/// 阈值是内部诊断策略，不是 WS/OpenSpec 对外契约；相同输入始终产生相同输出。
+/// 这是诊断，不是 WS/OpenSpec 对外契约；相同 IR item 数与 provider profile 始终产生
+/// 相同结果。Pi/Fake profile 保守记录 serial，其余 profile 在三项以内记录 batch。
 pub(crate) fn select_internal_generation_mode(
     input: &SingleCandidateGenerationDecisionInput,
 ) -> WorkItemGenerationModeDto {
-    let prompt_within_budget =
-        input.prompt_bytes.saturating_mul(4) <= input.provider_input_budget_bytes.saturating_mul(3);
-    if input.candidate_item_count <= 3 && prompt_within_budget {
+    if input.candidate_item_count <= 3
+        && !matches!(input.provider, ProviderName::Pi | ProviderName::Fake)
+    {
         WorkItemGenerationModeDto::Batch
     } else {
         WorkItemGenerationModeDto::Serial
@@ -114,8 +101,7 @@ impl WorkspaceEngine {
         &mut self,
         source: String,
         target_repository_id: String,
-        trusted_command_catalog: Vec<TrustedDraftVerificationCommand>,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
@@ -173,7 +159,6 @@ impl WorkspaceEngine {
             &source,
             &WorkItemPlanSourceContext {
                 target_repository_id,
-                trusted_command_catalog,
             },
         )
         .map_err(|diagnostics| {
@@ -272,7 +257,7 @@ impl WorkspaceEngine {
                 self.request_provider_run(ProviderRunKind::ReviewOnly).await;
             }
         }
-        Ok(())
+        Ok(ir_record.ir.items.len())
     }
 }
 

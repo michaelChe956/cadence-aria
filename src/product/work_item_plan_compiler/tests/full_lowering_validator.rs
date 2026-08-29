@@ -1,33 +1,8 @@
 use super::*;
-use crate::product::models::{
-    RepositoryProfile, RepositoryProfileConfidence, TrustedDraftVerificationCommand,
-};
+use crate::product::models::{RepositoryProfile, RepositoryProfileConfidence};
 use crate::product::work_item_plan_compiler::{
     PlanCandidateValidationContext, validate_plan_candidate_ir,
 };
-
-fn rep4_trusted_command_catalog() -> Vec<TrustedDraftVerificationCommand> {
-    vec![
-        TrustedDraftVerificationCommand {
-            command: "cargo test --locked --lib levels_api".to_string(),
-            cwd: "backend".to_string(),
-            purpose: "backend checks".to_string(),
-            source_ref: "levels-api-unit".to_string(),
-        },
-        TrustedDraftVerificationCommand {
-            command: "pnpm test level-select".to_string(),
-            cwd: "frontend".to_string(),
-            purpose: "frontend checks".to_string(),
-            source_ref: "level-select-ui".to_string(),
-        },
-        TrustedDraftVerificationCommand {
-            command: "cargo test --locked --test levels_integration".to_string(),
-            cwd: "integration".to_string(),
-            purpose: "integration checks".to_string(),
-            source_ref: "levels-integration".to_string(),
-        },
-    ]
-}
 
 fn rep4_repository_profile() -> RepositoryProfile {
     RepositoryProfile {
@@ -70,12 +45,10 @@ fn rep4_validation_context<'a>(
 }
 #[test]
 fn full_lowering_validator_projects_rep4_through_all_existing_validator_layers() {
-    let catalog = rep4_trusted_command_catalog();
     let ir = compile_work_item_plan(
         REP4_FIXTURE,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
-            trusted_command_catalog: catalog,
         },
     )
     .expect("rep4 必须先 lower 为 typed IR");
@@ -109,7 +82,6 @@ fn full_lowering_validator_projects_rep4_through_all_existing_validator_layers()
 
 #[test]
 fn full_lowering_validator_rejects_unregistered_requirement_and_missing_reviewer_check() {
-    let catalog = rep4_trusted_command_catalog();
     let source = REP4_FIXTURE
         .replacen(
             "- requirement_refs: REQ-WSC-02",
@@ -125,7 +97,6 @@ fn full_lowering_validator_rejects_unregistered_requirement_and_missing_reviewer
         &source,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
-            trusted_command_catalog: catalog,
         },
     )
     .expect("交叉引用错误必须可 lower 为供 validator 拒绝的 typed IR");
@@ -152,12 +123,10 @@ fn full_lowering_validator_rejects_unregistered_requirement_and_missing_reviewer
 
 #[test]
 fn full_lowering_validator_preserves_existing_unknown_provider_code() {
-    let catalog = rep4_trusted_command_catalog();
     let mut ir = compile_work_item_plan(
         REP4_FIXTURE,
         &WorkItemPlanSourceContext {
             target_repository_id: "repo-levels".to_string(),
-            trusted_command_catalog: catalog,
         },
     )
     .expect("rep4 必须先 lower 为 typed IR");
@@ -194,10 +163,8 @@ fn full_lowering_validator_preserves_existing_unknown_provider_code() {
 
 #[test]
 fn full_lowering_validator_is_byte_stable_for_same_ir_and_context() {
-    let catalog = rep4_trusted_command_catalog();
     let source_context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
-        trusted_command_catalog: catalog,
     };
     let first_ir = compile_work_item_plan(REP4_FIXTURE, &source_context)
         .expect("rep4 必须先 lower 为 typed IR");

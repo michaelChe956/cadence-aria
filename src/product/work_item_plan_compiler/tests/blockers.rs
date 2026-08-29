@@ -1,6 +1,6 @@
 use super::{
     WorkItemPlanSourceContext, compile_work_item_plan, lint_work_item_plan_source,
-    parse_work_item_plan, trusted_command_catalog_from_outline,
+    parse_work_item_plan,
 };
 use crate::product::work_item_plan_compiler::lower;
 
@@ -25,8 +25,6 @@ fn empty_blockers_section_parses_and_lowers_to_no_blocker_rules() {
         );
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
-        trusted_command_catalog: trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
-            .expect("rep4 应可提供 trusted command catalog"),
     };
 
     let ast = parse_work_item_plan(&source).expect("空 Blockers 的完整文档应通过 parse");

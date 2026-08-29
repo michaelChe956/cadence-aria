@@ -1,14 +1,9 @@
 use super::{
-    WorkItemPlanSourceContext, grammar, types,
-    {
-        compile_work_item_plan, lint_work_item_plan_source, parse_work_item_plan,
-        trusted_command_catalog_from_outline,
-    },
-};
-use crate::product::models::{
-    MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH, TrustedDraftVerificationCommand,
+    WorkItemPlanSourceContext, compile_work_item_plan, grammar, lint_work_item_plan_source,
+    parse_work_item_plan, types,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 mod blockers;
 mod full_lowering_validator;
@@ -338,8 +333,9 @@ fn field_source_matrix_uses_only_the_four_allowed_sources() {
 
     for columns in matrix_rows() {
         assert_eq!(columns.len(), 6, "每一行必须固定六列：{columns:?}");
+        let source = columns[1].split('（').next().unwrap_or(columns[1]);
         assert!(
-            allowed_sources.contains(&columns[1]),
+            allowed_sources.contains(&source),
             "字段 {} 的 source 必须是四种允许值之一，实际为 {}",
             columns[0],
             columns[1]
@@ -368,19 +364,24 @@ fn field_source_matrix_keeps_context_and_handoff_runtime_values_out_of_markdown_
         assert_ne!(row[1], "markdown", "{field_path} 不得来自 markdown");
     }
 
-    for field_path in [
-        "trusted_commands[].command",
-        "trusted_commands[].cwd",
-        "trusted_commands[].purpose",
-        "trusted_commands[].source_ref",
+    for (field_path, expected_source) in [
+        ("trusted_commands[].command", "markdown"),
+        ("trusted_commands[].cwd", "compiler_derived"),
+        ("trusted_commands[].purpose", "compiler_derived"),
+        ("trusted_commands[].source_ref", "compiler_derived"),
     ] {
         let row = rows
             .iter()
             .find(|columns| columns.first() == Some(&field_path))
             .expect("trusted command 字段必须存在");
         assert_eq!(
-            row[1], "session_confirmed_context",
-            "{field_path} 必须来自已确认的 trusted command catalog，而非 prompt"
+            row[1].split('（').next().unwrap_or(row[1]),
+            expected_source,
+            "{field_path} 必须遵循 FSM-038~041 的唯一来源"
+        );
+        assert!(
+            !row[3].contains("catalog"),
+            "{field_path} 不得从已删除的 trusted command catalog 获取第二来源"
         );
     }
 
@@ -906,29 +907,8 @@ fn source_linter_sorts_complete_diagnostics_stably() {
 
 #[test]
 fn lower_typed_ir() {
-    let catalog = vec![
-        TrustedDraftVerificationCommand {
-            command: "cargo test --locked --lib levels_api".to_string(),
-            cwd: "backend".to_string(),
-            purpose: "backend checks".to_string(),
-            source_ref: "cargo test --locked --lib levels_api".to_string(),
-        },
-        TrustedDraftVerificationCommand {
-            command: "pnpm test level-select".to_string(),
-            cwd: "frontend".to_string(),
-            purpose: "frontend checks".to_string(),
-            source_ref: "pnpm test level-select".to_string(),
-        },
-        TrustedDraftVerificationCommand {
-            command: "cargo test --locked --test levels_integration".to_string(),
-            cwd: "integration".to_string(),
-            purpose: "integration checks".to_string(),
-            source_ref: "cargo test --locked --test levels_integration".to_string(),
-        },
-    ];
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
-        trusted_command_catalog: catalog.clone(),
     };
     let ir = compile_work_item_plan(REP4_FIXTURE, &context).expect("rep4 应 lower 为 typed IR");
 
@@ -953,9 +933,34 @@ fn lower_typed_ir() {
             .map(|item| item.contract.verification_checks.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(ir.items[0].trusted_commands, vec![catalog[0].clone()]);
-    assert_eq!(ir.items[1].trusted_commands, vec![catalog[1].clone()]);
-    assert_eq!(ir.items[2].trusted_commands, vec![catalog[2].clone()]);
+    assert_eq!(
+        ir.items
+            .iter()
+            .flat_map(|item| item.trusted_commands.iter())
+            .map(|command| command.command.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "cargo test --locked --lib levels_api",
+            "pnpm test level-select",
+            "cargo test --locked --test levels_integration",
+        ]
+    );
+    let source_revision_hash = hex::encode(Sha256::digest(REP4_FIXTURE.as_bytes()));
+    let expected_source_ref = format!(
+        "plan-{}",
+        &hex::encode(Sha256::digest(source_revision_hash.as_bytes()))[..24]
+    );
+    assert!(
+        ir.items
+            .iter()
+            .flat_map(|item| item.trusted_commands.iter())
+            .all(|command| {
+                command.cwd == "."
+                    && command.purpose.chars().count()
+                        <= crate::product::models::MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH
+                    && command.source_ref == expected_source_ref
+            })
+    );
 
     let json = serde_json::to_value(&ir).expect("IR 必须可序列化");
     assert_eq!(
@@ -972,7 +977,7 @@ fn lower_typed_ir() {
         assert!(!item.as_object().unwrap().contains_key("compiler_version"));
     }
 
-    let unknown = compile_work_item_plan(
+    let declared_command = compile_work_item_plan(
         &REP4_FIXTURE.replacen(
             "cargo test --locked --lib levels_api",
             "unknown-command-ref",
@@ -980,11 +985,10 @@ fn lower_typed_ir() {
         ),
         &context,
     )
-    .expect_err("未知 command ref 必须失败关闭");
-    assert!(
-        unknown
-            .iter()
-            .any(|diagnostic| diagnostic.field == "trusted_commands")
+    .expect("Verification.command 自身声明即为 trusted command 来源");
+    assert_eq!(
+        declared_command.items[0].trusted_commands[0].command,
+        "unknown-command-ref"
     );
 
     let markdown_owned = REP4_FIXTURE.replacen(
@@ -996,115 +1000,36 @@ fn lower_typed_ir() {
 }
 
 #[test]
-fn outline_command_catalog_derives_deterministic_unique_nonempty_source_refs() {
-    let catalog = trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
-        .expect("完整 outline source 必须可解析并派生受信命令目录");
-
-    assert_eq!(
-        catalog
-            .iter()
-            .map(|entry| entry.command.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "cargo test --locked --lib levels_api",
-            "pnpm test level-select",
-            "cargo test --locked --test levels_integration",
-        ]
-    );
-    assert!(catalog.iter().all(|entry| {
-        entry.cwd == "."
-            && !entry.purpose.is_empty()
-            && entry.purpose.chars().count() <= 32
-            && !entry.source_ref.is_empty()
-            && entry.source_ref.chars().count() <= MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH
-    }));
-    let unique_source_refs = catalog
-        .iter()
-        .map(|entry| entry.source_ref.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(unique_source_refs.len(), catalog.len());
-    assert_eq!(
-        catalog,
-        trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
-            .expect("相同 outline 必须确定性派生同一目录")
-    );
-}
-
-#[test]
-fn trusted_catalog_rejects_duplicate_or_empty_source_ref() {
-    let mut duplicate_source_ref = trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
-        .expect("完整 outline source 必须可解析并派生受信命令目录");
-    duplicate_source_ref[1].source_ref = duplicate_source_ref[0].source_ref.clone();
-    let duplicate = compile_work_item_plan(
-        REP4_FIXTURE,
-        &WorkItemPlanSourceContext {
-            target_repository_id: "repo-levels".to_string(),
-            trusted_command_catalog: duplicate_source_ref,
-        },
-    )
-    .expect_err("重复 source_ref 必须由 lowering 拒绝");
-    assert!(duplicate.iter().any(|diagnostic| {
-        diagnostic.field == "trusted_commands" && diagnostic.message.contains("source_ref 不得重复")
-    }));
-
-    let mut empty_source_ref = trusted_command_catalog_from_outline(REP4_FIXTURE, ".")
-        .expect("完整 outline source 必须可解析并派生受信命令目录");
-    empty_source_ref[0].source_ref.clear();
-    let empty = compile_work_item_plan(
-        REP4_FIXTURE,
-        &WorkItemPlanSourceContext {
-            target_repository_id: "repo-levels".to_string(),
-            trusted_command_catalog: empty_source_ref,
-        },
-    )
-    .expect_err("空 source_ref 必须由 lowering 拒绝");
-    assert!(empty.iter().any(|diagnostic| {
-        diagnostic.field == "trusted_commands" && diagnostic.message.contains("source_ref 不得为空")
-    }));
-}
-
-#[test]
-fn untrusted_command_diagnostic_points_to_its_own_command_line() {
-    let source = REP4_FIXTURE.replacen(
-        "### Handoff Schema\n- required_fields: commit_sha",
-        "- check_id: CHECK-004\n- command: unknown-command-ref\n- manual_instruction: Confirm the extra check.\n- required: true\n- non_zero_test_execution_required: true\n\n### Handoff Schema\n- required_fields: commit_sha",
-        1,
-    );
-    let expected_line = source
-        .lines()
-        .position(|line| line == "- command: unknown-command-ref")
-        .expect("测试输入必须包含未知 command")
-        + 1;
+fn declared_commands_project_deterministically_per_item_and_keep_duplicate_hygiene() {
     let context = WorkItemPlanSourceContext {
         target_repository_id: "repo-levels".to_string(),
-        trusted_command_catalog: vec![
-            TrustedDraftVerificationCommand {
-                command: "cargo test --locked --lib levels_api".to_string(),
-                cwd: "backend".to_string(),
-                purpose: "backend checks".to_string(),
-                source_ref: "cargo test --locked --lib levels_api".to_string(),
-            },
-            TrustedDraftVerificationCommand {
-                command: "pnpm test level-select".to_string(),
-                cwd: "frontend".to_string(),
-                purpose: "frontend checks".to_string(),
-                source_ref: "pnpm test level-select".to_string(),
-            },
-            TrustedDraftVerificationCommand {
-                command: "cargo test --locked --test levels_integration".to_string(),
-                cwd: "integration".to_string(),
-                purpose: "integration checks".to_string(),
-                source_ref: "cargo test --locked --test levels_integration".to_string(),
-            },
-        ],
     };
+    let first = compile_work_item_plan(REP4_FIXTURE, &context)
+        .expect("rep4 Verification.command 必须投影为 trusted commands");
+    let second = compile_work_item_plan(REP4_FIXTURE, &context)
+        .expect("相同 source 必须投影相同 trusted commands");
+    assert_eq!(first.items, second.items);
+    assert!(
+        first
+            .items
+            .iter()
+            .flat_map(|item| item.trusted_commands.iter())
+            .all(|command| command.cwd == "." && command.source_ref.starts_with("plan-"))
+    );
 
-    let diagnostics = compile_work_item_plan(&source, &context)
-        .expect_err("未知 trusted command 必须让 lowering 失败关闭");
-    assert_eq!(diagnostics.len(), 1, "测试输入只能产生一个 lowering 诊断");
-    let diagnostic = &diagnostics[0];
-    assert_eq!(diagnostic.field, "trusted_commands");
-    assert_eq!(diagnostic.line, expected_line);
+    let duplicate = REP4_FIXTURE.replacen(
+        "### Handoff Schema\n- required_fields: commit_sha",
+        "- check_id: CHECK-004\n- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the duplicate check.\n- required: true\n- non_zero_test_execution_required: true\n\n### Handoff Schema\n- required_fields: commit_sha",
+        1,
+    );
+    let diagnostics = compile_work_item_plan(&duplicate, &context)
+        .expect_err("同一 Work Item 重复 command 仍必须失败关闭");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.field == "trusted_commands"
+            && diagnostic
+                .message
+                .contains("同一 Work Item 不得重复引用 trusted command")
+    }));
 }
 
 #[test]

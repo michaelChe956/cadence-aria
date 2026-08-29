@@ -227,68 +227,52 @@ async fn complete_single_candidate_review(engine: &mut WorkspaceEngine, verdict:
 mod internal_generation_mode {
     use super::*;
     use crate::product::models::ProviderName;
-    use crate::product::work_item_split_engine::parse::count_work_item_plan_candidates;
     use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 
     fn generation_input(
+        provider: ProviderName,
         candidate_item_count: usize,
-        prompt_bytes: usize,
     ) -> SingleCandidateGenerationDecisionInput {
         SingleCandidateGenerationDecisionInput {
-            provider: ProviderName::Codex,
+            provider,
             candidate_item_count,
-            prompt_bytes,
-            provider_input_budget_bytes: 100,
         }
     }
 
     #[test]
-    fn internal_generation_mode_uses_parsed_outline_count_and_budget_boundaries() {
-        let three_items = include_str!(concat!(
+    fn internal_generation_mode_uses_compiled_ir_item_count_and_provider_profile() {
+        let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
         ));
-        let fourth_item = format!(
-            "## Work Item WI-003{}",
-            three_items
-                .split("## Work Item WI-003")
-                .nth(1)
-                .expect("third item fixture")
+        let ir = crate::product::work_item_plan_compiler::compile_work_item_plan(
+            source,
+            &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
+                target_repository_id: "repo-levels".to_string(),
+            },
         )
-        .replace("WI-003", "WI-004")
-        .replace("TASK-003", "TASK-004")
-        .replace("AC-003", "AC-004")
-        .replace("CHECK-003", "CHECK-004")
-        .replace("contract.levels-integration", "contract.levels-fourth")
-        .replace("REQ-WSC-07", "REQ-WSC-08");
-        let four_items = format!("{three_items}\n\n{fourth_item}");
-
-        let parsed_three =
-            count_work_item_plan_candidates(three_items).expect("three-item fixture must parse");
-        let parsed_four =
-            count_work_item_plan_candidates(&four_items).expect("four-item fixture must parse");
-        assert_eq!(parsed_three, 3);
-        assert_eq!(parsed_four, 4);
+        .expect("rep4 source must compile to IR");
+        assert_eq!(ir.items.len(), 3);
         assert_eq!(
-            select_internal_generation_mode(&generation_input(parsed_three, 75)),
+            select_internal_generation_mode(&generation_input(ProviderName::Codex, ir.items.len())),
             WorkItemGenerationModeDto::Batch,
-            "75% input budget and three parsed candidates remain batch-eligible"
+            "three compiled items with the Codex profile remain batch-diagnostic eligible"
         );
         assert_eq!(
-            select_internal_generation_mode(&generation_input(parsed_three, 76)),
+            select_internal_generation_mode(&generation_input(ProviderName::Pi, ir.items.len())),
             WorkItemGenerationModeDto::Serial,
-            "over 75% input budget must be serial"
+            "the Pi provider profile remains conservatively serial"
         );
         assert_eq!(
-            select_internal_generation_mode(&generation_input(parsed_four, 1)),
+            select_internal_generation_mode(&generation_input(ProviderName::Codex, 4)),
             WorkItemGenerationModeDto::Serial,
-            "four parsed candidates must be serial regardless of prompt budget"
+            "four compiled items must be serial regardless of profile"
         );
     }
 
     #[test]
     fn internal_generation_mode_is_deterministic_for_identical_input() {
-        let input = generation_input(3, 75);
+        let input = generation_input(ProviderName::Codex, 3);
         assert_eq!(
             select_internal_generation_mode(&input),
             select_internal_generation_mode(&input)

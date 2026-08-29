@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
@@ -32,7 +32,6 @@ pub struct PlanCandidateItemIr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkItemPlanSourceContext {
     pub target_repository_id: String,
-    pub trusted_command_catalog: Vec<TrustedDraftVerificationCommand>,
 }
 
 type TaskState = (String, String, Vec<String>, Vec<String>, usize);
@@ -73,44 +72,13 @@ pub fn lower_work_item_plan(
         ));
     }
 
-    let mut catalog_by_command = HashMap::new();
-    let mut source_refs = HashSet::new();
-    for command in &context.trusted_command_catalog {
-        if command.source_ref.trim().is_empty() {
-            diagnostics.push(diagnostic(
-                "trusted_commands",
-                "trusted command 的 source_ref 不得为空。",
-                1,
-                "source_ref: catalog-entry-001",
-            ));
-        }
-        if !source_refs.insert(command.source_ref.as_str()) {
-            diagnostics.push(diagnostic(
-                "trusted_commands",
-                "trusted command source_ref 不得重复。",
-                1,
-                "source_ref: catalog-entry-001",
-            ));
-        }
-        if catalog_by_command
-            .insert(command.command.as_str(), command)
-            .is_some()
-        {
-            diagnostics.push(diagnostic(
-                "trusted_commands",
-                "trusted command command 不得重复。",
-                1,
-                "command: cargo test --locked --lib target",
-            ));
-        }
-    }
-
+    let source_revision_hash = hex::encode(Sha256::digest(source.as_bytes()));
     let mut items = Vec::with_capacity(ast.items.len());
     for item in &ast.items {
         if let Some(item) = lower_item(
             item,
-            &catalog_by_command,
             context.target_repository_id.clone(),
+            &source_revision_hash,
             &mut diagnostics,
         ) {
             items.push(item);
@@ -128,7 +96,7 @@ pub fn lower_work_item_plan(
     }
 
     Ok(PlanCandidateIr {
-        source_revision_hash: hex::encode(Sha256::digest(source.as_bytes())),
+        source_revision_hash,
         compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
         items,
     })
@@ -142,132 +110,10 @@ pub fn compile_work_item_plan(
     lower_work_item_plan(source, ast, context)
 }
 
-/// 从 SingleCandidate 轻量 outline 的 Verification.command 行构造完整 author 可消费的
-/// 受信命令目录。目录只登记已在 outline 中出现的命令，避免完整 author 从上下文臆造。
-pub fn trusted_command_catalog_from_outline(
-    source: &str,
-    cwd: &str,
-) -> Result<Vec<TrustedDraftVerificationCommand>, Vec<CompilerDiagnostic>> {
-    let ast = super::parse_work_item_plan(source)?;
-    Ok(trusted_command_catalog_from_ast(&ast, cwd))
-}
-
-/// 复用已完成 grammar 校验的 AST，避免 SingleCandidate 为命令目录再次解析 outline。
-pub fn trusted_command_catalog_from_ast(
-    ast: &WorkItemPlanAst,
-    cwd: &str,
-) -> Vec<TrustedDraftVerificationCommand> {
-    let mut catalog = Vec::new();
-    let mut commands = HashSet::new();
-    let mut source_refs = HashSet::new();
-
-    for item in &ast.items {
-        let Some(verification) = item
-            .sections
-            .iter()
-            .find(|section| section.name.value == "Verification")
-        else {
-            continue;
-        };
-        let mut current_check_id = None;
-        let mut command = None;
-        let mut command_line = 0;
-        let mut manual_instruction = None;
-        let mut flush = |check_id: Option<&str>,
-                         command: &mut Option<String>,
-                         command_line: usize,
-                         manual_instruction: Option<&str>| {
-            let Some(command) = command.take() else {
-                return;
-            };
-            let command = command.trim();
-            if command.is_empty() || !commands.insert(command.to_string()) {
-                return;
-            }
-            let source_ref = unique_outline_command_source_ref(
-                &mut source_refs,
-                item.id.value.as_str(),
-                check_id.unwrap_or_default(),
-                command_line,
-                command,
-            );
-            catalog.push(TrustedDraftVerificationCommand {
-                command: command.to_string(),
-                cwd: cwd.to_string(),
-                purpose: truncated_command_purpose(manual_instruction),
-                source_ref,
-            });
-        };
-
-        for field in &verification.fields {
-            match field.key.value.as_str() {
-                "check_id" => {
-                    flush(
-                        current_check_id.as_deref(),
-                        &mut command,
-                        command_line,
-                        manual_instruction.as_deref(),
-                    );
-                    current_check_id = Some(field.value.value.clone());
-                    command_line = 0;
-                    manual_instruction = None;
-                }
-                "command" => {
-                    command = Some(field.value.value.clone());
-                    command_line = field.value.line;
-                }
-                "manual_instruction" => {
-                    manual_instruction = Some(field.value.value.clone());
-                }
-                _ => {}
-            }
-        }
-        flush(
-            current_check_id.as_deref(),
-            &mut command,
-            command_line,
-            manual_instruction.as_deref(),
-        );
-    }
-
-    catalog
-}
-
-fn unique_outline_command_source_ref(
-    source_refs: &mut HashSet<String>,
-    item_id: &str,
-    check_id: &str,
-    command_line: usize,
-    command: &str,
-) -> String {
-    let mut collision_attempt = 0usize;
-    loop {
-        let fingerprint =
-            format!("{item_id}\0{check_id}\0{command_line}\0{command}\0{collision_attempt}");
-        let digest = hex::encode(Sha256::digest(fingerprint.as_bytes()));
-        let source_ref = format!("outline-{}", &digest[..24]);
-        if source_refs.insert(source_ref.clone()) {
-            return source_ref;
-        }
-        collision_attempt += 1;
-    }
-}
-
-fn truncated_command_purpose(manual_instruction: Option<&str>) -> String {
-    let purpose = manual_instruction
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("registered at outline stage");
-    purpose
-        .chars()
-        .take(crate::product::models::MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH)
-        .collect()
-}
-
 fn lower_item(
     item: &WorkItemPlanItemAst,
-    catalog: &HashMap<&str, &TrustedDraftVerificationCommand>,
     target_repository_id: String,
+    source_revision_hash: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<PlanCandidateItemIr> {
     let mut fields = Vec::new();
@@ -386,7 +232,8 @@ fn lower_item(
         _ => return None,
     };
 
-    let trusted_commands = trusted_commands_for_checks(&verification_checks, catalog, diagnostics);
+    let trusted_commands =
+        trusted_commands_for_checks(&verification_checks, source_revision_hash, diagnostics);
     Some(PlanCandidateItemIr {
         target_repository_id,
         verification_plan: WorkItemDraftVerificationPlan {
@@ -879,33 +726,39 @@ fn flush_traceability(
 
 fn trusted_commands_for_checks(
     checks: &[LoweredVerificationCheck],
-    catalog: &HashMap<&str, &TrustedDraftVerificationCommand>,
+    source_revision_hash: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Vec<TrustedDraftVerificationCommand> {
     let mut trusted_commands = Vec::new();
-    let mut refs = HashSet::new();
+    let mut commands = HashSet::new();
     for entry in checks {
-        let Some(reference) = entry.check.command.as_deref() else {
+        let Some(command) = entry.check.command.as_deref() else {
             continue;
         };
-        if !refs.insert(reference) {
+        if !commands.insert(command) {
             diagnostics.push(diagnostic(
                 "trusted_commands",
                 "同一 Work Item 不得重复引用 trusted command。",
                 entry.command_line,
-                "- command: catalog-entry-001",
+                "- command: cargo test --locked --lib target",
             ));
             continue;
         }
-        match catalog.get(reference) {
-            Some(command) => trusted_commands.push((*command).clone()),
-            None => diagnostics.push(diagnostic(
-                "trusted_commands",
-                "Verification command 未在 trusted command catalog 中找到。",
-                entry.command_line,
-                "- command: catalog-entry-001",
-            )),
-        }
+        let purpose = entry
+            .check
+            .manual_instruction
+            .as_deref()
+            .unwrap_or(entry.check.check_id.as_str())
+            .chars()
+            .take(crate::product::models::MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH)
+            .collect();
+        let source_ref_hash = hex::encode(Sha256::digest(source_revision_hash.as_bytes()));
+        trusted_commands.push(TrustedDraftVerificationCommand {
+            command: command.to_string(),
+            cwd: ".".to_string(),
+            purpose,
+            source_ref: format!("plan-{}", &source_ref_hash[..24]),
+        });
     }
     trusted_commands
 }

@@ -47,7 +47,6 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub design_requirement_ids: &'a [String],
     pub repository_structure: &'a str,
     pub routing_context: &'a RoutingReferenceContext,
-    pub trusted_command_catalog: &'a [crate::product::models::TrustedDraftVerificationCommand],
 }
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
@@ -98,7 +97,7 @@ fn work_item_plan_markdown_grammar() -> String {
          输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。\n\
          section 按序且各一次：{structured_sections}；自由文本仅 `{free_text_sections}`（`{free_text_policy}`）。\n\
          Blockers 为空时保留空 section（### Blockers 后直接下一 section），表示无 blocker；若存在 blocker 字段则仍须完整填写 reason_code、route、target_contract_refs。\n\
-         受信命令目录为空时（outline 未登记任何命令），每个含验证需求的 Work Item 必须包含一条 `route: operational_gate` 的 blocker；manual_instruction 检查不能替代该 blocker；不得虚构 required 命令。\n\
+         Verification.command 直接声明，将按声明执行；命令证据不足时改用 manual_instruction 或 blocker，禁止臆造命令。\n\
          行 `{structured_line}`；ID 行 `{identified_line}`；statement `{ears_template}`（{ears_keywords}）。\n\
          CJK 空格规则：WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格；条件为中文时同样必须（正例：`WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录`；反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法）。
 \
@@ -110,7 +109,7 @@ fn work_item_plan_markdown_grammar() -> String {
          - compatibility_policy: require_all\n\
          无依赖时 Inputs 留空 section。\n\
          反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。\n\
-         同一 Work Item 内每条 trusted command 至多被一个 check 引用；需要复合验证时合并为一条 check 或改用 manual_instruction。\n\
+         同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。\n\
          key 白名单：{structured_keys}。\n\
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
@@ -247,62 +246,6 @@ fn work_item_plan_real_few_shot() -> Result<String, String> {
     Ok(cases)
 }
 
-/// 构造 SingleCandidate 的轻量 markdown outline prompt。
-///
-/// compiler 当前只有完整 markdown grammar，因此 outline 仍须是可机械解析的最小合法
-/// source；它只用于本地 item count，绝不作为 source revision、IR 或 WS artifact。完整
-/// author prompt 仍由 `build_work_item_plan_markdown_prompt` 构造。
-pub(crate) fn build_work_item_plan_markdown_outline_prompt(
-    request: &GenerateWorkItemsRequest,
-    issue: &IssueRecord,
-    repository: &RepositoryRecord,
-    story_context: &str,
-    design_context: &str,
-    repository_structure: &str,
-    routing_context: &RoutingReferenceContext,
-) -> Result<String, String> {
-    let (story_context, design_context, repository_structure) =
-        budget_markdown_outline_context(story_context, design_context, repository_structure);
-    let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
-    let prompt = format!(
-        "只输出用于服务端机械计数的最小合法 `work-item-plan.md` outline；不得输出 JSON、code fence、解释、source hash、target_repository_id 或 trusted command catalog。\n\\
-         该 outline 绝不发布、绝不写 source revision；但必须按 markdown grammar 让每个候选 Work Item 都可被 compiler parser 计数。\n\\
-         [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\\
-         [routing_reference]\n{routing_reference}\n\\
-         [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\\
-         story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\\
-         {grammar}\\
-         [outline_identifier_and_dependency_rules]\n\
-         每个 Work Item 必须以 `{item_id_prefix}<三位数字>` 编号，从 `{item_id_prefix}001` 起，按递增顺序且全局唯一。\n\
-         Verification.command 仅登记已确认仓库/Design/Outline 证据支持的命令；证据不足时不写 command，改用 manual_instruction 或 blocker，绝不根据 WorkItemKind 猜测命令。\n\
-         {dependency_syntax_rules}\n\
-         [minimum_legal_source] 每个候选复用该完整 grammar 形状并使用唯一 WI/TASK/AC/CHECK/contract ID；不要省略 section 或必填字段。\n{minimum_source}\n\\
-         [output] 现在只输出轻量、可 parser 的 markdown outline。",
-        issue_title = issue.title,
-        issue_description = issue.description.as_deref().unwrap_or("无"),
-        repository_id = repository.id,
-        repository_path = repository.path.display(),
-        routing_reference = generation_cadence_routing_rules_reference(routing_context),
-        story_context = story_context,
-        design_context = design_context,
-        repository_structure = repository_structure,
-        story_spec_ids = request.story_spec_ids.join(", "),
-        design_spec_ids = request.design_spec_ids.join(", "),
-        grammar = work_item_plan_markdown_grammar(),
-        item_id_prefix = grammar::ITEM_ID_PREFIX,
-        dependency_syntax_rules = dependency_syntax_rules,
-        minimum_source = work_item_plan_minimum_legal_source(),
-    );
-    if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
-        return Err(format!(
-            "work item plan markdown outline prompt exceeds hard budget: {} > {} bytes",
-            prompt.len(),
-            WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES
-        ));
-    }
-    Ok(prompt)
-}
-
 /// 构造单候选路径专用的 markdown source author prompt。
 ///
 /// 该 prompt 只描述待编译的 `work-item-plan.md` 产物：Provider 原始输出直接进入
@@ -315,12 +258,6 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     context: WorkItemPlanMarkdownAuthorContext<'_>,
 ) -> Result<String, String> {
     let few_shot = work_item_plan_real_few_shot()?;
-    let trusted_command_catalog = context
-        .trusted_command_catalog
-        .iter()
-        .map(|entry| format!("- {}", entry.command))
-        .collect::<Vec<_>>()
-        .join("\n");
     let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
     let reference_discipline =
         work_item_plan_markdown_reference_discipline(Some(context.design_requirement_ids));
@@ -337,11 +274,10 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          [routing_reference]\n{routing_reference}\n\
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
          story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
-         [outline_commands]\n{trusted_command_catalog}\n\
          [source_boundary]\n\
-         只写 markdown 字段；不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段。\n\
+         只写 markdown 字段；不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段。\n\
          exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
-         Verification.command 必须已在 outline 阶段登记；仅逐字引用 [outline_commands]。证据不足写 manual_instruction 或 blocker，禁止臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
+         Verification.command 直接声明，将按声明执行；命令证据不足写 manual_instruction 或 blocker，禁止臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
          {dependency_syntax_rules}\n\n\
          {reference_discipline}
          {grammar}\
@@ -358,7 +294,6 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         repository_structure = repository_structure,
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
-        trusted_command_catalog = trusted_command_catalog,
         reference_discipline = reference_discipline,
         grammar = work_item_plan_markdown_grammar(),
         dependency_syntax_rules = dependency_syntax_rules,
@@ -373,18 +308,6 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         ));
     }
     Ok(prompt)
-}
-
-fn budget_markdown_outline_context(
-    story_context: &str,
-    design_context: &str,
-    repository_structure: &str,
-) -> (String, String, String) {
-    (
-        truncate_markdown_context(story_context, 2_000),
-        truncate_markdown_context(design_context, 2_000),
-        truncate_markdown_context(repository_structure, 1_000),
-    )
 }
 
 fn budget_markdown_context(
