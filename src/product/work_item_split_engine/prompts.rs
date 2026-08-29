@@ -108,6 +108,15 @@ fn work_item_plan_markdown_grammar() -> String {
     )
 }
 
+fn work_item_plan_dependency_syntax_rules() -> String {
+    let dependencies_key = grammar::DEPENDENCIES_KEY;
+    let item_id_prefix = grammar::ITEM_ID_PREFIX;
+    let item_id_suffix = grammar::ITEM_ID_SUFFIX;
+    format!(
+        "`{dependencies_key}`：`- {dependencies_key}: []`；`- {dependencies_key}: {item_id_prefix}001`（裸值）；多依赖每行：`- {dependencies_key}: {item_id_prefix}001`\n`- {dependencies_key}: {item_id_prefix}002`。禁止括号列表、空格或逗号分隔多值；值仅 `[]` 或 `{item_id_prefix}{item_id_suffix}`。"
+    )
+}
+
 fn work_item_plan_minimum_legal_source() -> &'static str {
     "# Work Item Plan\n\
      ## Work Item WI-001: x\n\
@@ -211,7 +220,7 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
 ) -> Result<String, String> {
     let (story_context, design_context, repository_structure) =
         budget_markdown_outline_context(story_context, design_context, repository_structure);
-    let dependencies_key = grammar::DEPENDENCIES_KEY;
+    let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
     let prompt = format!(
         "只输出用于服务端机械计数的最小合法 `work-item-plan.md` outline；不得输出 JSON、code fence、解释、source hash、target_repository_id 或 trusted command catalog。\n\\
          该 outline 绝不发布、绝不写 source revision；但必须按 markdown grammar 让每个候选 Work Item 都可被 compiler parser 计数。\n\\
@@ -222,8 +231,7 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
          {grammar}\\
          [outline_identifier_and_dependency_rules]\n\
          每个 Work Item 必须以 `{item_id_prefix}<三位数字>` 编号，从 `{item_id_prefix}001` 起，按递增顺序且全局唯一。\n\
-         Dependencies 只能使用结构化 key `{dependencies_key}`；合法行示例：`- {dependencies_key}: []`（无依赖）或 `- {dependencies_key}: [{item_id_prefix}001]`（依赖前项）。\n\
-         除 `[]` 外，`{dependencies_key}` 中的每个依赖必须是 `{item_id_prefix}{item_id_suffix}`；禁止在 `{dependencies_key}` 中写自由文本依赖、标题、说明或其他非 `{item_id_prefix}{item_id_suffix}` 内容。\n\
+         {dependency_syntax_rules}\n\
          [minimum_legal_source] 每个候选复用该完整 grammar 形状并使用唯一 WI/TASK/AC/CHECK/contract ID；不要省略 section 或必填字段。\n{minimum_source}\n\\
          [output] 现在只输出轻量、可 parser 的 markdown outline。",
         issue_title = issue.title,
@@ -238,8 +246,7 @@ pub(crate) fn build_work_item_plan_markdown_outline_prompt(
         design_spec_ids = request.design_spec_ids.join(", "),
         grammar = work_item_plan_markdown_grammar(),
         item_id_prefix = grammar::ITEM_ID_PREFIX,
-        item_id_suffix = grammar::ITEM_ID_SUFFIX,
-        dependencies_key = dependencies_key,
+        dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),
     );
     if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
@@ -267,6 +274,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     routing_context: &RoutingReferenceContext,
 ) -> Result<String, String> {
     let few_shot = work_item_plan_real_few_shot()?;
+    let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
     // story/design 真实上下文可能远大于旧 JSON outline 路径。固定 grammar、最小合法
     // source 与 few-shot 永不截断；只按确定性配额压缩可再加载的上下文，并显式标记。
     let (story_context, design_context, repository_structure) =
@@ -279,8 +287,9 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
          [source_boundary]\n\
          只写 markdown 字段；不得从 issue、outline、prompt 或 runtime 补齐 markdown 缺失字段，且不得输出 target_repository_id、durable ID、source hash 或 trusted command catalog。\n\
-         exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得和 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
-         command 仅取已确认的可信仓库证据；不足则写 manual_instruction 或 blocker，不得臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\n\
+         exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾；依赖、contract、验收、handoff 必须可验证。\n\
+         command 仅取已确认可信仓库证据；不足写 manual_instruction 或 blocker，不得臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
+         {dependency_syntax_rules}\n\n\
          {grammar}\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
@@ -296,6 +305,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
         grammar = work_item_plan_markdown_grammar(),
+        dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),
         few_shot = few_shot,
     );

@@ -818,6 +818,23 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         );
     }
 
+    let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
+    let item_id_prefix = crate::product::work_item_plan_compiler::grammar::ITEM_ID_PREFIX;
+    for example in [
+        format!("`- {dependency_key}: []`"),
+        format!("`- {dependency_key}: {item_id_prefix}001`"),
+        format!("`- {dependency_key}: {item_id_prefix}001`\n`- {dependency_key}: {item_id_prefix}002`"),
+    ] {
+        assert!(
+            prompt.contains(&example),
+            "完整 author 必须教授合法 Dependencies 形态：{example}"
+        );
+    }
+    assert!(
+        prompt.contains("禁止括号列表、空格或逗号分隔多值"),
+        "完整 author 必须禁止 parser 不接受的 Dependencies 多值写法"
+    );
+
     let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
@@ -926,16 +943,23 @@ fn work_item_plan_markdown_outline_prompt_is_parser_oriented_and_excludes_full_a
     );
     for example in [
         format!("`- {dependency_key}: []`"),
-        format!("`- {dependency_key}: [{item_id_prefix}001]`"),
+        format!("`- {dependency_key}: {item_id_prefix}001`"),
+        format!("`- {dependency_key}: {item_id_prefix}001`\n`- {dependency_key}: {item_id_prefix}002`"),
     ] {
         assert!(
             prompt.contains(&example),
-            "轻量 outline 必须给出合法 Dependencies 行示例：{example}"
+            "轻量 outline 必须给出合法 Dependencies 形态：{example}"
         );
     }
     assert!(
-        prompt.contains(&format!("禁止在 `{dependency_key}` 中写自由文本")),
-        "轻量 outline 必须禁止自由文本依赖"
+        prompt.contains("禁止括号列表、空格或逗号分隔多值"),
+        "轻量 outline 必须禁止 parser 不接受的 Dependencies 多值写法"
+    );
+    assert!(
+        prompt.contains(&format!(
+            "值仅 `[]` 或 `{item_id_prefix}<digits>`",
+        )),
+        "轻量 outline 必须仅允许 grammar 定义的 Dependencies 值"
     );
     assert!(
         !prompt.contains("[real_finding_few_shot]"),
