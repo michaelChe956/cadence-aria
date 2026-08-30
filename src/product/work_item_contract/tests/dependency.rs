@@ -5,9 +5,11 @@ use crate::product::{
     models::DependencyGraphRevision,
     work_item_contract::{
         CanonicalWorkItemContract, ContractCapabilityCoverage, ContractCompatibilityPolicy,
-        DependencyContractEdge, DependencyContractGraph, PromisedOutputContract,
-        RequiredDependencyContract, RequiredInputContract, build_dependency_contract_graph,
-        project_contract_capability_coverage, validate_dependency_contract_graph,
+        ContractDependencyItemFact, ContractHandoffConsumption, DependencyContractEdge,
+        DependencyContractGraph, PromisedOutputContract, RequiredDependencyContract,
+        RequiredInputContract, build_dependency_contract_graph,
+        project_contract_capability_coverage, project_contract_reviewer_coverage,
+        validate_dependency_contract_graph,
     },
 };
 
@@ -42,6 +44,164 @@ fn consumer_contract_fixture(
     consumer.output_contracts.clear();
     consumer.handoff_contract.provided_contract_refs.clear();
     consumer
+}
+
+#[test]
+fn p2_reviewer_handoff_projection_reports_empty_consumer_set_field_exactly() {
+    let mut provider = provider_contract_fixture(&["capability.present"]);
+    provider.handoff_contract.provided_contract_refs = vec!["CT-005".to_string()];
+    let consumer = consumer_contract_fixture(&[], ContractCompatibilityPolicy::RequireAny);
+    let graph = build_dependency_contract_graph(&[provider, consumer]).expect("graph");
+    let projection = project_contract_reviewer_coverage(&graph);
+    assert_eq!(
+        projection.handoff_consumption,
+        vec![ContractHandoffConsumption {
+            provider: "WI-01".to_string(),
+            contract_ref: "CT-005".to_string(),
+            consumers: Vec::new(),
+            consumed: false,
+        }]
+    );
+    let report = validate_dependency_contract_graph(&graph);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.code == "unconsumed_required_handoff"
+                    && finding.logical_work_item_id.as_deref() == Some("WI-01")
+                    && finding.contract_ref.as_deref() == Some("CT-005")
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn p2_reviewer_handoff_projection_consumers_match_validator_for_multiple_consumers() {
+    let mut provider = provider_contract_fixture(&["capability.present"]);
+    provider.output_contracts[0].contract_id = "CT-005".to_string();
+    provider.handoff_contract.provided_contract_refs = vec!["CT-005".to_string()];
+    let mut first = consumer_contract_fixture(
+        &["capability.present"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    first.input_contracts[0].contract_id = "CT-005".to_string();
+    let mut second = first.clone();
+    second.identity.logical_work_item_id = "WI-03".to_string();
+    let graph = build_dependency_contract_graph(&[provider, first, second]).expect("graph");
+    let projection = project_contract_reviewer_coverage(&graph);
+    assert_eq!(
+        projection.handoff_consumption,
+        vec![ContractHandoffConsumption {
+            provider: "WI-01".to_string(),
+            contract_ref: "CT-005".to_string(),
+            consumers: vec!["WI-02".to_string(), "WI-03".to_string()],
+            consumed: true,
+        }]
+    );
+    assert!(
+        validate_dependency_contract_graph(&graph)
+            .findings
+            .iter()
+            .all(|finding| {
+                finding.code != "unconsumed_required_handoff"
+                    || finding.contract_ref.as_deref() != Some("CT-005")
+            })
+    );
+}
+
+#[test]
+fn p2_reviewer_dependency_and_scope_projection_facts_are_field_exact_and_stable() {
+    let mut first = provider_contract_fixture(&["capability.present"]);
+    first.depends_on = vec!["WI-02".to_string()];
+    first.write_policy.exclusive_scopes = vec!["src/shared/**".to_string()];
+    first.write_policy.forbidden_scopes.clear();
+    let mut second = consumer_contract_fixture(
+        &["capability.present"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    second.depends_on = vec!["WI-01".to_string()];
+    second.write_policy.exclusive_scopes.clear();
+    second.write_policy.forbidden_scopes = vec!["src/shared/**".to_string()];
+    let required = RequiredDependencyContract {
+        contract_id: "contract.workflow".to_string(),
+        required_capabilities: vec!["capability.present".to_string()],
+        compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+    };
+    let graph = DependencyContractGraph {
+        contracts: BTreeMap::from([("WI-01".to_string(), first), ("WI-02".to_string(), second)]),
+        edges: vec![
+            DependencyContractEdge {
+                from: "WI-01".to_string(),
+                to: "WI-02".to_string(),
+                required_contracts: vec![required.clone(), required.clone()],
+            },
+            DependencyContractEdge {
+                from: "WI-01".to_string(),
+                to: "WI-02".to_string(),
+                required_contracts: vec![required.clone()],
+            },
+            DependencyContractEdge {
+                from: "WI-02".to_string(),
+                to: "WI-01".to_string(),
+                required_contracts: vec![required.clone()],
+            },
+            DependencyContractEdge {
+                from: "WI-404".to_string(),
+                to: "WI-02".to_string(),
+                required_contracts: vec![required],
+            },
+        ],
+    };
+    let first_projection = project_contract_reviewer_coverage(&graph);
+    let second_projection = project_contract_reviewer_coverage(&graph);
+    assert_eq!(first_projection, second_projection);
+    assert_eq!(
+        first_projection.dependency_graph.depends_on,
+        vec![
+            ContractDependencyItemFact {
+                work_item_id: "WI-01".to_string(),
+                depends_on: vec!["WI-02".to_string()],
+            },
+            ContractDependencyItemFact {
+                work_item_id: "WI-02".to_string(),
+                depends_on: vec!["WI-01".to_string()],
+            },
+        ]
+    );
+    assert_eq!(
+        first_projection.dependency_graph.cycles,
+        vec![vec!["WI-01".to_string(), "WI-02".to_string()]]
+    );
+    assert_eq!(
+        first_projection.dependency_graph.unknown_providers[0].provider,
+        "WI-404"
+    );
+    assert!(
+        first_projection
+            .dependency_graph
+            .duplicate_edges
+            .iter()
+            .any(|fact| fact.from == "WI-01" && fact.to == "WI-02")
+    );
+    assert!(
+        first_projection
+            .write_scope_conflicts
+            .iter()
+            .any(|fact| fact.left_work_item_id == "WI-01"
+                && fact.left_scope == "src/shared/**"
+                && fact.right_work_item_id == "WI-02"
+                && fact.right_scope == "src/shared/**")
+    );
+    let report = validate_dependency_contract_graph(&graph);
+    for code in [
+        "duplicate_dependency_contract_edge",
+        "dependency_cycle",
+        "unknown_provider_logical_work_item",
+    ] {
+        assert!(report.findings.iter().any(|finding| finding.code == code));
+    }
 }
 
 fn finding_count(graph: &DependencyContractGraph, code: &str) -> usize {

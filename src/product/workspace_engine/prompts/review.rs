@@ -3,16 +3,14 @@ use super::history_compaction::{
     render_intermediate_artifact_diffs, render_open_required_findings,
 };
 use super::review_context::{
-    PlanReviewSource, append_review_context_section, load_plan_review_context,
-    single_candidate_dependency_graph,
+    PlanReviewSource, append_review_context_section, append_single_candidate_contract_gap_teaching,
+    load_plan_review_context, single_candidate_dependency_graph,
+    single_candidate_reviewer_coverage,
 };
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
-use crate::product::work_item_contract::{
-    build_dependency_contract_graph, project_contract_capability_coverage,
-};
 use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocationScope};
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use serde_json::json;
@@ -522,17 +520,7 @@ impl WorkspaceEngine {
             })
             .collect::<Vec<_>>();
         let dependency_graph = single_candidate_dependency_graph(&ir_record.ir.items)?;
-        let canonical_contracts = ir_record
-            .ir
-            .items
-            .iter()
-            .map(|item| item.contract.clone())
-            .collect::<Vec<_>>();
-        let dependency_contract_graph = build_dependency_contract_graph(&canonical_contracts)
-            .map_err(|report| {
-                format!("single-candidate review dependency contract graph failed: {report:?}")
-            })?;
-        let capability_coverage = project_contract_capability_coverage(&dependency_contract_graph);
+        let reviewer_coverage = single_candidate_reviewer_coverage(&ir_record.ir.items)?;
         let cross_item_contracts = json!({
             "supplies": ir_record.ir.items.iter().map(|item| json!({
                 "work_item_id": item.contract.identity.logical_work_item_id,
@@ -574,7 +562,7 @@ impl WorkspaceEngine {
         append_review_context_section(
             &mut prompt,
             "Reviewer Capability Coverage Projection",
-            &capability_coverage,
+            &reviewer_coverage,
         )?;
         append_review_context_section(
             &mut prompt,
@@ -598,7 +586,8 @@ impl WorkspaceEngine {
             "\n审核边界：只审核 Plan Review Context 中的权威 canonical contract、依赖拓扑、跨 WorkItem 契约供需与机械校验摘要；不得把 session markdown 或 lifecycle legacy DTO 当作候选事实来源。\n\
              能力覆盖机械规则：当任一 coverage entry 的 `missing_capabilities` 非空时，必须返回 `severity=must_fix`、`category=contract_gap` 的 finding，并按现有 scope 约定提供 `class_hint=repairable`；`evidence` 必须明确指出具体 `from -> to` edge、`contract_id` 与缺失 capability，不得以 `pass` 或 advisory 掩盖该缺口。\n",
         );
-        for coverage in capability_coverage
+        for coverage in reviewer_coverage
+            .capability_coverage
             .iter()
             .filter(|coverage| !coverage.missing_capabilities.is_empty())
         {
@@ -610,6 +599,7 @@ impl WorkspaceEngine {
                 coverage.missing_capabilities.join(", "),
             ));
         }
+        append_single_candidate_contract_gap_teaching(&mut prompt, &reviewer_coverage);
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),

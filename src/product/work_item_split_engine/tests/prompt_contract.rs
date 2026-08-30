@@ -869,6 +869,14 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。",
         "正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。",
         "canonical fail-closed：required_capability_missing 拒绝 plan。",
+        "provided_contract_refs 中每项必须被至少一个下游 Work Item 的 input_contracts",
+        "provider_logical_work_item_id",
+        "contract_id",
+        "逐字二元组",
+        "unconsumed_required_handoff",
+        "反例：WI-002 handoff 提供 CT-005",
+        "正例：WI-002 提供 CT-005",
+        "不能依赖 title、depends_on 或自然语言描述推断消费",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
         "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
         "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
@@ -899,6 +907,11 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
             .count(),
         1,
         "完整 author 的 CJK 反例只能出现在明确标记为非法的教学中"
+    );
+    assert_eq!(
+        prompt.matches("unconsumed_required_handoff").count(),
+        1,
+        "SC author handoff finding code must appear exactly once"
     );
 
     let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
@@ -986,10 +999,25 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
             .len(),
         1
     );
+    assert_eq!(
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        17_000
+    );
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
         "markdown prompt must remain below its dedicated quality budget: {} bytes",
         prompt.len()
     );
+    eprintln!(
+        "SC author prompt bytes={} margin={}",
+        prompt.len(),
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+            - prompt.len()
+    );
+}
+
+#[test]
+fn p2_author_handoff_consumption_prompt_teaches_exact_pair_and_counterexample() {
+    work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings();
 }

@@ -162,6 +162,9 @@ fn design_reviewer_boundary_non_design_prompts_exclude_examples() {
             input.prompt
         );
         assert!(!input.prompt.contains(REVIEWER_COVERAGE_TITLE));
+        assert!(!input.prompt.contains("handoff_consumption"));
+        assert!(!input.prompt.contains("write_scope_conflicts"));
+        assert!(!input.prompt.contains("category=contract_gap"));
     }
 
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
@@ -175,6 +178,9 @@ fn design_reviewer_boundary_non_design_prompts_exclude_examples() {
         .expect("work item plan review input");
     assert_eq!(input.prompt.matches(BOUNDARY_EXAMPLES_MARKER).count(), 0);
     assert!(!input.prompt.contains(REVIEWER_COVERAGE_TITLE));
+    assert!(!input.prompt.contains("handoff_consumption"));
+    assert!(!input.prompt.contains("write_scope_conflicts"));
+    assert!(!input.prompt.contains("category=contract_gap"));
 
     let design_engine = design_review_engine(
         "sess_non_design_boundary_design",
@@ -184,6 +190,9 @@ fn design_reviewer_boundary_non_design_prompts_exclude_examples() {
         .build_review_input()
         .expect("design review input");
     assert!(!input.prompt.contains(REVIEWER_COVERAGE_TITLE));
+    assert!(!input.prompt.contains("handoff_consumption"));
+    assert!(!input.prompt.contains("write_scope_conflicts"));
+    assert!(!input.prompt.contains("category=contract_gap"));
 }
 
 #[test]

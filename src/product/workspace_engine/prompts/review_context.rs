@@ -8,7 +8,10 @@ use crate::product::models::{
 use crate::product::plan_repair::{
     candidate_request_matches_review_status, load_plan_repair_candidate_package,
 };
-use crate::product::work_item_contract::{CanonicalWorkItemContract, canonical_contract_hash};
+use crate::product::work_item_contract::{
+    CanonicalWorkItemContract, ContractReviewerCoverageProjection, build_dependency_contract_graph,
+    canonical_contract_hash, project_contract_reviewer_coverage,
+};
 use crate::product::work_item_projection::{
     CompiledPlanProjections, CompiledWorkItemProjections, ProjectionValidationReport,
     plan_projection_hashes, projection_hashes,
@@ -43,6 +46,35 @@ pub(super) fn append_review_context_section(
     );
     prompt.push('\n');
     Ok(())
+}
+
+pub(super) fn single_candidate_reviewer_coverage(
+    items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
+) -> Result<ContractReviewerCoverageProjection, String> {
+    let contracts = items
+        .iter()
+        .map(|item| item.contract.clone())
+        .collect::<Vec<_>>();
+    let graph = build_dependency_contract_graph(&contracts).map_err(|report| {
+        format!("single-candidate review dependency contract graph failed: {report:?}")
+    })?;
+    Ok(project_contract_reviewer_coverage(&graph))
+}
+
+pub(super) fn append_single_candidate_contract_gap_teaching(
+    prompt: &mut String,
+    coverage: &ContractReviewerCoverageProjection,
+) {
+    for handoff in coverage
+        .handoff_consumption
+        .iter()
+        .filter(|handoff| !handoff.consumed)
+    {
+        prompt.push_str(&format!(
+            "- handoff gap evidence required: severity=must_fix category=contract_gap class_hint=repairable evidence: provider `{}`, contract_ref `{}`, consumers: [], consumed: false\n",
+            handoff.provider, handoff.contract_ref,
+        ));
+    }
 }
 
 pub(super) fn single_candidate_dependency_graph(

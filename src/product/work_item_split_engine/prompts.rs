@@ -55,10 +55,10 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 #[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 
-/// SingleCandidate markdown author 的质量预算。契约能力覆盖教学注入后从 15_600 上调至
-/// 16_200；该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
+/// SingleCandidate markdown author 的质量预算。契约能力覆盖与 handoff 消费闭环教学注入后，
+/// 从 16_200 上调 800 字节至 17_000；该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 16_200;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 17_000;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -158,6 +158,10 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。\n\
          正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。\n\
          canonical fail-closed：required_capability_missing 拒绝 plan。\n\
+         provided_contract_refs 中每项必须被至少一个下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费；provider_logical_work_item_id 是提供 item ID，contract_id 是 provided ref 完整字符串；二者须逐字相等，不能依赖 title、depends_on 或自然语言描述推断消费。\n\
+         反例：WI-002 handoff 提供 CT-005，但任何下游 input_contracts 没有 (provider_logical_work_item_id=WI-002, contract_id=CT-005) → 拒绝/生成前修正。\n\
+         正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → consumed=true。\n\
+         无消费者生成前修正，否则 unconsumed_required_handoff fail-closed 拒绝；不要写 blocker、改 id 或自动推断掩盖。\n\
          每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单。\n\n"
     )
 }

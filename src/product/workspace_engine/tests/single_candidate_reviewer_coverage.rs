@@ -53,6 +53,7 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
         contract_id: "contract.workflow".to_string(),
         capabilities: vec!["capability.present".to_string()],
     }];
+    provider.handoff_contract.provided_contract_refs = vec!["CT-005".to_string()];
     let mut consumer = crate::product::work_item_contract::canonical_contract_fixture("WI-02");
     consumer.input_contracts = vec![RequiredInputContract {
         contract_id: "contract.workflow".to_string(),
@@ -200,6 +201,17 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
         "provided_capabilities",
         "missing_capabilities",
         "compatibility_policy",
+        "dependency_graph",
+        "depends_on",
+        "declared_edges",
+        "contract_edges",
+        "cycles",
+        "duplicate_edges",
+        "unknown_providers",
+        "handoff_consumption",
+        "consumers",
+        "consumed",
+        "write_scope_conflicts",
     ] {
         assert!(
             input.prompt.contains(field),
@@ -212,6 +224,13 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
         "evidence",
         "WI-01 -> WI-02",
         "capability.missing",
+        "CT-005",
+        "consumers: []",
+        "consumed: false",
+        "severity=must_fix",
+        "category=contract_gap",
+        "class_hint=repairable",
+        "evidence",
     ] {
         assert!(
             input.prompt.contains(teaching),
