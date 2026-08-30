@@ -129,6 +129,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
              - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
              - 每个 finding 对象只能包含以下字段：severity、message、evidence（可选）、required_action（可选）、category、class_hint、contract_field（可选）——不得添加 finding_id、code、work_item_ids 或其他字段。\n\
              - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n\
+             - severity 只能取三值之一：blocking（阻断发布）、must_fix（必须修复）、suggestion（建议）——不得使用 error/warning 等其他词。\n\
              - class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）。\n",
         )),
         ReviewInvocationScope::Verification {
@@ -169,6 +170,7 @@ pub(crate) fn review_scope_instructions(scope: &ReviewInvocationScope) -> Result
                  - 每个 finding 必须提供 category 与 class_hint 建议；最终分类由服务端策略层决定。\n\
                  - 每个 finding 对象只能包含以下字段：severity、message、evidence（可选）、required_action（可选）、category、class_hint、contract_field（可选）——不得添加 finding_id、code、work_item_ids 或其他字段。\n\
                  - category 只能取以上六值之一；无法归类时用 other。合法值：{category_whitelist}。\n\
+                 - severity 只能取三值之一：blocking（阻断发布）、must_fix（必须修复）、suggestion（建议）——不得使用 error/warning 等其他词。\n\
                  - class_hint 只能取三值之一：repairable（可自动返修）、human_required（需人工裁决）、advisory（仅建议）。\n",
             ))
         }

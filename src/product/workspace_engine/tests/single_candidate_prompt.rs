@@ -453,6 +453,9 @@ fn single_candidate_initial_prompt_is_derived_from_server_scope() {
         );
     }
     assert!(instructions.contains("category 只能取以上六值之一；无法归类时用 other"));
+    assert!(instructions.contains(
+        "severity 只能取三值之一：blocking（阻断发布）、must_fix（必须修复）、suggestion（建议）——不得使用 error/warning 等其他词"
+    ));
     for class_hint in ["repairable", "human_required", "advisory"] {
         assert!(
             instructions.contains(class_hint),
@@ -504,6 +507,9 @@ fn single_candidate_verification_prompt_replays_only_original_fingerprints() {
         );
     }
     assert!(instructions.contains("category 只能取以上六值之一；无法归类时用 other"));
+    assert!(instructions.contains(
+        "severity 只能取三值之一：blocking（阻断发布）、must_fix（必须修复）、suggestion（建议）——不得使用 error/warning 等其他词"
+    ));
     for class_hint in ["repairable", "human_required", "advisory"] {
         assert!(
             instructions.contains(class_hint),

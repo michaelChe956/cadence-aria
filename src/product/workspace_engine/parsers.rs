@@ -927,8 +927,8 @@ fn parse_optional_contract_field(
 pub(crate) fn parse_live_review_finding_severity(value: &str) -> Option<ReviewFindingSeverity> {
     match value {
         "blocking" => Some(ReviewFindingSeverity::Blocking),
-        "must_fix" => Some(ReviewFindingSeverity::MustFix),
-        "suggestion" => Some(ReviewFindingSeverity::Suggestion),
+        "must_fix" | "error" => Some(ReviewFindingSeverity::MustFix),
+        "suggestion" | "warning" => Some(ReviewFindingSeverity::Suggestion),
         _ => None,
     }
 }

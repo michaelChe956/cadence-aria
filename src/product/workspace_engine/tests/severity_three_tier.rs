@@ -48,6 +48,20 @@ fn live_review_schema_rejects_legacy_severities_and_impact_field() {
 }
 
 #[test]
+fn live_review_parser_normalizes_error_and_warning_severity_aliases() {
+    for (value, expected) in [
+        ("error", ReviewFindingSeverity::MustFix),
+        ("warning", ReviewFindingSeverity::Suggestion),
+    ] {
+        assert_eq!(
+            parse_live_review_finding_severity(value),
+            Some(expected),
+            "live review severity alias {value} must normalize"
+        );
+    }
+}
+
+#[test]
 fn historical_review_deserialization_normalizes_all_legacy_severities_and_impact_idempotently() {
     let value = serde_json::json!({
         "verdict": "pass",
