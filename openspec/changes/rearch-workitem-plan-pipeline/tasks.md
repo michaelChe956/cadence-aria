@@ -91,3 +91,6 @@ pub struct InitialPlanCompileInput {
 - [ ] 8.5 实施过审后 r25 重跑三 provider（codex/kimi 900s、pi 1800s）：全部 Confirmed 方为 6.2 达标；needs_human 为合法终态，不降级不伪造；pi 方差按有界重跑，连续复现另立议题报用户
 
 > **登记（2026-08-30，用户裁决方案 b）**：plan/draft/review 产物 95% 成功率验收**不入 6.2 判据**；待全流程（6.2→6.3→6.4→终审→push）完成后以专项测量轮执行（测量形态终审裁量）。
+
+> **8.2-fix 教学修复（2026-08-30 二次增补，用户批准 C′）**：8.2 教学补「Handoff Schema 三字段必须显式输出；无下游消费者（含链路末端与单 WI 计划）→ `provided_contract_refs: []`（合法空数组，非省略）；禁止以省略/删字段/写 blocker/改 ID/自然语言回避校验」；预算常量 17,000→18,000（改后实测 prompt bytes）。TDD：RED=教学句存在性断言；行为锁=终端 `[]` 编译通过、省略字段仍 `missing_section`、非终端未消费非空 ref 仍被 validator 拒。validator/grammar/lowering 零改动（`[]` 机制本就合法）。
+> **登记（同批）**：legacy draft prompt 的「无消费者空数组」约定在架构简化重写 SC prompt 时丢失，本项为复原该约定。

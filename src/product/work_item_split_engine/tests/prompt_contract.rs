@@ -877,6 +877,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "反例：WI-002 handoff 提供 CT-005",
         "正例：WI-002 提供 CT-005",
         "不能依赖 title、depends_on 或自然语言描述推断消费",
+        "Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。",
+        "provided_contract_refs 只列出确实被下游 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字消费的 ref。",
+        "若本 WI 没有任何下游 consumer edge（链路末端；单 WI 计划也属于此类），必须保留 provided_contract_refs 字段并写 `[]`；`[]` 是合法空数组，不是省略字段。",
+        "非空 ref 无消费者时，补齐精确下游 Inputs 或移除该 ref；不得删除整个 Handoff Schema、删除必需字段、写 blocker、改 contract ID，也不得依赖 depends_on 或自然语言制造虚假消费。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
         "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
         "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
@@ -1001,7 +1005,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        17_000
+        18_000
     );
     assert!(
         prompt.len()

@@ -48,6 +48,21 @@ fn empty_blockers_section_parses_and_lowers_to_no_blocker_rules() {
 }
 
 #[test]
+fn omitted_handoff_refs_section_still_rejects_missing_required_field() {
+    let source = REP4_FIXTURE.replace(
+        "- provided_contract_refs: contract.levels-integration\n",
+        "",
+    );
+    let diagnostics = lint_work_item_plan_source(&source);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_section" && diagnostic.field == "provided_contract_refs"
+        }),
+        "省略 Handoff Schema 的 provided_contract_refs 仍必须拒绝：{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn empty_non_blockers_section_still_rejects_missing_required_field() {
     let source = REP4_FIXTURE.replace(
         "### Goal\n- summary: WHEN a level list request arrives THE SYSTEM SHALL return the configured levels JSON.\n",

@@ -118,3 +118,10 @@ session 创建时写入 `RunPolicy`：`interactive`（手动最终批准）或 `
 - **决策**：P4 先行独立提交（故障面分离、可回滚）；只清 SC IR 路径，legacy draft 路径与测试零变化。P2 = author handoff 消费闭环教学（预算 16,200→17,000，留 ~800 字节余量）+ reviewer 覆盖投影扩展（依赖图/消费闭环/跨 item scope，同源复用 `dependency.rs` 共享逻辑）；canonical validator 对外行为除退役残留外零改动。
 - **pi 方差**：`unknown_requirement_ref` 是 provider 无视已有教学（教学与清单均已存在），不扩 prompt，按有界重跑消化；连续复现另立议题。`needs_human` 为合法终态，不降级不伪造。
 - **95% 验收（方案 b，用户裁决）**：6.2 按现判据收敛；95% 成功率验收为全流程完成后的专项测量轮，不在本轮判据内。
+
+## 终端 handoff 显式空数组裁决（2026-08-30，用户批准，oracle 反证修正）
+
+- **反证**：原「规则集对终端 WI 无解」判断不成立——`- provided_contract_refs: []` 本就是合法表达（parse.rs 视为字段存在且非空；lower.rs `split_value` 过滤 `[]` 为空集合；空集合不产生 `unconsumed_required_handoff`）；legacy draft prompt（prompts.rs:1024/1031）早有此教学，架构简化重写 SC prompt 时丢失。
+- **决策（C′）**：终端 WI 保留 Handoff Schema 三字段并显式写 `[]`；非终端未消费非空 ref 维持拒绝（教学管生成侧）；不实施 validator sink 豁免（A）与 grammar 放宽（B）——A 削弱 fail-closed 且引入投影/校验口径分叉，B 鼓励省略字段藏错。
+- **终端定义**：合法依赖图上无任何有效出边（不存在其他 WI 的 `input_contracts` 以精确 `(provider_logical_work_item_id, contract_id)` 消费之）；单 WI 计划唯一 WI 为终端；环/自依赖/未知 provider 维持既有 fail-closed 拒绝，不得借终端语义绕过。
+- **残余登记**：终端外部输出（计划外 publication/coding 消费）若需独立建模，另立产品设计，不通过本轮隐式解决。

@@ -55,10 +55,10 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 #[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 
-/// SingleCandidate markdown author 的质量预算。契约能力覆盖与 handoff 消费闭环教学注入后，
-/// 从 16_200 上调 800 字节至 17_000；该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
+/// SingleCandidate markdown author 的质量预算。契约能力覆盖与 handoff 消费闭环教学注入后上调；
+/// 该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 17_000;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 18_000;
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -158,6 +158,10 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。\n\
          正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。\n\
          canonical fail-closed：required_capability_missing 拒绝 plan。\n\
+         Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。\n\
+         provided_contract_refs 只列出确实被下游 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字消费的 ref。\n\
+         若本 WI 没有任何下游 consumer edge（链路末端；单 WI 计划也属于此类），必须保留 provided_contract_refs 字段并写 `[]`；`[]` 是合法空数组，不是省略字段。\n\
+         非空 ref 无消费者时，补齐精确下游 Inputs 或移除该 ref；不得删除整个 Handoff Schema、删除必需字段、写 blocker、改 contract ID，也不得依赖 depends_on 或自然语言制造虚假消费。\n\
          provided_contract_refs 中每项必须被至少一个下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费；provider_logical_work_item_id 是提供 item ID，contract_id 是 provided ref 完整字符串；二者须逐字相等，不能依赖 title、depends_on 或自然语言描述推断消费。\n\
          反例：WI-002 handoff 提供 CT-005，但任何下游 input_contracts 没有 (provider_logical_work_item_id=WI-002, contract_id=CT-005) → 拒绝/生成前修正。\n\
          正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → consumed=true。\n\

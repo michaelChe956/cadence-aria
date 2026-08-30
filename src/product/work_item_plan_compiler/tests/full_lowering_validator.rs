@@ -81,6 +81,35 @@ fn full_lowering_validator_projects_rep4_through_all_existing_validator_layers()
 }
 
 #[test]
+fn terminal_empty_handoff_refs_are_valid_and_not_unconsumed() {
+    let source = REP4_FIXTURE.replace(
+        "- provided_contract_refs: contract.levels-integration",
+        "- provided_contract_refs: []",
+    );
+    let ir = compile_work_item_plan(
+        &source,
+        &WorkItemPlanSourceContext {
+            target_repository_id: "repo-levels".to_string(),
+        },
+    )
+    .expect("terminal WI with explicit empty handoff refs must lower");
+    let story_ids = vec!["story_spec_levels_0001".to_string()];
+    let design_ids = vec!["design_spec_levels_0001".to_string()];
+    let report = validate_plan_candidate_ir(
+        &ir,
+        &rep4_validation_context(Some(&rep4_repository_profile()), &story_ids, &design_ids),
+    )
+    .expect("terminal WI with explicit empty handoff refs must validate");
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.code != "unconsumed_required_handoff")
+    );
+}
+
+#[test]
 fn p4_sc_long_verification_command_does_not_emit_catalog_field_finding() {
     let mut ir = compile_work_item_plan(
         REP4_FIXTURE,
