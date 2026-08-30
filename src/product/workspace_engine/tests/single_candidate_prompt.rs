@@ -18,6 +18,10 @@ use crate::product::workspace_engine::review::policy_routing::RoutingAction;
 use crate::web::workspace_ws_types::review::{
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
 };
+use crate::web::workspace_ws_types::{
+    ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    WorkspaceStage as WsWorkspaceStage,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -206,6 +210,132 @@ fn pass_verdict() -> ReviewVerdict {
         work_item_plan_review: None,
         structured_output_diagnostic: None,
     }
+}
+
+#[tokio::test]
+async fn single_candidate_scope_uses_one_reviewer_cycle_key_across_ensure_and_policy() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("single_reviewer_cycle_key");
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    persist_single_candidate_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::initial(ir_ref.clone()),
+        RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:reviewer-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        },
+    );
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.plan_candidate_ir_ref = Some(ir_ref.clone());
+    record.mechanical_report_ref = Some(report_ref.clone());
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist durable verification refs");
+    engine.session.plan_candidate_ir_ref = Some(ir_ref);
+    engine.session.mechanical_report_ref = Some(report_ref);
+    engine.active_node_id = Some("reviewer-node".to_string());
+    engine.timeline_nodes.push(TimelineNode {
+        node_id: "reviewer-node".to_string(),
+        node_type: TimelineNodeType::WorkItemBatchReview,
+        agent: None,
+        stage: WsWorkspaceStage::Running,
+        round: Some(2),
+        status: TimelineNodeStatus::Active,
+        title: "reviewer run".to_string(),
+        summary: None,
+        started_at: "2026-08-08T00:00:00Z".to_string(),
+        completed_at: None,
+        duration_ms: None,
+        artifact_ref: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: crate::product::models::ProviderName::ClaudeCode,
+            reviewer: Some(crate::product::models::ProviderName::KimiCode),
+            review_rounds: 2,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        },
+        retry: None,
+    });
+
+    engine
+        .ensure_review_invocation_scope()
+        .await
+        .expect("ensure must construct verification scope");
+    let action = engine
+        .work_item_policy_action("reviewer-node", &pass_verdict())
+        .expect("policy action");
+    assert!(
+        !matches!(
+            action,
+            RoutingAction::AbortFatal {
+                reason: FatalReason::ProtocolViolation,
+                ..
+            }
+        ),
+        "ensure and policy must share the reviewer cycle key, got {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn single_candidate_verification_scope_requires_durable_mechanical_report_at_ensure() {
+    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_ensure_missing_report",
+        );
+    persist_single_candidate_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::initial("initial-ir"),
+        RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:reviewer-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        },
+    );
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.mechanical_report_ref = None;
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("clear durable report ref");
+    engine.session.mechanical_report_ref = None;
+    engine.active_node_id = Some("reviewer-node".to_string());
+
+    let error = engine
+        .ensure_review_invocation_scope()
+        .await
+        .expect_err("Verification scope must not be constructed without a durable report");
+    assert!(error.contains("verification review requires a durable mechanical report"));
+    assert!(matches!(
+        engine.session().review_invocation_scope,
+        Some(ReviewInvocationScope::Initial { .. })
+    ));
 }
 
 #[tokio::test]

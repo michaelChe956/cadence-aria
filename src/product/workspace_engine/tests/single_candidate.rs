@@ -7,8 +7,8 @@ use crate::product::work_item_plan_compiler::{
     WORK_ITEM_PLAN_COMPILER_VERSION,
 };
 use crate::product::work_item_plan_policy::{
-    FindingClassHint, ReviewFindingCategory, RunBudgets, RunHistory, RunPolicy,
-    WorkItemPlanFlowKind,
+    FindingClassHint, HumanReason, ReviewFindingCategory, ReviewInvocationScope, RunBudgets,
+    RunHistory, RunPolicy, WorkItemPlanFlowKind,
 };
 use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
@@ -424,6 +424,71 @@ mod phase_machine {
     }
 
     #[tokio::test]
+    async fn repair_then_second_review_passes_with_one_durable_reviewer_cycle() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+
+        complete_single_candidate_review(&mut engine, repairable_verdict("missing contract")).await;
+        let after_repair = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("repair route persisted");
+        assert_eq!(
+            after_repair.single_candidate_phase,
+            Some(SingleCandidatePhase::Generate)
+        );
+        assert_eq!(after_repair.run_history.repairs_used, 1);
+
+        complete_repair_generation(&lifecycle, &mut engine, "second-review-pass");
+        let verification = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("verification generation persisted");
+        assert!(matches!(
+            verification.review_invocation_scope,
+            Some(ReviewInvocationScope::Verification { .. })
+        ));
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let completed = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("second review persisted");
+        assert_eq!(
+            completed.single_candidate_phase,
+            Some(SingleCandidatePhase::Approval)
+        );
+        assert_eq!(completed.status, WorkspaceSessionStatus::WaitingForHuman);
+        assert!(
+            !completed
+                .policy_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "verification_scope_violation"),
+            "verification must not terminate from an invocation/cycle phase mismatch"
+        );
+        let reviewer_cycles = completed
+            .run_history
+            .review_cycles
+            .iter()
+            .filter(|(key, _)| key.starts_with("review:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reviewer_cycles.len(),
+            1,
+            "repair must not create another cycle"
+        );
+        let (_, cycle) = reviewer_cycles[0];
+        assert!(cycle.initial_count <= 1);
+        assert!(cycle.verification_count <= 1);
+        assert!(cycle.repairs_used <= 1);
+        assert_eq!(cycle.repairs_used, 1);
+    }
+
+    #[tokio::test]
     async fn repeated_fingerprint_enters_the_policy_terminal_for_each_run_policy() {
         for (policy, expected_status) in [
             (
@@ -453,7 +518,15 @@ mod phase_machine {
                 .expect("terminal persisted");
             assert_eq!(persisted.status, expected_status);
             assert_eq!(persisted.run_history.repairs_used, 1);
-            assert!(persisted.human_gate_snapshot.is_some());
+            assert!(matches!(
+                persisted.human_gate_snapshot,
+                Some(ref snapshot) if snapshot.trigger == HumanReason::RepeatedFingerprint
+            ));
+            for cycle in persisted.run_history.review_cycles.values() {
+                assert!(cycle.initial_count <= 1);
+                assert!(cycle.verification_count <= 1);
+                assert!(cycle.repairs_used <= 1);
+            }
         }
     }
 
@@ -487,6 +560,19 @@ mod phase_machine {
                 .expect("terminal persisted");
             assert_eq!(persisted.status, expected_status);
             assert_ne!(persisted.status, WorkspaceSessionStatus::Failed);
+            assert!(persisted.human_gate_snapshot.is_some());
+            assert!(
+                !persisted
+                    .policy_diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "verification_scope_violation"),
+                "a Verification-scope external finding must retain its human route"
+            );
+            for cycle in persisted.run_history.review_cycles.values() {
+                assert!(cycle.initial_count <= 1);
+                assert!(cycle.verification_count <= 1);
+                assert!(cycle.repairs_used <= 1);
+            }
         }
     }
 

@@ -4,7 +4,7 @@ use super::*;
 use crate::product::lifecycle_store::workspace::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
     FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,
-    ReviewInvocationScope, ReviewPhase, WorkItemPlanFlowKind,
+    ReviewInvocationScope, ReviewPhase, RunHistory, WorkItemPlanFlowKind,
 };
 use crate::product::work_item_plan_source_store::{
     SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
@@ -25,6 +25,32 @@ fn scope_for_action(
         return durable_scope.cloned();
     }
     Some(invocation.clone())
+}
+
+/// Returns the only durable review-cycle identity and phase for a SingleCandidate
+/// reviewer invocation. A SingleCandidate review always stays attached to its
+/// ReviewerRun node, regardless of any legacy WorkItemPlan node subtype.
+pub(super) fn single_candidate_review_cycle(
+    active_node_id: Option<&str>,
+    run_history: &RunHistory,
+) -> Result<(String, ReviewPhase), String> {
+    let reviewer_node_id = active_node_id
+        .filter(|node_id| !node_id.is_empty() && *node_id != "review_unknown")
+        .ok_or_else(|| {
+            "active ReviewerRun node is unavailable for SingleCandidate review".to_string()
+        })?;
+    let cycle_key = format!("review:{reviewer_node_id}");
+    let cycle = run_history
+        .review_cycles
+        .get(&cycle_key)
+        .cloned()
+        .unwrap_or_default();
+    let phase = if cycle.initial_count == 0 && cycle.verification_count == 0 {
+        ReviewPhase::Initial
+    } else {
+        ReviewPhase::Verification
+    };
+    Ok((cycle_key, phase))
 }
 
 fn validate_single_candidate_scope(
@@ -180,26 +206,17 @@ impl WorkspaceEngine {
             return Ok(());
         }
 
-        let node_id = self
-            .active_node_id
-            .clone()
-            .unwrap_or_else(|| "review_unknown".to_string());
-        let cycle_key = self.review_cycle_key_for_active_node(&node_id);
-        let cycle = self
-            .session
-            .run_history
-            .review_cycles
-            .get(&cycle_key)
-            .cloned()
-            .unwrap_or_default();
-        let is_initial = cycle.initial_count == 0 && cycle.verification_count == 0;
-        let scope = if is_initial {
+        let node_id = self.active_node_id.as_deref().ok_or_else(|| {
+            "active ReviewerRun node is unavailable for SingleCandidate review".to_string()
+        })?;
+        let (_, phase) = single_candidate_review_cycle(Some(node_id), &self.session.run_history)?;
+        let scope = if phase == ReviewPhase::Initial {
             match self.session.review_invocation_scope.as_ref() {
                 Some(scope @ ReviewInvocationScope::Initial { .. }) => scope.clone(),
-                _ => ReviewInvocationScope::initial(self.review_revision_id(&node_id, true)),
+                _ => ReviewInvocationScope::initial(self.review_revision_id(node_id, true)),
             }
         } else {
-            let repaired_revision_id = self.review_revision_id(&node_id, false);
+            let repaired_revision_id = self.review_revision_id(node_id, false);
             // Verification scope must bind the durable report produced by compile/evaluate,
             // rather than reusing a prior invocation scope (which may still be Initial after
             // a repair). Missing durable evidence is a protocol failure, fail-closed.
@@ -341,20 +358,6 @@ impl WorkspaceEngine {
                 } => repaired_revision_id.clone(),
             })
             .unwrap_or_else(|| format!("revision:{node_id}"))
-    }
-
-    fn review_cycle_key_for_active_node(&self, node_id: &str) -> String {
-        match self.active_node_type() {
-            Some(TimelineNodeType::WorkItemPlanOutlineReview) => self
-                .latest_work_item_plan_outline_candidate()
-                .map(|candidate| format!("outline:{}", candidate.outline.id))
-                .unwrap_or_else(|_| format!("outline:{node_id}")),
-            Some(TimelineNodeType::WorkItemDraftReview) => self
-                .current_work_item_draft_candidate_payload()
-                .map(|candidate| format!("draft:{}", candidate.draft_record.outline_id))
-                .unwrap_or_else(|_| format!("draft:{node_id}")),
-            _ => format!("review:{node_id}"),
-        }
     }
 
     pub(super) fn single_candidate_mechanical_findings(
@@ -654,6 +657,54 @@ fn verification_scope_store_error(message: String, persistence_failure: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::work_item_plan_policy::ReviewCycleState;
+
+    #[test]
+    fn single_candidate_cycle_is_reviewer_node_scoped_and_counter_derived() {
+        let (initial_key, initial_phase) =
+            single_candidate_review_cycle(Some("reviewer-node"), &RunHistory::default())
+                .expect("reviewer node has an initial cycle");
+        assert_eq!(initial_key, "review:reviewer-node");
+        assert_eq!(initial_phase, ReviewPhase::Initial);
+
+        let history = RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:reviewer-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        };
+        assert_eq!(
+            single_candidate_review_cycle(Some("reviewer-node"), &history),
+            Ok((
+                "review:reviewer-node".to_string(),
+                ReviewPhase::Verification
+            ))
+        );
+
+        let outline_or_batch_history = RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "batch:generation-round".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    verification_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        };
+        assert_eq!(
+            single_candidate_review_cycle(Some("reviewer-node"), &outline_or_batch_history),
+            Ok(("review:reviewer-node".to_string(), ReviewPhase::Initial))
+        );
+        assert!(single_candidate_review_cycle(None, &RunHistory::default()).is_err());
+        assert!(
+            single_candidate_review_cycle(Some("review_unknown"), &RunHistory::default()).is_err()
+        );
+    }
 
     #[test]
     fn single_candidate_scope_rejects_initial_scope_during_verification() {

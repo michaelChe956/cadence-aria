@@ -10,7 +10,7 @@ use crate::product::work_item_plan_policy::{
     ReviewEvaluationInput, ReviewFindingCategory, ReviewInvocationScope, ReviewPhase, RunBudgets,
     RunHistory, RunHistoryDelta, RunPolicy, WorkItemPlanFlowKind, classify_review, evaluate,
 };
-use routing_scope::route_outcome_from_decision;
+use routing_scope::{route_outcome_from_decision, single_candidate_review_cycle};
 impl WorkspaceEngine {
     pub(crate) async fn complete_review(
         &mut self,
@@ -157,7 +157,35 @@ impl WorkspaceEngine {
         verdict: &ReviewVerdict,
     ) -> Option<(ReviewInvocationScope, RoutingAction, RunHistory)> {
         let envelope_value = serde_json::to_value(verdict).ok()?;
-        let cycle_key = self.review_cycle_key(node_id, verdict);
+        let (cycle_key, single_candidate_phase) =
+            if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                match single_candidate_review_cycle(Some(node_id), &self.session.run_history) {
+                    Ok((cycle_key, phase)) => (cycle_key, Some(phase)),
+                    Err(message) => {
+                        let scope =
+                            self.session
+                                .review_invocation_scope
+                                .clone()
+                                .unwrap_or_else(|| {
+                                    ReviewInvocationScope::initial("unavailable-reviewer-node")
+                                });
+                        return Some((
+                            scope,
+                            RoutingAction::AbortFatal {
+                                reason: FatalReason::ProtocolViolation,
+                                diagnostics: vec![PolicyDiagnostic {
+                                    code: "verification_scope_violation".to_string(),
+                                    message,
+                                    field: Some("active_node_id".to_string()),
+                                }],
+                            },
+                            self.session.run_history.clone(),
+                        ));
+                    }
+                }
+            } else {
+                (self.review_cycle_key(node_id, verdict), None)
+            };
         let cycle = self
             .session
             .run_history
@@ -165,11 +193,13 @@ impl WorkspaceEngine {
             .get(&cycle_key)
             .cloned()
             .unwrap_or_default();
-        let phase = if cycle.initial_count == 0 && cycle.verification_count == 0 {
-            ReviewPhase::Initial
-        } else {
-            ReviewPhase::Verification
-        };
+        let phase = single_candidate_phase.unwrap_or(
+            if cycle.initial_count == 0 && cycle.verification_count == 0 {
+                ReviewPhase::Initial
+            } else {
+                ReviewPhase::Verification
+            },
+        );
         let invocation = match self.policy_invocation(phase, &cycle_key) {
             Ok(scope) => scope,
             Err(action) => {
