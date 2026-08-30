@@ -4,86 +4,33 @@ use super::history_compaction::{
 };
 use super::review_context::{
     PlanReviewSource, append_review_context_section, load_plan_review_context,
+    single_candidate_dependency_graph,
 };
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
+use crate::product::work_item_contract::{
+    build_dependency_contract_graph, project_contract_capability_coverage,
+};
 use crate::product::work_item_plan_policy::{ReviewFindingCategory, ReviewInvocationScope};
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-fn single_candidate_dependency_graph(
-    items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
-) -> Result<serde_json::Value, String> {
-    let mut item_ids = BTreeSet::new();
-    for item in items {
-        let item_id = item.contract.identity.logical_work_item_id.as_str();
-        if item_id.trim().is_empty() {
-            return Err(
-                "single-candidate review IR contains an empty work item identity".to_string(),
-            );
-        }
-        if !item_ids.insert(item_id.to_string()) {
-            return Err(format!(
-                "single-candidate review IR contains duplicate work item identity `{item_id}`"
-            ));
-        }
+// 余量按完整多 WI plan 的增长预留；接近上限时先实测，再放宽至整百级。
+pub(crate) const SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES: usize = 64 * 1024;
+
+pub(crate) fn ensure_single_candidate_review_prompt_budget(prompt: &str) -> Result<(), String> {
+    if prompt.len() <= SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES {
+        Ok(())
+    } else {
+        Err(format!(
+            "single-candidate reviewer prompt exceeds byte budget: actual={} max={}",
+            prompt.len(),
+            SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES
+        ))
     }
-    let mut remaining_dependencies = BTreeMap::new();
-    let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut edges = Vec::new();
-    for item in items {
-        let item_id = item.contract.identity.logical_work_item_id.clone();
-        let mut dependencies = BTreeSet::new();
-        for dependency in &item.contract.depends_on {
-            if !item_ids.contains(dependency) {
-                return Err(format!(
-                    "single-candidate review IR dependency `{dependency}` for `{item_id}` is missing"
-                ));
-            }
-            if dependency == &item_id {
-                return Err(format!(
-                    "single-candidate review IR work item `{item_id}` depends on itself"
-                ));
-            }
-            if dependencies.insert(dependency.clone()) {
-                dependents
-                    .entry(dependency.clone())
-                    .or_default()
-                    .insert(item_id.clone());
-                edges.push(format!("{dependency} -> {item_id}"));
-            }
-        }
-        remaining_dependencies.insert(item_id, dependencies);
-    }
-    edges.sort();
-    let mut ready = remaining_dependencies
-        .iter()
-        .filter_map(|(item_id, dependencies)| dependencies.is_empty().then_some(item_id.clone()))
-        .collect::<BTreeSet<_>>();
-    let mut topological_order = Vec::with_capacity(items.len());
-    while let Some(item_id) = ready.iter().next().cloned() {
-        ready.remove(&item_id);
-        topological_order.push(item_id.clone());
-        for dependent in dependents.get(&item_id).into_iter().flatten() {
-            let dependencies = remaining_dependencies
-                .get_mut(dependent)
-                .expect("dependent must be present in remaining dependency map");
-            dependencies.remove(&item_id);
-            if dependencies.is_empty() {
-                ready.insert(dependent.clone());
-            }
-        }
-    }
-    if topological_order.len() != items.len() {
-        return Err("single-candidate review IR dependency graph contains a cycle".to_string());
-    }
-    Ok(json!({
-        "topological_order": topological_order,
-        "edges": edges,
-    }))
 }
 
 fn review_finding_category_whitelist() -> String {
@@ -192,6 +139,7 @@ impl WorkspaceEngine {
                         "single-candidate review invocation scope is not durable".to_string()
                     })?;
                 input.prompt.push_str(&review_scope_instructions(scope)?);
+                ensure_single_candidate_review_prompt_budget(&input.prompt)?;
             }
             return Ok(input);
         }
@@ -574,6 +522,17 @@ impl WorkspaceEngine {
             })
             .collect::<Vec<_>>();
         let dependency_graph = single_candidate_dependency_graph(&ir_record.ir.items)?;
+        let canonical_contracts = ir_record
+            .ir
+            .items
+            .iter()
+            .map(|item| item.contract.clone())
+            .collect::<Vec<_>>();
+        let dependency_contract_graph = build_dependency_contract_graph(&canonical_contracts)
+            .map_err(|report| {
+                format!("single-candidate review dependency contract graph failed: {report:?}")
+            })?;
+        let capability_coverage = project_contract_capability_coverage(&dependency_contract_graph);
         let cross_item_contracts = json!({
             "supplies": ir_record.ir.items.iter().map(|item| json!({
                 "work_item_id": item.contract.identity.logical_work_item_id,
@@ -614,6 +573,11 @@ impl WorkspaceEngine {
         append_review_context_section(&mut prompt, "Dependency Contract Graph", &dependency_graph)?;
         append_review_context_section(
             &mut prompt,
+            "Reviewer Capability Coverage Projection",
+            &capability_coverage,
+        )?;
+        append_review_context_section(
+            &mut prompt,
             "Cross-Item Contract Supply / Demand",
             &cross_item_contracts,
         )?;
@@ -631,8 +595,21 @@ impl WorkspaceEngine {
             }),
         )?;
         prompt.push_str(
-            "\n审核边界：只审核 Plan Review Context 中的权威 canonical contract、依赖拓扑、跨 WorkItem 契约供需与机械校验摘要；不得把 session markdown 或 lifecycle legacy DTO 当作候选事实来源。\n",
+            "\n审核边界：只审核 Plan Review Context 中的权威 canonical contract、依赖拓扑、跨 WorkItem 契约供需与机械校验摘要；不得把 session markdown 或 lifecycle legacy DTO 当作候选事实来源。\n\
+             能力覆盖机械规则：当任一 coverage entry 的 `missing_capabilities` 非空时，必须返回 `severity=must_fix`、`category=contract_gap` 的 finding，并按现有 scope 约定提供 `class_hint=repairable`；`evidence` 必须明确指出具体 `from -> to` edge、`contract_id` 与缺失 capability，不得以 `pass` 或 advisory 掩盖该缺口。\n",
         );
+        for coverage in capability_coverage
+            .iter()
+            .filter(|coverage| !coverage.missing_capabilities.is_empty())
+        {
+            prompt.push_str(&format!(
+                "- coverage gap evidence required: edge {} -> {}, contract_id `{}`, missing_capabilities [{}]\n",
+                coverage.from,
+                coverage.to,
+                coverage.contract_id,
+                coverage.missing_capabilities.join(", "),
+            ));
+        }
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),
@@ -648,6 +625,7 @@ impl WorkspaceEngine {
             "\n只能在契约、依赖、供需匹配或机械校验影响发布时返回 revise；需要产品判断时返回 needs_human。",
             &self.routing_reference_context(),
         ));
+        ensure_single_candidate_review_prompt_budget(&prompt)?;
         let working_dir = self
             .session
             .repository_path

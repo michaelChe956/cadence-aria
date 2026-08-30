@@ -28,6 +28,17 @@ pub struct DependencyContractGraph {
     pub edges: Vec<DependencyContractEdge>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContractCapabilityCoverage {
+    pub from: String,
+    pub to: String,
+    pub contract_id: String,
+    pub required_capabilities: Vec<String>,
+    pub provided_capabilities: Vec<String>,
+    pub missing_capabilities: Vec<String>,
+    pub compatibility_policy: ContractCompatibilityPolicy,
+}
+
 pub fn build_dependency_contract_graph(
     contracts: &[CanonicalWorkItemContract],
 ) -> Result<DependencyContractGraph, ContractValidationReport> {
@@ -153,6 +164,89 @@ fn report_duplicate_edges(
     }
 }
 
+fn provided_capabilities_for_contract<'a>(
+    provider: Option<&'a CanonicalWorkItemContract>,
+    contract_id: &str,
+) -> BTreeSet<&'a str> {
+    provider
+        .into_iter()
+        .flat_map(|provider| provider.output_contracts.iter())
+        .filter(|output| output.contract_id == contract_id)
+        .flat_map(|output| output.capabilities.iter().map(String::as_str))
+        .collect()
+}
+
+fn missing_capabilities_for_policy(
+    required_capabilities: &[String],
+    provided_capabilities: &BTreeSet<&str>,
+    compatibility_policy: &ContractCompatibilityPolicy,
+) -> Vec<String> {
+    let required_capabilities = required_capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    match compatibility_policy {
+        ContractCompatibilityPolicy::RequireAll => required_capabilities
+            .difference(provided_capabilities)
+            .map(|capability| (*capability).to_string())
+            .collect(),
+        ContractCompatibilityPolicy::RequireAny
+            if !required_capabilities.is_empty()
+                && required_capabilities.is_disjoint(provided_capabilities) =>
+        {
+            required_capabilities
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        }
+        ContractCompatibilityPolicy::RequireAny => Vec::new(),
+    }
+}
+
+pub(crate) fn project_contract_capability_coverage(
+    graph: &DependencyContractGraph,
+) -> Vec<ContractCapabilityCoverage> {
+    graph
+        .edges
+        .iter()
+        .flat_map(|edge| {
+            edge.required_contracts.iter().map(|required| {
+                let provided_capabilities = provided_capabilities_for_contract(
+                    graph.contracts.get(&edge.from),
+                    &required.contract_id,
+                );
+                let provided_capabilities = provided_capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_string())
+                    .collect::<Vec<_>>();
+                let provided_set = provided_capabilities
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                ContractCapabilityCoverage {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    contract_id: required.contract_id.clone(),
+                    required_capabilities: required
+                        .required_capabilities
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    missing_capabilities: missing_capabilities_for_policy(
+                        &required.required_capabilities,
+                        &provided_set,
+                        &required.compatibility_policy,
+                    ),
+                    provided_capabilities,
+                    compatibility_policy: required.compatibility_policy.clone(),
+                }
+            })
+        })
+        .collect()
+}
+
 fn report_contract_requirements(
     graph: &DependencyContractGraph,
     findings: &mut Vec<ContractValidationFinding>,
@@ -175,12 +269,8 @@ fn report_contract_requirements(
         };
 
         for required in &edge.required_contracts {
-            let provided_capabilities = provider
-                .output_contracts
-                .iter()
-                .filter(|output| output.contract_id == required.contract_id)
-                .flat_map(|output| output.capabilities.iter().map(String::as_str))
-                .collect::<BTreeSet<_>>();
+            let provided_capabilities =
+                provided_capabilities_for_contract(Some(provider), &required.contract_id);
             if provided_capabilities.is_empty()
                 && !provider
                     .output_contracts
@@ -200,31 +290,18 @@ fn report_contract_requirements(
                 continue;
             }
 
-            let required_capabilities = required
-                .required_capabilities
-                .iter()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>();
-            let missing_capabilities = match required.compatibility_policy {
-                ContractCompatibilityPolicy::RequireAll => required_capabilities
-                    .difference(&provided_capabilities)
-                    .copied()
-                    .collect::<Vec<_>>(),
-                ContractCompatibilityPolicy::RequireAny
-                    if !required_capabilities.is_empty()
-                        && required_capabilities.is_disjoint(&provided_capabilities) =>
-                {
-                    required_capabilities.iter().copied().collect::<Vec<_>>()
-                }
-                ContractCompatibilityPolicy::RequireAny => Vec::new(),
-            };
+            let missing_capabilities = missing_capabilities_for_policy(
+                &required.required_capabilities,
+                &provided_capabilities,
+                &required.compatibility_policy,
+            );
 
             for capability in missing_capabilities {
                 findings.push(error_finding(
                     "required_capability_missing",
                     &edge.to,
                     Some(&required.contract_id),
-                    Some(capability),
+                    Some(&capability),
                     format!(
                         "provider {} contract {} lacks capability {capability} required by {}",
                         edge.from, required.contract_id, edge.to

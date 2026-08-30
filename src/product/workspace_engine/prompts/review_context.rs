@@ -15,6 +15,7 @@ use crate::product::work_item_projection::{
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::workspace_engine::WorkspaceEngine;
+use serde_json::json;
 
 pub(super) struct PlanReviewContext {
     pub(super) story_design_traceability: Vec<String>,
@@ -42,6 +43,78 @@ pub(super) fn append_review_context_section(
     );
     prompt.push('\n');
     Ok(())
+}
+
+pub(super) fn single_candidate_dependency_graph(
+    items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
+) -> Result<serde_json::Value, String> {
+    let mut item_ids = BTreeSet::new();
+    for item in items {
+        let item_id = item.contract.identity.logical_work_item_id.as_str();
+        if item_id.trim().is_empty() {
+            return Err(
+                "single-candidate review IR contains an empty work item identity".to_string(),
+            );
+        }
+        if !item_ids.insert(item_id.to_string()) {
+            return Err(format!(
+                "single-candidate review IR contains duplicate work item identity `{item_id}`"
+            ));
+        }
+    }
+    let mut remaining_dependencies = BTreeMap::new();
+    let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut edges = Vec::new();
+    for item in items {
+        let item_id = item.contract.identity.logical_work_item_id.clone();
+        let mut dependencies = BTreeSet::new();
+        for dependency in &item.contract.depends_on {
+            if !item_ids.contains(dependency) {
+                return Err(format!(
+                    "single-candidate review IR dependency `{dependency}` for `{item_id}` is missing"
+                ));
+            }
+            if dependency == &item_id {
+                return Err(format!(
+                    "single-candidate review IR work item `{item_id}` depends on itself"
+                ));
+            }
+            if dependencies.insert(dependency.clone()) {
+                dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .insert(item_id.clone());
+                edges.push(format!("{dependency} -> {item_id}"));
+            }
+        }
+        remaining_dependencies.insert(item_id, dependencies);
+    }
+    edges.sort();
+    let mut ready = remaining_dependencies
+        .iter()
+        .filter_map(|(item_id, dependencies)| dependencies.is_empty().then_some(item_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut topological_order = Vec::with_capacity(items.len());
+    while let Some(item_id) = ready.iter().next().cloned() {
+        ready.remove(&item_id);
+        topological_order.push(item_id.clone());
+        for dependent in dependents.get(&item_id).into_iter().flatten() {
+            let dependencies = remaining_dependencies
+                .get_mut(dependent)
+                .expect("dependent must be present in remaining dependency map");
+            dependencies.remove(&item_id);
+            if dependencies.is_empty() {
+                ready.insert(dependent.clone());
+            }
+        }
+    }
+    if topological_order.len() != items.len() {
+        return Err("single-candidate review IR dependency graph contains a cycle".to_string());
+    }
+    Ok(json!({
+        "topological_order": topological_order,
+        "edges": edges,
+    }))
 }
 
 #[derive(Clone, Copy)]

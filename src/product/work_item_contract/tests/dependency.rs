@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::canonical_contract_fixture;
 use crate::product::{
     models::DependencyGraphRevision,
     work_item_contract::{
-        CanonicalWorkItemContract, ContractCompatibilityPolicy, DependencyContractEdge,
-        DependencyContractGraph, PromisedOutputContract, RequiredDependencyContract,
-        RequiredInputContract, build_dependency_contract_graph, validate_dependency_contract_graph,
+        CanonicalWorkItemContract, ContractCapabilityCoverage, ContractCompatibilityPolicy,
+        DependencyContractEdge, DependencyContractGraph, PromisedOutputContract,
+        RequiredDependencyContract, RequiredInputContract, build_dependency_contract_graph,
+        project_contract_capability_coverage, validate_dependency_contract_graph,
     },
 };
 
@@ -49,6 +50,124 @@ fn finding_count(graph: &DependencyContractGraph, code: &str) -> usize {
         .iter()
         .filter(|finding| finding.code == code)
         .count()
+}
+
+#[test]
+fn reviewer_capability_coverage_projection_complete_graph_is_field_exact() {
+    let provider = provider_contract_fixture(&["capability.b", "capability.a"]);
+    let consumer =
+        consumer_contract_fixture(&["capability.a"], ContractCompatibilityPolicy::RequireAll);
+    let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
+
+    assert_eq!(
+        project_contract_capability_coverage(&graph),
+        vec![ContractCapabilityCoverage {
+            from: "WI-01".into(),
+            to: "WI-02".into(),
+            contract_id: "contract.workflow".into(),
+            required_capabilities: vec!["capability.a".into()],
+            provided_capabilities: vec!["capability.a".into(), "capability.b".into()],
+            missing_capabilities: vec![],
+            compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+        }]
+    );
+}
+
+#[test]
+fn reviewer_capability_coverage_projection_gap_matches_validator_missing_set() {
+    let provider = provider_contract_fixture(&["capability.present"]);
+    let consumer = consumer_contract_fixture(
+        &["capability.missing", "capability.present"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
+    let coverage = project_contract_capability_coverage(&graph);
+    let report = validate_dependency_contract_graph(&graph);
+    let projected_missing = coverage
+        .iter()
+        .flat_map(|entry| entry.missing_capabilities.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let validator_missing = report
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "required_capability_missing")
+        .filter_map(|finding| finding.capability_ref.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(projected_missing, validator_missing);
+}
+
+#[test]
+fn reviewer_capability_coverage_projection_require_all_multi_gap_is_sorted_and_matches_validator() {
+    let provider = provider_contract_fixture(&["capability.present"]);
+    let consumer = consumer_contract_fixture(
+        &["capability.z", "capability.present", "capability.a"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
+    let coverage = project_contract_capability_coverage(&graph);
+    let report = validate_dependency_contract_graph(&graph);
+    let projected_missing = coverage
+        .iter()
+        .flat_map(|entry| entry.missing_capabilities.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let validator_missing = report
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "required_capability_missing")
+        .filter_map(|finding| finding.capability_ref.clone())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(projected_missing, validator_missing);
+    assert_eq!(
+        coverage[0].missing_capabilities,
+        vec!["capability.a", "capability.z"]
+    );
+}
+
+#[test]
+fn reviewer_capability_coverage_projection_missing_contract_fails_closed() {
+    let mut consumer = consumer_contract_fixture(
+        &["capability.missing"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    consumer.input_contracts[0].contract_id = "contract.unknown".to_string();
+    let provider = provider_contract_fixture(&["capability.present"]);
+    let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
+    let coverage = project_contract_capability_coverage(&graph);
+
+    assert_eq!(coverage.len(), 1);
+    assert!(coverage[0].provided_capabilities.is_empty());
+    assert_eq!(coverage[0].missing_capabilities, vec!["capability.missing"]);
+}
+
+#[test]
+fn reviewer_capability_coverage_projection_require_any_semantics_are_stable() {
+    let provider = provider_contract_fixture(&["capability.present"]);
+    let any_complete = consumer_contract_fixture(
+        &["capability.missing", "capability.present"],
+        ContractCompatibilityPolicy::RequireAny,
+    );
+    let mut any_gap = consumer_contract_fixture(
+        &["capability.z", "capability.a"],
+        ContractCompatibilityPolicy::RequireAny,
+    );
+    any_gap.identity.logical_work_item_id = "WI-03".into();
+    any_gap.input_contracts[0].provider_logical_work_item_id = "WI-01".into();
+    let complete_graph =
+        build_dependency_contract_graph(&[provider.clone(), any_complete]).unwrap();
+    let gap_graph = build_dependency_contract_graph(&[provider, any_gap]).unwrap();
+
+    assert!(
+        project_contract_capability_coverage(&complete_graph)[0]
+            .missing_capabilities
+            .is_empty()
+    );
+    assert_eq!(
+        project_contract_capability_coverage(&gap_graph)[0].missing_capabilities,
+        vec!["capability.a", "capability.z"]
+    );
 }
 
 #[test]

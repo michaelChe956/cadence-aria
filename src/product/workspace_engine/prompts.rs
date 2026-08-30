@@ -15,7 +15,10 @@ mod revision;
 
 use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
 #[cfg(test)]
-pub(crate) use review::review_scope_instructions;
+pub(crate) use review::{
+    SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,
+    review_scope_instructions,
+};
 
 /// 聚合视野 prompt 的唯一 marker（`aggregate_story_scope_prompt` / `aggregate_design_scope_prompt` /
 /// `aggregate_work_item_target_scope_prompt` 均以 `## 聚合代码库成员清单` 开头）。用于在

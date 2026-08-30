@@ -3,6 +3,7 @@ use crate::cross_cutting::structured_output::StructuredOutputErrorCode;
 use crate::product::models::WorkspaceType;
 
 const BOUNDARY_EXAMPLES_MARKER: &str = "[design_reviewer_boundary_examples]";
+const REVIEWER_COVERAGE_TITLE: &str = "Reviewer Capability Coverage Projection";
 const BOUNDARY_EXAMPLES_FINAL_LINE: &str = "命中才可 must_fix，未命中最高 suggestion。";
 
 fn design_candidate_with_abstract_traceability() -> String {
@@ -160,14 +161,29 @@ fn design_reviewer_boundary_non_design_prompts_exclude_examples() {
             "{workspace_type:?} reviewer prompt must not include design examples: {}",
             input.prompt
         );
+        assert!(!input.prompt.contains(REVIEWER_COVERAGE_TITLE));
     }
 
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_non_design_boundary_work_item_plan");
+    assert_eq!(
+        engine.session().flow_kind,
+        crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy
+    );
     let input = engine
         .build_review_input()
         .expect("work item plan review input");
     assert_eq!(input.prompt.matches(BOUNDARY_EXAMPLES_MARKER).count(), 0);
+    assert!(!input.prompt.contains(REVIEWER_COVERAGE_TITLE));
+
+    let design_engine = design_review_engine(
+        "sess_non_design_boundary_design",
+        &design_candidate_with_abstract_traceability(),
+    );
+    let input = design_engine
+        .build_review_input()
+        .expect("design review input");
+    assert!(!input.prompt.contains(REVIEWER_COVERAGE_TITLE));
 }
 
 #[test]
