@@ -863,6 +863,12 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "target_contract_refs 仅逐字引用已登记 input/output contract_id",
         "requirement_refs 仅引用清单；清单外 REQ-* 拒绝",
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "同 contract_id：provider output_capabilities 覆盖 WI input_contracts required_capabilities。",
+        "require_all=全部覆盖（缺一项→required_capability_missing）；require_any=至少一项相交（交集空→required_capability_missing）。",
+        "端点/动作如 `GET /api/levels` 须显式声明；字段/记录不隐含端点。",
+        "反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。",
+        "正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。",
+        "canonical fail-closed：required_capability_missing 拒绝 plan。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
         "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
         "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
@@ -981,8 +987,9 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         1
     );
     assert!(
-        prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
-        "markdown prompt must remain below the existing quality budget: {} bytes",
+        prompt.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "markdown prompt must remain below its dedicated quality budget: {} bytes",
         prompt.len()
     );
 }

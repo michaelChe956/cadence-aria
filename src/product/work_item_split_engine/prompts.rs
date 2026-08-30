@@ -55,6 +55,11 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 #[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 
+/// SingleCandidate markdown author 的质量预算。契约能力覆盖教学注入后从 15_600 上调至
+/// 16_200；该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
+#[cfg(test)]
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 16_200;
+
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
@@ -147,6 +152,12 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          target_contract_refs 仅逐字引用已登记 input/output contract_id。\n\
          requirement_refs 仅引用清单；清单外 REQ-* 拒绝。\n\
          handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）。\n\
+         同 contract_id：provider output_capabilities 覆盖 WI input_contracts required_capabilities。\n\
+         require_all=全部覆盖（缺一项→required_capability_missing）；require_any=至少一项相交（交集空→required_capability_missing）。\n\
+         端点/动作如 `GET /api/levels` 须显式声明；字段/记录不隐含端点。\n\
+         反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。\n\
+         正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。\n\
+         canonical fail-closed：required_capability_missing 拒绝 plan。\n\
          每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单。\n\n"
     )
 }
