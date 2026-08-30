@@ -7,8 +7,8 @@ use crate::product::work_item_plan_compiler::{
     WORK_ITEM_PLAN_COMPILER_VERSION,
 };
 use crate::product::work_item_plan_policy::{
-    FindingClassHint, HumanReason, ReviewFindingCategory, ReviewInvocationScope, RunBudgets,
-    RunHistory, RunPolicy, WorkItemPlanFlowKind,
+    FindingClassHint, HumanReason, ReviewCycleState, ReviewFindingCategory, ReviewInvocationScope,
+    RunBudgets, RunHistory, RunPolicy, WorkItemPlanFlowKind,
 };
 use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
@@ -18,6 +18,9 @@ use crate::web::workspace_ws_types::{
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+
+use crate::product::workspace_engine::review::policy_routing::RoutingAction;
 
 fn single_candidate_record(
     lifecycle: &LifecycleStore,
@@ -382,7 +385,7 @@ mod phase_machine {
     }
 
     #[tokio::test]
-    async fn repairable_runs_once_then_verification_uses_real_mechanical_report_ref() {
+    async fn ensure_reconciles_stale_memory_scope_from_durable_candidate_and_cycle() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         single_candidate_record(
@@ -391,6 +394,108 @@ mod phase_machine {
             SingleCandidatePhase::Evaluate,
             RunPolicy::Interactive,
         );
+        let repaired_refs = persist_candidate_artifacts(&lifecycle, &engine, "r23-repaired");
+        update_durable_candidate_refs(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            repaired_refs,
+        );
+        let durable_candidate = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load durable candidate");
+        let current_ir_ref = durable_candidate
+            .plan_candidate_ir_ref
+            .clone()
+            .expect("durable candidate IR");
+        let report_ref = durable_candidate
+            .mechanical_report_ref
+            .clone()
+            .expect("durable mechanical report");
+        let mut durable = durable_candidate;
+        durable.review_invocation_scope = Some(ReviewInvocationScope::verification(
+            BTreeSet::new(),
+            current_ir_ref.clone(),
+            report_ref,
+        ));
+        durable.run_history = RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:new-reviewer-node".to_string(),
+                ReviewCycleState::default(),
+            )]),
+            ..RunHistory::default()
+        };
+        write_json(
+            &lifecycle
+                .app_paths()
+                .issue_root(&durable.project_id, &durable.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", durable.id)),
+            &durable,
+        )
+        .expect("persist durable current candidate and new-node cycle");
+
+        // Simulate r23: the worker retained a round-one scope and candidate while the
+        // durable session has the current candidate/report and a different reviewer node.
+        engine.session.review_invocation_scope = Some(ReviewInvocationScope::initial("stale-ir"));
+        engine.session.plan_candidate_ir_ref = Some("stale-ir".to_string());
+        engine.active_node_id = Some("new-reviewer-node".to_string());
+
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("ensure must reconcile from durable state");
+
+        let expected_scope = ReviewInvocationScope::initial(current_ir_ref.clone());
+        assert_eq!(
+            engine.session().review_invocation_scope,
+            Some(expected_scope.clone())
+        );
+        expected_scope
+            .validate_digest()
+            .expect("reconciled Initial scope digest must be valid");
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load reconciled durable session");
+        assert_eq!(durable.review_invocation_scope, Some(expected_scope));
+
+        let action = engine
+            .work_item_policy_action("new-reviewer-node", &pass_verdict())
+            .expect("policy action");
+        assert!(
+            !matches!(action, RoutingAction::AbortFatal { .. }),
+            "durable-first reconciliation must not produce a policy fatal: {action:?}"
+        );
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load verdict-updated durable session");
+        assert_eq!(
+            durable
+                .run_history
+                .review_cycles
+                .get("review:new-reviewer-node")
+                .expect("new reviewer node cycle")
+                .initial_count,
+            1,
+            "the merged verdict must consume the new node's Initial review budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn repairable_runs_once_then_same_node_recovery_uses_real_mechanical_report_ref() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        engine.start_review().await;
+        let initial_node_id = engine
+            .active_node_id
+            .clone()
+            .expect("start_review creates the initial ReviewerRun node");
 
         complete_single_candidate_review(&mut engine, repairable_verdict("missing contract")).await;
 
@@ -404,22 +509,41 @@ mod phase_machine {
             "repair provider must be reserved after durable Generate transition"
         );
         complete_repair_generation(&lifecycle, &mut engine, "verification");
-        let verified = lifecycle
+        let evaluated = lifecycle
             .get_workspace_session(&engine.session().session_id)
             .expect("verification refs persisted");
         assert_eq!(
-            verified.single_candidate_phase,
+            evaluated.single_candidate_phase,
             Some(SingleCandidatePhase::Evaluate)
         );
+        assert!(matches!(
+            evaluated.review_invocation_scope,
+            Some(ReviewInvocationScope::Initial { .. })
+        ));
+
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("same ReviewerRun node must materialize Verification from durable refs");
+        let verified = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("verification scope persisted");
         let scope = verified
             .review_invocation_scope
             .expect("verification scope persisted");
         match scope {
             crate::product::work_item_plan_policy::ReviewInvocationScope::Verification {
+                repaired_revision_id,
                 mechanical_report_ref: persisted_report_ref,
                 ..
-            } => assert_eq!(persisted_report_ref, mechanical_report_ref(&engine)),
-            other => panic!("expected verification scope, got {other:?}"),
+            } => {
+                assert_eq!(
+                    repaired_revision_id,
+                    verified.plan_candidate_ir_ref.unwrap()
+                );
+                assert_eq!(persisted_report_ref, mechanical_report_ref(&engine));
+            }
+            other => panic!("expected verification scope for {initial_node_id}, got {other:?}"),
         }
     }
 
@@ -433,7 +557,11 @@ mod phase_machine {
             SingleCandidatePhase::Evaluate,
             RunPolicy::Interactive,
         );
-
+        engine.start_review().await;
+        let node_a = engine
+            .active_node_id
+            .clone()
+            .expect("start_review creates round-one ReviewerRun node");
         complete_single_candidate_review(&mut engine, repairable_verdict("missing contract")).await;
         let after_repair = lifecycle
             .get_workspace_session(&engine.session().session_id)
@@ -445,13 +573,39 @@ mod phase_machine {
         assert_eq!(after_repair.run_history.repairs_used, 1);
 
         complete_repair_generation(&lifecycle, &mut engine, "second-review-pass");
-        let verification = lifecycle
+        let evaluated = lifecycle
             .get_workspace_session(&engine.session().session_id)
-            .expect("verification generation persisted");
+            .expect("repaired evaluation persisted");
         assert!(matches!(
-            verification.review_invocation_scope,
-            Some(ReviewInvocationScope::Verification { .. })
+            evaluated.review_invocation_scope,
+            Some(ReviewInvocationScope::Initial { .. })
         ));
+
+        engine.start_review().await;
+        let node_b = engine
+            .active_node_id
+            .clone()
+            .expect("start_review creates a new ReviewerRun node for round two");
+        assert_ne!(
+            node_a, node_b,
+            "each review start must create a distinct node"
+        );
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("new node must materialize Initial scope");
+        let second_scope = engine
+            .session()
+            .review_invocation_scope
+            .clone()
+            .expect("scope materialized for node B");
+        assert!(matches!(
+            second_scope,
+            ReviewInvocationScope::Initial { .. }
+        ));
+        second_scope
+            .validate_digest()
+            .expect("node B initial scope digest is valid");
 
         complete_single_candidate_review(&mut engine, pass_verdict()).await;
 
@@ -468,7 +622,7 @@ mod phase_machine {
                 .policy_diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "verification_scope_violation"),
-            "verification must not terminate from an invocation/cycle phase mismatch"
+            "node rotation must not terminate from an invocation/cycle phase mismatch"
         );
         let reviewer_cycles = completed
             .run_history
@@ -476,16 +630,12 @@ mod phase_machine {
             .iter()
             .filter(|(key, _)| key.starts_with("review:"))
             .collect::<Vec<_>>();
-        assert_eq!(
-            reviewer_cycles.len(),
-            1,
-            "repair must not create another cycle"
-        );
-        let (_, cycle) = reviewer_cycles[0];
-        assert!(cycle.initial_count <= 1);
-        assert!(cycle.verification_count <= 1);
-        assert!(cycle.repairs_used <= 1);
-        assert_eq!(cycle.repairs_used, 1);
+        assert_eq!(reviewer_cycles.len(), 2, "each ReviewerRun owns one cycle");
+        for (_, cycle) in reviewer_cycles {
+            assert!(cycle.initial_count <= 1);
+            assert!(cycle.verification_count <= 1);
+            assert!(cycle.repairs_used <= 1);
+        }
     }
 
     #[tokio::test]
@@ -508,9 +658,14 @@ mod phase_machine {
                 SingleCandidatePhase::Evaluate,
                 policy,
             );
+            engine.start_review().await;
             let finding = repairable_verdict("duplicate contract finding");
             complete_single_candidate_review(&mut engine, finding.clone()).await;
             complete_repair_generation(&lifecycle, &mut engine, "repeated");
+            engine
+                .ensure_review_invocation_scope()
+                .await
+                .expect("same ReviewerRun must materialize Verification after repair");
             complete_single_candidate_review(&mut engine, finding).await;
 
             let persisted = lifecycle
@@ -550,9 +705,14 @@ mod phase_machine {
                 SingleCandidatePhase::Evaluate,
                 policy,
             );
+            engine.start_review().await;
             complete_single_candidate_review(&mut engine, repairable_verdict("first finding"))
                 .await;
             complete_repair_generation(&lifecycle, &mut engine, "budget");
+            engine
+                .ensure_review_invocation_scope()
+                .await
+                .expect("same ReviewerRun must materialize Verification after repair");
             complete_single_candidate_review(&mut engine, repairable_verdict("new finding")).await;
 
             let persisted = lifecycle

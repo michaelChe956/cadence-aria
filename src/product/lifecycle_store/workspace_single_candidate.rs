@@ -318,8 +318,8 @@ impl LifecycleStore {
         })
     }
 
-    /// Persist the immutable mechanical report produced by Evaluate. A repaired candidate
-    /// creates its verification scope only after its matching report is durable.
+    /// Persist the immutable mechanical report produced by Evaluate. Invocation scope is
+    /// materialized by reviewer startup ensure from the current ReviewerRun cycle.
     pub fn compare_and_save_single_candidate_evaluation(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -372,18 +372,6 @@ impl LifecycleStore {
                 None => {}
             }
             stored.mechanical_report_ref = Some(mechanical_report_ref.to_string());
-            if stored.run_history.repairs_used > 0 {
-                stored.review_invocation_scope = Some(
-                    crate::product::work_item_plan_policy::ReviewInvocationScope::verification(
-                        stored.run_history.seen_fingerprints.clone(),
-                        stored
-                            .plan_candidate_ir_ref
-                            .clone()
-                            .expect("validated generated IR ref"),
-                        mechanical_report_ref.to_string(),
-                    ),
-                );
-            }
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(&session_path, &stored)?;
             Ok(stored)
@@ -558,7 +546,7 @@ mod tests {
         CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
     };
     use crate::product::models::{ProviderName, WorkspaceType};
-    use crate::product::work_item_plan_policy::RunPolicy;
+    use crate::product::work_item_plan_policy::{ReviewInvocationScope, RunHistory, RunPolicy};
 
     #[test]
     fn single_candidate_provider_start_reservation_is_one_shot_and_durable() {
@@ -597,6 +585,64 @@ mod tests {
             .expect("replay provider start");
         assert!(!did_replay);
         assert_eq!(replayed, started);
+    }
+
+    #[test]
+    fn single_candidate_evaluation_persists_report_without_upgrading_invocation_scope() {
+        let temp = tempdir().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+        let mut session = store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    run_policy: RunPolicy::Interactive,
+                    rollout_snapshot: true,
+                }),
+            })
+            .expect("create single candidate session");
+        session.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
+        session.work_item_plan_source_revision_ref = Some(
+            "project/project_0001/issue/issue_0001/plan/entity_0001/source_revision/source-001"
+                .to_string(),
+        );
+        session.plan_candidate_ir_ref = Some(
+            "project/project_0001/issue/issue_0001/plan/entity_0001/plan_candidate_ir/ir-001"
+                .to_string(),
+        );
+        let initial_scope = ReviewInvocationScope::initial("review:node-a");
+        session.review_invocation_scope = Some(initial_scope.clone());
+        session.run_history = RunHistory {
+            repairs_used: 1,
+            ..RunHistory::default()
+        };
+        write_json(
+            &store
+                .workspace_sessions_root("project_0001", "issue_0001")
+                .join(format!("{}.json", session.id)),
+            &session,
+        )
+        .expect("seed evaluate session");
+
+        let report_ref =
+            "project/project_0001/issue/issue_0001/plan/entity_0001/mechanical_report/report-001";
+        let expected = store
+            .get_workspace_session(&session.id)
+            .expect("load evaluate session");
+        let saved = store
+            .compare_and_save_single_candidate_evaluation(&expected, report_ref)
+            .expect("persist mechanical report");
+
+        assert_eq!(saved.mechanical_report_ref.as_deref(), Some(report_ref));
+        assert_eq!(saved.review_invocation_scope, Some(initial_scope));
     }
 
     #[test]

@@ -199,8 +199,9 @@ impl WorkspaceEngine {
     }
 
     /// 在 reviewer provider 启动前为 SingleCandidate 建立服务端 scope，并以
-    /// 与策略路由相同的 CAS 持久化。该入口只写 scope/其余字段原样复用，因而
-    /// 不会提前消费 review counter 或改变 stage/history。
+    /// 与策略路由相同的 CAS 持久化。scope 仅由当前 ReviewerRun 节点在 durable
+    /// history 中的 cycle 与 durable candidate refs 物化，因而不会提前消费
+    /// review counter 或改变 stage/history。
     pub(crate) async fn ensure_review_invocation_scope(&mut self) -> Result<(), String> {
         if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
             return Ok(());
@@ -209,41 +210,52 @@ impl WorkspaceEngine {
         let node_id = self.active_node_id.as_deref().ok_or_else(|| {
             "active ReviewerRun node is unavailable for SingleCandidate review".to_string()
         })?;
-        let (_, phase) = single_candidate_review_cycle(Some(node_id), &self.session.run_history)?;
-        let scope = if phase == ReviewPhase::Initial {
-            match self.session.review_invocation_scope.as_ref() {
-                Some(scope @ ReviewInvocationScope::Initial { .. }) => scope.clone(),
-                _ => ReviewInvocationScope::initial(self.review_revision_id(node_id, true)),
-            }
-        } else {
-            let repaired_revision_id = self.review_revision_id(node_id, false);
-            // Verification scope must bind the durable report produced by compile/evaluate,
-            // rather than reusing a prior invocation scope (which may still be Initial after
-            // a repair). Missing durable evidence is a protocol failure, fail-closed.
-            let mechanical_report_ref = self
-                .session
-                .mechanical_report_ref
-                .clone()
-                .ok_or("verification review requires a durable mechanical report")?;
-            ReviewInvocationScope::verification(
-                self.session.run_history.seen_fingerprints.clone(),
-                repaired_revision_id,
-                mechanical_report_ref,
-            )
-        };
-        scope
-            .validate_digest()
-            .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
-
-        if self.session.review_invocation_scope.as_ref() == Some(&scope) {
-            return Ok(());
+        // Validate only the active-node identity from worker state. The authoritative
+        // phase remains derived below from the durable record's history.
+        let _ = single_candidate_review_cycle(Some(node_id), &self.session.run_history)?;
+        // A worker-held scope is protocol input too. Reject a bad digest before the
+        // durable reload so reconciliation cannot conceal the violation.
+        if let Some(scope) = self.session.review_invocation_scope.as_ref() {
+            scope
+                .validate_digest()
+                .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
         }
+
         let Some(store) = self.lifecycle_store.as_ref() else {
             return Err("lifecycle_store unavailable for review invocation scope".to_string());
         };
         let expected = store
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| format!("load workspace session for review scope failed: {error}"))?;
+        let (_, phase) = single_candidate_review_cycle(Some(node_id), &expected.run_history)?;
+        let scope = match phase {
+            ReviewPhase::Initial => {
+                let plan_candidate_ir_ref = expected
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .ok_or("initial review requires a durable plan candidate IR")?;
+                ReviewInvocationScope::initial(plan_candidate_ir_ref)
+            }
+            ReviewPhase::Verification => {
+                let repaired_revision_id = expected
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .ok_or("verification review requires a durable plan candidate IR")?;
+                let mechanical_report_ref = expected
+                    .mechanical_report_ref
+                    .clone()
+                    .ok_or("verification review requires a durable mechanical report")?;
+                ReviewInvocationScope::verification(
+                    expected.run_history.seen_fingerprints.clone(),
+                    repaired_revision_id,
+                    mechanical_report_ref,
+                )
+            }
+        };
+        scope
+            .validate_digest()
+            .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
+
         if expected.review_invocation_scope.as_ref() == Some(&scope) {
             self.refresh_policy_state(&expected);
             return Ok(());
@@ -333,31 +345,6 @@ impl WorkspaceEngine {
         }
 
         Ok(Some(mechanical_report_ref.clone()))
-    }
-
-    fn review_revision_id(&self, node_id: &str, initial: bool) -> String {
-        if !initial
-            && let Some(ReviewInvocationScope::Verification {
-                repaired_revision_id,
-                ..
-            }) = self.session.review_invocation_scope.as_ref()
-        {
-            return repaired_revision_id.clone();
-        }
-        self.session
-            .review_invocation_scope
-            .as_ref()
-            .map(|scope| match scope {
-                ReviewInvocationScope::Initial {
-                    initial_revision_id,
-                    ..
-                } => initial_revision_id.clone(),
-                ReviewInvocationScope::Verification {
-                    repaired_revision_id,
-                    ..
-                } => repaired_revision_id.clone(),
-            })
-            .unwrap_or_else(|| format!("revision:{node_id}"))
     }
 
     pub(super) fn single_candidate_mechanical_findings(

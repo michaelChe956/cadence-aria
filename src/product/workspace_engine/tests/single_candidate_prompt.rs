@@ -291,6 +291,76 @@ async fn single_candidate_scope_uses_one_reviewer_cycle_key_across_ensure_and_po
 }
 
 #[tokio::test]
+async fn ensure_materializes_verification_scope_from_durable_same_node_cycle() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_draft_candidate("durable_verification_scope");
+    let (repaired_ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    let original_fingerprint = fingerprint("original repair finding");
+    persist_single_candidate_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::initial("first-review-ir"),
+        RunHistory {
+            seen_fingerprints: BTreeSet::from([original_fingerprint.clone()]),
+            review_cycles: std::collections::BTreeMap::from([(
+                "review:verification-node".to_string(),
+                ReviewCycleState {
+                    initial_count: 1,
+                    ..ReviewCycleState::default()
+                },
+            )]),
+            ..RunHistory::default()
+        },
+    );
+    let mut durable = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load durable session");
+    durable.plan_candidate_ir_ref = Some(repaired_ir_ref.clone());
+    durable.mechanical_report_ref = Some(report_ref.clone());
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&durable.project_id, &durable.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", durable.id)),
+        &durable,
+    )
+    .expect("persist repaired durable artifacts");
+
+    // Simulate the stale worker that performed the first review: it has neither the
+    // repaired refs nor this node's durable initial count in memory.
+    engine.session.run_history = RunHistory::default();
+    engine.session.plan_candidate_ir_ref = Some("first-review-ir".to_string());
+    engine.session.mechanical_report_ref = None;
+    engine.active_node_id = Some("verification-node".to_string());
+
+    engine
+        .ensure_review_invocation_scope()
+        .await
+        .expect("ensure must derive Verification from the durable node cycle");
+
+    let expected_scope = ReviewInvocationScope::verification(
+        BTreeSet::from([original_fingerprint]),
+        repaired_ir_ref,
+        report_ref,
+    );
+    assert_eq!(
+        engine.session().review_invocation_scope,
+        Some(expected_scope.clone())
+    );
+    expected_scope
+        .validate_digest()
+        .expect("verification scope digest must be valid");
+    let action = engine
+        .work_item_policy_action("verification-node", &pass_verdict())
+        .expect("policy action");
+    assert!(
+        !matches!(action, RoutingAction::AbortFatal { .. }),
+        "durable Verification materialization must prevent a phase mismatch: {action:?}"
+    );
+}
+
+#[tokio::test]
 async fn single_candidate_verification_scope_requires_durable_mechanical_report_at_ensure() {
     let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
         super::make_work_item_plan_engine_with_draft_candidate(
@@ -314,6 +384,7 @@ async fn single_candidate_verification_scope_requires_durable_mechanical_report_
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)
         .expect("load session");
+    record.plan_candidate_ir_ref = Some("ir-001".to_string());
     record.mechanical_report_ref = None;
     write_json(
         &lifecycle
