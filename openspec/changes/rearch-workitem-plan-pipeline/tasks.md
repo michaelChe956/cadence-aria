@@ -79,3 +79,15 @@ pub struct InitialPlanCompileInput {
 - [ ] 7.3 测试：投影正确性单测（与 validator 同输入同口径）、prompt 教学句存在性测试（先 RED 后 GREEN）、legacy/story/design 路径不接收投影的隔离测试
 - [ ] 7.4 SC markdown prompt 预算余量复核（B1 后余 5 字节；如 B2 触及 SC prompt 侧则同步放宽常量至整百级并注明 margin 惯例）
 - [ ] 7.5 完成并过审后 r24 重跑三 provider 验收（codex/kimi 900s、pi 1800s，D2 用户批准）：全部 Confirmed 方为 6.2 达标；D3（driver 卫生）本轮不做，留作三 provider 通过后的独立 harness 任务
+
+## 8. handoff 消费闭环与 trusted catalog 残留清理（2026-08-30 增补，用户批准 P2+P4）
+
+> 依据：r24 实跑——codex R1 直接过 review（B1/B2 能力覆盖类消灭），Final Compile 拒 `unconsumed_required_handoff` ×2；pi 在 IR 校验被 `trusted_verification_command_catalog_field_too_large` ×1（2026-08-29 简化裁决后残留）+ `unknown_requirement_ref` ×11（provider 方差，教学已存在）。oracle 裁决 P2+P4、不做 P3 全量 checklist；P4 先行独立提交。
+
+- [ ] 8.1 （P4）SC 路径退役旧 trusted catalog 规则：`validate_plan_candidate_ir` 走 SC 专用 outline 校验 profile，跳过 `outline.rs:126-175` catalog 条目数/字段长度/投影 bytes 规则与 `draft.rs:230-270` missing_trusted/untrusted_required 残留（`parse.rs:177`、`work_item_plan_compiler/validate.rs:34-35` 联动点以代码现状为准）；legacy draft 路径及其测试零变化；SC 路径其他 outline 规则（IDs/traceability/scope/budget/依赖/环）行为不变；不全局放开命令字段边界，长度安全门若保留须迁移为通用 bounded-field 校验、不再使用带 outline 语义的旧规则名
+- [ ] 8.2 （P2-author）handoff 消费闭环教学：`work_item_split_engine/prompts.rs` SC full-author prompt 增补 `provided_contract_refs` 必须被下游 `input_contracts` 逐字消费的纪律与反例；预算常量 16,200→17,000
+- [ ] 8.3 （P2-reviewer）覆盖投影扩展：依赖图事实（depends_on/边/环/重复边/未知 provider）+ handoff 消费闭环（消费者集合与消费状态，空消费者显式空集）+ 跨 item 写范围冲突事实；同源复用 `dependency.rs` 共享逻辑，不重述不重实现；unconsumed handoff must_fix/contract_gap 教学；仅单候选注入；reviewer 64KiB 预算双点检查不变
+- [ ] 8.4 测试：P4 RED（SC 路径长命令字段通过且无 outline catalog finding；legacy 路径该规则仍生效）；投影消费闭环逐字段测试（同源一致）；SC prompt 教学句测试；隔离回归
+- [ ] 8.5 实施过审后 r25 重跑三 provider（codex/kimi 900s、pi 1800s）：全部 Confirmed 方为 6.2 达标；needs_human 为合法终态，不降级不伪造；pi 方差按有界重跑，连续复现另立议题报用户
+
+> **登记（2026-08-30，用户裁决方案 b）**：plan/draft/review 产物 95% 成功率验收**不入 6.2 判据**；待全流程（6.2→6.3→6.4→终审→push）完成后以专项测量轮执行（测量形态终审裁量）。

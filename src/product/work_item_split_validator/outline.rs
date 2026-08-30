@@ -46,80 +46,95 @@ pub(crate) fn validate_outline_traceability_and_scopes(
     findings: &mut Vec<WorkItemSplitFinding>,
 ) {
     for item in &outline.work_item_outlines {
-        if item.source_story_spec_ids.is_empty() || item.source_design_spec_ids.is_empty() {
-            findings.push(error(
-                "traceability_required",
-                format!(
-                    "outline {} must reference at least one story spec and design spec",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        if item.goal.trim().is_empty() {
-            findings.push(error(
-                "outline_goal_required",
-                format!("outline {} must include a goal", item.outline_id),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        if item.scope.is_empty() {
-            findings.push(error(
-                "outline_scope_required",
-                format!("outline {} must include a scope", item.outline_id),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        if item.exclusive_write_scopes.is_empty() {
-            findings.push(error(
-                "write_scope_required",
-                format!(
-                    "outline {} must include at least one exclusive_write_scope",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            ));
-        }
+        validate_outline_traceability_scope_and_budget_item(item, findings);
         validate_trusted_verification_command_catalog(item, findings);
-        match item.estimated_context_tokens {
-            Some(value)
-                if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
-            Some(0) | None => findings.push(error(
-                "outline_budget_required",
-                format!(
-                    "outline {} must include estimated_context_tokens between 1 and 50000",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            )),
-            Some(value) => findings.push(error(
-                "outline_exceeds_single_session_budget",
-                format!(
-                    "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <=50000",
-                    item.outline_id, value
-                ),
-                vec![item.outline_id.clone()],
-            )),
-        }
-        match item.session_fit.as_ref() {
-            Some(WorkItemOutlineSessionFit::FitsSingleAgentSession) => {}
-            Some(WorkItemOutlineSessionFit::TooLargeMustSplit) => findings.push(error(
-                "outline_too_large_must_split",
-                format!(
-                    "outline {} is marked too_large_must_split and must be split before draft generation",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            )),
-            None => findings.push(error(
-                "outline_session_fit_required",
-                format!(
-                    "outline {} must declare session_fit=fits_single_agent_session",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            )),
-        }
+    }
+}
+
+pub(crate) fn validate_outline_traceability_scopes_and_budget(
+    outline: &WorkItemPlanOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    for item in &outline.work_item_outlines {
+        validate_outline_traceability_scope_and_budget_item(item, findings);
+    }
+}
+
+fn validate_outline_traceability_scope_and_budget_item(
+    item: &WorkItemOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    if item.source_story_spec_ids.is_empty() || item.source_design_spec_ids.is_empty() {
+        findings.push(error(
+            "traceability_required",
+            format!(
+                "outline {} must reference at least one story spec and design spec",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    if item.goal.trim().is_empty() {
+        findings.push(error(
+            "outline_goal_required",
+            format!("outline {} must include a goal", item.outline_id),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    if item.scope.is_empty() {
+        findings.push(error(
+            "outline_scope_required",
+            format!("outline {} must include a scope", item.outline_id),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    if item.exclusive_write_scopes.is_empty() {
+        findings.push(error(
+            "write_scope_required",
+            format!(
+                "outline {} must include at least one exclusive_write_scope",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    match item.estimated_context_tokens {
+        Some(value) if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
+        Some(0) | None => findings.push(error(
+            "outline_budget_required",
+            format!(
+                "outline {} must include estimated_context_tokens between 1 and 50000",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        )),
+        Some(value) => findings.push(error(
+            "outline_exceeds_single_session_budget",
+            format!(
+                "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <=50000",
+                item.outline_id, value
+            ),
+            vec![item.outline_id.clone()],
+        )),
+    }
+    match item.session_fit.as_ref() {
+        Some(WorkItemOutlineSessionFit::FitsSingleAgentSession) => {}
+        Some(WorkItemOutlineSessionFit::TooLargeMustSplit) => findings.push(error(
+            "outline_too_large_must_split",
+            format!(
+                "outline {} is marked too_large_must_split and must be split before draft generation",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        )),
+        None => findings.push(error(
+            "outline_session_fit_required",
+            format!(
+                "outline {} must declare session_fit=fits_single_agent_session",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        )),
     }
 }
 

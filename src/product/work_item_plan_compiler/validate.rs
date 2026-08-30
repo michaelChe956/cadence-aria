@@ -31,7 +31,8 @@ pub fn validate_plan_candidate_ir(
     let work_items = project_lifecycle_work_items(ir, context);
     let verification_plans = project_verification_plans(ir, context);
 
-    let mut findings = WorkItemPlanOutlineValidator::validate(&outline).findings;
+    let mut findings =
+        WorkItemPlanOutlineValidator::validate_for_single_candidate(&outline).findings;
     for (index, draft) in drafts.iter().enumerate() {
         let accepted_dependencies = drafts
             .iter()
@@ -46,7 +47,12 @@ pub fn validate_plan_candidate_ir(
             })
             .collect::<Vec<_>>();
         findings.extend(
-            WorkItemDraftLocalValidator::validate(draft, &accepted_dependencies, &outline).findings,
+            WorkItemDraftLocalValidator::validate_for_single_candidate(
+                draft,
+                &accepted_dependencies,
+                &outline,
+            )
+            .findings,
         );
     }
     findings.extend(

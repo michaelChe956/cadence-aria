@@ -193,6 +193,36 @@ fn work_item_plan_draft_validator_trusted_command_matrix_has_one_target_finding(
 }
 
 #[test]
+fn p4_legacy_draft_trusted_catalog_rules_remain_active() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0]
+        .trusted_verification_commands
+        .clear();
+    let candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+    assert_has_code(&report, "missing_trusted_verification_command_catalog");
+}
+
+#[test]
+fn p4_sc_outline_budget_rules_remain_active() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0].estimated_context_tokens = Some(50_001);
+    outline.work_item_outlines[0].session_fit = Some(WorkItemOutlineSessionFit::TooLargeMustSplit);
+    let report = WorkItemPlanOutlineValidator::validate_for_single_candidate(&outline);
+    for code in [
+        "outline_exceeds_single_session_budget",
+        "outline_too_large_must_split",
+    ] {
+        assert_has_code(&report, code);
+    }
+    assert!(report.findings.iter().all(|finding| {
+        !finding
+            .code
+            .starts_with("trusted_verification_command_catalog_")
+    }));
+}
+
+#[test]
 fn work_item_plan_draft_validator_requires_operational_gate_when_catalog_is_empty() {
     let mut outline = valid_outline();
     outline.work_item_outlines[0]

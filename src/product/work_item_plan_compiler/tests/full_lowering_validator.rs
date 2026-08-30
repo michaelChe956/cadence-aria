@@ -81,6 +81,61 @@ fn full_lowering_validator_projects_rep4_through_all_existing_validator_layers()
 }
 
 #[test]
+fn p4_sc_long_verification_command_does_not_emit_catalog_field_finding() {
+    let mut ir = compile_work_item_plan(
+        REP4_FIXTURE,
+        &WorkItemPlanSourceContext {
+            target_repository_id: "repo-levels".to_string(),
+        },
+    )
+    .expect("rep4 fixture must lower");
+    let long_command = format!("cargo test {}", "x".repeat(49));
+    ir.items[0].verification_plan.checks[0].command = Some(long_command.clone());
+    ir.items[0].contract.verification_checks[0].command = Some(long_command.clone());
+    ir.items[0].trusted_commands[0].command = long_command;
+    let story_ids = vec!["story_spec_levels_0001".to_string()];
+    let design_ids = vec!["design_spec_levels_0001".to_string()];
+    let result = validate_plan_candidate_ir(
+        &ir,
+        &rep4_validation_context(Some(&rep4_repository_profile()), &story_ids, &design_ids),
+    );
+    let catalog_field_finding_exists = match result {
+        Ok(report) => report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "trusted_verification_command_catalog_field_too_large"),
+        Err(diagnostics) => diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "trusted_verification_command_catalog_field_too_large"
+        }),
+    };
+    assert!(!catalog_field_finding_exists);
+}
+
+#[test]
+fn p4_sc_outline_identity_rules_remain_active() {
+    let mut ir = compile_work_item_plan(
+        REP4_FIXTURE,
+        &WorkItemPlanSourceContext {
+            target_repository_id: "repo-levels".to_string(),
+        },
+    )
+    .expect("rep4 fixture must lower");
+    ir.items[0].contract.identity.logical_work_item_id.clear();
+    let story_ids = vec!["story_spec_levels_0001".to_string()];
+    let design_ids = vec!["design_spec_levels_0001".to_string()];
+    let diagnostics = validate_plan_candidate_ir(
+        &ir,
+        &rep4_validation_context(Some(&rep4_repository_profile()), &story_ids, &design_ids),
+    )
+    .expect_err("blank canonical identity must fail closed");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "blank_logical_work_item_id")
+    );
+}
+
+#[test]
 fn full_lowering_validator_rejects_unregistered_requirement_and_missing_reviewer_check() {
     let source = REP4_FIXTURE
         .replacen(

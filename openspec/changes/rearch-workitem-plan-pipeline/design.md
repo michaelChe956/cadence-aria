@@ -110,3 +110,11 @@ session 创建时写入 `RunPolicy`：`interactive`（手动最终批准）或 `
 - **取舍**：接受 review 输入变大/变长的成本（预算按上报式上调纪律吸收）；不要求 reviewer 重跑整个 validator，只核能力覆盖；canonical validator 保持 fail-closed 原样，reviewer 为前置防线而非替代。
 - **边界**：legacy/story/design reviewer 零触碰；scope/digest/CAS 机制零触碰。
 - **遗留张力（6.4 裁量登记）**：REQ-WSC-07 退役门要求「单案例时长 ≤12 分钟」，而 pi 实测全链（生成+返修+复评）超过 12 分钟（D2 已批准 r24 pi 硬超时 1800s）。若 pi 以 >12 分钟 Confirmed，退役门该子项是否放宽/改口径，由 6.4 验收时用户裁决，不影响本节实施。
+
+## P2+P4 裁决（2026-08-30，用户批准）
+
+- **依据**：r24 实跑暴露两类残留——(a) reviewer 结构性盲区：单 item 投影看不到跨 item handoff 消费关系，codex 死于 `unconsumed_required_handoff`；(b) 2026-08-29「砍 outline 与受信目录」裁决的未完成收尾：`trusted_verification_command_catalog_*` 旧规则仍在 SC 编译路径拦截（错误串含 outline 字样）。
+- **oracle 裁决**：P2+P4，排除 P3 九组全量 checklist——其中一半属「教了 provider 也可能无视」的局部字段规则，堆 2KB 文本反而增加弱模型不合规风险；P3 留作 P2 重跑仍多类违规时的第二阶段预案。
+- **决策**：P4 先行独立提交（故障面分离、可回滚）；只清 SC IR 路径，legacy draft 路径与测试零变化。P2 = author handoff 消费闭环教学（预算 16,200→17,000，留 ~800 字节余量）+ reviewer 覆盖投影扩展（依赖图/消费闭环/跨 item scope，同源复用 `dependency.rs` 共享逻辑）；canonical validator 对外行为除退役残留外零改动。
+- **pi 方差**：`unknown_requirement_ref` 是 provider 无视已有教学（教学与清单均已存在），不扩 prompt，按有界重跑消化；连续复现另立议题。`needs_human` 为合法终态，不降级不伪造。
+- **95% 验收（方案 b，用户裁决）**：6.2 按现判据收敛；95% 成功率验收为全流程完成后的专项测量轮，不在本轮判据内。
