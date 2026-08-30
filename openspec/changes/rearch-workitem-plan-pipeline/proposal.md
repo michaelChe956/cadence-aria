@@ -64,3 +64,9 @@ workitem 段（issue→story→design→**workitem**→coding→交付的第四�
 - **prompt**：`work_item_split_engine/prompts.rs` 大瘦身（删 B 层行为教学与 JSON 格式对抗内容）
 - **验证**：复用 `cadence/reports/workitem-coding-campaign/` 两个 campaign driver（需适配新协议）+ 阶段 1 的 14 条 classifier golden；compiler diagnostic golden 仅覆盖明确的 grammar/lowering 例
 - **外部依赖**：无。prompt 分层依赖 Cadence-skills 既有注入内容即可（现状已覆盖），不要求 Cadence-skills 变更
+
+## 增补（2026-08-30）：reviewer 能力覆盖投影（D1=B3，用户批准）
+
+- **Why**：r23 实跑暴露 reviewer 判定面与 canonical validator 系统性错位——plan 过 review 却被 Final Compile 以 `required_capability_missing` 拒绝（codex 11/kimi 5 条），review 层对能力覆盖不设防。
+- **What**：prompt 层增补两向纪律——author 教学契约能力覆盖（已落地 `e78094a9`）；单候选 reviewer 复评前获得由 `report_contract_requirements` 同源逻辑生成的只读能力覆盖投影，覆盖缺口必报 must_fix（contract_gap）。REQ-WSC-06 增补对应 SHALL 条款；tasks.md 增设第 7 节。
+- **Boundary**：canonical validator/scope/digest/CAS 零改动；legacy/story/design reviewer 零触碰；本增补属阶段 2 Task 6.2 收敛范畴，随本 change 一并 sync/archive。

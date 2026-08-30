@@ -102,3 +102,11 @@ session 创建时写入 `RunPolicy`：`interactive`（手动最终批准）或 `
 2. **命令声明即授权载体**：plan 的 Verification 段 `command` 字段=唯一声明处；`PlanCandidateItemIr.trusted_commands` 由该 item 声明确定性投影（去重；cwd="."；purpose 由 check 语句确定性截断派生；source_ref 由 source revision hash 派生）。删除 outline→目录→lowering 校验链与 `WorkItemPlanSourceContext.trusted_command_catalog`。授权锚=plan 审批门（人工/auto 策略批准 plan 即批准其命令集）；执行边界=coding 安全门（消费 trusted_commands，不变）。
 3. **不动**：编译器语法/lowering 的结构校验、三层 validator 规则本身、确定性编译/发布/恢复链、review/人工门、flow_kind/preflight。
 4. **已知取舍**：失去「命令事前清单」审计形式（改为审批门时人工直接看到 Verification 段）；同 item 重复命令的编译规则保留为卫生规则。
+
+## reviewer 能力覆盖投影增补（2026-08-30，用户批准 D1=B3）
+
+- **依据**：r23 三 provider 实跑暴露「reviewer pass → canonical validator fail」系统性错位（codex 11 / kimi 5 条 `required_capability_missing`，如 CT-001 未声明 `GET /api/levels`）；reviewer prompt 现状不含任何 capability 覆盖数据面（`reviewer_output_contract` 签名无 DependencyContractGraph/capability 参数）。
+- **决策**：B3=B1+B2。B1（author 教学，`e78094a9` 已落地）修生成源头；B2（本节）向单候选 reviewer context 注入只读能力覆盖投影，数据复用 `report_contract_requirements` 同源逻辑（不重述、不重实现，消除口径漂移），reviewer 对覆盖缺口必报 must_fix（contract_gap）。
+- **取舍**：接受 review 输入变大/变长的成本（预算按上报式上调纪律吸收）；不要求 reviewer 重跑整个 validator，只核能力覆盖；canonical validator 保持 fail-closed 原样，reviewer 为前置防线而非替代。
+- **边界**：legacy/story/design reviewer 零触碰；scope/digest/CAS 机制零触碰。
+- **遗留张力（6.4 裁量登记）**：REQ-WSC-07 退役门要求「单案例时长 ≤12 分钟」，而 pi 实测全链（生成+返修+复评）超过 12 分钟（D2 已批准 r24 pi 硬超时 1800s）。若 pi 以 >12 分钟 Confirmed，退役门该子项是否放宽/改口径，由 6.4 验收时用户裁决，不影响本节实施。

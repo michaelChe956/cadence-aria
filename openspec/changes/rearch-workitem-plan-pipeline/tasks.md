@@ -69,3 +69,13 @@ pub struct InitialPlanCompileInput {
 - [ ] 6.4 验收报告落盘；达标后移交阶段 3 立项（对话流人工门与 `advance` 接口），未达标不得退役旧协议
 
 > **2026-08-29 简化裁决补记**（用户批准）：工作包 5.2 的「轻量 outline→计数→selector→完整 author」两阶段生成简化为**单次 provider 生成完整 plan**；selector 降级为编译后内部诊断。工作包 2.5/5.x 期间落地的 outline 派生受信目录链（catalogfix b2aaf24e 及其后续教学）标记 superseded——trusted_commands 改为 plan Verification 段声明确定性投影，授权锚=plan 审批门（见 design.md 架构简化裁决节与 field-source-matrix FSM-024/038~041 更新）。
+
+## 7. reviewer 能力覆盖投影（2026-08-30 增补，D1=B3 用户批准）
+
+> 依据：r23 实跑 codex/kimi 的 plan 过 review 却被 Final Compile canonical 校验拒（`required_capability_missing` 11/5 条），reviewer 判定面与 canonical validator 系统性错位。B1（author prompt 能力覆盖教学，commit `e78094a9`）已先行落地；本节为 B2。REQ-WSC-06 已增补对应 SHALL 条款与 scenario。
+
+- [ ] 7.1 reviewer context 只读能力覆盖投影：逐 WI→contract edge 的 required capabilities、所引契约输出 capabilities、compatibility_policy；数据由 `report_contract_requirements`（`src/product/work_item_contract/dependency.rs:156-235`）同源计算逻辑生成，不重述不重实现；仅注入单候选 reviewer 路径
+- [ ] 7.2 reviewer prompt 增补：逐 edge 机械核验教学；任何覆盖缺口产出 must_fix finding（归类建议 contract_gap，evidence 含具体 edge 与缺失能力）；canonical validator 与 scope/digest/CAS 机制零改动
+- [ ] 7.3 测试：投影正确性单测（与 validator 同输入同口径）、prompt 教学句存在性测试（先 RED 后 GREEN）、legacy/story/design 路径不接收投影的隔离测试
+- [ ] 7.4 SC markdown prompt 预算余量复核（B1 后余 5 字节；如 B2 触及 SC prompt 侧则同步放宽常量至整百级并注明 margin 惯例）
+- [ ] 7.5 完成并过审后 r24 重跑三 provider 验收（codex/kimi 900s、pi 1800s，D2 用户批准）：全部 Confirmed 方为 6.2 达标；D3（driver 卫生）本轮不做，留作三 provider 通过后的独立 harness 任务
