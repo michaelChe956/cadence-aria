@@ -77,6 +77,7 @@ mod author_confirm;
 mod compile;
 mod compile_parse;
 mod controls;
+mod conversational_gate;
 mod decisions;
 pub(crate) mod draft_batch;
 mod human_presentation;
@@ -136,6 +137,7 @@ pub(crate) use artifact_constraints::*;
 #[cfg(test)]
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
+pub(crate) use conversational_gate::{HumanGateCommandOutcome, HumanGateFeedbackInput};
 pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;

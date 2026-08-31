@@ -91,12 +91,36 @@ impl LifecycleStore {
                     if existing_turn == turn {
                         return Ok((stored, existing_turn));
                     }
+                    return Err(ProductStoreError::Conflict {
+                        kind: "human_gate_reservation",
+                        id: reservation.command_id.clone(),
+                    });
                 }
-                return Err(ProductStoreError::Conflict {
-                    kind: "human_gate_reservation",
-                    id: reservation.command_id.clone(),
-                });
+                let previous_turn_path =
+                    self.human_gate_turn_path(&stored, &existing_reservation.turn_id)?;
+                if !super::path_exists(&previous_turn_path)? {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "human_gate_reservation",
+                        id: reservation.command_id.clone(),
+                    });
+                }
+                let previous_turn: HumanGateTurn = read_json(&previous_turn_path)?;
+                Self::validate_human_gate_turn(
+                    &previous_turn,
+                    &stored.id,
+                    &existing_reservation.turn_id,
+                )?;
+                if matches!(
+                    previous_turn.status,
+                    HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
+                ) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "human_gate_reservation",
+                        id: reservation.command_id.clone(),
+                    });
+                }
             }
+
             if stored != *expected {
                 return Err(ProductStoreError::Conflict {
                     kind: "workspace_session",
@@ -160,6 +184,47 @@ impl LifecycleStore {
         let turn: HumanGateTurn = read_json(&path)?;
         Self::validate_human_gate_turn(&turn, session_id, turn_id)?;
         Ok(turn)
+    }
+
+    pub fn list_human_gate_turns(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<HumanGateTurn>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session = self.get_workspace_session(session_id)?;
+        let root = self
+            .paths
+            .issue_lifecycle_root(&session.project_id, &session.issue_id)
+            .join("workspace-sessions")
+            .join(&session.id)
+            .join("human-gate-turns");
+        if !super::path_exists(&root)? {
+            return Ok(Vec::new());
+        }
+        let mut entries = std::fs::read_dir(&root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut turns = Vec::new();
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(turn_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "human_gate_turn",
+                    id: session_id.to_string(),
+                });
+            };
+            let turn: HumanGateTurn = read_json(&path)?;
+            Self::validate_human_gate_turn(&turn, session_id, turn_id)?;
+            turns.push(turn);
+        }
+        Ok(turns)
     }
 
     pub fn get_human_gate_turn_by_command_id(

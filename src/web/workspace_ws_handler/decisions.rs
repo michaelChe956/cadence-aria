@@ -238,6 +238,72 @@ pub(crate) async fn handle_author_decision_from_handler(
     }
 }
 
+pub(crate) async fn handle_human_gate_feedback_from_handler(
+    run_context: ProviderRunContext,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    input: HumanGateFeedbackInput,
+) {
+    let outcome = {
+        let mut engine = run_context.engine.lock().await;
+        engine.handle_human_gate_feedback(input).await
+    };
+    let message = match outcome {
+        Ok(HumanGateCommandOutcome::TurnOpened {
+            turn,
+            remaining_budget,
+        }) => WsOutMessage::HumanGateTurnOpen {
+            turn_id: turn.turn_id,
+            command_id: turn.command_id,
+            remaining_budget,
+        },
+        Ok(HumanGateCommandOutcome::Replayed { turn }) => WsOutMessage::HumanGateTurnOpen {
+            turn_id: turn.turn_id,
+            command_id: turn.command_id,
+            remaining_budget: run_context
+                .engine
+                .lock()
+                .await
+                .session()
+                .human_gate_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.manual_repairs_remaining),
+        },
+        Ok(HumanGateCommandOutcome::Busy { turn_id }) => WsOutMessage::HumanGateBusy { turn_id },
+        Ok(HumanGateCommandOutcome::Rejected { code, reason }) => WsOutMessage::ProtocolError {
+            code,
+            message: reason,
+            context: None,
+        },
+        Err(message) => WsOutMessage::Error { message },
+    };
+    let _ = send_json_outbound(&outbound_tx, &message).await;
+}
+
+pub(crate) async fn handle_human_gate_termination_from_handler(
+    run_context: ProviderRunContext,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    decision: HumanConfirmDecision,
+) {
+    let outcome = {
+        let mut engine = run_context.engine.lock().await;
+        engine.handle_human_gate_termination(decision).await
+    };
+    let message = match outcome {
+        Ok(HumanGateCommandOutcome::Busy { turn_id }) => WsOutMessage::HumanGateBusy { turn_id },
+        Ok(HumanGateCommandOutcome::Rejected { code, reason }) => WsOutMessage::ProtocolError {
+            code,
+            message: reason,
+            context: None,
+        },
+        Ok(other) => WsOutMessage::ProtocolError {
+            code: "HUMAN_GATE_CLOSE_UNEXPECTED_OUTCOME".to_string(),
+            message: format!("unexpected human gate close outcome: {other:?}"),
+            context: None,
+        },
+        Err(message) => WsOutMessage::Error { message },
+    };
+    let _ = send_json_outbound(&outbound_tx, &message).await;
+}
 pub(crate) async fn handle_human_confirm_from_handler(
     run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,

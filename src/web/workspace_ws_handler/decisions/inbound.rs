@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceInboundContext {
@@ -83,30 +84,15 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
                 return;
             }
-            let stage = engine.lock().await.current_stage();
-            let message = WsInMessage::HumanGateFeedback {
-                command_id: command_id.clone(),
-                feedback,
-            };
-            if !is_message_valid_for_stage_with_flow(
-                run_context.session_record.flow_kind,
-                &message,
-                &stage,
-            ) {
-                let err = conversational_gate_stage_error(
-                    run_context.session_record.flow_kind,
-                    &stage,
-                    &message,
-                );
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-                return;
-            }
-            let err = WsOutMessage::ProtocolError {
-                code: "COMMAND_HANDLER_NOT_WIRED".to_string(),
-                message: "human_gate_feedback handler not wired".to_string(),
-                context: None,
-            };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
+            handle_human_gate_feedback_from_handler(
+                run_context.clone(),
+                outbound_tx.clone(),
+                HumanGateFeedbackInput {
+                    command_id,
+                    feedback,
+                },
+            )
+            .await;
         }
         WsInMessage::Advance { command_id } => {
             if let Err(err) = validate_command_id(&command_id) {
@@ -158,13 +144,22 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
             }
         }
         WsInMessage::Confirm => {
-            handle_human_confirm_from_handler(
-                run_context.clone(),
-                outbound_tx.clone(),
-                HumanConfirmDecision::Confirm,
-                None,
-            )
-            .await;
+            if run_context.session_record.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                handle_human_gate_termination_from_handler(
+                    run_context.clone(),
+                    outbound_tx.clone(),
+                    HumanConfirmDecision::Confirm,
+                )
+                .await;
+            } else {
+                handle_human_confirm_from_handler(
+                    run_context.clone(),
+                    outbound_tx.clone(),
+                    HumanConfirmDecision::Confirm,
+                    None,
+                )
+                .await;
+            }
         }
         WsInMessage::ProviderSelect { role, provider } => {
             let result = {
@@ -794,13 +789,22 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
             }
         }
         WsInMessage::HumanConfirm { decision, payload } => {
-            handle_human_confirm_from_handler(
-                run_context.clone(),
-                outbound_tx.clone(),
-                decision,
-                payload,
-            )
-            .await;
+            if run_context.session_record.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                handle_human_gate_termination_from_handler(
+                    run_context.clone(),
+                    outbound_tx.clone(),
+                    decision,
+                )
+                .await;
+            } else {
+                handle_human_confirm_from_handler(
+                    run_context.clone(),
+                    outbound_tx.clone(),
+                    decision,
+                    payload,
+                )
+                .await;
+            }
         }
         WsInMessage::ConfirmPlanAmendment { amendment_id } => {
             handle_plan_amendment_confirmation_from_handler(

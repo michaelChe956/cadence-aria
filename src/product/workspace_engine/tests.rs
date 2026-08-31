@@ -39,6 +39,7 @@ include!("tests/design_reviewer_boundary.rs");
 include!("review/tests_policy_routing.rs");
 mod author_revision_loop;
 mod author_revision_review_routing;
+mod conversational_gate;
 mod review_repair_prompt;
 mod single_candidate;
 mod single_candidate_flow_dispatch;
