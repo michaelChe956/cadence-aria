@@ -232,9 +232,22 @@ pub enum ProviderRunKind {
     WorkItemPlanRevision {
         feedback: Option<String>,
     },
+    /// SC interactive human-gate revision. The turn id is the durable logical
+    /// key; provider attempts are tracked separately from WS events.
+    HumanGateScManualRevision {
+        turn_id: String,
+        prompt: String,
+    },
 }
 
 impl ProviderRunKind {
+    pub(crate) fn human_gate_turn_id(&self) -> Option<&str> {
+        match self {
+            Self::HumanGateScManualRevision { turn_id, .. } => Some(turn_id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn work_item_plan_author_for_durable_flow(
         flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind,
     ) -> Self {

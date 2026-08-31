@@ -247,36 +247,75 @@ pub(crate) async fn handle_human_gate_feedback_from_handler(
         let mut engine = run_context.engine.lock().await;
         engine.handle_human_gate_feedback(input).await
     };
-    let message = match outcome {
+    let saved_turn = match outcome {
         Ok(HumanGateCommandOutcome::TurnOpened {
             turn,
             remaining_budget,
-        }) => WsOutMessage::HumanGateTurnOpen {
-            turn_id: turn.turn_id,
-            command_id: turn.command_id,
-            remaining_budget,
-        },
-        Ok(HumanGateCommandOutcome::Replayed { turn }) => WsOutMessage::HumanGateTurnOpen {
-            turn_id: turn.turn_id,
-            command_id: turn.command_id,
-            remaining_budget: run_context
+        }) => {
+            let _ = send_json_outbound(
+                &outbound_tx,
+                &WsOutMessage::HumanGateTurnOpen {
+                    turn_id: turn.turn_id.clone(),
+                    command_id: turn.command_id.clone(),
+                    remaining_budget,
+                },
+            )
+            .await;
+            Some(turn)
+        }
+        Ok(HumanGateCommandOutcome::Replayed { turn }) => {
+            let remaining_budget = run_context
                 .engine
                 .lock()
                 .await
                 .session()
                 .human_gate_snapshot
                 .as_ref()
-                .map_or(0, |snapshot| snapshot.manual_repairs_remaining),
-        },
-        Ok(HumanGateCommandOutcome::Busy { turn_id }) => WsOutMessage::HumanGateBusy { turn_id },
-        Ok(HumanGateCommandOutcome::Rejected { code, reason }) => WsOutMessage::ProtocolError {
-            code,
-            message: reason,
-            context: None,
-        },
-        Err(message) => WsOutMessage::Error { message },
+                .map_or(0, |snapshot| snapshot.manual_repairs_remaining);
+            let _ = send_json_outbound(
+                &outbound_tx,
+                &WsOutMessage::HumanGateTurnOpen {
+                    turn_id: turn.turn_id,
+                    command_id: turn.command_id,
+                    remaining_budget,
+                },
+            )
+            .await;
+            None
+        }
+        Ok(HumanGateCommandOutcome::Busy { turn_id }) => {
+            let _ =
+                send_json_outbound(&outbound_tx, &WsOutMessage::HumanGateBusy { turn_id }).await;
+            None
+        }
+        Ok(HumanGateCommandOutcome::Rejected { code, reason }) => {
+            let _ = send_json_outbound(
+                &outbound_tx,
+                &WsOutMessage::ProtocolError {
+                    code,
+                    message: reason,
+                    context: None,
+                },
+            )
+            .await;
+            None
+        }
+        Err(message) => {
+            let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Error { message }).await;
+            None
+        }
     };
-    let _ = send_json_outbound(&outbound_tx, &message).await;
+    if let Some(turn) = saved_turn {
+        let run_kind = ProviderRunKind::HumanGateScManualRevision {
+            turn_id: turn.turn_id,
+            prompt: turn.feedback_text,
+        };
+        if let Err(message) =
+            spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
+        {
+            let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Error { message }).await;
+        }
+    }
 }
 
 pub(crate) async fn handle_human_gate_termination_from_handler(

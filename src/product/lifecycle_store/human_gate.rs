@@ -6,6 +6,8 @@ use crate::product::models::{
     HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, WorkspaceSessionRecord,
 };
 
+use crate::product::workspace_engine::HUMAN_GATE_PROVIDER_MAX_ATTEMPTS;
+
 use super::LifecycleStore;
 
 impl LifecycleStore {
@@ -29,6 +31,14 @@ impl LifecycleStore {
         session_id: &str,
         turn_id: &str,
     ) -> Result<(), ProductStoreError> {
+        if turn.attempt_no == 0 || turn.attempt_no > HUMAN_GATE_PROVIDER_MAX_ATTEMPTS {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "human_gate_turn",
+                reason: format!(
+                    "attempt_no must be between 1 and {HUMAN_GATE_PROVIDER_MAX_ATTEMPTS}"
+                ),
+            });
+        }
         if turn.session_id != session_id || turn.turn_id != turn_id {
             return Err(ProductStoreError::IdentityMismatch {
                 kind: "human_gate_turn",
@@ -306,9 +316,18 @@ impl LifecycleStore {
             }
             if existing.session_id != turn.session_id
                 || existing.feedback_text != turn.feedback_text
-                || existing.attempt_no != turn.attempt_no
                 || existing.budget_reserved != turn.budget_reserved
                 || existing.created_at != turn.created_at
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "human_gate_turn",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            if existing.attempt_no != turn.attempt_no
+                && !(existing.status == HumanGateTurnStatus::Running
+                    && turn.status == HumanGateTurnStatus::Running
+                    && turn.attempt_no == existing.attempt_no.saturating_add(1))
             {
                 return Err(ProductStoreError::Conflict {
                     kind: "human_gate_turn",
@@ -318,7 +337,7 @@ impl LifecycleStore {
             if existing == turn {
                 return Ok(stored);
             }
-            let valid_progression = matches!(
+            let valid_status_progression = matches!(
                 (&existing.status, &turn.status),
                 (HumanGateTurnStatus::Reserved, HumanGateTurnStatus::Running)
                     | (
@@ -328,15 +347,44 @@ impl LifecycleStore {
                     | (HumanGateTurnStatus::Reserved, HumanGateTurnStatus::Failed)
                     | (HumanGateTurnStatus::Running, HumanGateTurnStatus::Completed)
                     | (HumanGateTurnStatus::Running, HumanGateTurnStatus::Failed)
-            );
-            if !valid_progression {
+            ) || (existing.status == HumanGateTurnStatus::Running
+                && turn.status == HumanGateTurnStatus::Running
+                && turn.attempt_no == existing.attempt_no.saturating_add(1));
+            if !valid_status_progression {
                 return Err(ProductStoreError::Conflict {
                     kind: "human_gate_turn",
                     id: turn.turn_id.clone(),
                 });
             }
-            write_json(&turn_path, &turn)?;
-            Ok(stored)
+            let original = stored.clone();
+            let mut next = stored;
+            if turn.attempt_no != existing.attempt_no {
+                let provider_start_idempotency_key =
+                    format!("human_gate:{}:attempt:{}", turn.turn_id, turn.attempt_no);
+                if next.provider_start_ledger.iter().any(|entry| {
+                    entry.provider_start_idempotency_key == provider_start_idempotency_key
+                }) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "provider_start_ledger",
+                        id: provider_start_idempotency_key,
+                    });
+                }
+                next.provider_start_ledger.push(
+                    crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+                        provider_start_idempotency_key,
+                        started: true,
+                    },
+                );
+                next.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &next)?;
+            }
+            if let Err(error) = write_json(&turn_path, &turn) {
+                if turn.attempt_no != existing.attempt_no {
+                    let _ = write_json(&session_path, &original);
+                }
+                return Err(error);
+            }
+            Ok(next)
         })
     }
 }

@@ -78,6 +78,7 @@ mod compile;
 mod compile_parse;
 mod controls;
 mod conversational_gate;
+mod conversational_gate_recovery;
 mod decisions;
 pub(crate) mod draft_batch;
 mod human_presentation;
@@ -138,6 +139,13 @@ pub(crate) use artifact_constraints::*;
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
 pub(crate) use conversational_gate::{HumanGateCommandOutcome, HumanGateFeedbackInput};
+pub(crate) use conversational_gate_recovery::{
+    HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction, provider_run_kind_for_human_gate,
+};
+#[cfg(test)]
+pub(crate) use conversational_gate_recovery::{
+    assert_human_gate_event_prefix_immutable, recover_human_gate_turn,
+};
 pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;

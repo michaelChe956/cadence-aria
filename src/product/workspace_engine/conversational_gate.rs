@@ -9,6 +9,9 @@ use crate::web::workspace_ws_types::HumanConfirmDecision;
 pub(crate) const HUMAN_GATE_FEEDBACK_MAX_BYTES: usize = 8_192;
 pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
 pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";
+/// Fixed upper bound for real provider starts belonging to one logical turn.
+/// A turn is reserved as attempt 1 and may be resumed once as attempt 2.
+pub(crate) const HUMAN_GATE_PROVIDER_MAX_ATTEMPTS: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HumanGateFeedbackInput {
@@ -168,7 +171,7 @@ impl super::WorkspaceEngine {
         let reservation = HumanGateReservation {
             command_id: turn.command_id.clone(),
             turn_id: turn.turn_id.clone(),
-            provider_start_idempotency_key: format!("human_gate_start_{}", turn.turn_id),
+            provider_start_idempotency_key: format!("human_gate:{}:attempt:1", turn.turn_id),
             reserved_at: now,
         };
         let expected = store

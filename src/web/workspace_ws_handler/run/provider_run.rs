@@ -28,6 +28,35 @@ pub(crate) async fn spawn_provider_run_from_handler(
     run_kind: ProviderRunKind,
     outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<(), String> {
+    let target_turn = {
+        let engine = run_context.engine.lock().await;
+        run_kind.human_gate_turn_id().map(|turn_id| {
+            (
+                turn_id.to_string(),
+                engine.lifecycle_store.as_ref().and_then(|store| {
+                    store
+                        .get_human_gate_turn(&engine.session().session_id, turn_id)
+                        .ok()
+                }),
+            )
+        })
+    };
+    if let Some((_, Some(mut turn))) = target_turn
+        && turn.status == crate::product::models::HumanGateTurnStatus::Reserved
+    {
+        turn.status = crate::product::models::HumanGateTurnStatus::Running;
+        let engine = run_context.engine.lock().await;
+        let Some(store) = engine.lifecycle_store.as_ref() else {
+            return Err("lifecycle_store unavailable".to_string());
+        };
+        let expected = store
+            .get_workspace_session(&engine.session().session_id)
+            .map_err(|error| error.to_string())?;
+        store
+            .update_human_gate_turn(&expected, turn)
+            .map_err(|error| error.to_string())?;
+    }
+
     let run_context_clone = run_context.clone();
     let ProviderRunContext {
         provider_registry,
@@ -69,7 +98,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
             | ProviderRunKind::WorkItemPlanOutlineRebuild { .. }
             | ProviderRunKind::WorkItemPlanDraft { .. }
             | ProviderRunKind::WorkItemPlanBatch
-            | ProviderRunKind::WorkItemPlanRevision { .. } => {
+            | ProviderRunKind::WorkItemPlanRevision { .. }
+            | ProviderRunKind::HumanGateScManualRevision { .. } => {
                 engine.session().author_provider.clone()
             }
         }
@@ -892,6 +922,27 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     run_token,
                     feedback
                 );
+            }
+            ProviderRunKind::HumanGateScManualRevision { turn_id, prompt } => {
+                let _ = (turn_id, prompt);
+                engine.mark_active_run_finished(&run_label);
+                drop(engine);
+                let _ = send_json_outbound(
+                    &outbound_tx_for_task,
+                    &WsOutMessage::Error {
+                        message: "human gate provider run is not wired until SC revision task"
+                            .to_string(),
+                    },
+                )
+                .await;
+                clear_active_run_if_token(
+                    &current_run_for_task,
+                    &workspace_runs_for_task,
+                    &session_id_for_task,
+                    run_token,
+                )
+                .await;
+                return;
             }
         }
         workspace_ws_provider_run_followups!(

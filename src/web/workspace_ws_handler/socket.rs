@@ -455,6 +455,52 @@ pub(crate) async fn handle_workspace_socket(
         state.workspace_runs.clone(),
         Some(run_context.clone()),
     );
+    let human_gate_recovery = {
+        let active_node_id = engine.lock().await.active_timeline_node_id();
+        let provider_is_running = state
+            .workspace_runs
+            .run(&session_id)
+            .await
+            .is_some_and(|run| run.node_id == active_node_id);
+        let mut engine = engine.lock().await;
+        engine.recover_human_gate_turns(provider_is_running)
+    };
+    let human_gate_recovery = match human_gate_recovery {
+        Ok(actions) => actions,
+        Err(error) => {
+            let err = WsOutMessage::Error {
+                message: format!("human gate recovery failed: {error}"),
+            };
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+            return;
+        }
+    };
+    for (turn_id, action) in human_gate_recovery {
+        if matches!(
+            action,
+            crate::product::workspace_engine::HumanGateRecoveryAction::ResumeSameTurn { .. }
+        ) {
+            let run_kind = match crate::product::workspace_engine::provider_run_kind_for_human_gate(
+                session_record.flow_kind,
+                &turn_id,
+            ) {
+                Ok(run_kind) => run_kind,
+                Err(error) => {
+                    let err = WsOutMessage::Error { message: error };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                    continue;
+                }
+            };
+            if let Err(error) =
+                spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx.clone())
+                    .await
+            {
+                let err = WsOutMessage::Error { message: error };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+    }
+
     let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let current_run_for_idle = current_run.clone();
     let idle_timeout_task = spawn_idle_timeout_task(
