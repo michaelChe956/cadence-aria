@@ -6,6 +6,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 const CAMPAIGN_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -475,6 +476,140 @@ function humanConfirmRequestChangeMessage(feedback) {
   };
 }
 
+function parseHumanScript(script) {
+  if (script === undefined || script === null) return [];
+  if (typeof script !== 'string') throw new Error('ARIA_HUMAN_SCRIPT 必须是字符串');
+  if (script.trim() === '') return [];
+  return script
+    .split(';')
+    .map((rawEntry) => rawEntry.trim())
+    .filter(Boolean)
+    .map((entry, index) => {
+      const separator = entry.indexOf(':');
+      const decision = (separator === -1 ? entry : entry.slice(0, separator)).trim();
+      if (decision === 'confirm') {
+        if (separator !== -1) throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条 confirm 不接受描述`);
+        return { decision: 'confirm', description: null };
+      }
+      if (decision === 'request-change') {
+        const description = separator === -1 ? '' : entry.slice(separator + 1).trim();
+        if (!description) {
+          throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条 request-change 必须提供冒号后的反馈文本`);
+        }
+        return { decision: 'request-change', description };
+      }
+      throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条仅支持 confirm 或 request-change:<文本>`);
+    });
+}
+
+function humanConfirmScriptAction(script, gateIndex, runPolicy) {
+  if (runPolicy !== 'interactive') return null;
+  const entry = script[gateIndex];
+  if (entry) return { ...entry, source: 'human_script' };
+  return { decision: 'confirm', description: null, source: 'human_script_exhausted_default' };
+}
+
+function humanConfirmMessage(action) {
+  if (action.decision === 'confirm') {
+    return { type: 'human_confirm', decision: 'confirm', payload: null };
+  }
+  if (action.decision === 'request-change' && typeof action.description === 'string') {
+    return humanConfirmRequestChangeMessage(action.description);
+  }
+  throw new Error(`不支持的人工确认决策: ${String(action.decision)}`);
+}
+
+function isHumanGateStage(stage) {
+  return stage === 'human_confirm' || stage === 'waiting_for_human';
+}
+
+function shouldClearPendingGateNode(
+  stage,
+  source,
+  stageActiveNodeId = null,
+  currentActiveNodeType = null,
+) {
+  return source === 'stage_change'
+    && (stage === 'author_confirm' || isHumanGateStage(stage))
+    && !stageActiveNodeId
+    && (!isHumanGateStage(stage) || currentActiveNodeType !== 'human_confirm');
+}
+
+function activeNodeTypeForActiveNode(nodesById, activeNodeId, previousActiveNodeId, previousActiveNodeType) {
+  if (!activeNodeId) return null;
+  const nodeType = nodesById.get(activeNodeId)?.node_type;
+  if (nodeType) return nodeType;
+  return activeNodeId === previousActiveNodeId ? previousActiveNodeType : null;
+}
+
+function singleCandidateOutboundAllowed(message, runPolicy = CONFIGURED_RUN_POLICY) {
+  return message?.type === 'start_generation' || (
+    runPolicy === 'interactive' && message?.type === 'human_confirm'
+  );
+}
+
+function humanGateActionAudit({
+  sequence,
+  enteredAt,
+  elapsedSec,
+  stage,
+  reviewVerdict,
+  activeNodeId,
+  response = null,
+  message = null,
+  sentAt = null,
+}) {
+  return {
+    sequence,
+    enteredAt,
+    elapsedSec,
+    stage,
+    reviewVerdict,
+    active_node_id: activeNodeId,
+    source: response?.source ?? null,
+    message: message
+      ? {
+        decision: message.decision,
+        description_summary: humanDescriptionSummary(message.payload?.description),
+      }
+      : null,
+    ...(sentAt ? { sentAt } : {}),
+  };
+}
+
+function parseHumanStdinCommand(line) {
+  const command = String(line ?? '').trim();
+  if (command === 'confirm') return { decision: 'confirm', description: null, source: 'human_stdin' };
+  const requestChange = /^request-change\s+(.+)$/u.exec(command);
+  if (requestChange?.[1]?.trim()) {
+    return {
+      decision: 'request-change',
+      description: requestChange[1].trim(),
+      source: 'human_stdin',
+    };
+  }
+  throw new Error('stdin 人工确认仅接受 confirm 或 request-change <文本>');
+}
+
+async function readHumanStdinAction({ sequence, stage, reviewVerdict }) {
+  console.log(
+    `[ARIA_HUMAN_MODE=stdin] 人工门 #${sequence}：stage=${stage ?? 'unknown'}；review verdict=${reviewVerdict ?? 'unknown'}。`,
+  );
+  console.log('可选命令：confirm | request-change <文本>');
+  const readline = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return parseHumanStdinCommand(await readline.question('human> '));
+  } finally {
+    readline.close();
+  }
+}
+
+function humanDescriptionSummary(description) {
+  if (typeof description !== 'string') return null;
+  const compact = description.replace(/\s+/gu, ' ').trim();
+  return compact.length <= 240 ? compact : `${compact.slice(0, 237)}...`;
+}
+
 function hasMustFixFindings(reviewComplete, humanGateSnapshot = null) {
   const reviewFindings = Array.isArray(reviewComplete)
     ? reviewComplete
@@ -662,8 +797,13 @@ function reviewDecisionAction(message, reviewVerdict, reviewComplete = null) {
   return { kind: 'fail', strategy: 'unhandled_without_options' };
 }
 
-function legacySingleCandidateDecisionMessage(message) {
+function legacySingleCandidateDecisionMessage(message, runPolicy = CONFIGURED_RUN_POLICY) {
   if (!isRecord(message)) return null;
+  const interactiveHumanGate = runPolicy === 'interactive' && (
+    (message.type === 'stage_change' && isHumanGateStage(message.stage))
+    || (message.type === 'timeline_node_created' && message.node?.node_type === 'human_confirm')
+  );
+  if (interactiveHumanGate) return null;
   if (new Set([
     'provider_select_request',
     'choice_request',
@@ -762,6 +902,7 @@ function resultTemplate(
     run_history: null,
     policy_diagnostics: [],
     human_gate_snapshot: null,
+    ...(runPolicy === 'interactive' ? { humanGateActions: [] } : {}),
     provider_start_count: 0,
     provider_start_ledger: [],
     legacy_decision_messages: [],
@@ -802,7 +943,10 @@ async function runCampaign({
   fs.mkdirSync(outDir, { recursive: true });
   const log = fs.createWriteStream(path.join(outDir, 'ws.jsonl'), { flags: 'wx' });
   const writeLog = (entry) => log.write(`${JSON.stringify({ at: now(), ...entry })}\n`);
-  let feedback = runPolicy === 'interactive' ? FEEDBACK : FEEDBACK;
+  let feedback = FEEDBACK;
+  let humanScript = [];
+  let humanScriptConfigured = false;
+  let humanMode = null;
   const result = resultTemplate(
     provider,
     rep,
@@ -819,7 +963,8 @@ async function runCampaign({
   let ended = false;
   let hardTimer = null;
   let startSent = false;
-  let humanConfirmSent = false;
+  const humanConfirmSentNodeIds = new Set();
+  let humanGateEnteredAt = null;
   let manualRepairRequestsSent = 0;
   let latestArtifact = null;
   let reviewVerdict = null;
@@ -868,11 +1013,11 @@ async function runCampaign({
     if (ended) return;
     if (
       result.flow_kind === 'single_candidate'
-      && message?.type !== 'start_generation'
+      && !singleCandidateOutboundAllowed(message, runPolicy)
     ) {
       fail(
         'single_candidate_outbound_not_allowed',
-        `SingleCandidate 仅允许 start_generation，拒绝发送: ${String(message?.type)}`,
+        `SingleCandidate 仅允许 start_generation 或 interactive human_confirm，拒绝发送: ${String(message?.type)}`,
       );
       return;
     }
@@ -928,28 +1073,86 @@ async function runCampaign({
     send({ type: 'work_item_batch_decision', decision: 'accept_all', feedback: null, first_affected_outline_id: null });
     return true;
   };
-  const handleHumanConfirm = () => {
-    if (runPolicy !== 'interactive' || !activeNodeId || humanConfirmSent || result.failureClass) return;
-    const action = humanConfirmAction({
-      activeNodeType,
+  const handleHumanConfirm = async () => {
+    if (
+      runPolicy !== 'interactive'
+      || !activeNodeId
+      || humanConfirmSentNodeIds.has(activeNodeId)
+      || result.failureClass
+    ) return;
+    if (activeNodeType === null) return;
+    if (activeNodeType !== 'human_confirm') {
+      fail('unexpected_human_confirm', 'interactive human_confirm 未关联到 human_confirm 节点');
+      return;
+    }
+
+    const gateNodeId = activeNodeId;
+    const gateSequence = result.humanGateActions.length + 1;
+    const gateAction = humanGateActionAudit({
+      sequence: gateSequence,
+      enteredAt: humanGateEnteredAt ?? now(),
+      elapsedSec: elapsedSec(),
+      stage: currentStage,
       reviewVerdict,
-      reviewComplete: latestReviewComplete,
-      humanGateSnapshot: result.human_gate_snapshot,
-      manualRepairsUsed: durableRunHistory?.manual_repairs_used ?? 0,
-      manualRepairRequestsSent,
+      activeNodeId: gateNodeId,
     });
-    if (action.kind === 'wait') return;
-    if (action.kind === 'fail') {
-      fail(action.failureClass, 'interactive human_confirm 的 manual 返修预算已耗尽或节点类型未知');
+    result.humanGateActions.push(gateAction);
+    writeLog({ event: 'human_gate_entered', ...gateAction });
+    humanConfirmSentNodeIds.add(gateNodeId);
+    let response;
+    try {
+      if (humanScriptConfigured) {
+        response = humanConfirmScriptAction(humanScript, gateSequence - 1, runPolicy);
+      } else if (humanMode === 'stdin' && process.stdin.isTTY) {
+        response = await readHumanStdinAction({
+          sequence: gateSequence,
+          stage: currentStage,
+          reviewVerdict,
+        });
+      } else {
+        const action = humanConfirmAction({
+          activeNodeType,
+          reviewVerdict,
+          reviewComplete: latestReviewComplete,
+          humanGateSnapshot: result.human_gate_snapshot,
+          manualRepairsUsed: durableRunHistory?.manual_repairs_used ?? 0,
+          manualRepairRequestsSent,
+        });
+        if (action.kind === 'wait') {
+          humanConfirmSentNodeIds.delete(gateNodeId);
+          result.humanGateActions.pop();
+          return;
+        }
+        if (action.kind === 'fail') {
+          fail(action.failureClass, 'interactive human_confirm 的 manual 返修预算已耗尽或节点类型未知');
+          return;
+        }
+        response = action.kind === 'confirm'
+          ? { decision: 'confirm', description: null, source: 'legacy_interactive_policy' }
+          : { decision: 'request-change', description: feedback, source: 'legacy_interactive_policy' };
+      }
+    } catch (error) {
+      fail('human_confirm_input_invalid', error);
       return;
     }
-    humanConfirmSent = true;
-    if (action.kind === 'confirm') {
-      send({ type: 'human_confirm', decision: 'confirm', payload: null });
-      return;
-    }
-    manualRepairRequestsSent += 1;
-    send(humanConfirmRequestChangeMessage(feedback));
+
+    // stdin 等待期间可能已切到另一个 gate；不得向旧节点补发决定。
+    if (ended || !isHumanGateStage(currentStage) || activeNodeId !== gateNodeId) return;
+    const message = humanConfirmMessage(response);
+    if (message.decision === 'request-change') manualRepairRequestsSent += 1;
+    Object.assign(gateAction, humanGateActionAudit({
+      sequence: gateSequence,
+      enteredAt: gateAction.enteredAt,
+      elapsedSec: gateAction.elapsedSec,
+      stage: currentStage,
+      reviewVerdict,
+      activeNodeId: gateNodeId,
+      response,
+      message,
+      sentAt: now(),
+    }));
+    writeLog({ event: 'human_gate_action', ...gateAction });
+    send(message);
   };
   const handleAuthorConfirm = () => {
     // stage_change 先于节点创建时先等待，避免对尚未知类型的节点猜测决定。
@@ -1123,14 +1326,17 @@ async function runCampaign({
     }
     return false;
   };
-  const handleStage = (stage, source) => {
+  const handleStage = (stage, source, stageActiveNodeId = null) => {
+    const previousStage = currentStage;
     currentStage = stage;
-    // 后端可能先广播 stage_change、后创建确认节点；清除旧节点避免误发决策。
-    if ((stage === 'author_confirm' || stage === 'human_confirm') && source === 'stage_change') {
+    // 后端可能先广播 stage_change、后创建确认节点；仅在消息没有携带新 active node 时
+    // 清除旧节点。携带 active node 的人工门必须立刻走统一 human_confirm 应答。
+    if (shouldClearPendingGateNode(stage, source, stageActiveNodeId, activeNodeType)) {
       activeNodeId = null;
       activeNodeType = null;
     }
-    if (stage !== 'human_confirm') humanConfirmSent = false;
+    if (isHumanGateStage(stage) && !isHumanGateStage(previousStage)) humanGateEnteredAt = now();
+    if (!isHumanGateStage(stage)) humanGateEnteredAt = null;
     recordStage(stage, source);
     if (ended) return;
     if (stage === 'completed' && source === 'stage_change') {
@@ -1152,13 +1358,15 @@ async function runCampaign({
       });
       return;
     }
-    // SingleCandidate 的控制面只允许 start_generation；旧 author/review/generation gate
-    // 即使被服务端意外重放，也绝不能被下方 legacy 分支自动应答。
+    // SingleCandidate 的控制面只允许 start_generation；interactive 人工门是唯一例外，
+    // 无论服务端使用 human_confirm 或 waiting_for_human，都必须走统一 human_confirm 应答。
+    if (isHumanGateStage(stage) && runPolicy === 'interactive') {
+      void handleHumanConfirm();
+      return;
+    }
     if (result.flow_kind === 'single_candidate') return;
     if (stage === 'author_confirm') {
       handleAuthorConfirm();
-    } else if (stage === 'human_confirm') {
-      handleHumanConfirm();
     }
   };
 
@@ -1167,6 +1375,7 @@ async function runCampaign({
   }, HARD_LIMIT_MS);
 
   try {
+    // 保持既有读取时机：仅由初始 runPolicy=interactive 触发 ARIA_FEEDBACK_FILE。
     if (runPolicy === 'interactive') feedback = readFeedbackFile(feedbackFile);
     let existingSession = null;
     if (existingSessionId) {
@@ -1239,6 +1448,13 @@ async function runCampaign({
       writeLog({ event: 'plan_prepared', plan_id: result.plan_id, session_id: result.workspace_session_id });
     }
 
+    if (runPolicy === 'interactive') {
+      result.humanGateActions ??= [];
+      humanScriptConfigured = process.env.ARIA_HUMAN_SCRIPT !== undefined;
+      humanScript = parseHumanScript(process.env.ARIA_HUMAN_SCRIPT);
+      humanMode = process.env.ARIA_HUMAN_MODE === 'stdin' ? 'stdin' : null;
+    }
+
     if (elapsedMs() >= HARD_LIMIT_MS) throw new Error('hard-timeout before WebSocket connection');
     ws = new WebSocket(`${WS_BASE}/api/workspace-sessions/${encodeURIComponent(result.workspace_session_id)}/ws`);
     ws.onopen = () => {
@@ -1291,7 +1507,7 @@ async function runCampaign({
           return;
         }
         const legacyDecision = result.flow_kind === 'single_candidate'
-          ? legacySingleCandidateDecisionMessage(message)
+          ? legacySingleCandidateDecisionMessage(message, runPolicy)
           : null;
         if (legacyDecision) {
           result.legacy_decision_messages.push(legacyDecision);
@@ -1314,13 +1530,23 @@ async function runCampaign({
           nodesById.set(message.node.node_id, message.node);
         }
         if (message.active_node_id) {
+          const previousActiveNodeId = activeNodeId;
+          const previousActiveNodeType = activeNodeType;
           activeNodeId = message.active_node_id;
-          activeNodeType = nodesById.get(activeNodeId)?.node_type ?? activeNodeType;
+          activeNodeType = activeNodeTypeForActiveNode(
+            nodesById,
+            activeNodeId,
+            previousActiveNodeId,
+            previousActiveNodeType,
+          );
+          if (isHumanGateStage(currentStage) && activeNodeId !== previousActiveNodeId) {
+            humanGateEnteredAt = now();
+          }
         }
         switch (message.type) {
         case 'session_state':
         case 'stage_change':
-          handleStage(message.stage, message.type);
+          handleStage(message.stage, message.type, message.active_node_id ?? null);
           break;
         case 'artifact_update':
           writeArtifact(message);
@@ -1364,8 +1590,8 @@ async function runCampaign({
             // review_complete 可能先于 human_confirm timeline node 广播；此处只记录
             // 非终态事实，等 node 成为 active 后由 handleHumanConfirm 发送。
             awaitingReviewNeedsHumanTerminal = false;
-            if (currentStage === 'human_confirm' && activeNodeType === 'human_confirm') {
-              handleHumanConfirm();
+            if (isHumanGateStage(currentStage) && activeNodeType === 'human_confirm') {
+              void handleHumanConfirm();
             }
           } else if (action.kind === 'await_terminal_session_state') {
             awaitingReviewNeedsHumanTerminal = true;
@@ -1425,7 +1651,8 @@ async function runCampaign({
             activeNodeId = message.node.node_id ?? activeNodeId;
             activeNodeType = message.node.node_type ?? activeNodeType;
             if (currentStage === 'author_confirm') handleAuthorConfirm();
-            if (currentStage === 'human_confirm') handleHumanConfirm();
+            // stage_change 可能早于节点创建；节点补齐后重试统一人工门，仍由 node id 去重。
+            if (isHumanGateStage(currentStage)) void handleHumanConfirm();
           }
           break;
         case 'provider_status':
@@ -1515,6 +1742,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 }
 
 export {
+  activeNodeTypeForActiveNode,
   applyResultTiming,
   authorConfirmAction,
   collectUsageByRole,
@@ -1523,7 +1751,14 @@ export {
   legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
   humanConfirmAction,
+  humanConfirmMessage,
   humanConfirmRequestChangeMessage,
+  humanConfirmScriptAction,
+  humanGateActionAudit,
+  isHumanGateStage,
+  parseHumanScript,
+  shouldClearPendingGateNode,
+  singleCandidateOutboundAllowed,
   providerRolesForSelection,
   prepareOptionsForProvider,
   resultTemplate,

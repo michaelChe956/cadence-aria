@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  activeNodeTypeForActiveNode,
   authorConfirmAction,
   applyResultTiming,
   confirmedCountForPlanStatus,
@@ -14,7 +15,14 @@ import {
   legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
   humanConfirmAction,
+  humanConfirmMessage,
   humanConfirmRequestChangeMessage,
+  humanConfirmScriptAction,
+  humanGateActionAudit,
+  isHumanGateStage,
+  parseHumanScript,
+  shouldClearPendingGateNode,
+  singleCandidateOutboundAllowed,
   providerRolesForSelection,
   reviewCompleteAction,
   reviewDecisionAction,
@@ -55,6 +63,180 @@ test('interactive human_confirm messages use the HumanConfirm payload contract a
     decision: 'request-change',
     payload: { description: feedback, source: 'human' },
   });
+});
+
+test('human script parses multiple gate responses, preserves colons in feedback, and defaults to confirm after exhaustion', () => {
+  const script = parseHumanScript('request-change:请补全 CT-001:能力声明并保持中文输出;confirm');
+
+  assert.deepEqual(script, [
+    { decision: 'request-change', description: '请补全 CT-001:能力声明并保持中文输出' },
+    { decision: 'confirm', description: null },
+  ]);
+  assert.deepEqual(humanConfirmScriptAction(script, 0, 'interactive'), {
+    decision: 'request-change',
+    description: '请补全 CT-001:能力声明并保持中文输出',
+    source: 'human_script',
+  });
+  assert.deepEqual(humanConfirmScriptAction(script, 1, 'interactive'), {
+    decision: 'confirm',
+    description: null,
+    source: 'human_script',
+  });
+  assert.deepEqual(humanConfirmScriptAction(script, 2, 'interactive'), {
+    decision: 'confirm',
+    description: null,
+    source: 'human_script_exhausted_default',
+  });
+});
+
+test('interactive needs_human and final-pass gates use human_confirm messages and audit actions across both human stages', () => {
+  const needsHumanMessage = humanConfirmMessage(humanConfirmScriptAction(
+    parseHumanScript('request-change:请补全 CT-001 的能力声明'), 0, 'interactive',
+  ));
+  assert.deepEqual(needsHumanMessage, {
+    type: 'human_confirm',
+    decision: 'request-change',
+    payload: { description: '请补全 CT-001 的能力声明', source: 'human' },
+  });
+  assert.deepEqual(
+    humanGateActionAudit({
+      sequence: 1,
+      enteredAt: '2026-08-30T00:00:00.000Z',
+      elapsedSec: 12.5,
+      stage: 'human_confirm',
+      reviewVerdict: 'needs_human',
+      activeNodeId: 'human-gate-needs-human',
+      response: humanConfirmScriptAction(parseHumanScript('request-change:请补全 CT-001 的能力声明'), 0, 'interactive'),
+      message: needsHumanMessage,
+      sentAt: '2026-08-30T00:00:01.000Z',
+    }),
+    {
+      sequence: 1,
+      enteredAt: '2026-08-30T00:00:00.000Z',
+      elapsedSec: 12.5,
+      stage: 'human_confirm',
+      reviewVerdict: 'needs_human',
+      active_node_id: 'human-gate-needs-human',
+      source: 'human_script',
+      message: {
+        decision: 'request-change',
+        description_summary: '请补全 CT-001 的能力声明',
+      },
+      sentAt: '2026-08-30T00:00:01.000Z',
+    },
+  );
+
+  const finalPassMessage = humanConfirmMessage(humanConfirmScriptAction(
+    parseHumanScript('confirm'), 0, 'interactive',
+  ));
+  assert.deepEqual(finalPassMessage, { type: 'human_confirm', decision: 'confirm', payload: null });
+  assert.deepEqual(
+    humanGateActionAudit({
+      sequence: 2,
+      enteredAt: '2026-08-30T00:00:02.000Z',
+      elapsedSec: 18,
+      stage: 'waiting_for_human',
+      reviewVerdict: 'pass',
+      activeNodeId: 'human-gate-final-pass',
+      response: humanConfirmScriptAction(parseHumanScript('confirm'), 0, 'interactive'),
+      message: finalPassMessage,
+      sentAt: '2026-08-30T00:00:03.000Z',
+    }),
+    {
+      sequence: 2,
+      enteredAt: '2026-08-30T00:00:02.000Z',
+      elapsedSec: 18,
+      stage: 'waiting_for_human',
+      reviewVerdict: 'pass',
+      active_node_id: 'human-gate-final-pass',
+      source: 'human_script',
+      message: { decision: 'confirm', description_summary: null },
+      sentAt: '2026-08-30T00:00:03.000Z',
+    },
+  );
+
+  assert.equal(isHumanGateStage('human_confirm'), true);
+  assert.equal(isHumanGateStage('waiting_for_human'), true);
+  assert.equal(isHumanGateStage('review_decision'), false);
+  assert.equal(
+    shouldClearPendingGateNode('human_confirm', 'stage_change', null),
+    true,
+    '没有 active node 的 stage_change 必须等待 node 创建',
+  );
+  assert.equal(
+    shouldClearPendingGateNode('waiting_for_human', 'stage_change', 'human-gate-final-pass'),
+    false,
+    '携带 active human node 的 stage_change 必须保留节点并立即走统一应答',
+  );
+  assert.equal(
+    shouldClearPendingGateNode('human_confirm', 'stage_change', null, 'human_confirm'),
+    false,
+    'node_created 若先到达，后续未携带 active_node_id 的 stage_change 仍须保留已识别的人工节点',
+  );
+  assert.equal(
+    activeNodeTypeForActiveNode(new Map(), 'next-human-gate', 'previous-human-gate', 'human_confirm'),
+    null,
+    '新 active_node_id 尚未随事件携带 node 时，不得沿用旧 human_confirm 类型而向旧门发送应答',
+  );
+  assert.equal(
+    activeNodeTypeForActiveNode(
+      new Map([['next-human-gate', { node_type: 'human_confirm' }]]),
+      'next-human-gate',
+      'previous-human-gate',
+      null,
+    ),
+    'human_confirm',
+  );
+  assert.equal(singleCandidateOutboundAllowed(needsHumanMessage, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed(finalPassMessage, 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'stage_change', stage: 'human_confirm' }, 'interactive'), false);
+  assert.equal(
+    legacySingleCandidateDecisionMessage({ type: 'stage_change', stage: 'human_confirm' }, 'interactive'),
+    null,
+    'interactive SingleCandidate human gates must reach the unified human_confirm responder',
+  );
+  assert.equal(
+    legacySingleCandidateDecisionMessage({ type: 'stage_change', stage: 'waiting_for_human' }, 'interactive'),
+    null,
+    'waiting_for_human is the same interactive human gate',
+  );
+  const autoHumanGate = { type: 'stage_change', stage: 'human_confirm' };
+  assert.deepEqual(
+    legacySingleCandidateDecisionMessage(autoHumanGate, 'auto_if_valid'),
+    autoHumanGate,
+    'auto 模式仍将 SingleCandidate 的旧人工门消息视为协议回归',
+  );
+  const driverSource = fs.readFileSync(path.join(CAMPAIGN_DIR, 'workitem_run_campaign.mjs'), 'utf8');
+  assert.doesNotMatch(
+    driverSource,
+    /send\(\{\s*type:\s*['"]stage_change['"]/u,
+    'interactive 人工门不得发送旧 stage_change 协议',
+  );
+});
+
+test('human script is inert outside interactive policy', () => {
+  const script = parseHumanScript('request-change:不应在 auto 模式发送');
+  assert.equal(humanConfirmScriptAction(script, 0, 'auto_if_valid'), null);
+  assert.equal(
+    Object.hasOwn(resultTemplate('codex', 1, '/tmp/out', {}, 'digest', 'auto_if_valid'), 'humanGateActions'),
+    false,
+    'auto 模式的 result.json 模板不新增人工门字段',
+  );
+  assert.deepEqual(
+    humanConfirmAction({
+      activeNodeType: 'human_confirm',
+      reviewVerdict: 'needs_human',
+      reviewComplete: { findings: [] },
+    }),
+    { kind: 'request_change' },
+  );
+});
+
+test('interactive result template reserves the human gate action audit trail', () => {
+  assert.deepEqual(
+    resultTemplate('codex', 1, '/tmp/out', {}, 'digest', 'interactive').humanGateActions,
+    [],
+  );
 });
 
 test('interactive human gates distinguish needs_human/manual revision from the final pass confirmation', () => {
