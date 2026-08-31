@@ -1057,6 +1057,15 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
     assert!(prompt.contains(
         "每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空"
     ));
+    for teaching in [
+        "能力必须原子化",
+        "每个 `- capabilities:` 与 `- required_capabilities:` 字段一行只写一个精确能力字符串",
+        "禁止用「A + B」、逗号、斜杠或自然语言把多个能力合并为一个字符串",
+        "`require_all` 按字符串逐字精确匹配",
+        "假性 `required_capability_missing`",
+    ] {
+        assert!(prompt.contains(teaching), "missing capability teaching: {teaching}");
+    }
     assert!(prompt.contains("该字段的值写 []"));
     assert!(prompt.contains("不表示其他 section 可以为空"));
     assert!(!prompt.contains("若本 WI 没有任何下游 consumer edge（链路末端"));

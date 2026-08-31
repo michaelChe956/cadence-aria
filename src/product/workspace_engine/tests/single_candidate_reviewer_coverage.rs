@@ -231,6 +231,9 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
         "category=contract_gap",
         "class_hint=repairable",
         "evidence",
+        "实际 nonce 开始标签",
+        "必须是输出第一行",
+        "禁止任何前言、声明、路由回执、说明、空白行或代码围栏",
     ] {
         assert!(
             input.prompt.contains(teaching),

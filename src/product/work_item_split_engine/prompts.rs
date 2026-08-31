@@ -185,6 +185,8 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          requirement_refs 仅引用清单；清单外 REQ-* 拒绝。\n\
          handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）。\n\
          同 contract_id：provider output_capabilities 覆盖 WI input_contracts required_capabilities。\n\
+         能力必须原子化：每个 `- capabilities:` 与 `- required_capabilities:` 字段一行只写一个精确能力字符串；禁止用「A + B」、逗号、斜杠或自然语言把多个能力合并为一个字符串。\n\
+         `require_all` 按字符串逐字精确匹配；将两个能力合并成一个字符串会制造假性 `required_capability_missing`，即使语义上看似都已提供。\n\
          require_all=全部覆盖（缺一项→required_capability_missing）；require_any=至少一项相交（交集空→required_capability_missing）。\n\
          端点/动作如 `GET /api/levels` 须显式声明；字段/记录不隐含端点。\n\
          反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。\n\

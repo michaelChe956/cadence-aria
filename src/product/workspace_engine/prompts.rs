@@ -180,6 +180,7 @@ pub(crate) fn reviewer_output_contract(
          当前阶段：候选产物审查。\n\
          必调 Skill：using-superpowers。\n\
          前置 gate：仅只读审核当前材料；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\
+         输出硬约束：实际 nonce 开始标签必须是输出第一行；此前禁止任何前言、声明、路由回执、说明、空白行或代码围栏。\n\
          {intro}\
          完整示例（仅用于理解结构，绝不可照抄 nonce）：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\

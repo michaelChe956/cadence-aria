@@ -709,6 +709,9 @@ fn reviewer_prompt_requires_nonce_sentinel() {
 
     assert!(input.prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
     assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(input.prompt.contains("实际 nonce 开始标签"));
+    assert!(input.prompt.contains("必须是输出第一行"));
+    assert!(input.prompt.contains("禁止任何前言、声明、路由回执、说明、空白行或代码围栏"));
     assert!(input.prompt.contains("不得使用 Markdown code fence"));
     assert!(!input.prompt.contains("```json"));
     assert!(input.prompt.contains("[cadence_project_rules]"));

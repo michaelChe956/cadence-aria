@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::structured_output::{
     StructuredOutputContract, StructuredOutputState, parse_structured_output,
+    parse_structured_output_first_line_nonce,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
@@ -275,7 +276,18 @@ impl ProviderCompletion {
         let Some(contract) = contract else {
             return Self::plain(full_output, provider_session_id);
         };
-        let parsed = parse_structured_output(&full_output, contract);
+        let parsed = if contract.schema_name == "single_candidate_work_item_plan_review" {
+            parse_structured_output_first_line_nonce(&full_output, contract)
+        } else {
+            parse_structured_output(&full_output, contract)
+        };
+        if parsed.preamble_trimmed {
+            tracing::info!(
+                diagnostic = "preamble_trimmed",
+                schema = %contract.schema_name,
+                "discarded preamble before single-candidate reviewer nonce sentinel"
+            );
+        }
         Self {
             full_output,
             readable_output: parsed.readable_output,

@@ -603,7 +603,7 @@ impl WorkspaceEngine {
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),
-            schema_name: "work_item_plan_review".to_string(),
+            schema_name: "single_candidate_work_item_plan_review".to_string(),
         };
         let schema = format!(
             r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[]}}"#,

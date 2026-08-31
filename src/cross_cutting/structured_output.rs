@@ -45,6 +45,9 @@ pub enum StructuredOutputErrorCode {
 pub struct StructuredOutputParse {
     pub readable_output: String,
     pub state: StructuredOutputState,
+    /// Set only by the SC reviewer adapter when it deterministically discards
+    /// text preceding the required first-line nonce sentinel.
+    pub preamble_trimmed: bool,
 }
 
 impl StructuredOutputErrorCode {
@@ -77,6 +80,25 @@ pub fn parse_structured_output(
         );
     };
 
+    parse_block_at(output, start, Some(contract.nonce.as_str()))
+}
+
+/// Parses a reviewer response that requires its nonce sentinel on the first
+/// line. When a valid, expected sentinel is preceded by text, the preamble is
+/// deterministically discarded before parsing and the result records that trim.
+/// This intentionally remains opt-in so legacy/story/design parsing is unchanged.
+pub fn parse_structured_output_first_line_nonce(
+    output: &str,
+    contract: &StructuredOutputContract,
+) -> StructuredOutputParse {
+    let Some(start) = output.rfind(START_PREFIX) else {
+        return parse_structured_output(output, contract);
+    };
+    if !output[..start].trim().is_empty() {
+        let mut parsed = parse_block_at(&output[start..], 0, Some(contract.nonce.as_str()));
+        parsed.preamble_trimmed = true;
+        return parsed;
+    }
     parse_block_at(output, start, Some(contract.nonce.as_str()))
 }
 
@@ -116,6 +138,7 @@ fn parse_block_at(
             return StructuredOutputParse {
                 readable_output: output[..start_index].trim().to_string(),
                 state: StructuredOutputState::Failed(error),
+                preamble_trimmed: false,
             };
         }
     };
@@ -193,6 +216,7 @@ fn parse_block_at(
         Ok(()) => StructuredOutputParse {
             readable_output,
             state: StructuredOutputState::Parsed(value),
+            preamble_trimmed: false,
         },
         Err(mut error) => {
             // A nonce failure is never accepted as business output. Retaining only the
@@ -202,6 +226,7 @@ fn parse_block_at(
             StructuredOutputParse {
                 readable_output,
                 state: StructuredOutputState::Failed(error),
+                preamble_trimmed: false,
             }
         }
     }
@@ -450,6 +475,7 @@ fn parse_failure(
             observed_nonce,
             recoverable_value,
         }),
+        preamble_trimmed: false,
     }
 }
 
@@ -491,6 +517,50 @@ mod tests {
             panic!("expected structured output failure: {parsed:?}");
         };
         error
+    }
+
+    #[test]
+    fn first_line_nonce_parser_discards_preamble_and_records_the_trim() {
+        let output = format!(
+            "路由回执：开始审核\n{}\n闭合后文本",
+            block(r#"{"nonce":"96aca42f","verdict":"pass"}"#)
+        );
+
+        let parsed = parse_structured_output_first_line_nonce(&output, &contract());
+
+        assert!(parsed.preamble_trimmed);
+        assert_eq!(parsed.readable_output, "闭合后文本");
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
+    }
+
+    #[test]
+    fn first_line_nonce_parser_preserves_no_preamble_path() {
+        let parsed = parse_structured_output_first_line_nonce(
+            &block(r#"{"nonce":"96aca42f","verdict":"pass"}"#),
+            &contract(),
+        );
+
+        assert!(!parsed.preamble_trimmed);
+        assert_eq!(parsed.readable_output, "");
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
+    }
+
+    #[test]
+    fn first_line_nonce_parser_does_not_hide_a_missing_start_tag() {
+        let error = match parse_structured_output_first_line_nonce("前言但没有标签", &contract())
+            .state
+        {
+            StructuredOutputState::Failed(error) => error,
+            state => panic!("expected missing-start-tag failure: {state:?}"),
+        };
+
+        assert_eq!(error.code, StructuredOutputErrorCode::MissingStartTag);
     }
 
     #[test]

@@ -76,6 +76,25 @@ fn provider_completion_parses_requested_structured_output() {
 }
 
 #[test]
+fn single_candidate_reviewer_completion_discards_nonce_preamble() {
+    let contract = StructuredOutputContract {
+        nonce: "96aca42f".to_string(),
+        schema_name: "single_candidate_work_item_plan_review".to_string(),
+    };
+    let completion = ProviderCompletion::from_output(
+        "路由回执\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT>".to_string(),
+        Some(&contract),
+        Some("provider-session-1".to_string()),
+    );
+
+    assert_eq!(completion.readable_output, "");
+    assert_eq!(
+        completion.structured_output,
+        StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+    );
+}
+
+#[test]
 fn provider_completion_plain_marks_structured_output_not_requested() {
     let completion = ProviderCompletion::plain("plain output", None);
 
