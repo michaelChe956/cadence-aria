@@ -21,7 +21,7 @@
 
 ### New Capabilities
 
-- `work-item-plan-conversational-gate`: 对话式人工门——typed 反馈回合协议、HumanGateTurn durable 模型、预算/单飞/幂等语义、SC manual revision 专属路径、门关闭决定（approve→compile→Confirmed / abandon / 预算耗尽）
+- `work-item-plan-conversational-gate`: 对话式人工门——typed 反馈回合协议、HumanGateTurn durable 模型、预算/单飞/幂等语义、SC manual revision 专属路径、门关闭决定（仅 approve→compile→Confirmed 与 abandon；预算耗尽时门保持开启、拒绝新反馈）
 - `work-item-plan-advance`: advance 幂等编排接口——前置校验、AdvanceRecord durable 模型、group attempt 唯一性与初始化 journal 恢复、ready-only 语义、SC/legacy 入口隔离
 - `work-item-group-coding-execution`: group coding 执行编排——依赖就绪门（权威=依赖图+handoff readiness，order_index 仅 tie-breaker）、共享 worktree 单 active unit、失败留在 attempt 内处理、plan 缺陷走 amendment 链恢复
 
