@@ -246,7 +246,7 @@ mod internal_generation_mode {
     fn internal_generation_mode_uses_compiled_ir_item_count_and_provider_profile() {
         let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
+            "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
         ));
         let ir = crate::product::work_item_plan_compiler::compile_work_item_plan(
             source,

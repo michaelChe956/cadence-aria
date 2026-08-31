@@ -4,9 +4,8 @@ use super::{DIAGNOSTIC_FIXTURES, EXPECTED_DIAGNOSTICS};
 
 const CLASSIFIER_GOLDEN_FINDINGS: &str =
     include_str!("../../work_item_plan_policy/fixtures/golden_findings.json");
-const REVIEWER_FINDING_CHANNEL_MAP: &str = include_str!(
-    "../../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/reviewer-finding-channel-map.json"
-);
+const REVIEWER_FINDING_CHANNEL_MAP: &str =
+    include_str!("../fixtures/reviewer-finding-channel-map.json");
 
 #[test]
 fn reviewer_finding_channel_boundary() {

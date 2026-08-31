@@ -232,8 +232,7 @@ fn required_fields_define_every_structured_section() {
     );
 }
 
-const FIELD_SOURCE_MATRIX: &str =
-    include_str!("../../../openspec/changes/rearch-workitem-plan-pipeline/field-source-matrix.md");
+const FIELD_SOURCE_MATRIX: &str = include_str!("fixtures/field-source-matrix.md");
 
 const REQUIRED_FIELD_PATHS: &[&str] = &[
     "contract.schema_version",
@@ -394,24 +393,13 @@ fn field_source_matrix_keeps_context_and_handoff_runtime_values_out_of_markdown_
     }
 }
 
-const REP4_FIXTURE: &str = include_str!(
-    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
-);
-const MISSING_VERIFICATION_FIXTURE: &str = include_str!(
-    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/missing-verification.md"
-);
-const UNKNOWN_FIELD_FIXTURE: &str = include_str!(
-    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/unknown-field.md"
-);
-const INVALID_ID_FIXTURE: &str = include_str!(
-    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/invalid-id.md"
-);
-const INVALID_EARS_FIXTURE: &str = include_str!(
-    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/invalid-ears.md"
-);
-const EXPECTED_DIAGNOSTICS: &str = include_str!(
-    "../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/expected.json"
-);
+const REP4_FIXTURE: &str = include_str!("fixtures/work-item-plan-rep4.md");
+const MISSING_VERIFICATION_FIXTURE: &str =
+    include_str!("fixtures/compiler-diagnostics/missing-verification.md");
+const UNKNOWN_FIELD_FIXTURE: &str = include_str!("fixtures/compiler-diagnostics/unknown-field.md");
+const INVALID_ID_FIXTURE: &str = include_str!("fixtures/compiler-diagnostics/invalid-id.md");
+const INVALID_EARS_FIXTURE: &str = include_str!("fixtures/compiler-diagnostics/invalid-ears.md");
+const EXPECTED_DIAGNOSTICS: &str = include_str!("fixtures/compiler-diagnostics/expected.json");
 
 const DIAGNOSTIC_FIXTURES: [(&str, &str); 4] = [
     (

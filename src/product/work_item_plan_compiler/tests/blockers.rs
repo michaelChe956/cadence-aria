@@ -4,9 +4,7 @@ use super::{
 };
 use crate::product::work_item_plan_compiler::lower;
 
-const REP4_FIXTURE: &str = include_str!(
-    "../../../../openspec/changes/rearch-workitem-plan-pipeline/fixtures/work-item-plan-rep4.md"
-);
+const REP4_FIXTURE: &str = include_str!("../fixtures/work-item-plan-rep4.md");
 
 #[test]
 fn empty_blockers_section_parses_and_lowers_to_no_blocker_rules() {

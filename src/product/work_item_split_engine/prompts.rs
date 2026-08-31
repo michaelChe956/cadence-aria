@@ -64,7 +64,7 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 /// 🔴 红线（2026-08-31 终审裁决 2b）：当前实测余量仅 66B（18,934/19,000）。
 /// 任何后续 SC author 教学变更必须先将本常量上调至整百级并注明 margin 惯例，
 /// 再添加教学内容；预算调整必须配套更新 prompt bytes 测试与 margin 说明。
-/// 依据：openspec/changes/rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
+/// 依据：openspec/changes/archive/2026-08-31-rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
 #[cfg(test)]
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 19_000;
 
