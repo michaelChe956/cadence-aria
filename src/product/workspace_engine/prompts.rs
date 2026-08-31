@@ -6,6 +6,7 @@ use crate::product::cadence_skills::routing_reference::{
 
 mod author_revision;
 mod history_compaction;
+mod human_gate_revision;
 mod review;
 mod review_context;
 mod review_repair;
@@ -14,6 +15,13 @@ mod reviewer_context_filter;
 mod revision;
 
 use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
+
+#[allow(unused_imports)]
+pub(crate) use human_gate_revision::{
+    LANGUAGE_RULE_FILE_CONTENT, SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES,
+    SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES, ScManualRevisionPromptInput,
+    build_sc_manual_revision_prompt, validate_sc_manual_revision_feedback,
+};
 #[cfg(test)]
 pub(crate) use review::{
     SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,

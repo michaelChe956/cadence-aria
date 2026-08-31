@@ -6,8 +6,10 @@ use crate::product::models::{
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::HumanConfirmDecision;
 
-pub(crate) const HUMAN_GATE_FEEDBACK_MAX_BYTES: usize = 8_192;
 pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
+#[allow(dead_code)]
+pub(crate) const HUMAN_GATE_FEEDBACK_MAX_BYTES: usize =
+    super::prompts::SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES;
 pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";
 /// Fixed upper bound for real provider starts belonging to one logical turn.
 /// A turn is reserved as attempt 1 and may be resumed once as attempt 2.
@@ -74,16 +76,7 @@ fn validate_command_id(command_id: &str) -> Result<(), String> {
 }
 
 fn validate_feedback(feedback: &str) -> Result<(), String> {
-    if feedback.trim().is_empty() {
-        return Err("INVALID_HUMAN_GATE_FEEDBACK: feedback must not be blank".to_string());
-    }
-    if feedback.len() > HUMAN_GATE_FEEDBACK_MAX_BYTES {
-        return Err(format!(
-            "HUMAN_GATE_FEEDBACK_TOO_LARGE: feedback exceeds {} bytes",
-            HUMAN_GATE_FEEDBACK_MAX_BYTES
-        ));
-    }
-    Ok(())
+    super::prompts::validate_sc_manual_revision_feedback(feedback)
 }
 
 impl super::WorkspaceEngine {
@@ -127,6 +120,31 @@ impl super::WorkspaceEngine {
         if let Err(error) = validate_feedback(&input.feedback) {
             let (code, reason) = error.split_once(':').map_or(
                 ("INVALID_HUMAN_GATE_FEEDBACK", error.as_str()),
+                |(code, reason)| (code, reason.trim()),
+            );
+            return Ok(rejected(code, reason));
+        }
+
+        // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
+        // 固定契约超出独立预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
+        let candidate_markdown = self
+            .session
+            .artifact
+            .clone()
+            .and_then(|artifact| artifact.into_markdown())
+            .unwrap_or_default();
+        let grammar_boundary =
+            crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
+        if let Err(error) = super::prompts::build_sc_manual_revision_prompt(
+            super::prompts::ScManualRevisionPromptInput {
+                candidate_markdown: &candidate_markdown,
+                feedback: &input.feedback,
+                grammar_boundary: &grammar_boundary,
+                language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
+            },
+        ) {
+            let (code, reason) = error.split_once(':').map_or(
+                ("HUMAN_GATE_REVISION_PROMPT_TOO_LARGE", error.as_str()),
                 |(code, reason)| (code, reason.trim()),
             );
             return Ok(rejected(code, reason));
