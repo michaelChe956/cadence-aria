@@ -869,18 +869,11 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。",
         "正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。",
         "canonical fail-closed：required_capability_missing 拒绝 plan。",
-        "provided_contract_refs 中每项必须被至少一个下游 Work Item 的 input_contracts",
-        "provider_logical_work_item_id",
-        "contract_id",
-        "逐字二元组",
-        "unconsumed_required_handoff",
-        "反例：WI-002 handoff 提供 CT-005",
-        "正例：WI-002 提供 CT-005",
-        "不能依赖 title、depends_on 或自然语言描述推断消费",
         "Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。",
-        "provided_contract_refs 只列出确实被下游 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字消费的 ref。",
-        "若本 WI 没有任何下游 consumer edge（链路末端；单 WI 计划也属于此类），必须保留 provided_contract_refs 字段并写 `[]`；`[]` 是合法空数组，不是省略字段。",
-        "非空 ref 无消费者时，补齐精确下游 Inputs 或移除该 ref；不得删除整个 Handoff Schema、删除必需字段、写 blocker、改 contract ID，也不得依赖 depends_on 或自然语言制造虚假消费。",
+        "Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空；验证/集成类 Work Item 同样声明其产出的证据类契约。",
+        "provided_contract_refs 列出本 WI 交接给下游的契约引用：只列会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的引用；没有要交接的引用时，该字段的值写 []——[] 是 provided_contract_refs 的合法取值，不是省略字段，也不表示其他 section 可以为空。",
+        "正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → 合法。",
+        "反例：WI-002 提供 CT-005 但无下游引用它 → 从 provided_contract_refs 移除 CT-005（该字段值可为 []）或补齐精确下游 Inputs；不得以省略字段、写 blocker、改 ID 或自然语言掩盖。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
         "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
         "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
@@ -912,10 +905,9 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         1,
         "完整 author 的 CJK 反例只能出现在明确标记为非法的教学中"
     );
-    assert_eq!(
-        prompt.matches("unconsumed_required_handoff").count(),
-        1,
-        "SC author handoff finding code must appear exactly once"
+    assert!(
+        !prompt.contains("unconsumed_required_handoff"),
+        "SC author must not retain the redundant handoff-consumption rule"
     );
 
     let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
@@ -1024,4 +1016,32 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
 #[test]
 fn p2_author_handoff_consumption_prompt_teaches_exact_pair_and_counterexample() {
     work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings();
+}
+
+#[test]
+fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &[],
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                routing_context: &RoutingReferenceContext::Legacy,
+            },
+        )
+        .expect("markdown author prompt");
+
+    assert!(prompt.contains("Outputs 与 Handoff Schema 相互独立"));
+    assert!(prompt.contains(
+        "每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空"
+    ));
+    assert!(prompt.contains("该字段的值写 []"));
+    assert!(prompt.contains("不表示其他 section 可以为空"));
+    assert!(!prompt.contains("若本 WI 没有任何下游 consumer edge（链路末端"));
+    assert!(!prompt.contains("provided_contract_refs 中每项必须被至少一个下游"));
 }

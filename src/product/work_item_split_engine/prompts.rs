@@ -159,13 +159,10 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。\n\
          canonical fail-closed：required_capability_missing 拒绝 plan。\n\
          Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。\n\
-         provided_contract_refs 只列出确实被下游 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字消费的 ref。\n\
-         若本 WI 没有任何下游 consumer edge（链路末端；单 WI 计划也属于此类），必须保留 provided_contract_refs 字段并写 `[]`；`[]` 是合法空数组，不是省略字段。\n\
-         非空 ref 无消费者时，补齐精确下游 Inputs 或移除该 ref；不得删除整个 Handoff Schema、删除必需字段、写 blocker、改 contract ID，也不得依赖 depends_on 或自然语言制造虚假消费。\n\
-         provided_contract_refs 中每项必须被至少一个下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费；provider_logical_work_item_id 是提供 item ID，contract_id 是 provided ref 完整字符串；二者须逐字相等，不能依赖 title、depends_on 或自然语言描述推断消费。\n\
-         反例：WI-002 handoff 提供 CT-005，但任何下游 input_contracts 没有 (provider_logical_work_item_id=WI-002, contract_id=CT-005) → 拒绝/生成前修正。\n\
-         正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → consumed=true。\n\
-         无消费者生成前修正，否则 unconsumed_required_handoff fail-closed 拒绝；不要写 blocker、改 id 或自动推断掩盖。\n\
+         Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空；验证/集成类 Work Item 同样声明其产出的证据类契约。\n\
+         provided_contract_refs 列出本 WI 交接给下游的契约引用：只列会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的引用；没有要交接的引用时，该字段的值写 []——[] 是 provided_contract_refs 的合法取值，不是省略字段，也不表示其他 section 可以为空。\n\
+         正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → 合法。\n\
+         反例：WI-002 提供 CT-005 但无下游引用它 → 从 provided_contract_refs 移除 CT-005（该字段值可为 []）或补齐精确下游 Inputs；不得以省略字段、写 blocker、改 ID 或自然语言掩盖。\n\
          每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单。\n\n"
     )
 }

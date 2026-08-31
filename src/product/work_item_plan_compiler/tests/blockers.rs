@@ -63,6 +63,22 @@ fn omitted_handoff_refs_section_still_rejects_missing_required_field() {
 }
 
 #[test]
+fn empty_outputs_section_still_rejects_missing_required_field() {
+    let source = REP4_FIXTURE.replace(
+        "### Outputs\n- contract_id: contract.levels-api\n- capabilities: api.levels.read\n",
+        "### Outputs\n",
+    );
+    let diagnostics = lint_work_item_plan_source(&source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "missing_section"
+                && diagnostic.field == "contract_id"),
+        "空 Outputs section 仍必须拒绝 contract_id 缺失：{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn empty_non_blockers_section_still_rejects_missing_required_field() {
     let source = REP4_FIXTURE.replace(
         "### Goal\n- summary: WHEN a level list request arrives THE SYSTEM SHALL return the configured levels JSON.\n",
