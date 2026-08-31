@@ -16,11 +16,13 @@ mod revision;
 
 use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
 
-#[allow(unused_imports)]
 pub(crate) use human_gate_revision::{
-    LANGUAGE_RULE_FILE_CONTENT, SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES,
-    SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES, ScManualRevisionPromptInput,
-    build_sc_manual_revision_prompt, validate_sc_manual_revision_feedback,
+    LANGUAGE_RULE_FILE_CONTENT, ScManualRevisionPromptInput, build_sc_manual_revision_prompt,
+    validate_sc_manual_revision_feedback,
+};
+#[cfg(test)]
+pub(crate) use human_gate_revision::{
+    SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES, SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES,
 };
 #[cfg(test)]
 pub(crate) use review::{

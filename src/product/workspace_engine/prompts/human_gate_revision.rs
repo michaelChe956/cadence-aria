@@ -13,7 +13,6 @@ pub(crate) const SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES: usize = 32_000;
 pub(crate) const SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES: usize = 8_192;
 
 /// 仓库规则 fixture 仅读取 language.md 全文；本模块不读取 code-usage/code-reading。
-#[allow(dead_code)]
 pub(crate) const LANGUAGE_RULE_FILE_CONTENT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/.claude/rules/language.md"

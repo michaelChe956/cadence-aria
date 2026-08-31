@@ -11,7 +11,7 @@ use crate::product::work_item_plan_policy::{
 };
 use tempfile::TempDir;
 
-fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEngine) {
+pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEngine) {
     let root = TempDir::new().expect("tempdir");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths);

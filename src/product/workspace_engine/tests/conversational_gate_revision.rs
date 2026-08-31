@@ -2,8 +2,8 @@ use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PRO
 use crate::product::workspace_engine::prompts::{
     SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES, SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES,
     ScManualRevisionPromptInput, build_sc_manual_revision_prompt,
-    validate_sc_manual_revision_feedback,
 };
+use crate::product::workspace_engine::{HumanGateCommandOutcome, HumanGateFeedbackInput};
 
 const LANGUAGE_RULE_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -75,16 +75,47 @@ fn conversational_gate_revision_prompt_includes_candidate_feedback_grammar_langu
     );
 }
 
-#[test]
-fn conversational_gate_revision_prompt_rejects_oversized_feedback_before_reservation() {
+#[tokio::test]
+async fn conversational_gate_revision_prompt_rejects_oversized_feedback_before_reservation() {
+    let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(2);
+    let before = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session before oversized feedback");
+    let before_session_bytes = serde_json::to_vec(&before).expect("serialize session before");
     let oversized = "x".repeat(SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES + 1);
-    let error = validate_sc_manual_revision_feedback(&oversized)
-        .expect_err("oversized feedback must fail before a turn reservation");
-    assert!(
-        error.starts_with("HUMAN_GATE_FEEDBACK_TOO_LARGE"),
-        "{error}"
+
+    let outcome = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "cmd_oversized_revision".to_string(),
+            feedback: oversized,
+        })
+        .await
+        .expect("oversized feedback rejection");
+    assert!(matches!(
+        outcome,
+        HumanGateCommandOutcome::Rejected { ref code, .. }
+            if code == "HUMAN_GATE_FEEDBACK_TOO_LARGE"
+    ));
+
+    let after = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session after oversized feedback");
+    assert_eq!(
+        serde_json::to_vec(&after).expect("serialize session after"),
+        before_session_bytes,
+        "oversized feedback must not mutate durable session"
     );
-    assert_eq!(oversized.len(), SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES + 1);
+    assert!(
+        lifecycle
+            .list_human_gate_turns(engine.session().session_id.as_str())
+            .expect("list turns")
+            .is_empty(),
+        "oversized feedback must not create a turn"
+    );
+    assert!(
+        after.provider_start_ledger.is_empty(),
+        "oversized feedback must not reserve a provider start"
+    );
 }
 
 #[test]

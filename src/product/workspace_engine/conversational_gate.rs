@@ -7,9 +7,6 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::HumanConfirmDecision;
 
 pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
-#[allow(dead_code)]
-pub(crate) const HUMAN_GATE_FEEDBACK_MAX_BYTES: usize =
-    super::prompts::SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES;
 pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";
 /// Fixed upper bound for real provider starts belonging to one logical turn.
 /// A turn is reserved as attempt 1 and may be resumed once as attempt 2.
