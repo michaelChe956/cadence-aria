@@ -10,6 +10,7 @@ use crate::product::models::{
     DesignSpecRecord, LifecycleConfirmationStatus, ProviderName, StorySpecRecord,
     WorkItemRuntimeBinding, WorkspaceType,
 };
+use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason};
 
 use super::*;
 
@@ -44,6 +45,108 @@ fn create_session(
         .unwrap()
 }
 
+#[test]
+fn human_gate_reservation_cas_writes_turn_budget_and_provider_key_atomically() {
+    let (_tmp, store) = setup();
+    let mut session = create_session(&store, "work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    session.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+    });
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    write_json(&session_path, &session).unwrap();
+
+    let turn = crate::product::models::HumanGateTurn {
+        turn_id: "turn_0001".to_string(),
+        session_id: session.id.clone(),
+        command_id: "command_0001".to_string(),
+        feedback_text: "please revise".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-08-31T00:00:00Z".to_string(),
+        updated_at: "2026-08-31T00:00:00Z".to_string(),
+    };
+    let reservation = crate::product::models::HumanGateReservation {
+        command_id: turn.command_id.clone(),
+        turn_id: turn.turn_id.clone(),
+        provider_start_idempotency_key: "human_gate_start_0001".to_string(),
+        reserved_at: "2026-08-31T00:00:00Z".to_string(),
+    };
+
+    let (saved, saved_turn) = store
+        .compare_and_reserve_human_gate_turn(&session, turn.clone(), reservation.clone())
+        .unwrap();
+    assert_eq!(
+        saved
+            .human_gate_snapshot
+            .as_ref()
+            .unwrap()
+            .manual_repairs_remaining,
+        1
+    );
+    assert_eq!(saved.human_gate_reservation, Some(reservation.clone()));
+    assert_eq!(saved_turn, turn);
+    let session_bytes = std::fs::read(&session_path).unwrap();
+    let turn_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(&session.id)
+        .join("human-gate-turns")
+        .join("turn_0001.json");
+    let turn_bytes = std::fs::read(&turn_path).unwrap();
+    assert!(
+        session_bytes
+            .windows(b"human_gate_reservation".len())
+            .any(|bytes| bytes == b"human_gate_reservation")
+    );
+    assert!(
+        turn_bytes
+            .windows(b"reserved".len())
+            .any(|bytes| bytes == b"reserved")
+    );
+    assert_eq!(
+        store.get_human_gate_turn(&session.id, "turn_0001").unwrap(),
+        saved_turn
+    );
+    assert_eq!(
+        store
+            .get_human_gate_turn_by_command_id(&session.id, "command_0001")
+            .unwrap(),
+        Some(saved_turn.clone())
+    );
+    assert!(
+        saved
+            .provider_start_ledger
+            .iter()
+            .any(|entry| entry.provider_start_idempotency_key == "human_gate_start_0001")
+    );
+
+    let (replayed, replayed_turn) = store
+        .compare_and_reserve_human_gate_turn(&saved, turn, reservation)
+        .unwrap();
+    assert_eq!(replayed, saved);
+    assert_eq!(replayed_turn, saved_turn);
+    assert_eq!(
+        replayed
+            .human_gate_snapshot
+            .as_ref()
+            .unwrap()
+            .manual_repairs_remaining,
+        1
+    );
+}
 #[test]
 fn new_session_defaults_permission_modes_to_auto() {
     let (_tmp, store) = setup();

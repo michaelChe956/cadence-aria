@@ -1,5 +1,6 @@
 use crate::product::app_paths::ProductAppPaths;
 
+pub mod human_gate;
 pub mod inputs;
 pub mod paths;
 pub mod plan;

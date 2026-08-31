@@ -5,15 +5,16 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::product::models::{
     AgentRole, AmendmentResumeMode, AmendmentResumeTarget, ArtifactRef, DependencyGraphRevision,
-    DesignSpecRecord, HandoffRevision, HumanPresentationRevision, LogicalWorkItem, NodeDetail,
-    PermissionEvent, PlanAmendmentManifest, PlanAmendmentPublicationJournal,
-    PlanAmendmentPublicationPhase, PlanDefectClass, PlanDefectEvidence, PlanDefectRoute,
-    PlanProjectionBundle, PlanRepairRequest, PlanRepairRequestStatus, PlanRevisionReason,
-    PlanValidationReportArtifact, ProviderName, ProviderSnapshot, RepairTarget, RepairTargetKind,
-    RepositoryRecord, VerificationPlanRevision, WorkItemDraftRevision, WorkItemDraftRevisionState,
-    WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanRevision,
-    WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
-    WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    DesignSpecRecord, HandoffRevision, HumanGateTurn, HumanGateTurnFailureClass,
+    HumanGateTurnStatus, HumanPresentationRevision, LogicalWorkItem, NodeDetail, PermissionEvent,
+    PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
+    PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, PlanProjectionBundle, PlanRepairRequest,
+    PlanRepairRequestStatus, PlanRevisionReason, PlanValidationReportArtifact, ProviderName,
+    ProviderSnapshot, RepairTarget, RepairTargetKind, RepositoryRecord, VerificationPlanRevision,
+    WorkItemDraftRevision, WorkItemDraftRevisionState, WorkItemDraftRevisionStatus,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
+    WorkItemRevisionReplacement, WorkItemRuntimeBinding, WorkspaceSessionRecord,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_contract::{
     ContractValidationReport, build_dependency_contract_graph, canonical_contract_fixture,
@@ -58,6 +59,94 @@ where
     }
 }
 
+#[test]
+fn human_gate_turn_durable_schema_roundtrips_and_rejects_unknown_fields() {
+    let statuses = [
+        HumanGateTurnStatus::Reserved,
+        HumanGateTurnStatus::Running,
+        HumanGateTurnStatus::Completed,
+        HumanGateTurnStatus::Failed,
+    ];
+    let failure_classes = [
+        HumanGateTurnFailureClass::ProviderErr,
+        HumanGateTurnFailureClass::ValidationReject,
+        HumanGateTurnFailureClass::Timeout,
+        HumanGateTurnFailureClass::BudgetExhausted,
+    ];
+    for status in &statuses {
+        assert_serde_roundtrip(status);
+    }
+    assert_enum_cases([
+        (HumanGateTurnStatus::Reserved, "reserved"),
+        (HumanGateTurnStatus::Running, "running"),
+        (HumanGateTurnStatus::Completed, "completed"),
+        (HumanGateTurnStatus::Failed, "failed"),
+    ]);
+    for failure_class in &failure_classes {
+        assert_serde_roundtrip(failure_class);
+    }
+    assert_enum_cases([
+        (HumanGateTurnFailureClass::ProviderErr, "provider_err"),
+        (
+            HumanGateTurnFailureClass::ValidationReject,
+            "validation_reject",
+        ),
+        (HumanGateTurnFailureClass::Timeout, "timeout"),
+        (
+            HumanGateTurnFailureClass::BudgetExhausted,
+            "budget_exhausted",
+        ),
+    ]);
+
+    let turn = HumanGateTurn {
+        turn_id: "turn_0001".to_string(),
+        session_id: "workspace_session_0001".to_string(),
+        command_id: "command_0001".to_string(),
+        feedback_text: "please revise".to_string(),
+        status: HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        result_artifact_ref: Some("artifact_0001".to_string()),
+        failure_class: None,
+        created_at: "2026-08-31T00:00:00Z".to_string(),
+        updated_at: "2026-08-31T00:00:00Z".to_string(),
+    };
+    assert_serde_roundtrip(&turn);
+
+    let value = serde_json::to_value(&turn).unwrap();
+    for field in [
+        "turn_id",
+        "session_id",
+        "command_id",
+        "feedback_text",
+        "status",
+        "attempt_no",
+        "budget_reserved",
+        "result_artifact_ref",
+        "failure_class",
+        "created_at",
+        "updated_at",
+    ] {
+        assert_missing_field_rejected::<HumanGateTurn>(&value, field);
+    }
+    let mut unknown = value;
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".to_string(), serde_json::json!(true));
+    assert!(serde_json::from_value::<HumanGateTurn>(unknown).is_err());
+    let failed_turn = HumanGateTurn {
+        status: HumanGateTurnStatus::Failed,
+        failure_class: Some(HumanGateTurnFailureClass::Timeout),
+        ..turn.clone()
+    };
+    assert_serde_roundtrip(&failed_turn);
+    let invalid_nonterminal_failure = HumanGateTurn {
+        failure_class: Some(HumanGateTurnFailureClass::Timeout),
+        ..turn
+    };
+    assert_serde_roundtrip(&invalid_nonterminal_failure);
+}
 #[test]
 fn legacy_repository_json_roundtrips_with_identity_defaults() {
     let legacy = serde_json::json!({
@@ -239,6 +328,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         review_invocation_scope: None,
         human_gate_snapshot: None,
         repair_reservation: None,
+        human_gate_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
         single_candidate_phase: None,

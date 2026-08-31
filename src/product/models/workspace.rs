@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::human_gate::HumanGateReservation;
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
@@ -112,6 +113,8 @@ pub struct WorkspaceSessionRecord {
     pub human_gate_snapshot: Option<HumanGateSnapshot>,
     #[serde(default)]
     pub repair_reservation: Option<RepairReservation>,
+    #[serde(default)]
+    pub human_gate_reservation: Option<HumanGateReservation>,
     #[serde(default)]
     pub policy_diagnostics: Vec<PolicyDiagnostic>,
     #[serde(default)]

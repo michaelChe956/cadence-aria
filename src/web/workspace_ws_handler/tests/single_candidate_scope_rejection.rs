@@ -255,6 +255,7 @@ pub(super) fn scope_test_context(
         review_invocation_scope: None,
         human_gate_snapshot: None,
         repair_reservation: None,
+        human_gate_reservation: None,
         policy_diagnostics: vec![],
         provider_start_ledger: vec![],
         single_candidate_phase: None,
