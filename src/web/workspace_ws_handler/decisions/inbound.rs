@@ -75,6 +75,26 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
     }
 
     match envelope.message {
+        WsInMessage::HumanGateFeedback { command_id, .. } => {
+            let err = validate_command_id(&command_id).err().unwrap_or_else(|| {
+                WsOutMessage::ProtocolError {
+                    code: "COMMAND_HANDLER_NOT_WIRED".to_string(),
+                    message: "human_gate_feedback handler not wired".to_string(),
+                    context: None,
+                }
+            });
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
+        WsInMessage::Advance { command_id } => {
+            let err = validate_command_id(&command_id).err().unwrap_or_else(|| {
+                WsOutMessage::ProtocolError {
+                    code: "COMMAND_HANDLER_NOT_WIRED".to_string(),
+                    message: "advance handler not wired".to_string(),
+                    context: None,
+                }
+            });
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
         WsInMessage::UserMessage { content } => {
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context.clone(),

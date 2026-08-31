@@ -346,6 +346,33 @@ fn work_item_plan_review_complete_roundtrips() {
 }
 
 #[test]
+fn conversational_gate_inbound_wire_contract_roundtrips() {
+    let feedback = WsInMessage::HumanGateFeedback {
+        command_id: "cmd-001".to_string(),
+        feedback: "原文保留，不在协议层剪裁".to_string(),
+    };
+    let feedback_json = serde_json::to_string(&feedback).unwrap();
+    assert_eq!(
+        feedback_json,
+        r#"{"type":"human_gate_feedback","command_id":"cmd-001","feedback":"原文保留，不在协议层剪裁"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<WsInMessage>(&feedback_json).unwrap(),
+        feedback
+    );
+
+    let advance = WsInMessage::Advance {
+        command_id: "cmd-002".to_string(),
+    };
+    let advance_json = serde_json::to_string(&advance).unwrap();
+    assert_eq!(advance_json, r#"{"type":"advance","command_id":"cmd-002"}"#);
+    assert_eq!(
+        serde_json::from_str::<WsInMessage>(&advance_json).unwrap(),
+        advance
+    );
+}
+
+#[test]
 fn context_note_roundtrip() {
     let msg = WsInMessage::ContextNote {
         content: "需要支持空查询参数兜底".to_string(),

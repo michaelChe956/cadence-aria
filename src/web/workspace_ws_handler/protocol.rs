@@ -71,6 +71,19 @@ pub(crate) fn choice_id_unmatched_error(id: &str) -> WsOutMessage {
     }
 }
 
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_command_id(command_id: &str) -> Result<(), WsOutMessage> {
+    if command_id.trim().is_empty() {
+        return Err(WsOutMessage::ProtocolError {
+            code: "INVALID_COMMAND_ID".to_string(),
+            message: "command_id must not be blank".to_string(),
+            context: None,
+        });
+    }
+
+    Ok(())
+}
+
 pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
     if matches!(
         msg,
@@ -180,6 +193,8 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::CancelPlanAmendment { .. } => "cancel_plan_amendment",
         WsInMessage::StartLinkedWorkspaceAmendment { .. } => "start_linked_workspace_amendment",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
+        WsInMessage::HumanGateFeedback { .. } => "human_gate_feedback",
+        WsInMessage::Advance { .. } => "advance",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",
     }

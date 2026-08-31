@@ -110,6 +110,13 @@ pub enum WsInMessage {
         feedback: Option<String>,
         clear: bool,
     },
+    HumanGateFeedback {
+        command_id: String,
+        feedback: String,
+    },
+    Advance {
+        command_id: String,
+    },
     Abort,
     Ping,
 }
