@@ -241,6 +241,7 @@ pub enum ProviderRunKind {
 }
 
 impl ProviderRunKind {
+    #[allow(dead_code)]
     pub(crate) fn human_gate_turn_id(&self) -> Option<&str> {
         match self {
             Self::HumanGateScManualRevision { turn_id, .. } => Some(turn_id),

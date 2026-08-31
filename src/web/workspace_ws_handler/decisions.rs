@@ -251,18 +251,7 @@ pub(crate) async fn handle_human_gate_feedback_from_handler(
         Ok(HumanGateCommandOutcome::TurnOpened {
             turn,
             remaining_budget,
-        }) => {
-            let _ = send_json_outbound(
-                &outbound_tx,
-                &WsOutMessage::HumanGateTurnOpen {
-                    turn_id: turn.turn_id.clone(),
-                    command_id: turn.command_id.clone(),
-                    remaining_budget,
-                },
-            )
-            .await;
-            Some(turn)
-        }
+        }) => Some((turn, remaining_budget)),
         Ok(HumanGateCommandOutcome::Replayed { turn }) => {
             let remaining_budget = run_context
                 .engine
@@ -305,7 +294,16 @@ pub(crate) async fn handle_human_gate_feedback_from_handler(
             None
         }
     };
-    if let Some(turn) = saved_turn {
+    if let Some((turn, remaining_budget)) = saved_turn {
+        let _ = send_json_outbound(
+            &outbound_tx,
+            &WsOutMessage::HumanGateTurnOpen {
+                turn_id: turn.turn_id.clone(),
+                command_id: turn.command_id.clone(),
+                remaining_budget,
+            },
+        )
+        .await;
         let run_kind = ProviderRunKind::HumanGateScManualRevision {
             turn_id: turn.turn_id,
             prompt: turn.feedback_text,
