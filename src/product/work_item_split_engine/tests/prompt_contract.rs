@@ -898,6 +898,9 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
         "必须使用中文",
         "保持 grammar 指定的英文原样",
+        "字段行分隔符必须是半角 ASCII",
+        "禁止全角冒号",
+        "中文仅出现在值的自由文本中",
         "任务拆分与验证设计遵循测试先行纪律",
         "大范围定位优先检索工具",
     ] {
