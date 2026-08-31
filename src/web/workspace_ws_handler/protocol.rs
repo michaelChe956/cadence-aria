@@ -84,7 +84,16 @@ pub(crate) fn validate_command_id(command_id: &str) -> Result<(), WsOutMessage> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
+    is_message_valid_for_stage_with_flow(WorkItemPlanFlowKind::Legacy, msg, stage)
+}
+
+pub(crate) fn is_message_valid_for_stage_with_flow(
+    flow_kind: WorkItemPlanFlowKind,
+    msg: &WsInMessage,
+    stage: &WorkspaceStage,
+) -> bool {
     if matches!(
         msg,
         WsInMessage::Hello { .. }
@@ -136,17 +145,74 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
         WorkspaceStage::Revision => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
-        WorkspaceStage::HumanConfirm => matches!(
-            msg,
-            WsInMessage::HumanConfirm { .. }
-                | WsInMessage::ConfirmPlanAmendment { .. }
-                | WsInMessage::CancelPlanAmendment { .. }
-                | WsInMessage::StartLinkedWorkspaceAmendment { .. }
-                | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
-                | WsInMessage::RequestRevision { .. }
-                | WsInMessage::Confirm
+        WorkspaceStage::HumanConfirm => {
+            if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                matches!(
+                    msg,
+                    WsInMessage::HumanGateFeedback { .. }
+                        | WsInMessage::Confirm
+                        | WsInMessage::HumanConfirm {
+                            decision:
+                                crate::web::workspace_ws_types::HumanConfirmDecision::Terminate,
+                            ..
+                        }
+                )
+            } else {
+                matches!(
+                    msg,
+                    WsInMessage::HumanConfirm { .. }
+                        | WsInMessage::ConfirmPlanAmendment { .. }
+                        | WsInMessage::CancelPlanAmendment { .. }
+                        | WsInMessage::StartLinkedWorkspaceAmendment { .. }
+                        | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
+                        | WsInMessage::RequestRevision { .. }
+                        | WsInMessage::Confirm
+                )
+            }
+        }
+        WorkspaceStage::Completed => {
+            flow_kind == WorkItemPlanFlowKind::SingleCandidate
+                && matches!(msg, WsInMessage::Advance { .. })
+        }
+    }
+}
+
+pub(crate) fn conversational_gate_stage_error(
+    flow_kind: WorkItemPlanFlowKind,
+    stage: &WorkspaceStage,
+    msg: &WsInMessage,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+        message: format!(
+            "message {} not allowed in stage {}",
+            message_type(msg),
+            stage.as_str()
         ),
-        WorkspaceStage::Completed => false,
+        context: Some(serde_json::json!({
+            "stage": stage.as_str(),
+            "received": message_type(msg),
+            "flow_kind": flow_kind,
+        })),
+    }
+}
+
+pub(crate) fn advance_stage_error(
+    command_id: String,
+    stage: &WorkspaceStage,
+    flow_kind: WorkItemPlanFlowKind,
+) -> WsOutMessage {
+    let flow_kind = match flow_kind {
+        WorkItemPlanFlowKind::Legacy => "legacy",
+        WorkItemPlanFlowKind::SingleCandidate => "single_candidate",
+    };
+    WsOutMessage::AdvanceRejected {
+        command_id,
+        code: "ADVANCE_STAGE_INVALID".to_string(),
+        reason: format!(
+            "advance is not allowed for {flow_kind} flow in stage {}",
+            stage.as_str()
+        ),
     }
 }
 

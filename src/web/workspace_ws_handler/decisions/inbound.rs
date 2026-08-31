@@ -75,24 +75,63 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
     }
 
     match envelope.message {
-        WsInMessage::HumanGateFeedback { command_id, .. } => {
-            let err = validate_command_id(&command_id).err().unwrap_or_else(|| {
-                WsOutMessage::ProtocolError {
-                    code: "COMMAND_HANDLER_NOT_WIRED".to_string(),
-                    message: "human_gate_feedback handler not wired".to_string(),
-                    context: None,
-                }
-            });
+        WsInMessage::HumanGateFeedback {
+            command_id,
+            feedback,
+        } => {
+            if let Err(err) = validate_command_id(&command_id) {
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
+            }
+            let stage = engine.lock().await.current_stage();
+            let message = WsInMessage::HumanGateFeedback {
+                command_id: command_id.clone(),
+                feedback,
+            };
+            if !is_message_valid_for_stage_with_flow(
+                run_context.session_record.flow_kind,
+                &message,
+                &stage,
+            ) {
+                let err = conversational_gate_stage_error(
+                    run_context.session_record.flow_kind,
+                    &stage,
+                    &message,
+                );
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
+            }
+            let err = WsOutMessage::ProtocolError {
+                code: "COMMAND_HANDLER_NOT_WIRED".to_string(),
+                message: "human_gate_feedback handler not wired".to_string(),
+                context: None,
+            };
             let _ = send_json_outbound(&outbound_tx, &err).await;
         }
         WsInMessage::Advance { command_id } => {
-            let err = validate_command_id(&command_id).err().unwrap_or_else(|| {
-                WsOutMessage::ProtocolError {
-                    code: "COMMAND_HANDLER_NOT_WIRED".to_string(),
-                    message: "advance handler not wired".to_string(),
-                    context: None,
-                }
-            });
+            if let Err(err) = validate_command_id(&command_id) {
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
+            }
+            let stage = engine.lock().await.current_stage();
+            let message = WsInMessage::Advance {
+                command_id: command_id.clone(),
+            };
+            if !is_message_valid_for_stage_with_flow(
+                run_context.session_record.flow_kind,
+                &message,
+                &stage,
+            ) {
+                let err =
+                    advance_stage_error(command_id, &stage, run_context.session_record.flow_kind);
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
+            }
+            let err = WsOutMessage::AdvanceRejected {
+                command_id,
+                code: "ADVANCE_HANDLER_NOT_WIRED".to_string(),
+                reason: "advance handler not wired".to_string(),
+            };
             let _ = send_json_outbound(&outbound_tx, &err).await;
         }
         WsInMessage::UserMessage { content } => {

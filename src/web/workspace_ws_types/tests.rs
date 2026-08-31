@@ -13,6 +13,8 @@ use crate::web::workspace_ws_types::{
 };
 
 mod artifact_version_roundtrip;
+#[path = "tests/conversational_gate_events.rs"]
+mod conversational_gate_events;
 mod interrupted_run_recovery;
 mod review_structured_output;
 
@@ -449,6 +451,16 @@ fn work_item_plan_mode_messages_roundtrip() {
     assert_eq!(back, revise);
 }
 
+#[test]
+fn outbound_conversational_gate_event_type_is_stable() {
+    let message = WsOutMessage::HumanGateClosed {
+        reason: "approved".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(message).unwrap()["type"],
+        "human_gate_closed"
+    );
+}
 #[test]
 fn protocol_error_outbound_roundtrip() {
     let msg = WsOutMessage::ProtocolError {

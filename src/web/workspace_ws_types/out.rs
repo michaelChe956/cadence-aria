@@ -126,6 +126,36 @@ pub enum WsOutMessage {
     LinkedWorkspaceAmendmentCreated {
         snapshot: LinkedWorkspaceSessionSnapshot,
     },
+    HumanGateTurnOpen {
+        turn_id: String,
+        command_id: String,
+        remaining_budget: u32,
+    },
+    HumanGateTurnCompleted {
+        turn_id: String,
+        artifact_ref: String,
+    },
+    HumanGateTurnFailed {
+        turn_id: String,
+        failure_class: String,
+        message: String,
+    },
+    HumanGateBusy {
+        turn_id: String,
+    },
+    HumanGateClosed {
+        reason: String,
+    },
+    AdvanceCompleted {
+        command_id: String,
+        attempt_id: String,
+        workspace_entry: String,
+    },
+    AdvanceRejected {
+        command_id: String,
+        code: String,
+        reason: String,
+    },
     SessionState {
         session_id: String,
         workspace_type: WorkspaceType,

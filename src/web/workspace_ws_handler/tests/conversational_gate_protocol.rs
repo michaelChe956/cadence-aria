@@ -60,3 +60,30 @@ fn conversational_gate_rejects_blank_command_id_at_handler_boundary() {
 
     assert!(validate_command_id("cmd-001").is_ok());
 }
+
+#[tokio::test]
+async fn conversational_gate_blank_command_id_is_rejected_through_dispatch() {
+    let (context, _engine, mut outbound_rx, _events) =
+        super::single_candidate_scope_rejection::scope_test_context(
+            crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+        );
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::HumanGateFeedback {
+            command_id: "   ".to_string(),
+            feedback: "should not be dispatched".to_string(),
+        },
+    )
+    .await;
+
+    let outbound = outbound_rx.recv().await.expect("protocol error outbound");
+    let OutboundControl::Text(json) = outbound else {
+        panic!("expected text protocol error");
+    };
+    let error: WsOutMessage = serde_json::from_str(&json).expect("protocol error json");
+    assert!(matches!(
+        error,
+        WsOutMessage::ProtocolError { code, .. } if code == "INVALID_COMMAND_ID"
+    ));
+}

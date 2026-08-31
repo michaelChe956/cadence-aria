@@ -224,7 +224,7 @@ async fn scope_test_snapshot(engine: &Arc<Mutex<WorkspaceEngine>>) -> Vec<u8> {
     .expect("session and timeline snapshot")
 }
 
-fn scope_test_context(
+pub(super) fn scope_test_context(
     flow_kind: WorkItemPlanFlowKind,
 ) -> (
     WorkspaceInboundContext,

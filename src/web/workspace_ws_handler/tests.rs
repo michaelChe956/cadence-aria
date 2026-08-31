@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[path = "tests/conversational_gate_protocol.rs"]
 mod conversational_gate_protocol;
+#[path = "tests/conversational_gate_stage.rs"]
+mod conversational_gate_stage;
 #[path = "tests/gateway_start.rs"]
 mod gateway_start;
 #[path = "tests/human_presentation.rs"]
