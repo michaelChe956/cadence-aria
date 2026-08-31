@@ -63,9 +63,54 @@ pub struct InitialPlanCompileInput {
 
 ## 6. 验收（需操作者授权真实运行）
 
-- [ ] 6.1 campaign driver 适配 + 操作者授权
-- [ ] 6.2 codex + pi 各 1 案例实跑（naruto 单仓）：2/2 Confirmed、≤12 分钟、`initial_review_count ≤ 1`、`verification_review_count ≤ 1`、`repairs_used ≤ 1`
-- [ ] 6.3 核对阶段 1 的 14 条 classifier golden（11 原始 + 3 个带人工 class_hint 的 Repairable 变体）；只核对 9 个 reviewer finding 映射集合中已明确归入 grammar/lowering 的 compiler diagnostic golden。其余 reviewer finding 只作为 prompt few-shot 素材；usage/token 基线对比（含注入内容占比测量）
+- [x] 6.1 campaign driver 适配 + 操作者授权
+- [x] 6.2 codex + pi 各 1 案例实跑（naruto 单仓）：2/2 Confirmed、`initial_review_count ≤ 1`、`verification_review_count ≤ 1`、`repairs_used ≤ 1`
+- [ ] 6.2-时长子项 单案例时长 ≤12 分钟——**未通过**：pi 实测 938.04s（15.63 分钟）；用户裁决（2026-08-31，选项 c）不放宽子项、pi 登记为已知例外、**旧协议本阶段不删除**（详见下方收口块与 design.md 退役门裁决节）
+
+> **6.2 达标收口（2026-08-31，用户裁决 A：按本节判据原文收口）**：codex 与 pi 各 1 案例 Confirmed 实证达标，逐项亲验证据如下（campaign `result.json`，durable 证据勿删）：
+>
+> | 判据 | codex(r26) | pi(r26-rep2) | codex(r28，规则注入后) |
+> |---|---|---|---|
+> | `session_status` | confirmed | confirmed | confirmed |
+> | `confirmed_count` | 1 | 1 | 1 |
+> | `flow_kind` | single_candidate | single_candidate | single_candidate |
+> | verdict / round | pass@r1 | pass@r1 | pass@r1 |
+> | `repairs_used` | 0 | 0 | 0 |
+> | `provider_start_count` | 1 | 1 | 1 |
+> | `legacy_decision_messages` | [] | [] | [] |
+> | must_fix validator findings | 0 | 0 | 0 |
+> | 时长 | 142.96s | 938.04s ⚠️ | 627.14s |
+>
+> durable：`issue_0075`/`workspace_session_0080`（codex r26）、`issue_0077`/`workspace_session_0085`（pi r26）、`issue_0084`/`workspace_session_0095`（codex r28，中文 plan 验收）。产物：`/tmp/aria-phase2-results/r26/{codex,pi-rep2}/`、`/tmp/aria-phase2-results/r28/codex-rep2/`。
+>
+> **时长子项裁决（2026-08-31，用户选 c）**：pi 938.04s = 15.63 分钟 > 「≤12 分钟」——**该子项判为未通过**，不放宽、不改口径、不删除。推论：REQ-WSC-07 退役门未全部满足 → **旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法）本阶段不得删除**。pi 的 Confirmed 仍为合法功能实证，仅性能子项偏离。codex 两轮（142.96s / 627.14s）均在门内。详见 design.md「退役门时长子项裁决」节。
+>
+> **kimi 状态登记（不入 6.2 判据）**：本节判据原文仅要求 codex + pi；§7.5/§8.5 阶段性写的「三 provider 全 Confirmed」为实施期加严口径，随本次收口回归本节原文。kimi 五轮失败根因均已定位并修复（`d192755e` 能力原子拆分教学 + nonce 首行教学 + SC 前言确定性修剪；`61876332` 半角分隔符教学），但**修复后的验证轮未实跑**（r28c-rep1 hard_timeout 900s、rep2 用户叫停）。用户裁决：kimi 归为「待验证增强」，延后至 6.4 后的专项测量轮与 95% 成功率测量一并实跑；后续验证优先使用 codex 与 pi。不得据此声称 kimi 达标或不达标。
+- [x] 6.3 核对阶段 1 的 14 条 classifier golden（11 原始 + 3 个带人工 class_hint 的 Repairable 变体）；只核对 9 个 reviewer finding 映射集合中已明确归入 grammar/lowering 的 compiler diagnostic golden。其余 reviewer finding 只作为 prompt few-shot 素材；usage/token 基线对比（含注入内容占比测量）
+
+> **6.3 核对结果（2026-08-31，controller 亲验，非 worker 自报）**
+>
+> **表述对齐（用户同意，不改判据）**：本节原文「9 个 reviewer finding 映射集合中已明确归入 grammar/lowering 的 compiler diagnostic golden」实测归入数量为 **0**：`openspec/changes/rearch-workitem-plan-pipeline/fixtures/reviewer-finding-channel-map.json` 中 9 条全部 `channel=prompt_few_shot`、`compiler_fixture=null`，由 `src/product/work_item_plan_compiler/tests/reviewer_finding_channel_boundary.rs:54-116` 守卫。因此实际核对的 compiler diagnostic golden 是另外 **4 条独立 grammar/lowering fixture**（`openspec/changes/rearch-workitem-plan-pipeline/fixtures/compiler-diagnostics/` + `expected.json`），这与本节「其余 reviewer finding 只作为 prompt few-shot 素材」的意图一致。
+>
+> | 核对项 | 命令 | 结果 |
+> |---|---|---|
+> | 14 条 classifier golden | `cargo test --locked --lib golden_findings_classify_to_the_expected_typed_outcomes` | ok 1 passed（测试内含 `assert_eq!(fixtures.len(), 14)`；11 原始 `provider_raw` + 3 条 `annotated_variant`）|
+> | channel map 边界 | `cargo test --locked --lib reviewer_finding_channel_boundary` | ok 1 passed（守卫 14/11/3 数量、rep2/3/4 筛出 9 条、channel 与 compiler_fixture 字段事实）|
+> | compiler diagnostic golden（4 条 fixture）| `--lib fixtures_diagnostic_sources_have_one_static_target_error`、`--lib fixtures_expected_json_has_the_diagnostic_schema`、`--lib source_linter_matches_every_diagnostic_fixture_field_by_field` | 三条均 ok 1 passed |
+> | SC author 预算实测 | `--lib work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings -- --nocapture` | ok；**`SC author prompt bytes=18934 margin=66`**（预算 19,000，余量 66B——见 §8 defer 账第 1 条）|
+> | 全量 lib | `cargo test --locked --lib` | 2916 passed / 2 failed → 两条均为已登记 flaky 家族（`single_candidate_recovery_finalizer_checkpoint_matrix`、`task_3_4_single_candidate_crash_boundaries_reuse_durable_reservation`），定向复跑均 ok 1 passed，定性为并行时序 flaky，非产品缺陷 |
+>
+> **usage/token 基线对比**（数据源：campaign `result.json` 的 `usage_by_role`）：
+>
+> | 轮 | provider | 阶段 | reviewer input | reviewer output | cache_read |
+> |---|---|---|---:|---:|---:|
+> | r26 | codex | 注入前 | 27,753 | 1,313 | 25,344 |
+> | r28 | codex | 注入后（`67aa456f`）| 29,374 | 1,177 | 27,392 |
+> | r26 | pi | 注入前 | 474 | 1,728 | 33,408 |
+>
+> reviewer input 变化 +1,621 tokens（+5.84%）。**注入内容占比（静态字节口径）**：注入段合计 1,662B = language.md 全文 222B + 优先规则句 715B + code-usage 摘要 381B + code-reading 摘要 340B + 模板分隔 4B（`src/product/work_item_split_engine/prompts.rs:67-92`）；占预算 fixture prompt（18,934B）**8.78%**，占 r28 实跑 author prompt（33,942B，源 `ws.jsonl` 的 `timeline_node_002_prompt`）**4.90%**。
+>
+> **已登记缺口（defer，用户同意）**：`usage_by_role` 仅含 `reviewer`，无 `author` 条目（driver 从 `execution_event.kind=usage` 采集，author 侧不落 usage 事件）→ **author 侧 token 增量无实测值，不以缺失数据推算**。本节 usage 基线以 reviewer 侧 token + 静态字节占比结项；author 侧 usage 埋点归入阶段 3 可观测性工作，不阻塞 6.4。
 - [ ] 6.4 验收报告落盘；达标后移交阶段 3 立项（对话流人工门与 `advance` 接口），未达标不得退役旧协议
 
 > **2026-08-29 简化裁决补记**（用户批准）：工作包 5.2 的「轻量 outline→计数→selector→完整 author」两阶段生成简化为**单次 provider 生成完整 plan**；selector 降级为编译后内部诊断。工作包 2.5/5.x 期间落地的 outline 派生受信目录链（catalogfix b2aaf24e 及其后续教学）标记 superseded——trusted_commands 改为 plan Verification 段声明确定性投影，授权锚=plan 审批门（见 design.md 架构简化裁决节与 field-source-matrix FSM-024/038~041 更新）。
@@ -74,21 +119,27 @@ pub struct InitialPlanCompileInput {
 
 > 依据：r23 实跑 codex/kimi 的 plan 过 review 却被 Final Compile canonical 校验拒（`required_capability_missing` 11/5 条），reviewer 判定面与 canonical validator 系统性错位。B1（author prompt 能力覆盖教学，commit `e78094a9`）已先行落地；本节为 B2。REQ-WSC-06 已增补对应 SHALL 条款与 scenario。
 
-- [ ] 7.1 reviewer context 只读能力覆盖投影：逐 WI→contract edge 的 required capabilities、所引契约输出 capabilities、compatibility_policy；数据由 `report_contract_requirements`（`src/product/work_item_contract/dependency.rs:156-235`）同源计算逻辑生成，不重述不重实现；仅注入单候选 reviewer 路径
-- [ ] 7.2 reviewer prompt 增补：逐 edge 机械核验教学；任何覆盖缺口产出 must_fix finding（归类建议 contract_gap，evidence 含具体 edge 与缺失能力）；canonical validator 与 scope/digest/CAS 机制零改动
-- [ ] 7.3 测试：投影正确性单测（与 validator 同输入同口径）、prompt 教学句存在性测试（先 RED 后 GREEN）、legacy/story/design 路径不接收投影的隔离测试
-- [ ] 7.4 SC markdown prompt 预算余量复核（B1 后余 5 字节；如 B2 触及 SC prompt 侧则同步放宽常量至整百级并注明 margin 惯例）
-- [ ] 7.5 完成并过审后 r24 重跑三 provider 验收（codex/kimi 900s、pi 1800s，D2 用户批准）：全部 Confirmed 方为 6.2 达标；D3（driver 卫生）本轮不做，留作三 provider 通过后的独立 harness 任务
+- [x] 7.1 reviewer context 只读能力覆盖投影：逐 WI→contract edge 的 required capabilities、所引契约输出 capabilities、compatibility_policy；数据由 `report_contract_requirements`（`src/product/work_item_contract/dependency.rs:156-235`）同源计算逻辑生成，不重述不重实现；仅注入单候选 reviewer 路径
+- [x] 7.2 reviewer prompt 增补：逐 edge 机械核验教学；任何覆盖缺口产出 must_fix finding（归类建议 contract_gap，evidence 含具体 edge 与缺失能力）；canonical validator 与 scope/digest/CAS 机制零改动
+- [x] 7.3 测试：投影正确性单测（与 validator 同输入同口径）、prompt 教学句存在性测试（先 RED 后 GREEN）、legacy/story/design 路径不接收投影的隔离测试
+- [x] 7.4 SC markdown prompt 预算余量复核（B1 后余 5 字节；如 B2 触及 SC prompt 侧则同步放宽常量至整百级并注明 margin 惯例）
+- [x] 7.5 完成并过审后 r24 重跑三 provider 验收（codex/kimi 900s、pi 1800s，D2 用户批准）：全部 Confirmed 方为 6.2 达标；D3（driver 卫生）本轮不做，留作三 provider 通过后的独立 harness 任务
+
+> **口径回归（2026-08-31，用户裁决 A）**：7.5 的「全部（三 provider）Confirmed 方为 6.2 达标」为实施期加严口径，已回归 §6.2 判据原文（codex + pi）。B1/B2 能力覆盖投影本身的有效性由 r23→r26 实证（能力覆盖类违规消灭、codex/pi R1 直接过）；kimi 见 §6.2 收口块的待验证登记。
 
 ## 8. handoff 消费闭环与 trusted catalog 残留清理（2026-08-30 增补，用户批准 P2+P4）
 
 > 依据：r24 实跑——codex R1 直接过 review（B1/B2 能力覆盖类消灭），Final Compile 拒 `unconsumed_required_handoff` ×2；pi 在 IR 校验被 `trusted_verification_command_catalog_field_too_large` ×1（2026-08-29 简化裁决后残留）+ `unknown_requirement_ref` ×11（provider 方差，教学已存在）。oracle 裁决 P2+P4、不做 P3 全量 checklist；P4 先行独立提交。
 
-- [ ] 8.1 （P4）SC 路径退役旧 trusted catalog 规则：`validate_plan_candidate_ir` 走 SC 专用 outline 校验 profile，跳过 `outline.rs:126-175` catalog 条目数/字段长度/投影 bytes 规则与 `draft.rs:230-270` missing_trusted/untrusted_required 残留（`parse.rs:177`、`work_item_plan_compiler/validate.rs:34-35` 联动点以代码现状为准）；legacy draft 路径及其测试零变化；SC 路径其他 outline 规则（IDs/traceability/scope/budget/依赖/环）行为不变；不全局放开命令字段边界，长度安全门若保留须迁移为通用 bounded-field 校验、不再使用带 outline 语义的旧规则名
-- [ ] 8.2 （P2-author）handoff 消费闭环教学：`work_item_split_engine/prompts.rs` SC full-author prompt 增补 `provided_contract_refs` 必须被下游 `input_contracts` 逐字消费的纪律与反例；预算常量 16,200→17,000
-- [ ] 8.3 （P2-reviewer）覆盖投影扩展：依赖图事实（depends_on/边/环/重复边/未知 provider）+ handoff 消费闭环（消费者集合与消费状态，空消费者显式空集）+ 跨 item 写范围冲突事实；同源复用 `dependency.rs` 共享逻辑，不重述不重实现；unconsumed handoff must_fix/contract_gap 教学；仅单候选注入；reviewer 64KiB 预算双点检查不变
-- [ ] 8.4 测试：P4 RED（SC 路径长命令字段通过且无 outline catalog finding；legacy 路径该规则仍生效）；投影消费闭环逐字段测试（同源一致）；SC prompt 教学句测试；隔离回归
-- [ ] 8.5 实施过审后 r25 重跑三 provider（codex/kimi 900s、pi 1800s）：全部 Confirmed 方为 6.2 达标；needs_human 为合法终态，不降级不伪造；pi 方差按有界重跑，连续复现另立议题报用户
+- [x] 8.1 （P4）SC 路径退役旧 trusted catalog 规则：`validate_plan_candidate_ir` 走 SC 专用 outline 校验 profile，跳过 `outline.rs:126-175` catalog 条目数/字段长度/投影 bytes 规则与 `draft.rs:230-270` missing_trusted/untrusted_required 残留（`parse.rs:177`、`work_item_plan_compiler/validate.rs:34-35` 联动点以代码现状为准）；legacy draft 路径及其测试零变化；SC 路径其他 outline 规则（IDs/traceability/scope/budget/依赖/环）行为不变；不全局放开命令字段边界，长度安全门若保留须迁移为通用 bounded-field 校验、不再使用带 outline 语义的旧规则名
+- [x] 8.2 （P2-author）handoff 消费闭环教学：`work_item_split_engine/prompts.rs` SC full-author prompt 增补 `provided_contract_refs` 必须被下游 `input_contracts` 逐字消费的纪律与反例；预算常量 16,200→17,000
+- [x] 8.3 （P2-reviewer）覆盖投影扩展：依赖图事实（depends_on/边/环/重复边/未知 provider）+ handoff 消费闭环（消费者集合与消费状态，空消费者显式空集）+ 跨 item 写范围冲突事实；同源复用 `dependency.rs` 共享逻辑，不重述不重实现；unconsumed handoff must_fix/contract_gap 教学；仅单候选注入；reviewer 64KiB 预算双点检查不变
+- [x] 8.4 测试：P4 RED（SC 路径长命令字段通过且无 outline catalog finding；legacy 路径该规则仍生效）；投影消费闭环逐字段测试（同源一致）；SC prompt 教学句测试；隔离回归
+- [x] 8.5 实施过审后 r25 重跑三 provider（codex/kimi 900s、pi 1800s）：全部 Confirmed 方为 6.2 达标；needs_human 为合法终态，不降级不伪造；pi 方差按有界重跑，连续复现另立议题报用户
+
+> **口径回归（2026-08-31，用户裁决 A）**：同 7.5——「全部（三 provider）Confirmed」回归 §6.2 判据原文。P2+P4 本身的有效性由 r25→r26 实证（`unconsumed_required_handoff` 与 catalog 残留类消灭）。
+
+> **§7/§8 勾选证据（2026-08-31 终审，逐项核对）**：7.1-7.3=commit `0f47060d`（reviewer Approved+Important 补强；r26 kimi 轮 reviewer 拦截能力缺口=投影在工作实证；测试含入全量 lib 绿）。7.4=B2 未触及 SC author 侧条件未触发，后续 8.2-fix/8.3-fix 链已将常量上调至 19,000 整百级（实测 bytes=18,934 margin=66）。7.5=r24 已跑（codex 暴露 `unconsumed_required_handoff` → 引出 §8），终局 r26 codex+pi Confirmed；D3 driver 卫生登记为独立 harness 任务未做。8.1=`6d74242a`（Approved；r25 后 catalog 残留拦截消灭）。8.2-8.4=`4e031552`（Approved 3 Low defer；预算链 16,200→17,000→…→19,000；r26 后 `unconsumed_required_handoff` 消灭）。8.5=r25 已跑（暴露终端 `[]` 泛化 → 8.2-fix 链修复），终局 r26 codex+pi Confirmed、kimi needs_human 合法终态。
 
 > **登记（2026-08-30，用户裁决方案 b）**：plan/draft/review 产物 95% 成功率验收**不入 6.2 判据**；待全流程（6.2→6.3→6.4→终审→push）完成后以专项测量轮执行（测量形态终审裁量）。
 
