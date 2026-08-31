@@ -12,11 +12,16 @@ fn retry_interrupted_run_is_only_valid_in_prepare_context() {
         failed_node_id: "timeline_node_054".to_string(),
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(&msg, &WorkspaceStage::Running));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &msg,
+        &WorkspaceStage::Running
+    ));
     assert_eq!(message_type(&msg), "retry_interrupted_run");
 }
 

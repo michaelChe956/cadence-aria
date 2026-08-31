@@ -603,11 +603,7 @@ pub(crate) async fn handle_workspace_socket(
         };
         if let Some((stage, workspace_type, completed_cancel_replay)) =
             stage_type_and_cancel_replay.as_ref()
-            && !if session_record.flow_kind == WorkItemPlanFlowKind::Legacy {
-                is_message_valid_for_stage_with_flow(session_record.flow_kind, in_msg, stage)
-            } else {
-                is_message_valid_for_stage(in_msg, stage)
-            }
+            && !is_message_valid_for_stage_with_flow(session_record.flow_kind, in_msg, stage)
             && !completed_cancel_replay
             && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
                 && *stage == WorkspaceStage::AuthorConfirm

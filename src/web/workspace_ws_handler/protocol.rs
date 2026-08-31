@@ -84,11 +84,6 @@ pub(crate) fn validate_command_id(command_id: &str) -> Result<(), WsOutMessage> 
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
-    is_message_valid_for_stage_with_flow(WorkItemPlanFlowKind::Legacy, msg, stage)
-}
-
 pub(crate) fn is_message_valid_for_stage_with_flow(
     flow_kind: WorkItemPlanFlowKind,
     msg: &WsInMessage,

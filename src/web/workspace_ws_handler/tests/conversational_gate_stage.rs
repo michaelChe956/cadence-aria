@@ -1,5 +1,4 @@
 use super::*;
-use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
 #[test]
 fn conversational_gate_stage_matrix_accepts_only_human_confirm_and_advance() {
@@ -87,4 +86,13 @@ fn conversational_gate_unknown_stage_message_is_zero_side_effect_protocol_error(
     assert_eq!(context["stage"], "running");
     assert_eq!(context["received"], "human_gate_feedback");
     assert_eq!(context["flow_kind"], "single_candidate");
+}
+
+#[test]
+fn conversational_gate_socket_path_uses_flow_aware_admission() {
+    let source = include_str!("../socket.rs");
+    assert!(source.contains(
+        "&& !is_message_valid_for_stage_with_flow(session_record.flow_kind, in_msg, stage)"
+    ));
+    assert!(!source.contains("if session_record.flow_kind == WorkItemPlanFlowKind::Legacy"));
 }

@@ -68,15 +68,18 @@ fn workspace_session_link_upgrade_command_is_typed_and_stage_scoped() {
         serde_json::from_value::<WsInMessage>(serde_json::to_value(&message).unwrap()).unwrap(),
         message
     );
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &message,
         &WorkspaceStage::Running
     ));
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &message,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &message,
         &WorkspaceStage::PrepareContext
     ));

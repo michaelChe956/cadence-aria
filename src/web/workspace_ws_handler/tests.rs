@@ -4,6 +4,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, StreamChunk, StreamingProviderInput,
 };
 use crate::product::models::ProviderName;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::{
     AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
 };
@@ -64,11 +65,16 @@ fn context_note_is_only_valid_in_prepare_context() {
         content: "补充上下文".to_string(),
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(&msg, &WorkspaceStage::Running));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &msg,
+        &WorkspaceStage::Running
+    ));
 }
 
 #[test]
@@ -78,11 +84,16 @@ fn start_generation_is_only_valid_in_prepare_context() {
         reviewer_enabled: false,
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(&msg, &WorkspaceStage::Running));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &msg,
+        &WorkspaceStage::Running
+    ));
 }
 
 #[test]
@@ -103,8 +114,16 @@ fn hello_and_ping_are_valid_for_every_stage() {
         WorkspaceStage::HumanConfirm,
         WorkspaceStage::Completed,
     ] {
-        assert!(is_message_valid_for_stage(&hello, &stage));
-        assert!(is_message_valid_for_stage(&ping, &stage));
+        assert!(is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::Legacy,
+            &hello,
+            &stage
+        ));
+        assert!(is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::Legacy,
+            &ping,
+            &stage
+        ));
     }
 }
 
@@ -172,19 +191,23 @@ fn revision_path_messages_are_only_valid_in_review_decision() {
         extra_context: None,
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &select_path,
         &WorkspaceStage::ReviewDecision
     ));
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &legacy_decision,
         &WorkspaceStage::ReviewDecision
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &select_path,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &legacy_decision,
         &WorkspaceStage::HumanConfirm
     ));
@@ -196,15 +219,18 @@ fn author_decision_is_only_valid_in_author_confirm() {
         decision: AuthorDecision::Accept,
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::AuthorConfirm
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::HumanConfirm
     ));
@@ -227,23 +253,28 @@ fn human_confirm_messages_are_only_valid_in_human_confirm() {
     };
     let legacy_confirm = WsInMessage::Confirm;
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &human_confirm,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &legacy_request_revision,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &legacy_confirm,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &human_confirm,
         &WorkspaceStage::ReviewDecision
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &legacy_request_revision,
         &WorkspaceStage::ReviewDecision
     ));
@@ -261,19 +292,23 @@ fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
 
     assert_eq!(message_type(&confirm), "confirm_plan_amendment");
     assert_eq!(message_type(&cancel), "cancel_plan_amendment");
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &confirm,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &cancel,
         &WorkspaceStage::HumanConfirm
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &confirm,
         &WorkspaceStage::Running
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &cancel,
         &WorkspaceStage::Completed
     ));
@@ -290,11 +325,13 @@ fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
 
 #[test]
 fn completed_stage_rejects_business_messages() {
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &WsInMessage::Abort,
         &WorkspaceStage::Completed
     ));
-    assert!(!is_message_valid_for_stage(
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &WsInMessage::ContextNote {
             content: "late note".to_string()
         },

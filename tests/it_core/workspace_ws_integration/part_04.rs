@@ -1,4 +1,89 @@
 #[tokio::test]
+async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage_gate() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let plan = lifecycle
+        .create_issue_work_item_plan(
+            cadence_aria::product::lifecycle_store::CreateIssueWorkItemPlanInput {
+                id: Some("issue_work_item_plan_sc_socket".to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: vec![],
+                source_design_spec_ids: vec![],
+                options: cadence_aria::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: cadence_aria::product::models::IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec![],
+                repository_profile_ref: None,
+                verification_plan_ids: vec![],
+                dependency_graph: vec![],
+                created_from_provider_run: None,
+                validator_findings: vec![],
+            },
+        )
+        .expect("create plan");
+    let session = lifecycle
+        .create_workspace_session(
+            cadence_aria::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: plan.id,
+                workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: ProviderName::Fake,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(
+                    cadence_aria::product::lifecycle_store::WorkItemPlanSessionOptions {
+                        flow_kind:
+                            cadence_aria::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+                        run_policy: cadence_aria::product::work_item_plan_policy::RunPolicy::Interactive,
+                        rollout_snapshot: true,
+                    },
+                ),
+            },
+        )
+        .expect("create SC session");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/{}/ws", session.id);
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    assert!(matches!(recv_json(&mut ws).await, WsOutMessage::SessionState { .. }));
+    send_json(
+        &mut ws,
+        &WsInMessage::HumanGateFeedback {
+            command_id: "cmd-socket-gate".to_string(),
+            feedback: "请保留完整候选，仅修正此处".to_string(),
+        },
+    )
+    .await;
+
+    let response = recv_json(&mut ws).await;
+    assert!(matches!(
+        response,
+        WsOutMessage::ProtocolError { code, .. }
+            if code == "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID"
+    ));
+
+    let _ = ws.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
