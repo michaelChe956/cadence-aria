@@ -125,3 +125,8 @@ session 创建时写入 `RunPolicy`：`interactive`（手动最终批准）或 `
 - **决策（C′）**：终端 WI 保留 Handoff Schema 三字段并显式写 `[]`；非终端未消费非空 ref 维持拒绝（教学管生成侧）；不实施 validator sink 豁免（A）与 grammar 放宽（B）——A 削弱 fail-closed 且引入投影/校验口径分叉，B 鼓励省略字段藏错。
 - **终端定义**：合法依赖图上无任何有效出边（不存在其他 WI 的 `input_contracts` 以精确 `(provider_logical_work_item_id, contract_id)` 消费之）；单 WI 计划唯一 WI 为终端；环/自依赖/未知 provider 维持既有 fail-closed 拒绝，不得借终端语义绕过。
 - **残余登记**：终端外部输出（计划外 publication/coding 消费）若需独立建模，另立产品设计，不通过本轮隐式解决。
+
+## 项目规则内容式注入裁决（2026-08-31，用户批准简化方案）
+
+- 平台级双层 manifest 设计（v1.0 草案+oracle 评审）判定过于复杂，暂缓；用户裁决简化三步：①梳理 SC 编写所需规则（language 全文/code-usage 摘要/code-reading 摘要；markdown-format/document-storage/mcp 不注入——与 grammar 冲突或与阶段无关）②必读语义（内容式注入，language 缺失 fail-closed）③改当前 prompt（预算 19,000）。完整设计文档 `cadence/designs/2026-08-31_设计文档_按阶段项目规则获取_v1.0.md` 保留为阶段 2/3/4 完成后的统一参考（defer）。
+- 语言与 grammar 冲突的产品级优先规则：结构标题/字段 key/ID/枚举值永远保持 grammar 英文字面量，语言规则仅约束自由文本值与说明文字；代码/路径/命令/契约 ID 不翻译。

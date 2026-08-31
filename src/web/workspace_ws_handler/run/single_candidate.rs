@@ -69,6 +69,20 @@ pub(crate) async fn run_single_candidate_author(
         .map_err(|error| {
             SingleCandidateProviderRunError::Message(format!("load issue failed: {error}"))
         })?;
+    let language_rules_path = repository.path.join(".claude/rules/language.md");
+    let language_rules = match std::fs::read_to_string(&language_rules_path) {
+        Ok(rules) => rules,
+        Err(error) => {
+            engine.persist_single_candidate_terminal_phase(
+                crate::product::models::SingleCandidatePhase::Failed,
+            );
+            return Err(SingleCandidateProviderRunError::Message(format!(
+                "load required SingleCandidate language rules failed for repository {} at {}: {error}",
+                repository.path.display(),
+                language_rules_path.display(),
+            )));
+        }
+    };
     let story_context = crate::product::work_item_split_engine::context::collect_story_context(
         &lifecycle, &request, &issue,
     )
@@ -123,6 +137,7 @@ pub(crate) async fn run_single_candidate_author(
                 design_context: &design_context,
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: &repository_structure,
+                language_rules: &language_rules,
                 routing_context: &launch.routing_context(),
             },
         )

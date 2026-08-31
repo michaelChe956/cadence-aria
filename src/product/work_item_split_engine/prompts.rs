@@ -46,6 +46,10 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub design_context: &'a str,
     pub design_requirement_ids: &'a [String],
     pub repository_structure: &'a str,
+    /// SingleCandidate 启动前从目标仓库读取的 `.claude/rules/language.md` 全文。
+    /// 缺失或不可读必须由调用方拒绝启动，不能回退为指针式提示。
+    pub language_rules: &'a str,
+    /// 仅在逻辑代码库中保留 gateway 已验证的政策权威信息；传统单仓不注入旧指针。
     pub routing_context: &'a RoutingReferenceContext,
 }
 
@@ -55,10 +59,38 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
 #[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 
-/// SingleCandidate markdown author 的质量预算。契约能力覆盖与 handoff 消费闭环教学注入后上调；
+/// SingleCandidate markdown author 的质量预算。项目规则内容式注入后上调；
 /// 该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 18_000;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 19_000;
+
+const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##/### section 名)、字段 key、ID(WI-*/CT-*/TASK-*/AC-*/REQ-*/CHECK-* 等)、枚举值(require_all/require_any/backend/frontend/integration 等)永远保持 grammar 指定的英文原样,不做翻译;上述语言规则仅约束自由文本值(各 ## 标题的 <title> 部分、statement/description/capabilities 等字段的值)与说明性文字;代码、路径、命令、契约 ID 保持原样。";
+
+const SINGLE_CANDIDATE_CODE_USAGE_SUMMARY: &str = "任务拆分与验证设计遵循测试先行纪律：先明确可验证验收，再安排实现步骤；验证命令必须真实可执行、可复现，并与仓库现有工具链相符；遵守安全边界，不引入未授权依赖、凭据、网络访问或外部服务；保持职责与范围最小化，产出精炼，只含结构化必需内容，不写重复过程说明。";
+
+const SINGLE_CANDIDATE_CODE_READING_SUMMARY: &str = "对目标仓库做事实核查时，大范围定位优先检索工具，精确结构优先 outline 式阅读；先依据真实文件确认事实再写计划。引用的代码、路径、命令与契约 ID 必须来自真实仓库内容，保留原样且可追溯；不得臆造、猜测不存在的接口、目录、测试或验证命令。";
+
+fn single_candidate_project_rules_reference(
+    language_rules: &str,
+    routing_context: &RoutingReferenceContext,
+) -> String {
+    let logical_policy_authority = match routing_context {
+        RoutingReferenceContext::Legacy => String::new(),
+        RoutingReferenceContext::Logical(_) => {
+            generation_cadence_routing_rules_reference(routing_context)
+                .strip_prefix("[cadence_project_rules]\n")
+                .unwrap_or_default()
+                .to_string()
+        }
+    };
+    format!(
+        "[cadence_project_rules]\n{language_rules}\n\
+         [project_rule_priority]\n{SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY}\n\
+         [code_usage_summary]\n{SINGLE_CANDIDATE_CODE_USAGE_SUMMARY}\n\
+         [code_reading_summary]\n{SINGLE_CANDIDATE_CODE_READING_SUMMARY}\n\
+         {logical_policy_authority}"
+    )
+}
 
 fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -305,7 +337,10 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         issue_description = issue.description.as_deref().unwrap_or("无"),
         repository_id = repository.id,
         repository_path = repository.path.display(),
-        routing_reference = generation_cadence_routing_rules_reference(context.routing_context),
+        routing_reference = single_candidate_project_rules_reference(
+            context.language_rules,
+            context.routing_context,
+        ),
         story_context = story_context,
         design_context = design_context,
         repository_structure = repository_structure,

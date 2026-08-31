@@ -1,3 +1,6 @@
+const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
+    "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。";
+
 #[test]
 fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
@@ -796,6 +799,7 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
                 design_context: "design_spec_0001: levels API",
                 design_requirement_ids: &[],
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )
@@ -830,6 +834,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
                 design_context: "design_spec_0001: levels API",
                 design_requirement_ids: &design_requirement_ids,
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )
@@ -891,6 +896,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n- contract_id: <逐字复制 WI-001 Outputs 的 contract_id>\n- provider_logical_work_item_id: WI-001\n- required_capabilities: <该契约的能力>\n- compatibility_policy: require_all\n无依赖时 Inputs 留空 section。",
         "反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。",
         "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
+        "必须使用中文",
+        "保持 grammar 指定的英文原样",
+        "任务拆分与验证设计遵循测试先行纪律",
+        "大范围定位优先检索工具",
     ] {
         assert!(
             prompt.contains(required),
@@ -908,6 +917,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     assert!(
         !prompt.contains("unconsumed_required_handoff"),
         "SC author must not retain the redundant handoff-consumption rule"
+    );
+    assert!(
+        !prompt.contains("按需查阅其中适用章节即可"),
+        "SC author must replace the legacy pointer-style project-rules text"
     );
 
     let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
@@ -997,7 +1010,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        18_000
+        19_000
     );
     assert!(
         prompt.len()
@@ -1031,6 +1044,7 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
                 design_context: "design_spec_0001: levels API",
                 design_requirement_ids: &[],
                 repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
                 routing_context: &RoutingReferenceContext::Legacy,
             },
         )

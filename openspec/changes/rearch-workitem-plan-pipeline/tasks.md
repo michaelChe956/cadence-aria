@@ -94,3 +94,6 @@ pub struct InitialPlanCompileInput {
 
 > **8.2-fix 教学修复（2026-08-30 二次增补，用户批准 C′）**：8.2 教学补「Handoff Schema 三字段必须显式输出；无下游消费者（含链路末端与单 WI 计划）→ `provided_contract_refs: []`（合法空数组，非省略）；禁止以省略/删字段/写 blocker/改 ID/自然语言回避校验」；预算常量 17,000→18,000（改后实测 prompt bytes）。TDD：RED=教学句存在性断言；行为锁=终端 `[]` 编译通过、省略字段仍 `missing_section`、非终端未消费非空 ref 仍被 validator 拒。validator/grammar/lowering 零改动（`[]` 机制本就合法）。
 > **登记（同批）**：legacy draft prompt 的「无消费者空数组」约定在架构简化重写 SC prompt 时丢失，本项为复原该约定。
+
+> **8.3-fix 项目规则内容式注入（2026-08-31 增补，用户批准简化方案）**：SC author 的 [cadence_project_rules] 从指针式（「按需查阅+读不到就忽略」）改为内容式：服务端生成启动前读取目标仓库 `.claude/rules/language.md` 全文注入（222B 级），并注入 aria 侧维护的 code-usage/code-reading 关键段固定摘要与「结构字面量优先于语言规则」优先句；language.md 缺失/不可读→生成拒绝（fail-closed）；质量预算 18,000→19,000。旧 Legacy outline/draft/Story/Design/Coding 链路保持指针式不动。背景：r26 实跑 codex 英文 plan——规则内容从不进 prompt 的机制性根因（8-21 relax-gate 生成类弱指针）。
+> **登记（同批 defer）**：interactive 人工返修的 SC revision 路径缺口（现走 legacy 中文-heading artifact 约束，r27-interactive 实证）→ 阶段 3 对话式人工门一并重做。

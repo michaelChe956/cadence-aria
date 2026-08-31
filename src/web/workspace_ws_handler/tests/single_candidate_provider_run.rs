@@ -57,6 +57,7 @@ async fn provider_session_with_output(
 
 struct ProviderRunFixture {
     root: tempfile::TempDir,
+    repository_root: tempfile::TempDir,
     app_paths: ProductAppPaths,
     lifecycle: LifecycleStore,
     record: WorkspaceSessionRecord,
@@ -71,6 +72,13 @@ impl ProviderRunFixture {
     fn new(flow_kind: WorkItemPlanFlowKind) -> Self {
         let root = tempfile::tempdir().expect("temporary workspace root");
         let repository_root = tempfile::tempdir().expect("temporary repository root");
+        std::fs::create_dir_all(repository_root.path().join(".claude/rules"))
+            .expect("create language rules directory");
+        std::fs::write(
+            repository_root.path().join(".claude/rules/language.md"),
+            "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n",
+        )
+        .expect("write language rules");
         let app_paths = ProductAppPaths::new(root.path().join(".aria"));
         seed_legacy_project(&app_paths);
         let repository = RepositoryStore::new(app_paths.clone())
@@ -207,6 +215,7 @@ impl ProviderRunFixture {
         );
         Self {
             root,
+            repository_root,
             app_paths,
             lifecycle,
             record,
@@ -436,6 +445,16 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
         .expect("single-candidate full author provider input");
     assert!(full_input.prompt.contains("[markdown_grammar]"));
     assert!(full_input.prompt.contains("[routing_reference]"));
+    assert!(full_input.prompt.contains("[cadence_project_rules]"));
+    assert!(full_input.prompt.contains("必须使用中文"));
+    assert!(full_input.prompt.contains("保持 grammar 指定的英文原样"));
+    assert!(
+        full_input
+            .prompt
+            .contains("任务拆分与验证设计遵循测试先行纪律")
+    );
+    assert!(full_input.prompt.contains("大范围定位优先检索工具"));
+    assert!(!full_input.prompt.contains("按需查阅其中适用章节即可"));
     assert!(full_input.prompt.contains("[real_finding_few_shot]"));
     assert!(!full_input.prompt.contains("[outline_commands]"));
     assert!(!full_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
@@ -508,6 +527,64 @@ async fn single_candidate_provider_run_uses_markdown_builder_and_source_store_on
     source_store
         .get_mechanical_report(&scope, report_ref)
         .expect("stored mechanical report");
+}
+
+#[tokio::test]
+async fn single_candidate_author_rejects_missing_language_rules_before_provider_start() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let language_rules_path = fixture
+        .repository_root
+        .path()
+        .join(".claude/rules/language.md");
+    std::fs::remove_file(&language_rules_path).expect("remove fixture language rules");
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(RecordingOutputProvider {
+        output: single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let outbound = outbound_rx
+                .recv()
+                .await
+                .expect("missing language rules must emit an error");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == "error" {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("missing language rules rejection");
+    let message = error["message"].as_str().expect("error message");
+    assert!(message.contains(&fixture.repository_root.path().display().to_string()));
+    assert!(message.contains(&language_rules_path.display().to_string()));
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "missing language rules must reject before provider startup"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
 }
 
 #[tokio::test]
