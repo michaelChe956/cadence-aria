@@ -146,7 +146,84 @@ fn human_gate_reservation_cas_writes_turn_budget_and_provider_key_atomically() {
             .manual_repairs_remaining,
         1
     );
+
+    let duplicate_turn = crate::product::models::HumanGateTurn {
+        turn_id: "turn_0002".to_string(),
+        ..saved_turn.clone()
+    };
+    let duplicate_path = turn_path.with_file_name("turn_0002.json");
+    write_json(&duplicate_path, &duplicate_turn).unwrap();
+    assert!(matches!(
+        store.get_human_gate_turn_by_command_id(&session.id, "command_0001"),
+        Err(ProductStoreError::Conflict {
+            kind: "human_gate_turn_command",
+            ..
+        })
+    ));
 }
+
+#[test]
+fn human_gate_reservation_replay_repairs_torn_turn_file_without_double_debit() {
+    let (_tmp, store) = setup();
+    let mut session = create_session(&store, "work_item_plan_torn", WorkspaceType::WorkItemPlan);
+    session.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+    });
+    let session_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    let reservation = crate::product::models::HumanGateReservation {
+        command_id: "command_torn".to_string(),
+        turn_id: "turn_torn".to_string(),
+        provider_start_idempotency_key: "human_gate_start_torn".to_string(),
+        reserved_at: "2026-08-31T00:00:00Z".to_string(),
+    };
+    session
+        .human_gate_snapshot
+        .as_mut()
+        .unwrap()
+        .manual_repairs_remaining = 0;
+    session.human_gate_reservation = Some(reservation.clone());
+    session.provider_start_ledger.push(
+        crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+            provider_start_idempotency_key: reservation.provider_start_idempotency_key.clone(),
+            started: true,
+        },
+    );
+    write_json(&session_path, &session).unwrap();
+
+    let turn = crate::product::models::HumanGateTurn {
+        turn_id: reservation.turn_id.clone(),
+        session_id: session.id.clone(),
+        command_id: reservation.command_id.clone(),
+        feedback_text: "recover torn reservation".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-08-31T00:00:00Z".to_string(),
+        updated_at: "2026-08-31T00:00:00Z".to_string(),
+    };
+
+    let (recovered, recovered_turn) = store
+        .compare_and_reserve_human_gate_turn(&session, turn.clone(), reservation)
+        .unwrap();
+    assert_eq!(recovered, session);
+    assert_eq!(recovered_turn, turn);
+    assert_eq!(
+        store.get_human_gate_turn(&session.id, "turn_torn").unwrap(),
+        turn
+    );
+}
+
 #[test]
 fn new_session_defaults_permission_modes_to_auto() {
     let (_tmp, store) = setup();

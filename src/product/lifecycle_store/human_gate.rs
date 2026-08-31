@@ -82,6 +82,10 @@ impl LifecycleStore {
             let stored: WorkspaceSessionRecord = read_json(&session_path)?;
             if let Some(existing_reservation) = &stored.human_gate_reservation {
                 if existing_reservation == &reservation {
+                    if !super::path_exists(&turn_path)? {
+                        write_json(&turn_path, &turn)?;
+                        return Ok((stored, turn));
+                    }
                     let existing_turn: HumanGateTurn = read_json(&turn_path)?;
                     Self::validate_human_gate_turn(&existing_turn, &stored.id, &turn.turn_id)?;
                     if existing_turn == turn {
@@ -175,12 +179,15 @@ impl LifecycleStore {
         if !super::path_exists(&root)? {
             return Ok(None);
         }
-        for entry in std::fs::read_dir(&root)
+        let mut entries = std::fs::read_dir(&root)
             .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?
-        {
-            let entry = entry.map_err(|error| {
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
                 ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
             })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut matching_turn = None;
+        for entry in entries {
             let entry_path = entry.path();
             if entry_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
@@ -194,10 +201,16 @@ impl LifecycleStore {
             let turn: HumanGateTurn = read_json(&entry_path)?;
             Self::validate_human_gate_turn(&turn, session_id, file_turn_id)?;
             if turn.command_id == command_id {
-                return Ok(Some(turn));
+                if matching_turn.is_some() {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "human_gate_turn_command",
+                        id: command_id.to_string(),
+                    });
+                }
+                matching_turn = Some(turn);
             }
         }
-        Ok(None)
+        Ok(matching_turn)
     }
 
     pub fn update_human_gate_turn(

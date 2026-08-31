@@ -148,6 +148,36 @@ fn human_gate_turn_durable_schema_roundtrips_and_rejects_unknown_fields() {
     assert_serde_roundtrip(&invalid_nonterminal_failure);
 }
 #[test]
+fn old_workspace_session_without_human_gate_reservation_deserializes_to_none() {
+    let legacy = serde_json::json!({
+        "id": "workspace_session_legacy",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
+        "entity_id": "work_item_plan_legacy",
+        "workspace_type": "work_item_plan",
+        "status": "waiting_for_human",
+        "author_provider": "codex",
+        "reviewer_provider": "claude_code",
+        "review_rounds": 1,
+        "superpowers_enabled": false,
+        "openspec_enabled": false,
+        "messages": [],
+        "created_at": "2026-08-31T00:00:00Z",
+        "updated_at": "2026-08-31T00:00:00Z"
+    });
+    let legacy_session: WorkspaceSessionRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy_session.human_gate_reservation, None);
+    let mut missing_reservation = serde_json::to_value(&legacy_session).unwrap();
+    missing_reservation
+        .as_object_mut()
+        .unwrap()
+        .remove("human_gate_reservation");
+    let decoded_without_reservation: WorkspaceSessionRecord =
+        serde_json::from_value(missing_reservation).unwrap();
+    assert_eq!(decoded_without_reservation.human_gate_reservation, None);
+}
+
+#[test]
 fn legacy_repository_json_roundtrips_with_identity_defaults() {
     let legacy = serde_json::json!({
         "id": "repository_0001",
