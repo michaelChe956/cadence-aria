@@ -90,6 +90,14 @@ pub(crate) fn build_coding_session_state(
     } else {
         Vec::new()
     };
+    let (group_coding_progress, group_progress) =
+        if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+            let (progress, aggregate) =
+                crate::web::handlers::build_group_work_item_progress(coding_store, &attempt)?;
+            (Some(progress), Some(aggregate))
+        } else {
+            (None, None)
+        };
 
     Ok(CodingWsOutMessage::CodingSessionState {
         project_id: attempt.project_id.clone(),
@@ -100,6 +108,8 @@ pub(crate) fn build_coding_session_state(
         current_work_item_id: attempt.current_work_item_id.clone(),
         active_unit_id: attempt.active_unit_id.clone(),
         units,
+        group_coding_progress: Box::new(group_coding_progress),
+        group_progress: Box::new(group_progress),
         status: attempt.status,
         stage: attempt.stage,
         branch_name: attempt.branch_name,

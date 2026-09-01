@@ -14,7 +14,10 @@ use crate::product::models::ProviderName;
 use crate::product::models::{
     PlanAmendmentManifest, PlanRepairRequest, PlanRepairSessionSnapshotDto, WorkspaceSessionLink,
 };
-use crate::web::types::{CodingExecutionUnitDto, GroupReviewArtifactProjection};
+use crate::web::types::{
+    CodingExecutionUnitDto, GroupCodingProgressDto, GroupReviewArtifactProjection,
+    WorkItemCodingProgressDto,
+};
 use crate::web::workspace_ws_types::{
     ChoiceOption, ProviderConfigSnapshot, WsExecutionEvent, WsPermissionRiskLevel,
 };
@@ -31,6 +34,10 @@ pub enum CodingWsOutMessage {
         current_work_item_id: Option<String>,
         active_unit_id: Option<String>,
         units: Vec<CodingExecutionUnitDto>,
+        #[serde(default)]
+        group_coding_progress: Box<Option<Vec<WorkItemCodingProgressDto>>>,
+        #[serde(default)]
+        group_progress: Box<Option<GroupCodingProgressDto>>,
         status: CodingAttemptStatus,
         stage: CodingExecutionStage,
         branch_name: String,

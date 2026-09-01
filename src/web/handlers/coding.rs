@@ -15,6 +15,7 @@ use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapsh
 use crate::web::state::CodingAttemptRunKey;
 mod advance;
 mod group;
+mod progress;
 pub(crate) mod repository_resolution;
 mod scope;
 mod worktree_route;
@@ -24,6 +25,7 @@ pub use group::create_group_coding_attempt;
 #[cfg(test)]
 #[path = "coding/advance_tests.rs"]
 mod advance_tests;
+pub(crate) use progress::build_group_work_item_progress;
 use repository_resolution::{resolve_work_item_repository, routing_error};
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
 use worktree_route::{
@@ -726,6 +728,14 @@ pub(crate) async fn get_coding_attempt(
     } else {
         Vec::new()
     };
+    let (group_coding_progress, group_progress) =
+        if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+            let (progress, aggregate) = build_group_work_item_progress(&coding_store, &attempt)
+                .map_err(product_store_api_error)?;
+            (Some(progress), Some(aggregate))
+        } else {
+            (None, None)
+        };
 
     let provider_config_snapshot = attempt.provider_config_snapshot.clone();
 
@@ -736,6 +746,8 @@ pub(crate) async fn get_coding_attempt(
         current_work_item_id: attempt.current_work_item_id.clone(),
         active_unit_id: attempt.active_unit_id.clone(),
         units,
+        group_coding_progress,
+        group_progress,
         provider_config_snapshot,
         timeline_nodes,
         active_node_id,

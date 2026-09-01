@@ -646,6 +646,31 @@ pub struct CodingExecutionUnitDto {
     pub completion_commit: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemCodingProgressDto {
+    pub logical_work_item_id: String,
+    pub unit_id: String,
+    pub status: String,
+    pub stage: Option<String>,
+    pub current_commit: Option<String>,
+    pub final_commit: Option<String>,
+    pub code_review: Option<CodeReviewReport>,
+    pub handoff_revision_id: Option<String>,
+    pub failure_or_blocked_reason: Option<String>,
+    pub plan_revision_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GroupCodingProgressDto {
+    pub total: usize,
+    pub pending: usize,
+    pub active: usize,
+    pub completed: usize,
+    pub failed_or_blocked: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RequestExecutionPlanChangeRequest {
@@ -675,6 +700,10 @@ pub struct CodingAttemptSnapshotResponse {
     pub code_review_reports: Vec<CodeReviewReport>,
     pub review_request: Option<ReviewRequest>,
     pub internal_pr_review: Option<InternalPrReview>,
+    #[serde(default)]
+    pub group_coding_progress: Option<Vec<WorkItemCodingProgressDto>>,
+    #[serde(default)]
+    pub group_progress: Option<GroupCodingProgressDto>,
     #[serde(default)]
     pub group_review_artifacts: Option<GroupReviewArtifactProjection>,
     #[serde(default)]
