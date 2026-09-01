@@ -1,5 +1,23 @@
 use crate::product::models::WorkspaceType;
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static ARTIFACT_CONSTRAINT_SPEC_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_artifact_constraint_spec_call_count() {
+    ARTIFACT_CONSTRAINT_SPEC_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn artifact_constraint_spec_call_count() -> usize {
+    ARTIFACT_CONSTRAINT_SPEC_CALLS.with(Cell::get)
+}
+
 pub(crate) const ARTIFACT_SCHEMA_CONTRACT_MARKER: &str = "[artifact_schema_contract]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +97,8 @@ impl ArtifactValidationReport {
 pub(crate) fn artifact_constraint_spec_for(
     workspace_type: &WorkspaceType,
 ) -> ArtifactConstraintSpec {
+    #[cfg(test)]
+    ARTIFACT_CONSTRAINT_SPEC_CALLS.with(|calls| calls.set(calls.get() + 1));
     match workspace_type {
         WorkspaceType::Story => ArtifactConstraintSpec {
             workspace_type: workspace_type.clone(),

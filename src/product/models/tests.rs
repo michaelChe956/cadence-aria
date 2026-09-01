@@ -106,6 +106,7 @@ fn human_gate_turn_durable_schema_roundtrips_and_rejects_unknown_fields() {
         status: HumanGateTurnStatus::Reserved,
         attempt_no: 1,
         budget_reserved: 1,
+        source_hash: String::new(),
         result_artifact_ref: Some("artifact_0001".to_string()),
         failure_class: None,
         created_at: "2026-08-31T00:00:00Z".to_string(),
@@ -129,6 +130,13 @@ fn human_gate_turn_durable_schema_roundtrips_and_rejects_unknown_fields() {
     ] {
         assert_missing_field_rejected::<HumanGateTurn>(&value, field);
     }
+    let mut legacy_without_source_hash = serde_json::to_value(&turn).unwrap();
+    legacy_without_source_hash
+        .as_object_mut()
+        .unwrap()
+        .remove("source_hash");
+    let decoded_legacy: HumanGateTurn = serde_json::from_value(legacy_without_source_hash).unwrap();
+    assert!(decoded_legacy.source_hash.is_empty());
     let mut unknown = value;
     unknown
         .as_object_mut()

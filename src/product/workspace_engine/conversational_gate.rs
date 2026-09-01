@@ -525,6 +525,15 @@ impl super::WorkspaceEngine {
         }
 
         let now = Utc::now().to_rfc3339();
+        let source_hash = self
+            .session
+            .artifact
+            .as_ref()
+            .map(|artifact| {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(artifact.markdown_or_empty().as_bytes()))
+            })
+            .unwrap_or_default();
         let turn = HumanGateTurn {
             turn_id: format!("human_gate_turn_{}", uuid::Uuid::new_v4()),
             session_id: self.session.session_id.clone(),
@@ -533,6 +542,7 @@ impl super::WorkspaceEngine {
             status: HumanGateTurnStatus::Reserved,
             attempt_no: 1,
             budget_reserved: 1,
+            source_hash,
             result_artifact_ref: None,
             failure_class: None,
             created_at: now.clone(),

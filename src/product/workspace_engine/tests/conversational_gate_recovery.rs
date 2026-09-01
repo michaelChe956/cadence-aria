@@ -15,6 +15,7 @@ fn turn(status: HumanGateTurnStatus, attempt_no: u32) -> HumanGateTurn {
         status,
         attempt_no,
         budget_reserved: 1,
+        source_hash: String::new(),
         result_artifact_ref: None,
         failure_class: None,
         created_at: "2026-08-31T00:00:00Z".to_string(),
@@ -111,7 +112,7 @@ fn conversational_gate_recovery_preserves_event_prefix_and_budget() {
 }
 
 #[test]
-fn conversational_gate_recovery_revision_crash_window_completes_without_mutating_refs_or_budget() {
+fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fails_closed() {
     use crate::product::json_store::write_json;
     use crate::product::models::{
         HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
@@ -155,6 +156,12 @@ fn conversational_gate_recovery_revision_crash_window_completes_without_mutating
     write_json(&session_path, &session).expect("persist human gate session");
 
     let now = "2026-08-31T00:00:00Z".to_string();
+    let reserved_source_hash = engine
+        .session()
+        .artifact
+        .as_ref()
+        .map(|artifact| hex::encode(Sha256::digest(artifact.markdown_or_empty().as_bytes())))
+        .expect("current candidate source hash");
     let reserved_turn = HumanGateTurn {
         turn_id: "turn_recovery_revision_crash".to_string(),
         session_id: session.id.clone(),
@@ -163,6 +170,7 @@ fn conversational_gate_recovery_revision_crash_window_completes_without_mutating
         status: HumanGateTurnStatus::Reserved,
         attempt_no: 1,
         budget_reserved: 1,
+        source_hash: reserved_source_hash,
         result_artifact_ref: None,
         failure_class: None,
         created_at: now.clone(),
@@ -177,12 +185,6 @@ fn conversational_gate_recovery_revision_crash_window_completes_without_mutating
     let (reserved_session, _) = lifecycle
         .compare_and_reserve_human_gate_turn(&session, reserved_turn.clone(), reservation)
         .expect("reserve durable turn");
-    let mut running_turn = reserved_turn;
-    running_turn.status = HumanGateTurnStatus::Running;
-    let running_session = lifecycle
-        .update_human_gate_turn(&reserved_session, running_turn.clone())
-        .expect("persist running turn");
-
     let revised_source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
@@ -192,6 +194,11 @@ fn conversational_gate_recovery_revision_crash_window_completes_without_mutating
         "## Work Item WI-001: Recovered backend levels API",
     );
     let source_hash = hex::encode(Sha256::digest(revised_source.as_bytes()));
+    let mut running_turn = reserved_turn;
+    running_turn.status = HumanGateTurnStatus::Running;
+    let running_session = lifecycle
+        .update_human_gate_turn(&reserved_session, running_turn.clone())
+        .expect("persist running turn");
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
     let mut source = SourceRevisionRecord {
         id: "source-recovery-revision".to_string(),
@@ -311,17 +318,20 @@ fn conversational_gate_recovery_revision_crash_window_completes_without_mutating
         actions,
         vec![(
             running_turn.turn_id.clone(),
-            HumanGateRecoveryAction::CompletedRevision,
+            HumanGateRecoveryAction::MarkFailed {
+                failure_class: HumanGateTurnFailureClass::ValidationReject,
+            },
         )]
     );
-    let completed = lifecycle
+    let recovered_turn = lifecycle
         .get_human_gate_turn(engine.session().session_id.as_str(), &running_turn.turn_id)
-        .expect("completed recovered turn");
-    assert_eq!(completed.status, HumanGateTurnStatus::Completed);
+        .expect("recovered turn");
+    assert_eq!(recovered_turn.status, HumanGateTurnStatus::Failed);
     assert_eq!(
-        completed.result_artifact_ref.as_deref(),
-        Some("artifact_version_002")
+        recovered_turn.failure_class,
+        Some(HumanGateTurnFailureClass::ValidationReject)
     );
+    assert_eq!(recovered_turn.source_hash, running_turn.source_hash);
     let recovered_session = lifecycle
         .get_workspace_session(engine.session().session_id.as_str())
         .expect("recovered session");

@@ -125,6 +125,25 @@ pub(crate) fn revision_artifact_ref_from_versions(
     Ok(format!("artifact_version_{:03}", current[0].version))
 }
 
+fn current_revision_source_hash(
+    store: &super::LifecycleStore,
+    session: &crate::product::models::WorkspaceSessionRecord,
+) -> Result<Option<String>, String> {
+    let Some(source_ref) = session.work_item_plan_source_revision_ref.as_deref() else {
+        return Ok(None);
+    };
+    let scope = SourceStoreScope {
+        project_id: session.project_id.clone(),
+        issue_id: session.issue_id.clone(),
+        plan_id: session.entity_id.clone(),
+    };
+    let source_store = WorkItemPlanSourceStore::new(store.app_paths());
+    source_store
+        .get_source_revision(&scope, source_ref)
+        .map(|source| Some(source.source_revision_hash))
+        .map_err(|error| format!("{error:?}"))
+}
+
 fn durable_revision_artifact_ref(
     store: &super::LifecycleStore,
     session: &crate::product::models::WorkspaceSessionRecord,
@@ -143,15 +162,24 @@ fn durable_revision_artifact_ref(
     ) else {
         return Ok(None);
     };
+    // A turn reserved for a previous candidate must never be completed from a
+    // later round's refs. Empty hashes identify pre-source-hash records and are
+    // deliberately fail-closed rather than guessing their candidate.
+    if turn.source_hash.is_empty() {
+        return Ok(None);
+    }
     let scope = SourceStoreScope {
         project_id: session.project_id.clone(),
         issue_id: session.issue_id.clone(),
         plan_id: session.entity_id.clone(),
     };
     let source_store = WorkItemPlanSourceStore::new(store.app_paths());
-    source_store
+    let source = source_store
         .get_source_revision(&scope, source_ref)
         .map_err(|error| format!("{error:?}"))?;
+    if source.source_revision_hash != turn.source_hash {
+        return Ok(None);
+    }
     source_store
         .get_plan_candidate_ir(&scope, ir_ref)
         .map_err(|error| format!("{error:?}"))?;
@@ -187,6 +215,25 @@ impl super::WorkspaceEngine {
                 turn.status,
                 HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
             ) {
+                continue;
+            }
+            if let Some(current_source_hash) = current_revision_source_hash(store, &expected)?
+                && !turn.source_hash.is_empty()
+                && current_source_hash != turn.source_hash
+            {
+                let mut failed = turn.clone();
+                failed.status = HumanGateTurnStatus::Failed;
+                failed.failure_class = Some(HumanGateTurnFailureClass::ValidationReject);
+                failed.updated_at = Utc::now().to_rfc3339();
+                expected = store
+                    .update_human_gate_turn(&expected, failed)
+                    .map_err(|error| error.to_string())?;
+                actions.push((
+                    turn.turn_id,
+                    HumanGateRecoveryAction::MarkFailed {
+                        failure_class: HumanGateTurnFailureClass::ValidationReject,
+                    },
+                ));
                 continue;
             }
             if let Some(result_artifact_ref) =

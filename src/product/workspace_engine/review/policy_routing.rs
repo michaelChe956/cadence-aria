@@ -32,6 +32,21 @@ pub enum RoutingAction {
     },
 }
 
+#[allow(dead_code)]
+pub(crate) fn route_repeated_human_gate_fingerprint(
+    snapshot: &HumanGateSnapshot,
+    fingerprint: &FindingFingerprint,
+) -> Result<(), String> {
+    if snapshot.repeated_fingerprints.contains(fingerprint) {
+        Ok(())
+    } else {
+        Err(format!(
+            "human gate fingerprint {} is not recorded as repeated",
+            fingerprint.0
+        ))
+    }
+}
+
 pub fn route_outcome(
     outcome: PlanOutcome,
     policy: RunPolicy,

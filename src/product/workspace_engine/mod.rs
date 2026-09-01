@@ -135,6 +135,7 @@ pub use types::{
 };
 
 pub(crate) use artifact_constraints::*;
+
 #[cfg(test)]
 pub(crate) async fn single_candidate_compile_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();

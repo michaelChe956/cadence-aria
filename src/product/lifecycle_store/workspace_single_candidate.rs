@@ -373,6 +373,7 @@ impl LifecycleStore {
                 && existing.command_id == turn.command_id
                 && existing.feedback_text == turn.feedback_text
                 && existing.budget_reserved == turn.budget_reserved
+                && existing.source_hash == turn.source_hash
                 && existing.created_at == turn.created_at;
             if !immutable_fields_match
                 || existing.status == HumanGateTurnStatus::Completed

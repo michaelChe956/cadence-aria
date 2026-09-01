@@ -51,6 +51,14 @@ impl LifecycleStore {
                 reason: "budget_reserved must be exactly 1".to_string(),
             });
         }
+        if !turn.source_hash.is_empty()
+            && !crate::product::work_item_plan_policy::is_lowercase_sha256_hex(&turn.source_hash)
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "human_gate_turn",
+                reason: "source_hash must be a lowercase SHA-256 hex digest".to_string(),
+            });
+        }
         if turn.status != HumanGateTurnStatus::Failed && turn.failure_class.is_some() {
             return Err(ProductStoreError::InvalidRecord {
                 kind: "human_gate_turn",
@@ -317,6 +325,7 @@ impl LifecycleStore {
             if existing.session_id != turn.session_id
                 || existing.feedback_text != turn.feedback_text
                 || existing.budget_reserved != turn.budget_reserved
+                || existing.source_hash != turn.source_hash
                 || existing.created_at != turn.created_at
             {
                 return Err(ProductStoreError::Conflict {

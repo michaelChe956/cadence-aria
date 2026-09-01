@@ -407,6 +407,7 @@ async fn conversational_gate_revision_result_validation_reject_preserves_candida
 async fn conversational_gate_revision_result_never_calls_legacy_chinese_title_constraint() {
     let (_root, lifecycle, mut engine) = durable_revision_fixture("revision_no_legacy", 1);
     let turn_id = open_running_revision_turn(&mut engine, "revision_no_legacy_command").await;
+    crate::product::workspace_engine::reset_artifact_constraint_spec_call_count();
     let result = engine
         .run_sc_manual_revision_turn(
             &turn_id,
@@ -422,6 +423,11 @@ async fn conversational_gate_revision_result_never_calls_legacy_chinese_title_co
         result,
         crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
     ));
+    assert_eq!(
+        crate::product::workspace_engine::artifact_constraint_spec_call_count(),
+        0,
+        "SC revision must not consult legacy artifact constraints"
+    );
     assert!(
         lifecycle
             .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)

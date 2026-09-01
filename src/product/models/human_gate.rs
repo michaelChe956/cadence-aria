@@ -31,6 +31,11 @@ pub struct HumanGateTurn {
     pub status: HumanGateTurnStatus,
     pub attempt_no: u32,
     pub budget_reserved: u32,
+    /// SHA-256 of the candidate that was current when this turn was reserved.
+    /// Empty values are accepted only for backwards-compatible legacy JSON;
+    /// recovery must not auto-complete such a turn.
+    #[serde(default)]
+    pub source_hash: String,
     #[serde(deserialize_with = "super::deserialize_required_option")]
     pub result_artifact_ref: Option<String>,
     #[serde(deserialize_with = "super::deserialize_required_option")]

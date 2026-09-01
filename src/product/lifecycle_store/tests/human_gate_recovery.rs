@@ -29,6 +29,7 @@ fn human_gate_recovery_attempt_updates_same_turn_and_terminal_replay_reserves_ag
         status,
         attempt_no: 1,
         budget_reserved: 1,
+        source_hash: String::new(),
         result_artifact_ref: None,
         failure_class: None,
         created_at: "2026-08-31T00:00:00Z".to_string(),
