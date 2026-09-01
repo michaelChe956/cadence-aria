@@ -13,10 +13,13 @@ use crate::product::logical_codebase::{
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
+mod advance;
 mod group;
 pub(crate) mod repository_resolution;
 mod scope;
 mod worktree_route;
+#[allow(unused_imports)]
+pub(crate) use advance::map_advance_outcome;
 pub use group::create_group_coding_attempt;
 use repository_resolution::{resolve_work_item_repository, routing_error};
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};

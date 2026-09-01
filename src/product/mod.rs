@@ -1,3 +1,4 @@
+pub mod advance_store;
 pub mod app_paths;
 pub mod artifact_extraction;
 pub mod cadence_skills;

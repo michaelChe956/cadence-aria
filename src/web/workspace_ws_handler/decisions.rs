@@ -423,7 +423,9 @@ pub(crate) async fn handle_human_confirm_from_handler(
     }
 }
 
+mod advance;
 mod inbound;
+pub(crate) use advance::handle_advance_from_handler;
 pub(crate) use inbound::{WorkspaceInboundContext, handle_workspace_inbound_message};
 #[cfg(test)]
 pub(crate) use inbound::{

@@ -71,6 +71,7 @@ use crate::web::workspace_ws_types::{
     WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
 };
 
+mod advance;
 pub mod aggregate_output_parser;
 mod artifact_constraints;
 mod author_confirm;
@@ -108,6 +109,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use advance::{AdvanceInput, AdvanceOutcome, AdvanceRecord, AdvanceStatus};
 pub use compile::{
     CompileStores, InitialPlanCompileDurableContext, InitialPlanCompileInput,
     PreparedInitialPlanCompile, execute_initial_plan_compile, prepare_initial_plan_compile,

@@ -135,12 +135,7 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
                 return;
             }
-            let err = WsOutMessage::AdvanceRejected {
-                command_id,
-                code: "ADVANCE_HANDLER_NOT_WIRED".to_string(),
-                reason: "advance handler not wired".to_string(),
-            };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
+            handle_advance_from_handler(run_context.clone(), outbound_tx.clone(), command_id).await;
         }
         WsInMessage::UserMessage { content } => {
             if let Err(message) = spawn_provider_run_from_handler(
