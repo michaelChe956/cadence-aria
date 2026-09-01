@@ -236,6 +236,12 @@ impl WorkspaceEngine {
             .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
             .map_err(|error| format!("persist advance record failed: {error}"))?;
 
+        if record.plan_revision_id != authoritative.plan_revision_id {
+            return Err(
+                "advance record plan revision differs from authoritative plan revision".to_string(),
+            );
+        }
+
         let repository =
             Self::resolve_advance_repository(&advance_store.app_paths(), &input, &authoritative)?;
         let current_unit = authoritative
@@ -318,7 +324,7 @@ impl WorkspaceEngine {
             target_snapshot,
             max_auto_rework: 2,
         };
-        let group_journal = match existing_group_journal {
+        let mut group_journal = match existing_group_journal {
             Some(journal) => journal,
             None => coding_store
                 .prepare_group_initialization_with_admission(
@@ -343,7 +349,9 @@ impl WorkspaceEngine {
                 "advance record attempt identity differs from initialization journal".to_string(),
             );
         }
-        if outer.phase == AdvanceInitializationPhase::JournalPrepared {
+        if !group_journal.phase.has_reached(
+            crate::product::coding_attempt_store::CodingGroupInitializationPhase::AttemptPersisted,
+        ) {
             let record_attempt = coding_store
                 .ensure_group_initialization_attempt(
                     &group_journal,
@@ -358,8 +366,23 @@ impl WorkspaceEngine {
                         })?,
                 )
                 .map_err(|error| format!("persist group attempt failed: {error}"))?;
+            group_journal = coding_store
+                .advance_group_initialization_phase(
+                    &group_journal,
+                    crate::product::coding_attempt_store::CodingGroupInitializationPhase::AttemptPersisted,
+                )
+                .map_err(|error| format!("checkpoint group attempt persistence failed: {error}"))?;
+            if group_journal.attempt.id != record_attempt.id {
+                return Err(
+                    "group initialization attempt identity changed during replay".to_string(),
+                );
+            }
+        }
+        if outer.phase.order_for_engine()
+            < AdvanceInitializationPhase::AttemptPersisted.order_for_engine()
+        {
             let mut updated = record.clone();
-            updated.attempt_id = Some(record_attempt.id.clone());
+            updated.attempt_id = Some(group_journal.attempt.id.clone());
             updated.updated_at = chrono::Utc::now().to_rfc3339();
             advance_store
                 .update_record(&updated)
@@ -372,9 +395,9 @@ impl WorkspaceEngine {
                 )
                 .map_err(|error| format!("checkpoint attempt persistence failed: {error}"))?;
         }
-        if outer.phase.order_for_engine()
-            < AdvanceInitializationPhase::WorktreeBound.order_for_engine()
-        {
+        if !group_journal.phase.has_reached(
+            crate::product::coding_attempt_store::CodingGroupInitializationPhase::WorktreeBound,
+        ) {
             let lifecycle = self
                 .lifecycle_store
                 .as_ref()
@@ -413,8 +436,18 @@ impl WorkspaceEngine {
                     &group_journal.attempt.id,
                 )
                 .map_err(|error| format!("bind shared worktree failed: {error}"))?;
+            group_journal = coding_store
+                .advance_group_initialization_phase(
+                    &group_journal,
+                    crate::product::coding_attempt_store::CodingGroupInitializationPhase::WorktreeBound,
+                )
+                .map_err(|error| format!("checkpoint group worktree binding failed: {error}"))?;
+        }
+        if outer.phase.order_for_engine()
+            < AdvanceInitializationPhase::WorktreeBound.order_for_engine()
+        {
             let current_record = advance_store
-                .get_advance_by_command_id(&input.project_id, &input.issue_id, &input.command_id)
+                .get_advance_for_plan(&input.project_id, &input.issue_id, &record.plan_id)
                 .map_err(|error| format!("reload advance record failed: {error}"))?
                 .ok_or("advance record disappeared")?;
             outer = advance_store
@@ -426,15 +459,25 @@ impl WorkspaceEngine {
                 .map_err(|error| format!("checkpoint worktree binding failed: {error}"))?;
         }
         let current_record = advance_store
-            .get_advance_by_command_id(&input.project_id, &input.issue_id, &input.command_id)
+            .get_advance_for_plan(&input.project_id, &input.issue_id, &record.plan_id)
             .map_err(|error| format!("reload advance record failed: {error}"))?
             .ok_or("advance record disappeared")?;
-        if outer.phase.order_for_engine()
-            < AdvanceInitializationPhase::PlanBindingSaved.order_for_engine()
-        {
+        if !group_journal.phase.has_reached(
+            crate::product::coding_attempt_store::CodingGroupInitializationPhase::PlanBindingSaved,
+        ) {
             coding_store
                 .ensure_group_initialization_plan_binding(&group_journal)
                 .map_err(|error| format!("persist group plan binding failed: {error}"))?;
+            group_journal = coding_store
+                .advance_group_initialization_phase(
+                    &group_journal,
+                    crate::product::coding_attempt_store::CodingGroupInitializationPhase::PlanBindingSaved,
+                )
+                .map_err(|error| format!("checkpoint group plan binding failed: {error}"))?;
+        }
+        if outer.phase.order_for_engine()
+            < AdvanceInitializationPhase::PlanBindingSaved.order_for_engine()
+        {
             outer = advance_store
                 .advance_initialization_phase(
                     &current_record,
@@ -443,14 +486,24 @@ impl WorkspaceEngine {
                 )
                 .map_err(|error| format!("checkpoint plan binding failed: {error}"))?;
         }
-        if outer.phase.order_for_engine()
-            < AdvanceInitializationPhase::UnitsMaterialized.order_for_engine()
-        {
+        if !group_journal.phase.has_reached(
+            crate::product::coding_attempt_store::CodingGroupInitializationPhase::UnitsMaterialized,
+        ) {
             for index in 0..group_journal.units.len() {
                 coding_store
                     .ensure_group_initialization_unit(&group_journal, index)
                     .map_err(|error| format!("persist group unit failed: {error}"))?;
             }
+            group_journal = coding_store
+                .advance_group_initialization_phase(
+                    &group_journal,
+                    crate::product::coding_attempt_store::CodingGroupInitializationPhase::UnitsMaterialized,
+                )
+                .map_err(|error| format!("checkpoint group units materialization failed: {error}"))?;
+        }
+        if outer.phase.order_for_engine()
+            < AdvanceInitializationPhase::UnitsMaterialized.order_for_engine()
+        {
             outer = advance_store
                 .advance_initialization_phase(
                     &current_record,
@@ -470,9 +523,23 @@ impl WorkspaceEngine {
             .validate_group_attempt_integrity(&persisted_attempt)
             .map_err(|error| format!("validate initialized group failed: {error}"))?;
         let final_record = advance_store
-            .get_advance_by_command_id(&input.project_id, &input.issue_id, &input.command_id)
+            .get_advance_for_plan(&input.project_id, &input.issue_id, &record.plan_id)
             .map_err(|error| format!("reload final advance record failed: {error}"))?
             .ok_or("advance record disappeared")?;
+        let completed_group_journal = if !group_journal.phase.has_reached(
+            crate::product::coding_attempt_store::CodingGroupInitializationPhase::Completed,
+        ) {
+            coding_store
+                .advance_group_initialization_phase(
+                    &group_journal,
+                    crate::product::coding_attempt_store::CodingGroupInitializationPhase::Completed,
+                )
+                .map_err(|error| {
+                    format!("checkpoint group initialization completion failed: {error}")
+                })?
+        } else {
+            group_journal
+        };
         let final_journal = advance_store
             .advance_initialization_phase(&final_record, &outer, AdvanceInitializationPhase::Ready)
             .map_err(|error| format!("checkpoint ready initialization failed: {error}"))?;
@@ -484,6 +551,7 @@ impl WorkspaceEngine {
         advance_store
             .update_record(&ready_record)
             .map_err(|error| format!("persist ready advance record failed: {error}"))?;
+        let _ = completed_group_journal;
         let _ = final_journal;
         Ok(AdvanceOutcome::Completed {
             record: ready_record,
