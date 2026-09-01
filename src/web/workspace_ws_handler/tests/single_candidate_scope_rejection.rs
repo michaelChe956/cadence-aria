@@ -196,7 +196,7 @@ async fn single_candidate_scope_rejection_keeps_legacy_unknown_scope_compatible(
     assert!(events.try_recv().is_err());
 }
 
-async fn scope_test_snapshot(engine: &Arc<Mutex<WorkspaceEngine>>) -> Vec<u8> {
+pub(super) async fn scope_test_snapshot(engine: &Arc<Mutex<WorkspaceEngine>>) -> Vec<u8> {
     let engine = engine.lock().await;
     serde_json::to_vec(&(
         engine.session().stage.as_str(),

@@ -75,6 +75,28 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
         return;
     }
 
+    if let WsInMessage::HumanGateFeedback { command_id, .. } = &envelope.message
+        && let Err(err) = validate_command_id(command_id)
+    {
+        let _ = send_json_outbound(&outbound_tx, &err).await;
+        return;
+    }
+
+    if run_context.session_record.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+        && (requires_stage_validation(&envelope.message)
+            || matches!(envelope.message, WsInMessage::UserMessage { .. }))
+    {
+        let stage = engine.lock().await.current_stage();
+        if let Some(err) = human_gate_message_boundary_error(
+            run_context.session_record.flow_kind,
+            stage,
+            &envelope.message,
+        ) {
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+            return;
+        }
+    }
+
     match envelope.message {
         WsInMessage::HumanGateFeedback {
             command_id,

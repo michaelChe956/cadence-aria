@@ -655,25 +655,31 @@ pub(crate) async fn handle_workspace_socket(
                 && *stage == WorkspaceStage::AuthorConfirm
                 && *workspace_type == WorkspaceType::WorkItemPlan)
         {
-            let err = match in_msg {
-                WsInMessage::HumanGateFeedback { .. } => {
-                    conversational_gate_stage_error(session_record.flow_kind, stage, in_msg)
+            let err = if let Some(err) =
+                human_gate_message_boundary_error(session_record.flow_kind, stage.clone(), in_msg)
+            {
+                err
+            } else {
+                match in_msg {
+                    WsInMessage::HumanGateFeedback { .. } => {
+                        conversational_gate_stage_error(session_record.flow_kind, stage, in_msg)
+                    }
+                    WsInMessage::Advance { command_id } => {
+                        advance_stage_error(command_id.clone(), stage, session_record.flow_kind)
+                    }
+                    _ => WsOutMessage::ProtocolError {
+                        code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
+                        message: format!(
+                            "message {} not allowed in stage {}",
+                            message_type(in_msg),
+                            stage.as_str()
+                        ),
+                        context: Some(serde_json::json!({
+                            "stage": stage.as_str(),
+                            "received": message_type(in_msg),
+                        })),
+                    },
                 }
-                WsInMessage::Advance { command_id } => {
-                    advance_stage_error(command_id.clone(), stage, session_record.flow_kind)
-                }
-                _ => WsOutMessage::ProtocolError {
-                    code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
-                    message: format!(
-                        "message {} not allowed in stage {}",
-                        message_type(in_msg),
-                        stage.as_str()
-                    ),
-                    context: Some(serde_json::json!({
-                        "stage": stage.as_str(),
-                        "received": message_type(in_msg),
-                    })),
-                },
             };
             let _ = send_json_outbound(&outbound_tx, &err).await;
             continue;

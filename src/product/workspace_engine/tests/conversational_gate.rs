@@ -257,6 +257,94 @@ async fn conversational_gate_budget_exhaustion_rejects_before_reservation() {
 }
 
 #[tokio::test]
+async fn conversational_gate_budget_exhausted_rejects_feedback_but_accepts_termination() {
+    let (_root, lifecycle, mut engine) = gate_fixture(0);
+    let session_id = engine.session().session_id.clone();
+    let before = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable session before rejection");
+
+    assert_eq!(
+        engine
+            .handle_human_gate_feedback(feedback("cmd_exhausted_accept_close"))
+            .await
+            .expect("budget rejection"),
+        HumanGateCommandOutcome::Rejected {
+            code: "HUMAN_GATE_BUDGET_EXHAUSTED".to_string(),
+            reason: "manual repair budget is exhausted".to_string(),
+        }
+    );
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(&session_id)
+            .expect("durable session after rejection"),
+        before,
+        "budget rejection must preserve the open gate"
+    );
+    assert!(
+        lifecycle
+            .list_human_gate_turns(&session_id)
+            .expect("list turns")
+            .is_empty()
+    );
+
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .await
+            .expect("termination remains admissible"),
+        HumanGateCloseOutcome::Abandoned
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_budget_exhaustion_emits_no_advance_event() {
+    let (_root, _lifecycle, mut engine, mut event_rx) = gate_fixture_with_event_rx(0);
+
+    assert!(matches!(
+        engine
+            .handle_human_gate_feedback(feedback("cmd_exhausted_no_advance"))
+            .await
+            .expect("budget rejection"),
+        HumanGateCommandOutcome::Rejected { code, .. }
+            if code == "HUMAN_GATE_BUDGET_EXHAUSTED"
+    ));
+    assert!(
+        event_rx.try_recv().is_err(),
+        "budget rejection must not emit an advance or provider event"
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_closed_event_never_starts_advance() {
+    let (_root, _lifecycle, mut engine, mut event_rx) = gate_fixture_with_event_rx(0);
+
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .await
+            .expect("termination remains admissible after budget exhaustion"),
+        HumanGateCloseOutcome::Abandoned
+    );
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::HumanGateClosed { .. }))
+            .count(),
+        1,
+        "closing emits exactly one close event"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, EngineEvent::ProviderRunRequested { .. })),
+        "HumanGateClosed must not start an advance/provider run"
+    );
+}
+
+#[tokio::test]
 async fn conversational_gate_concurrent_feedback_reserves_exactly_one_turn() {
     let (_root, lifecycle, engine) = gate_fixture(2);
     let engine = Arc::new(tokio::sync::Mutex::new(engine));

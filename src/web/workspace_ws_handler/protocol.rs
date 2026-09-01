@@ -172,6 +172,29 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
     }
 }
 
+pub(crate) fn human_gate_message_boundary_error(
+    flow_kind: WorkItemPlanFlowKind,
+    stage: WorkspaceStage,
+    message: &WsInMessage,
+) -> Option<WsOutMessage> {
+    if flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        || matches!(message, WsInMessage::HumanGateFeedback { .. })
+    {
+        return None;
+    }
+    if is_message_valid_for_stage_with_flow(flow_kind, message, &stage) {
+        return None;
+    }
+
+    // Legacy/control traffic keeps its existing routing. New conversational-gate commands and
+    // ordinary user messages fail closed before any provider/store operation.
+    if stage == WorkspaceStage::HumanConfirm || matches!(message, WsInMessage::UserMessage { .. }) {
+        return Some(conversational_gate_stage_error(flow_kind, &stage, message));
+    }
+
+    None
+}
+
 pub(crate) fn conversational_gate_stage_error(
     flow_kind: WorkItemPlanFlowKind,
     stage: &WorkspaceStage,

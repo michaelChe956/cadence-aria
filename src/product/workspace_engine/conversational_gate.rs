@@ -487,19 +487,6 @@ impl super::WorkspaceEngine {
             return Ok(rejected(code, reason));
         }
 
-        // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
-        // 固定契约超出独立预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
-        let prompt = match self.build_sc_manual_revision_prompt_for_turn(&input.feedback) {
-            Ok(prompt) => prompt,
-            Err(error) => {
-                let (code, reason) = error.split_once(':').map_or(
-                    ("HUMAN_GATE_REVISION_PROMPT_TOO_LARGE", error.as_str()),
-                    |(code, reason)| (code, reason.trim()),
-                );
-                return Ok(rejected(code, reason));
-            }
-        };
-
         let turns = store
             .list_human_gate_turns(&self.session.session_id)
             .map_err(|error| error.to_string())?;
@@ -521,6 +508,19 @@ impl super::WorkspaceEngine {
                 "manual repair budget is exhausted",
             ));
         }
+
+        // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
+        // 固定契约超出独立预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
+        let prompt = match self.build_sc_manual_revision_prompt_for_turn(&input.feedback) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                let (code, reason) = error.split_once(':').map_or(
+                    ("HUMAN_GATE_REVISION_PROMPT_TOO_LARGE", error.as_str()),
+                    |(code, reason)| (code, reason.trim()),
+                );
+                return Ok(rejected(code, reason));
+            }
+        };
 
         let now = Utc::now().to_rfc3339();
         let source_hash = self
