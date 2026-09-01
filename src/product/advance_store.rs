@@ -170,7 +170,12 @@ impl AdvanceStore {
                     ProductStoreError::Io(format!("read advance record entry: {error}"))
                 })?
                 .path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            if path.extension().and_then(|value| value.to_str()) != Some("json")
+                || path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name.ends_with(".initialization.json"))
+            {
                 continue;
             }
             let record: AdvanceRecord = read_json(&path)?;
