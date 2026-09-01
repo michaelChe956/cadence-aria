@@ -64,10 +64,9 @@ impl WorkspaceEngine {
         if let Some(record) = advance_store
             .get_advance_for_plan(&input.project_id, &input.issue_id, &input.plan_id)
             .map_err(|error| format!("load advance plan record failed: {error}"))?
+            && record.status != AdvanceStatus::Initializing
         {
-            if record.status != AdvanceStatus::Initializing {
-                return Ok(AdvanceOutcome::Replayed { record });
-            }
+            return Ok(AdvanceOutcome::Replayed { record });
         }
 
         let lifecycle = self
@@ -256,9 +255,20 @@ impl WorkspaceEngine {
                 CodingAdmissionKind::ScAdvance,
             )
             .map_err(|error| format!("prepare group initialization failed: {error}"))?;
+        if group_journal.attempt.admission_kind != CodingAdmissionKind::ScAdvance {
+            return Err("advance initialization journal is not an SC admission".to_string());
+        }
         let mut outer = advance_store
-            .put_advance_initialization_if_absent(&record, &group_journal.attempt.id)
+            .load_or_prepare_advance_initialization(&record, &group_journal)
             .map_err(|error| format!("persist advance initialization failed: {error}"))?;
+        if outer.phase.order_for_engine()
+            >= AdvanceInitializationPhase::AttemptPersisted.order_for_engine()
+            && record.attempt_id.as_deref() != Some(outer.attempt_id.as_str())
+        {
+            return Err(
+                "advance record attempt identity differs from initialization journal".to_string(),
+            );
+        }
         if outer.phase == AdvanceInitializationPhase::JournalPrepared {
             let record_attempt = coding_store
                 .ensure_group_initialization_attempt(

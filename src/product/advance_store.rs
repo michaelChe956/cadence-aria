@@ -350,30 +350,34 @@ impl AdvanceStore {
         attempt_id: &str,
     ) -> Result<AdvanceInitializationJournal, ProductStoreError> {
         validate_advance_record_identity(record)?;
+        validate_relative_id(attempt_id)?;
         let path = self.initialization_path(record)?;
-        if path.is_file() {
-            let journal: AdvanceInitializationJournal = read_json(&path)?;
-            validate_advance_initialization_journal(&journal, record)?;
-            if journal.attempt_id != attempt_id {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "advance_initialization_journal_attempt",
-                    id: record.id.clone(),
-                });
+        let root = self.root(&record.project_id, &record.issue_id)?;
+        with_exclusive_lock(&root, || {
+            if path.is_file() {
+                let journal: AdvanceInitializationJournal = read_json(&path)?;
+                validate_advance_initialization_journal(&journal, record)?;
+                if journal.attempt_id != attempt_id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "advance_initialization_journal_attempt",
+                        id: record.id.clone(),
+                    });
+                }
+                return Ok(journal);
             }
-            return Ok(journal);
-        }
-        let now = Utc::now().to_rfc3339();
-        let journal = AdvanceInitializationJournal {
-            advance_id: record.id.clone(),
-            plan_id: record.plan_id.clone(),
-            attempt_id: attempt_id.to_string(),
-            phase: AdvanceInitializationPhase::JournalPrepared,
-            error: None,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        write_json(&path, &journal)?;
-        Ok(journal)
+            let now = Utc::now().to_rfc3339();
+            let journal = AdvanceInitializationJournal {
+                advance_id: record.id.clone(),
+                plan_id: record.plan_id.clone(),
+                attempt_id: attempt_id.to_string(),
+                phase: AdvanceInitializationPhase::JournalPrepared,
+                error: None,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            write_json(&path, &journal)?;
+            Ok(journal)
+        })
     }
 
     pub fn mark_advance_initialization_error(
@@ -449,28 +453,31 @@ impl AdvanceStore {
         validate_advance_record_identity(record)?;
         validate_advance_initialization_journal(expected, record)?;
         let path = self.initialization_path(record)?;
-        let mut current: AdvanceInitializationJournal = read_json(&path)?;
-        validate_advance_initialization_journal(&current, record)?;
-        if current != *expected {
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "advance_initialization_journal",
-                id: record.id.clone(),
-            });
-        }
-        if current.phase == next {
-            return Ok(current);
-        }
-        if next.order() != current.phase.order() + 1 {
-            return Err(ProductStoreError::Conflict {
-                kind: "advance_initialization_phase",
-                id: record.id.clone(),
-            });
-        }
-        current.phase = next;
-        current.error = None;
-        current.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &current)?;
-        Ok(current)
+        let root = self.root(&record.project_id, &record.issue_id)?;
+        with_exclusive_lock(&root, || {
+            let mut current: AdvanceInitializationJournal = read_json(&path)?;
+            validate_advance_initialization_journal(&current, record)?;
+            if current != *expected {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "advance_initialization_journal",
+                    id: record.id.clone(),
+                });
+            }
+            if current.phase == next {
+                return Ok(current);
+            }
+            if next.order() != current.phase.order() + 1 {
+                return Err(ProductStoreError::Conflict {
+                    kind: "advance_initialization_phase",
+                    id: record.id.clone(),
+                });
+            }
+            current.phase = next;
+            current.error = None;
+            current.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &current)?;
+            Ok(current)
+        })
     }
 
     fn initialization_path(&self, record: &AdvanceRecord) -> Result<PathBuf, ProductStoreError> {
