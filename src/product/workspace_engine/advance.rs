@@ -194,29 +194,47 @@ impl WorkspaceEngine {
         coding_store: CodingAttemptStore,
         authoritative: AuthoritativeGroupPlanBinding,
     ) -> Result<AdvanceOutcome, String> {
+        let result = self
+            .initialize_advance_inner(
+                input.clone(),
+                advance_store.clone(),
+                coding_store,
+                authoritative,
+            )
+            .await;
+        if let Err(error) = &result
+            && let Ok(Some(record)) = advance_store.get_advance_by_command_id(
+                &input.project_id,
+                &input.issue_id,
+                &input.command_id,
+            )
+        {
+            if let Ok(Some(journal)) = advance_store.get_advance_initialization(&record) {
+                let _ = advance_store.mark_advance_initialization_error(&record, &journal, error);
+            } else if record.status == AdvanceStatus::Initializing {
+                let mut failed = record.clone();
+                failed.status = AdvanceStatus::Failed;
+                failed.error = Some(error.clone());
+                failed.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = advance_store.update_record(&failed);
+            }
+        }
+        result
+    }
+
+    async fn initialize_advance_inner(
+        &mut self,
+        input: AdvanceInput,
+        advance_store: AdvanceStore,
+        coding_store: CodingAttemptStore,
+        authoritative: AuthoritativeGroupPlanBinding,
+    ) -> Result<AdvanceOutcome, String> {
         let _initialization_guard = coding_store
             .acquire_group_initialization_arbitration(&input.project_id, &input.issue_id)
             .map_err(|error| format!("acquire advance initialization lock failed: {error}"))?;
         let record = advance_store
             .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
             .map_err(|error| format!("persist advance record failed: {error}"))?;
-        if let Some(existing) = advance_store
-            .get_advance_initialization(&record)
-            .map_err(|error| format!("load advance initialization failed: {error}"))?
-        {
-            return if existing.phase == AdvanceInitializationPhase::Ready
-                && record.status == AdvanceStatus::Ready
-            {
-                Ok(Self::advance_replay_outcome(record))
-            } else if matches!(
-                record.status,
-                AdvanceStatus::Failed | AdvanceStatus::Aborted
-            ) {
-                Ok(AdvanceOutcome::Replayed { record })
-            } else {
-                Err("advance initialization replay requires durable group journal".to_string())
-            };
-        }
 
         let repository =
             Self::resolve_advance_repository(&advance_store.app_paths(), &input, &authoritative)?;
@@ -493,17 +511,6 @@ impl WorkspaceEngine {
             .map(Some)
             .map_err(|error| format!("capture advance target snapshot failed: {error}"))
     }
-    fn advance_replay_outcome(record: AdvanceRecord) -> AdvanceOutcome {
-        match (record.attempt_id.clone(), record.workspace_entry.clone()) {
-            (Some(attempt_id), Some(workspace_entry)) => AdvanceOutcome::Completed {
-                record,
-                attempt_id,
-                workspace_entry,
-            },
-            _ => AdvanceOutcome::Replayed { record },
-        }
-    }
-
     fn advance_workspace_entry(
         attempt: &crate::product::coding_models::CodingExecutionAttempt,
     ) -> String {
