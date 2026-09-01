@@ -369,8 +369,7 @@ impl AdvanceStore {
         validate_advance_initialization_journal(&journal, record)?;
         Ok(Some(journal))
     }
-    /// This helper is retained for the legacy store-level API; production advance orchestration
-    /// uses the checkpointed engine path above.
+    #[cfg(test)]
     pub(crate) fn put_advance_initialization_if_absent(
         &self,
         record: &AdvanceRecord,
