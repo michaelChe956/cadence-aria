@@ -42,6 +42,7 @@ mod author_revision_review_routing;
 mod conversational_gate;
 mod conversational_gate_recovery;
 mod conversational_gate_revision;
+mod conversational_gate_revision_fingerprint;
 mod review_repair_prompt;
 mod single_candidate;
 mod single_candidate_flow_dispatch;

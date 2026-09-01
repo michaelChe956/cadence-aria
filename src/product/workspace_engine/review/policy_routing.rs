@@ -32,7 +32,6 @@ pub enum RoutingAction {
     },
 }
 
-#[allow(dead_code)]
 pub(crate) fn route_repeated_human_gate_fingerprint(
     snapshot: &HumanGateSnapshot,
     fingerprint: &FindingFingerprint,
@@ -55,8 +54,29 @@ pub fn route_outcome(
     match outcome {
         PlanOutcome::Valid => RoutingAction::ContinueToCompleted,
         PlanOutcome::Repairable { findings } => RoutingAction::TriggerAggregateRepair { findings },
-        PlanOutcome::HumanRequired { .. } => {
+        PlanOutcome::HumanRequired {
+            findings: _,
+            repeated_fingerprints,
+            reason,
+        } => {
             let snapshot = human_gate_snapshot(&context, policy == RunPolicy::AutoIfValid);
+            if reason == HumanReason::RepeatedFingerprint
+                && let Some(fingerprint) = repeated_fingerprints.iter().find(|fingerprint| {
+                    route_repeated_human_gate_fingerprint(&snapshot, fingerprint).is_err()
+                })
+            {
+                return RoutingAction::AbortFatal {
+                    reason: FatalReason::SafetyInvariantViolation,
+                    diagnostics: vec![PolicyDiagnostic {
+                        code: FatalReason::SafetyInvariantViolation.as_code().to_owned(),
+                        message: format!(
+                            "repeated human gate fingerprint {} is absent from the durable gate snapshot",
+                            fingerprint.0
+                        ),
+                        field: Some("repeated_fingerprints".to_owned()),
+                    }],
+                };
+            }
             match policy {
                 RunPolicy::Interactive => RoutingAction::EnterHumanGate { snapshot },
                 RunPolicy::AutoIfValid => RoutingAction::StopNeedsHuman { snapshot },

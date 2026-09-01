@@ -338,6 +338,7 @@ async fn conversational_gate_revision_result_validation_reject_preserves_candida
         .expect("gate snapshot")
         .manual_repairs_remaining;
     let turn_id = open_running_revision_turn(&mut engine, "revision_reject_command").await;
+    crate::product::workspace_engine::reset_artifact_constraint_spec_call_count();
     let reserved_session = lifecycle
         .get_workspace_session(engine.session().session_id.as_str())
         .expect("session after reservation");
@@ -358,6 +359,11 @@ async fn conversational_gate_revision_result_validation_reject_preserves_candida
         result,
         crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { .. }
     ));
+    assert_eq!(
+        crate::product::workspace_engine::artifact_constraint_spec_call_count(),
+        0,
+        "validation reject must not consult legacy artifact constraints"
+    );
     let after = lifecycle
         .get_workspace_session(engine.session().session_id.as_str())
         .expect("session after rejection");
@@ -368,10 +374,17 @@ async fn conversational_gate_revision_result_validation_reject_preserves_candida
         turn.status,
         crate::product::models::HumanGateTurnStatus::Failed
     );
-    assert_eq!(
-        turn.failure_class,
-        Some(crate::product::models::HumanGateTurnFailureClass::ValidationReject)
-    );
+    let current_candidate_hash = {
+        use sha2::{Digest, Sha256};
+        let markdown = engine
+            .session()
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown())
+            .expect("candidate");
+        hex::encode(Sha256::digest(markdown.as_bytes()))
+    };
+    assert_eq!(turn.source_hash, current_candidate_hash);
     assert_eq!(before_artifact, engine.session().artifact);
     assert_eq!(
         before_artifact_versions,

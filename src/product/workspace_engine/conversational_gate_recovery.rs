@@ -23,7 +23,6 @@ pub(crate) enum HumanGateRecoveryAction {
 /// Classify a durable turn without allocating a new turn or changing the
 /// session budget. A running provider is left alone; a dead provider resumes
 /// the same logical turn until the fixed attempt limit is reached.
-#[allow(dead_code)]
 pub(crate) fn recover_human_gate_turn(
     turn: &HumanGateTurn,
     provider_is_running: bool,
@@ -71,7 +70,7 @@ pub(crate) fn recover_human_gate_turn(
 /// Verify that recovery only appends events. Existing durable event values are
 /// compared byte-for-byte by callers through `PartialEq`; no event is removed
 /// or rewritten as part of recovery.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn assert_human_gate_event_prefix_immutable<T: PartialEq + std::fmt::Debug>(
     event_prefix: &[T],
     recovered_events: &[T],
@@ -189,13 +188,20 @@ fn durable_revision_artifact_ref(
     let versions = store
         .list_artifact_versions(&session.id)
         .map_err(|error| error.to_string())?;
-    Ok(Some(revision_artifact_ref_from_versions(&versions)?))
+    let artifact_ref = revision_artifact_ref_from_versions(&versions)?;
+    let current = versions
+        .iter()
+        .find(|version| version.is_current)
+        .expect("revision_artifact_ref_from_versions checked exactly one current version");
+    if current.created_at <= turn.created_at {
+        return Ok(None);
+    }
+    Ok(Some(artifact_ref))
 }
 impl super::WorkspaceEngine {
     /// Reconcile all durable non-terminal turns after a websocket/process restart.
     /// The provider marker is deliberately supplied by the runtime; durable turn
     /// state alone determines whether to wait, resume the same turn, or fail it.
-    #[allow(dead_code)]
     pub(crate) fn recover_human_gate_turns(
         &mut self,
         provider_is_running: bool,
@@ -236,8 +242,10 @@ impl super::WorkspaceEngine {
                 ));
                 continue;
             }
-            if let Some(result_artifact_ref) =
-                durable_revision_artifact_ref(store, &expected, &turn)?
+            if let Some(result_artifact_ref) = (turn.status == HumanGateTurnStatus::Running)
+                .then(|| durable_revision_artifact_ref(store, &expected, &turn))
+                .transpose()?
+                .flatten()
             {
                 let mut completed = turn.clone();
                 completed.status = HumanGateTurnStatus::Completed;

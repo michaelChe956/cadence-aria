@@ -97,7 +97,15 @@ fn human_gate_reservation_cas_writes_turn_budget_and_provider_key_atomically() {
         1
     );
     assert_eq!(saved.human_gate_reservation, Some(reservation.clone()));
-    assert_eq!(saved_turn, turn);
+    let mut altered = turn.clone();
+    altered.source_hash = "b".repeat(64);
+    assert!(matches!(
+        store.update_human_gate_turn(&saved, altered),
+        Err(crate::product::json_store::ProductStoreError::Conflict {
+            kind: "human_gate_turn",
+            ..
+        })
+    ));
     let session_bytes = std::fs::read(&session_path).unwrap();
     let turn_path = store
         .app_paths()
