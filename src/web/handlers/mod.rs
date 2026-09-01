@@ -135,6 +135,7 @@ pub use aggregate_initialization::{
     create_lc_aggregate_initialization, get_aggregate_initialization,
     get_lc_aggregate_initialization,
 };
+pub(crate) use coding::map_advance_outcome;
 pub(crate) use dto::{coding_attempt_scope_text, coding_execution_unit_dto};
 pub use pointer_publication::{
     create_lc_pointer_publication, create_pointer_publication, get_lc_pointer_publication,

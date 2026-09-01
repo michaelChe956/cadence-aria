@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::advance_store::{AdvanceInput, AdvanceOutcome};
+use crate::product::advance_store::AdvanceInput;
 
 pub(crate) async fn handle_advance_from_handler(
     run_context: ProviderRunContext,
@@ -22,40 +22,7 @@ pub(crate) async fn handle_advance_from_handler(
     };
 
     let message = match outcome {
-        Ok(AdvanceOutcome::Completed {
-            attempt_id,
-            workspace_entry,
-            ..
-        }) => WsOutMessage::AdvanceCompleted {
-            command_id,
-            attempt_id,
-            workspace_entry,
-        },
-        Ok(AdvanceOutcome::Replayed { record }) => {
-            if let (Some(attempt_id), Some(workspace_entry)) =
-                (record.attempt_id, record.workspace_entry)
-            {
-                WsOutMessage::AdvanceCompleted {
-                    command_id,
-                    attempt_id,
-                    workspace_entry,
-                }
-            } else {
-                WsOutMessage::AdvanceRejected {
-                    command_id,
-                    code: "ADVANCE_REPLAY_INCOMPLETE".to_string(),
-                    reason: format!(
-                        "advance record {} is in durable status {:?}",
-                        record.id, record.status
-                    ),
-                }
-            }
-        }
-        Ok(AdvanceOutcome::Rejected { code, reason, .. }) => WsOutMessage::AdvanceRejected {
-            command_id,
-            code,
-            reason,
-        },
+        Ok(outcome) => crate::web::handlers::map_advance_outcome(command_id, outcome),
         Err(reason) => WsOutMessage::AdvanceRejected {
             command_id,
             code: "ADVANCE_HANDLER_FAILED".to_string(),

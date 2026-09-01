@@ -3,12 +3,12 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType, CodingProviderRole,
-    FindingSeverity, GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind,
-    GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind,
-    ReviewVerdict,
+    AttemptTargetSnapshot, CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
+    CodingProviderRole, FindingSeverity, GroupFinalReadinessDiagnostic,
+    GroupFinalReadinessDiagnosticKind, GroupFinalReadinessSnapshot, GroupFinalReadinessStatus,
+    GroupFinalReadinessUnit, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
+    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use crate::product::json_store::write_json;
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
@@ -17,6 +17,7 @@ use crate::product::models::{
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+mod advance_attempt_isolation;
 mod attempt_creation_concurrency;
 mod failed_review_recovery;
 mod failed_review_recovery_rollback;
@@ -613,6 +614,10 @@ fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
         Some("work_item_0001")
     );
     assert!(attempt.work_item_group_id.is_none());
+    assert_eq!(attempt.admission_kind, CodingAdmissionKind::LegacyGroup);
+
+    let json = serde_json::to_value(&attempt).expect("serialized attempt");
+    assert_eq!(json["admission_kind"], serde_json::json!("legacy_group"));
 }
 
 #[test]

@@ -21,6 +21,9 @@ mod worktree_route;
 #[allow(unused_imports)]
 pub(crate) use advance::map_advance_outcome;
 pub use group::create_group_coding_attempt;
+#[cfg(test)]
+#[path = "coding/advance_tests.rs"]
+mod advance_tests;
 use repository_resolution::{resolve_work_item_repository, routing_error};
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
 use worktree_route::{
