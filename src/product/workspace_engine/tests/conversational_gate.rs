@@ -4,7 +4,7 @@ use crate::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
 };
 use crate::product::models::{
-    HumanGateTurnStatus, ProviderName, WorkspaceSessionStatus, WorkspaceType,
+    HumanGateTurnStatus, ProviderName, SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, HumanReason, RunPolicy, WorkItemPlanFlowKind,
@@ -12,6 +12,18 @@ use crate::product::work_item_plan_policy::{
 use tempfile::TempDir;
 
 pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEngine) {
+    let (root, lifecycle, engine, _event_rx) = gate_fixture_with_event_rx(budget);
+    (root, lifecycle, engine)
+}
+
+fn gate_fixture_with_event_rx(
+    budget: u32,
+) -> (
+    TempDir,
+    LifecycleStore,
+    WorkspaceEngine,
+    mpsc::Receiver<EngineEvent>,
+) {
     let root = TempDir::new().expect("tempdir");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths);
@@ -34,6 +46,7 @@ pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEn
         })
         .expect("create session");
     record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.human_gate_snapshot = Some(HumanGateSnapshot {
         findings: Vec::new(),
         repeated_fingerprints: Vec::new(),
@@ -51,7 +64,7 @@ pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEn
         &record,
     )
     .expect("persist human gate fixture");
-    let (event_tx, _event_rx) = mpsc::channel(8);
+    let (event_tx, event_rx) = mpsc::channel(8);
     let mut session = WorkspaceSession::from_record(record);
     session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
         markdown: "# Work Item Plan\n".to_string(),
@@ -63,7 +76,7 @@ pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEn
         event_tx,
         session,
     );
-    (root, lifecycle, engine)
+    (root, lifecycle, engine, event_rx)
 }
 
 fn feedback(command_id: &str) -> HumanGateFeedbackInput {
@@ -174,11 +187,42 @@ async fn conversational_gate_termination_conflicts_with_inflight_turn() {
                 .handle_human_gate_termination(decision)
                 .await
                 .expect("busy result"),
-            HumanGateCommandOutcome::Busy {
+            HumanGateCloseOutcome::Busy {
                 turn_id: turn_id.clone()
             }
         );
     }
+}
+
+#[tokio::test]
+async fn conversational_gate_terminate_is_durable_and_emits_one_terminal_close_event() {
+    let (_root, lifecycle, mut engine, mut event_rx) = gate_fixture_with_event_rx(1);
+    let session_id = engine.session().session_id.clone();
+
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .await
+            .expect("terminate human gate"),
+        HumanGateCloseOutcome::Abandoned
+    );
+
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable terminated session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+    assert_eq!(durable.human_gate_snapshot, None);
+    assert_eq!(durable.human_gate_reservation, None);
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+    let mut close_events = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        if let EngineEvent::HumanGateClosed { decision, stage } = event {
+            close_events += 1;
+            assert_eq!(decision, "terminate");
+            assert_eq!(stage, "completed");
+        }
+    }
+    assert_eq!(close_events, 1, "close event must not be duplicated");
 }
 
 #[tokio::test]

@@ -148,7 +148,7 @@ pub(crate) async fn single_candidate_compile_test_lock() -> tokio::sync::MutexGu
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
 pub(crate) use conversational_gate::{
-    HumanGateCommandOutcome, HumanGateFeedbackInput, ScManualRevisionResult,
+    HumanGateCloseOutcome, HumanGateCommandOutcome, HumanGateFeedbackInput, ScManualRevisionResult,
 };
 pub(crate) use conversational_gate_recovery::{
     HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction, provider_run_kind_for_human_gate,

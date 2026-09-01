@@ -790,6 +790,19 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
         }
         WsInMessage::HumanConfirm { decision, payload } => {
             if run_context.session_record.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                if decision == HumanConfirmDecision::Terminate && payload.is_some() {
+                    let _ = send_json_outbound(
+                        &outbound_tx,
+                        &WsOutMessage::ProtocolError {
+                            code: "SINGLE_CANDIDATE_HUMAN_CONFIRM_PAYLOAD_FORBIDDEN".to_string(),
+                            message: "single-candidate terminate does not accept a payload"
+                                .to_string(),
+                            context: None,
+                        },
+                    )
+                    .await;
+                    return;
+                }
                 handle_human_gate_termination_from_handler(
                     run_context.clone(),
                     outbound_tx.clone(),

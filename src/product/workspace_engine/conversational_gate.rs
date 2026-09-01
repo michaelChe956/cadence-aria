@@ -1,7 +1,7 @@
 use chrono::Utc;
 
 use crate::product::models::{
-    HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, WorkspaceType,
+    HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
@@ -42,10 +42,8 @@ pub(crate) enum HumanGateCommandOutcome {
     },
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HumanGateCloseOutcome {
-    CompileStarted,
     Confirmed,
     Abandoned,
     Busy { turn_id: String },
@@ -557,6 +555,16 @@ impl super::WorkspaceEngine {
         let expected = store
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| error.to_string())?;
+        // Re-check the durable status immediately before the CAS.  A websocket
+        // may have retained a fresh-looking in-memory stage while another
+        // worker already advanced the session; reserving a turn in that stale
+        // window would reopen a closed gate.
+        if expected.status != WorkspaceSessionStatus::WaitingForHuman {
+            return Ok(rejected(
+                "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+                "human gate feedback requires a waiting_for_human session",
+            ));
+        }
         let (saved, saved_turn) =
             match store.compare_and_reserve_human_gate_turn(&expected, turn, reservation) {
                 Ok(result) => result,
@@ -597,42 +605,118 @@ impl super::WorkspaceEngine {
     pub(crate) async fn handle_human_gate_termination(
         &mut self,
         decision: HumanConfirmDecision,
-    ) -> Result<HumanGateCommandOutcome, String> {
-        let store = self
+    ) -> Result<HumanGateCloseOutcome, String> {
+        self.close_human_gate(decision).await
+    }
+
+    /// Atomically closes the single-candidate human gate. Approval enters the
+    /// existing deterministic compile path and only becomes Confirmed after
+    /// that path durably publishes the plan; termination is terminal without
+    /// creating a compile transaction.
+    pub(crate) async fn close_human_gate(
+        &mut self,
+        decision: HumanConfirmDecision,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        let lifecycle = self
             .lifecycle_store
-            .as_ref()
+            .clone()
             .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || self.session.stage != super::WorkspaceStage::HumanConfirm
         {
-            return Ok(rejected(
-                "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
-                "human gate termination is only available for a single-candidate work-item plan in human_confirm",
-            ));
+            return Err("human gate close is only available for a single-candidate work-item plan in human_confirm".to_string());
         }
-        if let Some(turn) = store
+
+        let expected = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        if expected.status != WorkspaceSessionStatus::WaitingForHuman {
+            return Err("human gate close requires a waiting_for_human session".to_string());
+        }
+        if let Some(turn) = lifecycle
             .list_human_gate_turns(&self.session.session_id)
             .map_err(|error| error.to_string())?
             .into_iter()
             .find(non_terminal)
         {
-            return Ok(HumanGateCommandOutcome::Busy {
+            return Ok(HumanGateCloseOutcome::Busy {
                 turn_id: turn.turn_id,
             });
         }
-        let _close_outcome = self.close_human_gate(decision).await?;
-        Err("human gate close outcome mapping is deferred to Task 4.1".to_string())
-    }
 
-    /// Delegation point reserved for Task 4.1. It intentionally does not
-    /// duplicate the legacy human-confirm close path.
-    #[allow(dead_code)]
-    pub(crate) async fn close_human_gate(
-        &mut self,
-        _decision: HumanConfirmDecision,
-    ) -> Result<HumanGateCloseOutcome, String> {
-        Err("close_human_gate is not implemented until Task 4.1".to_string())
+        match decision {
+            HumanConfirmDecision::Confirm => {
+                let saved = lifecycle
+                    .compare_and_save_human_gate_close(
+                        &expected,
+                        WorkspaceSessionStatus::Running,
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.session.session_status = saved.status;
+                self.session.human_gate_snapshot = saved.human_gate_snapshot;
+                self.enter_policy_valid_work_item_plan_compile().await;
+
+                let durable = lifecycle
+                    .get_workspace_session(&self.session.session_id)
+                    .map_err(|error| error.to_string())?;
+                self.session.session_status = durable.status.clone();
+                self.session.single_candidate_phase = durable.single_candidate_phase.clone();
+                self.session.human_gate_snapshot = durable.human_gate_snapshot.clone();
+                if durable.status != WorkspaceSessionStatus::Confirmed
+                    || durable.single_candidate_phase
+                        != Some(crate::product::models::SingleCandidatePhase::Completed)
+                {
+                    return Err(
+                        "single-candidate approval compile failed; human gate remains open"
+                            .to_string(),
+                    );
+                }
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::HumanGateClosed {
+                        decision: "confirm".to_string(),
+                        stage: self.session.stage.as_str().to_string(),
+                    })
+                    .await;
+                Ok(HumanGateCloseOutcome::Confirmed)
+            }
+            HumanConfirmDecision::Terminate => {
+                let saved = lifecycle
+                    .compare_and_save_human_gate_close(
+                        &expected,
+                        WorkspaceSessionStatus::Terminated,
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.session.session_status = saved.status;
+                self.session.human_gate_snapshot = saved.human_gate_snapshot;
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::HumanGateClosed {
+                        decision: "terminate".to_string(),
+                        stage: "completed".to_string(),
+                    })
+                    .await;
+                self.complete_active_node(Some("已终止".to_string())).await;
+                self.transition_stage(super::WorkspaceStage::Completed).await;
+                let _ = self
+                    .create_timeline_node(super::TimelineNodeDraft {
+                        node_type: super::TimelineNodeType::Completed,
+                        agent: None,
+                        stage: super::WorkspaceStage::Completed,
+                        round: None,
+                        title: "流程终止".to_string(),
+                        summary: Some("已终止".to_string()),
+                        status: super::TimelineNodeStatus::Completed,
+                    })
+                    .await;
+                Ok(HumanGateCloseOutcome::Abandoned)
+            }
+            HumanConfirmDecision::RequestChange => Err(
+                "single-candidate human gate does not support request-change; submit feedback through HumanGateFeedback"
+                    .to_string(),
+            ),
+        }
     }
 }
 

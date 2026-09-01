@@ -526,6 +526,56 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    /// Atomically claims the human-gate close operation.  The expected record
+    /// check is the single-flight boundary between a stale websocket and the
+    /// worker that already closed or advanced this gate.
+    pub fn compare_and_save_human_gate_close(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        status: WorkspaceSessionStatus,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind
+                != crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "human_gate_close",
+                reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
+            });
+        }
+        if expected.status != WorkspaceSessionStatus::WaitingForHuman
+            || expected.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Approval)
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "human_gate_close",
+                id: expected.id.clone(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let locked_session_path = session_path.clone();
+        with_exclusive_lock(&session_path, move || {
+            let mut stored: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            stored.status = status.clone();
+            if matches!(
+                status,
+                WorkspaceSessionStatus::Confirmed | WorkspaceSessionStatus::Terminated
+            ) {
+                stored.human_gate_snapshot = None;
+                stored.human_gate_reservation = None;
+            }
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&locked_session_path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     /// Atomically projects a policy route into the durable session record.
     /// The expected record check prevents stale websocket workers from
     /// overwriting a newer route; callers must reload and re-evaluate on clash.

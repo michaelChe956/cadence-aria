@@ -414,6 +414,9 @@ pub(crate) fn spawn_engine_event_forward_task(
                     round,
                     options,
                 },
+                EngineEvent::HumanGateClosed { decision, stage } => {
+                    WsOutMessage::HumanGateClosed { decision, stage }
+                }
                 EngineEvent::Error { message } => WsOutMessage::Error { message },
                 EngineEvent::ProtocolError {
                     code,

@@ -144,7 +144,8 @@ pub enum WsOutMessage {
         turn_id: String,
     },
     HumanGateClosed {
-        reason: String,
+        decision: String,
+        stage: String,
     },
     AdvanceCompleted {
         command_id: String,

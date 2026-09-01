@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::HumanGateCloseOutcome;
 
 pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
     app_state: WebAppState,
@@ -327,20 +328,16 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
         engine.handle_human_gate_termination(decision).await
     };
     let message = match outcome {
-        Ok(HumanGateCommandOutcome::Busy { turn_id }) => WsOutMessage::HumanGateBusy { turn_id },
-        Ok(HumanGateCommandOutcome::Rejected { code, reason }) => WsOutMessage::ProtocolError {
-            code,
-            message: reason,
-            context: None,
-        },
-        Ok(other) => WsOutMessage::ProtocolError {
-            code: "HUMAN_GATE_CLOSE_UNEXPECTED_OUTCOME".to_string(),
-            message: format!("unexpected human gate close outcome: {other:?}"),
-            context: None,
-        },
-        Err(message) => WsOutMessage::Error { message },
+        Ok(HumanGateCloseOutcome::Busy { turn_id }) => {
+            Some(WsOutMessage::HumanGateBusy { turn_id })
+        }
+        Ok(HumanGateCloseOutcome::Confirmed) => None,
+        Ok(HumanGateCloseOutcome::Abandoned) => None,
+        Err(message) => Some(WsOutMessage::Error { message }),
     };
-    let _ = send_json_outbound(&outbound_tx, &message).await;
+    if let Some(message) = message {
+        let _ = send_json_outbound(&outbound_tx, &message).await;
+    }
 }
 pub(crate) async fn handle_human_confirm_from_handler(
     run_context: ProviderRunContext,

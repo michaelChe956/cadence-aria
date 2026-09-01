@@ -349,6 +349,10 @@ pub enum EngineEvent {
         round: u32,
         options: Vec<String>,
     },
+    HumanGateClosed {
+        decision: String,
+        stage: String,
+    },
     Error {
         message: String,
     },

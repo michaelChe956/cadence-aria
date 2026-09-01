@@ -590,6 +590,7 @@ export type WsOutMessage =
       structured_output_diagnostic?: StructuredOutputDiagnostic | null;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
+  | { type: "human_gate_closed"; decision: "confirm" | "terminate"; stage: string }
   | { type: "human_presentation_revision_saved"; revision: HumanPresentationRevision }
   | {
       type: "human_presentation_revision_save_failed";

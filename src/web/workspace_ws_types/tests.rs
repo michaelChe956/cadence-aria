@@ -454,7 +454,8 @@ fn work_item_plan_mode_messages_roundtrip() {
 #[test]
 fn outbound_conversational_gate_event_type_is_stable() {
     let message = WsOutMessage::HumanGateClosed {
-        reason: "approved".to_string(),
+        decision: "confirm".to_string(),
+        stage: "completed".to_string(),
     };
     assert_eq!(
         serde_json::to_value(message).unwrap()["type"],

@@ -34,7 +34,8 @@ fn conversational_gate_outbound_events_roundtrip_with_immutable_prefixes() {
         ),
         (
             WsOutMessage::HumanGateClosed {
-                reason: "approved".to_string(),
+                decision: "confirm".to_string(),
+                stage: "completed".to_string(),
             },
             "human_gate_closed",
         ),
@@ -88,8 +89,9 @@ fn conversational_gate_outbound_events_roundtrip_with_immutable_prefixes() {
             WsOutMessage::HumanGateBusy { turn_id } => {
                 assert_eq!(json["turn_id"], serde_json::json!(turn_id));
             }
-            WsOutMessage::HumanGateClosed { reason } => {
-                assert_eq!(json["reason"], serde_json::json!(reason));
+            WsOutMessage::HumanGateClosed { decision, stage } => {
+                assert_eq!(json["decision"], serde_json::json!(decision));
+                assert_eq!(json["stage"], serde_json::json!(stage));
             }
             WsOutMessage::AdvanceCompleted {
                 command_id,
