@@ -225,6 +225,24 @@ impl AdvanceStore {
         })
     }
 
+    /// Returns whether the durable advance completed the exact attempt bound to
+    /// the plan. A missing record, a non-ready status, or an attempt mismatch is
+    /// fail-closed so an SC attempt cannot bypass the advance gate.
+    pub fn advance_is_ready_for_attempt(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        attempt_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        Ok(self
+            .get_advance_for_plan(project_id, issue_id, plan_id)?
+            .is_some_and(|record| {
+                record.status == AdvanceStatus::Ready
+                    && record.attempt_id.as_deref() == Some(attempt_id)
+            }))
+    }
+
     /// Test/next-stage orchestration hook. Task 5.1 deliberately never calls this
     /// on a first request; Task 5.2 owns the first durable record write.
     pub fn put_record(&self, record: &AdvanceRecord) -> Result<AdvanceRecord, ProductStoreError> {

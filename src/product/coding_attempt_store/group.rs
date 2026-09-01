@@ -95,11 +95,9 @@ impl super::CodingAttemptStore {
         &self,
         input: &CreateGroupCodingAttemptInput,
         plan_revision_id: &str,
-        command_id: &str,
         unit_bindings: &[super::group_validation::AuthoritativeCodingUnitBinding],
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         validate_relative_id(plan_revision_id)?;
-        validate_relative_id(command_id)?;
         let _initialization_guard =
             self.acquire_group_initialization_arbitration(&input.project_id, &input.issue_id)?;
         let creation_guard = self.acquire_work_item_attempt_creation(

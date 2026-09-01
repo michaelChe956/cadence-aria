@@ -196,12 +196,21 @@ impl CodingWorkspaceEngine {
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         if current.scope == CodingAttemptScope::WorkItemGroup {
-            if current.status == CodingAttemptStatus::Created
-                && current.admission_kind == CodingAdmissionKind::ScAdvance
-            {
-                return Err(CodingWorkspaceEngineError::ProviderProtocol(
-                    "SC advance attempt must be Ready before StartCoding".to_string(),
-                ));
+            if current.admission_kind == CodingAdmissionKind::ScAdvance {
+                let advance_store =
+                    crate::product::advance_store::AdvanceStore::new(self.store.paths());
+                let plan_id = current.work_item_group_id.as_deref().ok_or_else(|| {
+                    CodingWorkspaceEngineError::ProviderProtocol(
+                        "SC advance attempt is missing its plan binding".to_string(),
+                    )
+                })?;
+                if !advance_store
+                    .advance_is_ready_for_attempt(project_id, issue_id, plan_id, attempt_id)?
+                {
+                    return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                        "SC advance attempt must be Ready before StartCoding".to_string(),
+                    ));
+                }
             }
             self.store.validate_group_attempt_integrity(&current)?;
         }

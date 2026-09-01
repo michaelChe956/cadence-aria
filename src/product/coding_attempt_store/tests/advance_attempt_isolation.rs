@@ -34,7 +34,7 @@ fn advance_attempt_persists_sc_advance_admission_kind_and_immutable_plan_binding
     let units = vec![binding(WORK_ITEM_ID, &[])];
 
     let attempt = store
-        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", "command_0001", &units)
+        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", &units)
         .expect("SC advance attempt");
     assert_eq!(attempt.admission_kind, CodingAdmissionKind::ScAdvance);
 
@@ -76,12 +76,7 @@ fn advance_attempt_persists_sc_advance_admission_kind_and_immutable_plan_binding
             .write_coding_attempt_for_test(&fixture)
             .expect("persist status matrix fixture");
         let replay = store
-            .ensure_group_attempt_for_advance(
-                &input,
-                "plan_revision_0001",
-                "command_matrix",
-                &units,
-            )
+            .ensure_group_attempt_for_advance(&input, "plan_revision_0001", &units)
             .expect("status matrix replay");
         assert_eq!(replay.id, persisted.id);
     }
@@ -100,7 +95,7 @@ fn advance_attempt_repeated_plan_returns_same_attempt() {
     let input = group_input("plan_0002", WORK_ITEM_ID);
     let units = vec![binding(WORK_ITEM_ID, &[])];
     let first = store
-        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", "command_0001", &units)
+        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", &units)
         .expect("first SC advance attempt");
     let journal = store
         .get_group_initialization(PROJECT_ID, ISSUE_ID, "plan_0002")
@@ -110,7 +105,7 @@ fn advance_attempt_repeated_plan_returns_same_attempt() {
         .expect("save first plan binding");
 
     let replay = store
-        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", "command_0002", &units)
+        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", &units)
         .expect("repeated plan must replay");
     assert_eq!(replay.id, first.id);
     assert_eq!(
@@ -133,7 +128,7 @@ fn advance_attempt_units_follow_dependency_topology_with_stable_tie_break() {
     ];
 
     let attempt = store
-        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", "command_0001", &units)
+        .ensure_group_attempt_for_advance(&input, "plan_revision_0001", &units)
         .expect("topologically ordered SC advance attempt");
     let journal = store
         .get_group_initialization(PROJECT_ID, ISSUE_ID, "plan_0003")

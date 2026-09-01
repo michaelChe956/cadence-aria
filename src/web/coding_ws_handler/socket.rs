@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+use crate::product::advance_store::AdvanceStore;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
@@ -70,6 +71,7 @@ async fn handle_coding_socket(
     let (mut socket_tx, mut socket_rx) = socket.split();
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let coding_store = CodingAttemptStore::new(app_paths);
+    let advance_store = AdvanceStore::new(ProductAppPaths::new(state.workspace_root.join(".aria")));
     let attempt_result = match scope.as_ref() {
         Some((project_id, issue_id)) => coding_store.get_attempt(project_id, issue_id, &attempt_id),
         None => coding_store.get_attempt_by_id(&attempt_id),
@@ -235,9 +237,38 @@ async fn handle_coding_socket(
                     }
                 };
                 if inbound == CodingWsInMessage::StartCoding {
-                    if current_attempt.admission_kind == CodingAdmissionKind::ScAdvance
-                        && current_attempt.status == CodingAttemptStatus::Created
+                    let advance_ready = if current_attempt.admission_kind
+                        == CodingAdmissionKind::ScAdvance
                     {
+                        match current_attempt.work_item_group_id.as_deref() {
+                            None => false,
+                            Some(plan_id) => match advance_store.advance_is_ready_for_attempt(
+                                &current_attempt.project_id,
+                                &current_attempt.issue_id,
+                                plan_id,
+                                &current_attempt.id,
+                            ) {
+                                Ok(ready) => ready,
+                                Err(error) => {
+                                    drop(mutation_lease);
+                                    let _ = send_coding_json(
+                                        &mut socket_tx,
+                                        &CodingWsOutMessage::CodingProtocolError {
+                                            code: "SC_CODING_REQUIRES_ADVANCE".to_string(),
+                                            message: format!(
+                                                "cannot verify durable advance readiness: {error}"
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            },
+                        }
+                    } else {
+                        true
+                    };
+                    if !advance_ready {
                         drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,

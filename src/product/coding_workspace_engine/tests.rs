@@ -38,7 +38,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-fn seed_group_attempt_fixture(
+pub(super) fn seed_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
     initialize_attempt: bool,
@@ -509,6 +509,8 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
     }
 }
 
+#[path = "advance_ready_only.rs"]
+mod advance_ready_only;
 mod code_review_triage;
 mod coder_resume_recovery;
 mod gate_coder_feedback;
@@ -1023,7 +1025,7 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
     }
 }
 
-fn init_test_git_repo(repo: &Path) {
+pub(super) fn init_test_git_repo(repo: &Path) {
     run_test_git(repo, &["init"]);
     run_test_git(repo, &["config", "user.email", "aria@example.com"]);
     run_test_git(repo, &["config", "user.name", "Aria Test"]);
