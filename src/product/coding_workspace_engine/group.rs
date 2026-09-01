@@ -1,8 +1,8 @@
 use super::*;
-use crate::product::coding_models::{
-    CodingAdmissionKind, CodingAttemptScope, CodingExecutionUnitStatus,
+use crate::product::coding_models::{CodingAttemptScope, CodingExecutionUnitStatus};
+use crate::product::coding_workspace_engine::group_dependency_gate::{
+    GroupUnitSelectionOutcome, dependency_gate_applies,
 };
-use crate::product::coding_workspace_engine::group_dependency_gate::GroupUnitSelectionOutcome;
 
 impl CodingWorkspaceEngine {
     pub async fn complete_current_group_unit(
@@ -41,7 +41,7 @@ impl CodingWorkspaceEngine {
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
 
-        let next = if attempt.admission_kind == CodingAdmissionKind::ScAdvance {
+        let next = if dependency_gate_applies(attempt) {
             let outcome = self.select_next_sc_group_unit(attempt)?;
             match outcome {
                 GroupUnitSelectionOutcome::Ready { unit_id, audit } => {
@@ -95,6 +95,10 @@ impl CodingWorkspaceEngine {
                     // only the execution-authority pointer; current_work_item_id remains the
                     // progress/display pointer for the next pending work item.
                     persisted.active_unit_id = None;
+                    // Controller ruling for 6.1: retain the caller-facing progress pointer while
+                    // clearing execution authority; this keeps the waiting/fail-closed view
+                    // continuous even though store-side completion synchronizes durable pointers.
+                    persisted.current_work_item_id = Some(current_work_item_id.clone());
                     persisted.updated_at = Utc::now().to_rfc3339();
                     self.store.update_attempt_non_status_fields(&persisted)?;
                     return self
@@ -123,14 +127,23 @@ impl CodingWorkspaceEngine {
             next
         };
         if let Some(next) = next {
-            self.store.update_coding_unit_status(
+            let status_result = self.store.update_coding_unit_status(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 &next.id,
                 CodingExecutionUnitStatus::Running,
                 Some("进入下一个 Work Item".to_string()),
-            )?;
+            );
+            if let Err(ProductStoreError::Io(message)) = &status_result
+                && message.starts_with("active_coding_unit_exists:")
+            {
+                return self
+                    .store
+                    .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                    .map_err(CodingWorkspaceEngineError::from);
+            }
+            status_result?;
 
             let mut updated =
                 self.store

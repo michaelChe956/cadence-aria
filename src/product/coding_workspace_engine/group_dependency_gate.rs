@@ -19,6 +19,10 @@ pub(crate) struct GroupDependencyGateAudit {
     pub(crate) handoff_work_item_revision_id: Option<String>,
 }
 
+pub(crate) fn dependency_gate_applies(attempt: &CodingExecutionAttempt) -> bool {
+    attempt.admission_kind == crate::product::coding_models::CodingAdmissionKind::ScAdvance
+}
+
 pub(crate) enum GroupUnitSelectionOutcome {
     Ready {
         unit_id: String,

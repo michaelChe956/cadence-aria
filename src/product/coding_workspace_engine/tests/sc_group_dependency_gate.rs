@@ -5,8 +5,8 @@ mod tests {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
     use crate::product::coding_models::{
-        CodingAdmissionKind, CodingExecutionAttempt, CodingExecutionUnitStatus, CodingUnitRun,
-        CodingUnitRunStatus,
+        CodingAdmissionKind, CodingExecutionAttempt, CodingExecutionStage,
+        CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
     };
     use crate::product::coding_workspace_engine::group_dependency_gate::GroupUnitSelectionOutcome as SelectionOutcome;
     use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, group_dependency_gate};
@@ -220,7 +220,6 @@ mod tests {
             .expect("attempt");
         assert!(current.active_unit_id.is_some());
         let before = provider_ledger_count(&fixture);
-
         let updated = fixture
             .engine
             .advance_to_next_group_unit(&current)
@@ -228,9 +227,19 @@ mod tests {
             .expect("waiting advance");
 
         assert!(updated.active_unit_id.is_none());
+        assert_ne!(updated.stage, CodingExecutionStage::ReviewRequest);
+        // This fallback deliberately pins caller-view continuity, not byte-for-byte preservation
+        // of the prior durable pointer: completion-side store synchronization may clear it first.
         assert_eq!(
             updated.current_work_item_id.as_deref(),
             Some("work_item_0001")
+        );
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&updated, &unit(&fixture, "work_item_0002").id)
+                .expect("consumer runs")
+                .is_empty()
         );
         let snapshot = fixture
             .store
@@ -365,6 +374,19 @@ mod tests {
             .expect("mismatch advance");
 
         assert!(updated.active_unit_id.is_none());
+        assert_ne!(updated.stage, CodingExecutionStage::ReviewRequest);
+        // FailedClosed keeps the caller-facing pointer continuous for the same reason as Waiting.
+        assert_eq!(
+            updated.current_work_item_id.as_deref(),
+            Some("work_item_0001")
+        );
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&updated, &unit(&fixture, "work_item_0002").id)
+                .expect("consumer runs")
+                .is_empty()
+        );
         let snapshot = fixture
             .store
             .get_group_dependency_gate_snapshot(&updated)
