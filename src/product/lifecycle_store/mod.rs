@@ -15,6 +15,10 @@ pub mod worktree;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod workspace_session_read_spy {
+    include!("tests/workspace_session_read_spy.rs");
+}
 
 pub use inputs::*;
 pub use spec::{ConfirmAggregateGateError, ConfirmGateViolation};

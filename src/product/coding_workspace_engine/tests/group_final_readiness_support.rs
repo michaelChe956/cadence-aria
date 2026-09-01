@@ -9,16 +9,16 @@ use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, WorkItemRevisionHistoryDto,
 };
 
-pub(super) struct ReadinessFixture {
-    pub(super) _root: tempfile::TempDir,
-    pub(super) worktree: std::path::PathBuf,
-    pub(super) store: CodingAttemptStore,
-    pub(super) engine: CodingWorkspaceEngine,
-    pub(super) attempt: CodingExecutionAttempt,
-    pub(super) start_commit: String,
+pub(crate) struct ReadinessFixture {
+    pub(crate) _root: tempfile::TempDir,
+    pub(crate) worktree: std::path::PathBuf,
+    pub(crate) store: CodingAttemptStore,
+    pub(crate) engine: CodingWorkspaceEngine,
+    pub(crate) attempt: CodingExecutionAttempt,
+    pub(crate) start_commit: String,
 }
 
-pub(super) fn readiness_fixture() -> ReadinessFixture {
+pub(crate) fn readiness_fixture() -> ReadinessFixture {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");

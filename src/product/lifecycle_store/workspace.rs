@@ -475,6 +475,10 @@ impl LifecycleStore {
         &self,
         session_id: &str,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        #[cfg(test)]
+        {
+            super::workspace_session_read_spy::record_workspace_session_read();
+        }
         validate_relative_id(session_id)?;
         read_json(&self.find_workspace_session_path(session_id)?)
     }

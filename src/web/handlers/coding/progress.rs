@@ -78,7 +78,14 @@ fn aggregate_group_progress(progress: &[WorkItemCodingProgressDto]) -> GroupCodi
             "pending" => aggregate.pending += 1,
             "running" | "waiting_for_human" => aggregate.active += 1,
             "completed" => aggregate.completed += 1,
-            _ => aggregate.failed_or_blocked += 1,
+            "failed"
+            | "blocked"
+            | "blocked_by_plan_defect"
+            | "awaiting_amendment"
+            | "needs_revalidation"
+            | "stale" => aggregate.failed_or_blocked += 1,
+            "superseded" | "skipped" => {}
+            other => unreachable!("unknown coding unit progress status: {other}"),
         }
     }
     aggregate
@@ -114,18 +121,7 @@ fn build_unit_progress(
             })
             .cloned()
     });
-    let handoff_revision_id = latest_run.and_then(|run| {
-        let handoff_id = unit.latest_handoff_revision_id.as_deref()?;
-        let plan = lineage?;
-        let handoff = WorkItemRevisionStore::new(store.paths())
-            .get_handoff_revision(plan, &unit.logical_work_item_id, handoff_id)
-            .ok()?;
-        (handoff.coding_unit_run_id == run.id
-            && handoff.work_item_revision_id == run.work_item_revision_id
-            && handoff.logical_work_item_id == unit.logical_work_item_id
-            && run.completion_commit.as_deref() == Some(handoff.commit_sha.as_str()))
-        .then_some(handoff.id)
-    });
+    let handoff_revision_id = validated_handoff_revision_id(store, unit, latest_run, lineage)?;
     let is_active =
         unit.id == attempt.active_unit_id.as_deref().unwrap_or_default() && unit.status.is_active();
     let status = coding_execution_unit_status_text(&unit.status).to_string();
@@ -183,6 +179,36 @@ fn build_unit_progress(
     })
 }
 
+fn validated_handoff_revision_id(
+    store: &CodingAttemptStore,
+    unit: &CodingExecutionUnit,
+    latest_run: Option<&crate::product::coding_models::CodingUnitRun>,
+    lineage: Option<&crate::product::models::WorkItemPlanLineage>,
+) -> Result<Option<String>, ProductStoreError> {
+    let Some(run) = latest_run else {
+        return Ok(None);
+    };
+    let Some(handoff_id) = unit.latest_handoff_revision_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(plan) = lineage else {
+        return Ok(None);
+    };
+    let handoff = match WorkItemRevisionStore::new(store.paths()).get_handoff_revision(
+        plan,
+        &unit.logical_work_item_id,
+        handoff_id,
+    ) {
+        Ok(handoff) => handoff,
+        Err(ProductStoreError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(
+        crate::product::coding_workspace_engine::handoff_matches_unit_run(&handoff, unit, run)
+            .then_some(handoff.id),
+    )
+}
+
 fn dependency_reason(
     unit: &CodingExecutionUnit,
     snapshot: Option<&crate::product::coding_models::GroupDependencyGateSnapshot>,
@@ -202,8 +228,16 @@ fn dependency_reason(
 
 #[cfg(test)]
 mod tests {
-    use super::aggregate_group_progress;
-    use crate::web::types::{GroupCodingProgressDto, WorkItemCodingProgressDto};
+    use super::{aggregate_group_progress, build_group_work_item_progress};
+    use crate::product::coding_workspace_engine::readiness_fixture;
+    use crate::product::lifecycle_store::workspace_session_read_spy::{
+        reset_workspace_session_read_spy, set_workspace_session_read_panic,
+        workspace_session_read_count,
+    };
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+    use crate::product::models::{ProviderName, WorkspaceSessionStatus, WorkspaceType};
+    use crate::web::coding_ws_handler::CodingWsOutMessage;
+    use crate::web::types::{CodingAttemptSnapshotResponse, WorkItemCodingProgressDto};
 
     fn item(status: &str) -> WorkItemCodingProgressDto {
         WorkItemCodingProgressDto {
@@ -260,23 +294,192 @@ mod tests {
 
     #[test]
     fn group_work_item_progress_ignores_per_wi_session_state() {
-        let projected = item("running");
-        let contradictory_sc_child_session = "completed";
-        assert_ne!(contradictory_sc_child_session, projected.status);
-        assert_eq!(projected.status, "running");
-        assert_eq!(projected.stage, None);
+        let fixture = readiness_fixture();
+        let lifecycle = LifecycleStore::new(fixture.store.paths());
+        let child = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: fixture.attempt.project_id.clone(),
+                issue_id: fixture.attempt.issue_id.clone(),
+                entity_id: "work_item_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItem,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: ProviderName::Fake,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("SC child session");
+        lifecycle
+            .update_workspace_session_status(&child.id, WorkspaceSessionStatus::Failed)
+            .expect("contradictory SC child state");
+        lifecycle
+            .append_workspace_message(
+                &child.id,
+                "assistant".to_string(),
+                "stage=completed commit=SC_CHILD_COMMIT".to_string(),
+            )
+            .expect("contaminating SC child payload");
+
+        reset_workspace_session_read_spy();
+        set_workspace_session_read_panic(true);
+        let attempt = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("reloaded group attempt");
+        let result = build_group_work_item_progress(&fixture.store, &attempt)
+            .expect("group progress must ignore SC child session");
+        set_workspace_session_read_panic(false);
+
+        assert_eq!(workspace_session_read_count(), 0);
+        assert_eq!(result.0.len(), 3);
+        assert_eq!(result.0[0].logical_work_item_id, "work_item_0001");
+        assert_eq!(result.0[0].unit_id, "coding_unit_0001");
+        assert_eq!(result.0[0].status, "running");
+        assert_eq!(result.0[0].stage, Some("prepare_context".to_string()));
+        assert_eq!(result.0[0].current_commit, None);
+        assert_eq!(result.0[0].final_commit, None);
+        assert_eq!(result.0[0].code_review, None);
+        assert_eq!(result.0[0].handoff_revision_id, None);
+        assert_eq!(result.0[0].failure_or_blocked_reason, None);
+        assert_eq!(result.0[0].plan_revision_id, "plan_revision_0001");
+        assert_eq!(result.1.total, 3);
+        assert_eq!(result.1.pending, 2);
+        assert_eq!(result.1.active, 1);
+        assert_eq!(result.1.completed, 0);
+        assert_eq!(result.1.failed_or_blocked, 0);
     }
 
     #[test]
     fn group_work_item_progress_serialization_roundtrip_preserves_http_and_ws_shape() {
-        let progress = vec![item("pending"), item("completed")];
-        let aggregate = aggregate_group_progress(&progress);
-        let encoded = serde_json::to_string(&(progress, aggregate)).expect("serialize projection");
-        let decoded: (Vec<WorkItemCodingProgressDto>, GroupCodingProgressDto) =
-            serde_json::from_str(&encoded).expect("deserialize projection");
-        assert_eq!(decoded.0.len(), 2);
-        assert_eq!(decoded.1.total, 2);
-        assert_eq!(decoded.1.pending, 1);
-        assert_eq!(decoded.1.completed, 1);
+        let fixture = readiness_fixture();
+        let (progress, aggregate) =
+            build_group_work_item_progress(&fixture.store, &fixture.attempt)
+                .expect("group progress");
+        let attempt_dto =
+            crate::web::handlers::dto::coding_attempt_dto(&fixture.store, &fixture.attempt)
+                .expect("attempt dto");
+        let units = fixture
+            .store
+            .list_coding_units(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("units")
+            .iter()
+            .map(crate::web::handlers::dto::coding_execution_unit_dto)
+            .collect();
+        let http = CodingAttemptSnapshotResponse {
+            attempt: attempt_dto,
+            attempt_scope: "work_item_group".to_string(),
+            work_item_group_id: fixture.attempt.work_item_group_id.clone(),
+            current_work_item_id: fixture.attempt.current_work_item_id.clone(),
+            active_unit_id: fixture.attempt.active_unit_id.clone(),
+            units,
+            provider_config_snapshot: fixture.attempt.provider_config_snapshot.clone(),
+            timeline_nodes: Vec::new(),
+            active_node_id: None,
+            code_review_reports: Vec::new(),
+            review_request: None,
+            internal_pr_review: None,
+            group_coding_progress: Some(progress.clone()),
+            group_progress: Some(aggregate.clone()),
+            group_review_artifacts: None,
+            group_final_readiness: None,
+            pending_gates: Vec::new(),
+            pending_choices: Vec::new(),
+            role_runs: Vec::new(),
+            work_item_execution_plan: None,
+        };
+        let ws = CodingWsOutMessage::CodingSessionState {
+            project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            attempt_id: fixture.attempt.id.clone(),
+            attempt_scope: "work_item_group".to_string(),
+            work_item_group_id: fixture.attempt.work_item_group_id.clone(),
+            current_work_item_id: fixture.attempt.current_work_item_id.clone(),
+            active_unit_id: fixture.attempt.active_unit_id.clone(),
+            units: http.units.clone(),
+            group_coding_progress: Box::new(Some(progress.clone())),
+            group_progress: Box::new(Some(aggregate.clone())),
+            status: fixture.attempt.status,
+            stage: fixture.attempt.stage,
+            branch_name: fixture.attempt.branch_name.clone(),
+            base_branch: fixture.attempt.base_branch.clone(),
+            worktree_path: fixture.attempt.worktree_path.clone(),
+            rework_count: fixture.attempt.rework_count,
+            max_auto_rework: fixture.attempt.max_auto_rework,
+            head_commit: Box::new(fixture.attempt.head_commit.clone()),
+            pushed_remote: Box::new(fixture.attempt.pushed_remote.clone()),
+            role_provider_config_snapshot: Box::new(
+                fixture
+                    .store
+                    .get_role_provider_config_snapshot(
+                        &fixture.attempt.project_id,
+                        &fixture.attempt.issue_id,
+                        &fixture.attempt.id,
+                    )
+                    .expect("role provider snapshot"),
+            ),
+            provider_config_snapshot: Box::new(fixture.attempt.provider_config_snapshot.clone()),
+            chat_entries: Box::new(Vec::new()),
+            timeline_nodes: Box::new(Vec::new()),
+            active_node_id: Box::new(None),
+            code_review_reports: Box::new(Vec::new()),
+            review_request: Box::new(None),
+            internal_pr_review: Box::new(None),
+            group_review_artifacts: Box::new(None),
+            group_final_readiness: Box::new(None),
+            pending_gates: Box::new(Vec::new()),
+            pending_choices: Box::new(Vec::new()),
+            role_runs: Box::new(Vec::new()),
+            work_item_markdown: Box::new(None),
+            verification_commands: Box::new(Vec::new()),
+            work_item_execution_plan: Box::new(None),
+            linked_plan_repair: Box::new(None),
+        };
+
+        let http_roundtrip: CodingAttemptSnapshotResponse =
+            serde_json::from_value(serde_json::to_value(&http).expect("serialize HTTP envelope"))
+                .expect("deserialize HTTP envelope");
+        let ws_roundtrip: CodingWsOutMessage =
+            serde_json::from_value(serde_json::to_value(&ws).expect("serialize WS envelope"))
+                .expect("deserialize WS envelope");
+        let CodingWsOutMessage::CodingSessionState {
+            group_coding_progress: ws_progress,
+            group_progress: ws_aggregate,
+            ..
+        } = ws_roundtrip
+        else {
+            panic!("expected coding session state");
+        };
+        assert_eq!(http_roundtrip.group_coding_progress, Some(progress.clone()));
+        assert_eq!(http_roundtrip.group_progress, Some(aggregate.clone()));
+        assert_eq!(*ws_progress, Some(progress));
+        assert_eq!(*ws_aggregate, Some(aggregate));
+        let http_progress = http_roundtrip.group_coding_progress.as_ref().unwrap();
+        let ws_progress = ws_progress.as_ref().as_ref().unwrap();
+        assert_eq!(http_progress.len(), ws_progress.len());
+        for (http_item, ws_item) in http_progress.iter().zip(ws_progress) {
+            assert_eq!(http_item.logical_work_item_id, ws_item.logical_work_item_id);
+            assert_eq!(http_item.unit_id, ws_item.unit_id);
+            assert_eq!(http_item.status, ws_item.status);
+            assert_eq!(http_item.stage, ws_item.stage);
+            assert_eq!(http_item.current_commit, ws_item.current_commit);
+            assert_eq!(http_item.final_commit, ws_item.final_commit);
+            assert_eq!(http_item.code_review, ws_item.code_review);
+            assert_eq!(http_item.handoff_revision_id, ws_item.handoff_revision_id);
+            assert_eq!(
+                http_item.failure_or_blocked_reason,
+                ws_item.failure_or_blocked_reason
+            );
+            assert_eq!(http_item.plan_revision_id, ws_item.plan_revision_id);
+        }
+        assert_eq!(http_roundtrip.group_progress, *ws_aggregate);
     }
 }

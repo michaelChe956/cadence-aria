@@ -7,7 +7,22 @@ use crate::product::coding_models::{
     CodingUnitRunStatus, GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind,
     GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit,
 };
+use crate::product::models::HandoffRevision;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+pub(crate) fn handoff_matches_unit_run(
+    handoff: &HandoffRevision,
+    unit: &CodingExecutionUnit,
+    run: &crate::product::coding_models::CodingUnitRun,
+) -> bool {
+    handoff.coding_unit_run_id == run.id
+        && handoff.work_item_revision_id == run.work_item_revision_id
+        && handoff.logical_work_item_id == unit.logical_work_item_id
+        && run
+            .completion_commit
+            .as_deref()
+            .is_some_and(|completion_commit| handoff.commit_sha == completion_commit)
+}
 
 #[derive(Clone, Copy)]
 struct GroupFinalReadinessPlanContext<'a> {
@@ -223,16 +238,7 @@ impl CodingWorkspaceEngine {
                     &unit.logical_work_item_id,
                     handoff_id,
                 ) {
-                    Ok(handoff)
-                        if handoff.coding_unit_run_id == run.id
-                            && handoff.work_item_revision_id == run.work_item_revision_id
-                            && handoff.logical_work_item_id == unit.logical_work_item_id
-                            && run.completion_commit.as_deref().is_some_and(
-                                |completion_commit| handoff.commit_sha == completion_commit,
-                            ) =>
-                    {
-                        None
-                    }
+                    Ok(handoff) if handoff_matches_unit_run(&handoff, unit, &run) => None,
                     Ok(_) => {
                         result.handoff_revision_id = None;
                         Some(diagnostic(

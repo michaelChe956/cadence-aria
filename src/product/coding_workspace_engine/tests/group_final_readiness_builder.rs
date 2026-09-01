@@ -1,6 +1,8 @@
 use super::group_final_readiness_support::*;
 use super::*;
+use crate::product::coding_models::{GroupDependencyGateSnapshot, GroupDependencyGateStatus};
 use crate::product::coding_models::{GroupFinalReadinessDiagnosticKind, GroupFinalReadinessStatus};
+use crate::web::types::GroupCodingProgressDto;
 
 #[tokio::test]
 async fn readiness_includes_coder_commit_and_rework_commit_for_one_unit_run() {
@@ -380,4 +382,192 @@ async fn readiness_persists_diagnostic_for_missing_review_handoff_or_binding() {
             "{case}"
         );
     }
+}
+
+#[tokio::test]
+async fn group_work_item_progress_assembles_persisted_completed_running_and_pending_units() {
+    let fixture = readiness_fixture();
+    let units = fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("units");
+    let completed = &units[0];
+    let running = &units[1];
+    let pending = &units[2];
+
+    fs::write(fixture.worktree.join("progress.rs"), "completed\n").expect("progress change");
+    run_test_git(&fixture.worktree, &["add", "progress.rs"]);
+    run_test_git(&fixture.worktree, &["commit", "-m", "progress completed"]);
+    let completion_commit = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let run = seed_completed_run(
+        &fixture,
+        completed,
+        Some(completion_commit.clone()),
+        Vec::new(),
+    );
+    seed_handoff(&fixture, completed, &run);
+    fixture
+        .store
+        .save_code_review_report(
+            &fixture.attempt,
+            &review_report(
+                &fixture.attempt,
+                "progress_review_0001",
+                &run,
+                "2026-08-07T00:00:00Z",
+                ReviewVerdict::Approve,
+                "completed review",
+            ),
+        )
+        .expect("review report");
+    fixture
+        .store
+        .update_coding_unit_status(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &completed.id,
+            CodingExecutionUnitStatus::Completed,
+            None,
+        )
+        .expect("complete unit");
+    fixture
+        .store
+        .update_coding_unit_status(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &running.id,
+            CodingExecutionUnitStatus::Running,
+            None,
+        )
+        .expect("run unit");
+    fixture
+        .store
+        .update_attempt_head_commit(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            Some(completion_commit.clone()),
+        )
+        .expect("attempt head");
+    fixture
+        .store
+        .write_group_dependency_gate_snapshot(
+            &fixture.attempt,
+            &GroupDependencyGateSnapshot {
+                attempt_id: fixture.attempt.id.clone(),
+                status: GroupDependencyGateStatus::Waiting,
+                selected_unit_id: None,
+                pending_unit_ids: vec![pending.id.clone()],
+                reason_code: Some("dependency_waiting".to_string()),
+                message: Some("waiting for completed upstream handoff".to_string()),
+                dependency_unit_id: Some(completed.id.clone()),
+                handoff_id: None,
+                dependency_work_item_revision_id: Some(completed.work_item_revision_id.clone()),
+                handoff_work_item_revision_id: None,
+                plan_revision_id: "plan_revision_0001".to_string(),
+                created_at: "2026-08-07T00:00:00Z".to_string(),
+            },
+        )
+        .expect("dependency gate snapshot");
+
+    fixture
+        .store
+        .seed_running_attempt_for_test(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("running attempt");
+    fixture
+        .store
+        .update_attempt_stage(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("coding stage");
+    let attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("reloaded attempt");
+    let (progress, aggregate) =
+        crate::web::handlers::build_group_work_item_progress(&fixture.store, &attempt)
+            .expect("group progress");
+    assert_eq!(
+        aggregate,
+        GroupCodingProgressDto {
+            total: 3,
+            pending: 1,
+            active: 1,
+            completed: 1,
+            failed_or_blocked: 0,
+        }
+    );
+    let completed_progress = progress
+        .iter()
+        .find(|item| item.unit_id == completed.id)
+        .expect("completed progress");
+    assert_eq!(completed_progress.status, "completed");
+    assert_eq!(completed_progress.stage, None);
+    assert_eq!(
+        completed_progress.current_commit.as_deref(),
+        Some(completion_commit.as_str())
+    );
+    assert_eq!(
+        completed_progress.final_commit.as_deref(),
+        Some(completion_commit.as_str())
+    );
+    assert_eq!(
+        completed_progress
+            .code_review
+            .as_ref()
+            .map(|report| report.id.as_str()),
+        Some("progress_review_0001")
+    );
+    assert_eq!(
+        completed_progress.handoff_revision_id.as_deref(),
+        Some("handoff_revision_0001")
+    );
+    assert_eq!(completed_progress.plan_revision_id, "plan_revision_0001");
+
+    let running_progress = progress
+        .iter()
+        .find(|item| item.unit_id == running.id)
+        .expect("running progress");
+    assert_eq!(running_progress.status, "running");
+    assert_eq!(running_progress.stage.as_deref(), Some("coding"));
+    assert_eq!(
+        running_progress.current_commit.as_deref(),
+        Some(completion_commit.as_str())
+    );
+    assert_eq!(running_progress.final_commit, None);
+    assert_eq!(running_progress.code_review, None);
+    assert_eq!(running_progress.handoff_revision_id, None);
+
+    let pending_progress = progress
+        .iter()
+        .find(|item| item.unit_id == pending.id)
+        .expect("pending progress");
+    assert_eq!(pending_progress.status, "pending");
+    assert_eq!(pending_progress.stage, None);
+    assert_eq!(pending_progress.current_commit, None);
+    assert_eq!(pending_progress.final_commit, None);
+    assert_eq!(
+        pending_progress.failure_or_blocked_reason.as_deref(),
+        Some("dependency_waiting")
+    );
+    assert_eq!(pending_progress.plan_revision_id, "plan_revision_0001");
 }

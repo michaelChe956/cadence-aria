@@ -98,12 +98,15 @@ mod tool_format;
 mod types;
 mod ws_event_mapper;
 
+pub(crate) use group_final_readiness::handoff_matches_unit_run;
 #[cfg(test)]
 pub(crate) use mutation_test_pause::{
     CodingMutationTestPoint, register_coding_mutation_test_pause,
 };
 #[cfg(test)]
 pub(crate) use plan_repair_start::register_plan_repair_start_snapshot_request_pause;
+#[cfg(test)]
+pub(crate) use tests::group_final_readiness_support::readiness_fixture;
 
 pub(crate) struct CoderOutputChatEntryInput<'a> {
     pub(crate) attempt: &'a CodingExecutionAttempt,
