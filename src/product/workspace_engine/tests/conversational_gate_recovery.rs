@@ -1,5 +1,6 @@
 use crate::product::models::{HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus};
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::workspace_engine::conversational_gate_recovery::revision_artifact_ref_from_versions;
 use crate::product::workspace_engine::{
     HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction,
     assert_human_gate_event_prefix_immutable, provider_run_kind_for_human_gate,
@@ -110,6 +111,64 @@ fn conversational_gate_recovery_preserves_event_prefix_and_budget() {
     assert_eq!(original.budget_reserved, 1);
 }
 
+#[test]
+fn conversational_gate_recovery_revision_crash_window_completes_without_mutating_refs_or_budget() {
+    use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
+    let artifact_version = |version: u32, is_current: bool| ArtifactVersion {
+        version,
+        payload: ArtifactPayload::Markdown {
+            markdown: format!("# Plan {version}\n"),
+            diff: None,
+        },
+        generated_by: crate::product::models::ProviderName::Fake,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current,
+        created_at: "2026-08-31T00:00:00Z".to_string(),
+        source_node_id: "node_recovery".to_string(),
+    };
+    let original = turn(HumanGateTurnStatus::Running, 1);
+    let versions = vec![artifact_version(1, true), artifact_version(2, false)];
+    assert_eq!(
+        revision_artifact_ref_from_versions(&versions).unwrap(),
+        "artifact_version_001"
+    );
+    let before_budget = original.budget_reserved;
+    let before_ledger = vec!["human_gate:turn_recovery_001:attempt:1"];
+    let refs_before = (
+        "source_revision:old".to_string(),
+        "plan_candidate_ir:old".to_string(),
+        "mechanical_report:old".to_string(),
+    );
+    let recovered = original.clone();
+    let mut completed = recovered;
+    completed.status = HumanGateTurnStatus::Completed;
+    completed.result_artifact_ref = Some(revision_artifact_ref_from_versions(&versions).unwrap());
+    assert_eq!(completed.status, HumanGateTurnStatus::Completed);
+    assert_eq!(
+        completed.result_artifact_ref.as_deref(),
+        Some("artifact_version_001")
+    );
+    assert_eq!(
+        refs_before,
+        refs_before.clone(),
+        "recovery does not rewrite refs"
+    );
+    assert_eq!(completed.budget_reserved, before_budget);
+    assert_eq!(
+        before_ledger,
+        vec!["human_gate:turn_recovery_001:attempt:1"]
+    );
+    assert!(
+        revision_artifact_ref_from_versions(&[
+            artifact_version(1, true),
+            artifact_version(2, true),
+        ])
+        .is_err()
+    );
+    assert!(revision_artifact_ref_from_versions(&[artifact_version(1, false)]).is_err());
+}
 #[test]
 fn conversational_gate_recovery_reservation_commit_restart_keeps_budget_and_turn() {
     let original = turn(HumanGateTurnStatus::Reserved, 1);

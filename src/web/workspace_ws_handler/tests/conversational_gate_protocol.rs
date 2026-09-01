@@ -112,11 +112,16 @@ async fn conversational_gate_feedback_reaches_service_through_socket_dispatch() 
     .expect("persist gate session");
 
     let (event_tx, mut event_rx) = mpsc::channel(8);
+    let mut session = WorkspaceSession::from_record(record.clone());
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Work Item Plan\n".to_string(),
+        diff: None,
+    });
     let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
         Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
         lifecycle,
         event_tx,
-        WorkspaceSession::from_record(record.clone()),
+        session,
     )));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
     let current_run = Arc::new(Mutex::new(None));

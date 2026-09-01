@@ -1,7 +1,10 @@
 use chrono::Utc;
 
-use crate::product::models::{HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus};
+use crate::product::models::{
+    HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus, WorkspaceType,
+};
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 
 pub(crate) use super::conversational_gate::HUMAN_GATE_PROVIDER_MAX_ATTEMPTS;
 
@@ -105,6 +108,60 @@ pub(crate) fn provider_run_kind_for_human_gate(
     }
 }
 
+pub(crate) fn revision_artifact_ref_from_versions(
+    versions: &[crate::web::workspace_ws_types::ArtifactVersion],
+) -> Result<String, String> {
+    let current = versions
+        .iter()
+        .filter(|version| version.is_current)
+        .collect::<Vec<_>>();
+    if current.len() != 1 {
+        return Err(format!(
+            "human gate revision recovery requires exactly one current artifact version, found {}",
+            current.len()
+        ));
+    }
+    Ok(format!("artifact_version_{:03}", current[0].version))
+}
+
+fn durable_revision_artifact_ref(
+    store: &super::LifecycleStore,
+    session: &crate::product::models::WorkspaceSessionRecord,
+    turn: &HumanGateTurn,
+) -> Result<Option<String>, String> {
+    if session.workspace_type != WorkspaceType::WorkItemPlan
+        || session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        || turn.result_artifact_ref.is_some()
+    {
+        return Ok(None);
+    }
+    let (Some(source_ref), Some(ir_ref), Some(report_ref)) = (
+        session.work_item_plan_source_revision_ref.as_deref(),
+        session.plan_candidate_ir_ref.as_deref(),
+        session.mechanical_report_ref.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let scope = SourceStoreScope {
+        project_id: session.project_id.clone(),
+        issue_id: session.issue_id.clone(),
+        plan_id: session.entity_id.clone(),
+    };
+    let source_store = WorkItemPlanSourceStore::new(store.app_paths());
+    source_store
+        .get_source_revision(&scope, source_ref)
+        .map_err(|error| format!("{error:?}"))?;
+    source_store
+        .get_plan_candidate_ir(&scope, ir_ref)
+        .map_err(|error| format!("{error:?}"))?;
+    source_store
+        .get_mechanical_report(&scope, report_ref)
+        .map_err(|error| format!("{error:?}"))?;
+    let versions = store
+        .list_artifact_versions(&session.id)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(revision_artifact_ref_from_versions(&versions)?))
+}
 impl super::WorkspaceEngine {
     /// Reconcile all durable non-terminal turns after a websocket/process restart.
     /// The provider marker is deliberately supplied by the runtime; durable turn
@@ -129,6 +186,20 @@ impl super::WorkspaceEngine {
                 turn.status,
                 HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
             ) {
+                continue;
+            }
+            if let Some(result_artifact_ref) =
+                durable_revision_artifact_ref(store, &expected, &turn)?
+            {
+                let mut completed = turn.clone();
+                completed.status = HumanGateTurnStatus::Completed;
+                completed.result_artifact_ref = Some(result_artifact_ref);
+                completed.failure_class = None;
+                completed.updated_at = Utc::now().to_rfc3339();
+                expected = store
+                    .update_human_gate_turn(&expected, completed)
+                    .map_err(|error| error.to_string())?;
+                actions.push((turn.turn_id, HumanGateRecoveryAction::WaitForProvider));
                 continue;
             }
             let action = recover_human_gate_turn(&turn, provider_is_running)?;

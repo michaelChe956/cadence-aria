@@ -11,6 +11,7 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::product::work_item_plan_source_store::{
     SourceStoreScope, validate_canonical_ref_for_scope,
 };
+use crate::web::workspace_ws_types::ArtifactVersion;
 
 pub(super) fn max_workspace_session_sequence(
     projects_root: &std::path::Path,
@@ -318,7 +319,95 @@ impl LifecycleStore {
         })
     }
 
-    /// Persist the immutable mechanical report produced by Evaluate. Invocation scope is
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_human_gate_revision(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        mut turn: crate::product::models::HumanGateTurn,
+        source_revision_ref: &str,
+        plan_candidate_ir_ref: &str,
+        mechanical_report_ref: &str,
+        artifact_versions: &[ArtifactVersion],
+        result_artifact_ref: &str,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        use crate::product::models::{HumanGateTurnStatus, WorkspaceType};
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || turn.status != HumanGateTurnStatus::Completed
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "human_gate_revision",
+                reason: "invalid completed human gate revision".to_string(),
+            });
+        }
+        let scope = SourceStoreScope {
+            project_id: expected.project_id.clone(),
+            issue_id: expected.issue_id.clone(),
+            plan_id: expected.entity_id.clone(),
+        };
+        for (reference, kind) in [
+            (source_revision_ref, "source_revision"),
+            (plan_candidate_ir_ref, "plan_candidate_ir"),
+            (mechanical_report_ref, "mechanical_report"),
+        ] {
+            validate_canonical_ref_for_scope(&scope, reference, kind).map_err(|error| {
+                ProductStoreError::InvalidRecord {
+                    kind: "human_gate_revision",
+                    reason: error.code().to_string(),
+                }
+            })?;
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let turn_path = self.human_gate_turn_path(expected, &turn.turn_id)?;
+        with_exclusive_lock(&session_path, || {
+            let stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            let existing = read_json(&turn_path)?;
+            Self::validate_human_gate_turn(&existing, &stored.id, &turn.turn_id)?;
+            if existing.command_id != turn.command_id
+                || existing.status == HumanGateTurnStatus::Completed
+                || existing.status == HumanGateTurnStatus::Failed
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "human_gate_turn",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            if existing.attempt_no != turn.attempt_no {
+                return Err(ProductStoreError::Conflict {
+                    kind: "human_gate_turn",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            turn.updated_at = Utc::now().to_rfc3339();
+            let original_versions = self.list_artifact_versions(&stored.id)?;
+            if original_versions != *artifact_versions {
+                self.save_artifact_versions(&stored.id, artifact_versions)?;
+            }
+            let mut next = stored;
+            next.work_item_plan_source_revision_ref = Some(source_revision_ref.to_string());
+            next.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.to_string());
+            next.mechanical_report_ref = Some(mechanical_report_ref.to_string());
+            next.updated_at = turn.updated_at.clone();
+            if let Err(error) = write_json(&session_path, &next) {
+                let _ = self.save_artifact_versions(&next.id, &original_versions);
+                return Err(error);
+            }
+            turn.result_artifact_ref = Some(result_artifact_ref.to_string());
+            if let Err(error) = write_json(&turn_path, &turn) {
+                let _ = write_json(&session_path, &expected);
+                let _ = self.save_artifact_versions(&next.id, &original_versions);
+                return Err(error);
+            }
+            Ok(next)
+        })
+    }
+
     /// materialized by reviewer startup ensure from the current ReviewerRun cycle.
     pub fn compare_and_save_single_candidate_evaluation(
         &self,

@@ -52,11 +52,16 @@ pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEn
     )
     .expect("persist human gate fixture");
     let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = WorkspaceSession::from_record(record);
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Work Item Plan\n".to_string(),
+        diff: None,
+    });
     let engine = WorkspaceEngine::new_persistent(
         Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
         lifecycle.clone(),
         event_tx,
-        WorkspaceSession::from_record(record),
+        session,
     );
     (root, lifecycle, engine)
 }
@@ -79,6 +84,7 @@ async fn conversational_gate_feedback_replay_returns_same_turn_without_second_st
         HumanGateCommandOutcome::TurnOpened {
             turn,
             remaining_budget,
+            ..
         } => {
             assert_eq!(remaining_budget, 1);
             (turn.turn_id, turn.command_id)

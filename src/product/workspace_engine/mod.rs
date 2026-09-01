@@ -136,9 +136,19 @@ pub use types::{
 
 pub(crate) use artifact_constraints::*;
 #[cfg(test)]
+pub(crate) async fn single_candidate_compile_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+#[cfg(test)]
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
-pub(crate) use conversational_gate::{HumanGateCommandOutcome, HumanGateFeedbackInput};
+pub(crate) use conversational_gate::{
+    HumanGateCommandOutcome, HumanGateFeedbackInput, ScManualRevisionResult,
+};
 pub(crate) use conversational_gate_recovery::{
     HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction, provider_run_kind_for_human_gate,
 };

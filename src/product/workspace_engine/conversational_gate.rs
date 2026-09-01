@@ -3,9 +3,14 @@ use chrono::Utc;
 use crate::product::models::{
     HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, WorkspaceType,
 };
+use crate::product::work_item_plan_compiler::grammar;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::HumanConfirmDecision;
 
+pub(crate) enum ScManualRevisionResult {
+    Accepted { artifact_ref: String },
+    ValidationRejected { diagnostics: Vec<String> },
+}
 pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
 pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";
 /// Fixed upper bound for real provider starts belonging to one logical turn.
@@ -76,10 +81,338 @@ fn validate_feedback(feedback: &str) -> Result<(), String> {
     super::prompts::validate_sc_manual_revision_feedback(feedback)
 }
 
+pub(crate) fn trim_provider_preamble(source: &str) -> &str {
+    let document_heading = format!("{}\n", grammar::DOCUMENT_HEADING);
+    source
+        .find(&document_heading)
+        .map(|offset| &source[offset..])
+        .unwrap_or(source)
+}
+
 impl super::WorkspaceEngine {
-    /// Reserve one SC conversational-gate turn. This method deliberately
-    /// stops at the durable reservation boundary; provider execution belongs
-    /// to the later manual-revision task.
+    pub(crate) fn mark_human_gate_turn_running(&mut self, turn_id: &str) -> Result<(), String> {
+        use crate::product::models::HumanGateTurnStatus;
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let mut turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if turn.status == HumanGateTurnStatus::Running {
+            return Ok(());
+        }
+        if turn.status != HumanGateTurnStatus::Reserved {
+            return Err(format!("human gate turn {turn_id} is not reservable"));
+        }
+        turn.status = HumanGateTurnStatus::Running;
+        turn.updated_at = Utc::now().to_rfc3339();
+        let saved = store
+            .update_human_gate_turn(&expected, turn)
+            .map_err(|error| error.to_string())?;
+        self.session.provider_start_ledger = saved.provider_start_ledger;
+        Ok(())
+    }
+
+    pub(crate) async fn fail_human_gate_turn(
+        &mut self,
+        turn_id: &str,
+        failure_class: crate::product::models::HumanGateTurnFailureClass,
+    ) -> Result<(), String> {
+        use crate::product::models::HumanGateTurnStatus;
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let mut turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if matches!(
+            turn.status,
+            HumanGateTurnStatus::Completed | HumanGateTurnStatus::Failed
+        ) {
+            return Ok(());
+        }
+        turn.status = HumanGateTurnStatus::Failed;
+        turn.failure_class = Some(failure_class);
+        turn.updated_at = Utc::now().to_rfc3339();
+        let saved = store
+            .update_human_gate_turn(&expected, turn)
+            .map_err(|error| error.to_string())?;
+        self.session.provider_start_ledger = saved.provider_start_ledger;
+        Ok(())
+    }
+
+    pub(crate) async fn run_sc_manual_revision_turn(
+        &mut self,
+        turn_id: &str,
+        _prompt: String,
+        provider_output: String,
+    ) -> Result<ScManualRevisionResult, String> {
+        use crate::product::models::{HumanGateTurnFailureClass, HumanGateTurnStatus};
+        use crate::product::work_item_plan_compiler::{
+            PlanCandidateValidationContext, WorkItemPlanSourceContext, compile_work_item_plan,
+            validate_plan_candidate_ir,
+        };
+        use crate::product::work_item_plan_source_store::{
+            PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+            WorkItemPlanSourceStore,
+        };
+        use sha2::{Digest, Sha256};
+
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let mut expected = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let turn = lifecycle
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if turn.status != HumanGateTurnStatus::Running
+            && turn.status != HumanGateTurnStatus::Reserved
+        {
+            return Err(format!("human gate turn {turn_id} is not active"));
+        }
+        let source = trim_provider_preamble(&provider_output).to_string();
+        let plan = lifecycle
+            .get_issue_work_item_plan(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load plan for human gate revision failed: {error}"))?;
+        let repository_id = self.work_item_plan_repository_id(&lifecycle, &plan)?;
+        let repository_profile = plan
+            .repository_profile_ref
+            .as_deref()
+            .map(|profile_id| {
+                lifecycle.get_repository_profile(
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    profile_id,
+                )
+            })
+            .transpose()
+            .map_err(|error| {
+                format!("load repository profile for human gate revision failed: {error}")
+            })?;
+
+        let ir = match compile_work_item_plan(
+            &source,
+            &WorkItemPlanSourceContext {
+                target_repository_id: repository_id,
+            },
+        ) {
+            Ok(ir) => ir,
+            Err(diagnostics) => {
+                let messages = diagnostics
+                    .iter()
+                    .map(|diagnostic| {
+                        format!(
+                            "{}:{}:{}",
+                            diagnostic.code, diagnostic.line, diagnostic.message
+                        )
+                    })
+                    .collect();
+                let mut failed = turn.clone();
+                failed.status = HumanGateTurnStatus::Failed;
+                failed.failure_class = Some(HumanGateTurnFailureClass::ValidationReject);
+                failed.updated_at = chrono::Utc::now().to_rfc3339();
+                expected = lifecycle
+                    .update_human_gate_turn(&expected, failed)
+                    .map_err(|error| error.to_string())?;
+                self.session.provider_start_ledger = expected.provider_start_ledger;
+                return Ok(ScManualRevisionResult::ValidationRejected {
+                    diagnostics: messages,
+                });
+            }
+        };
+        let validation_now = chrono::Utc::now().to_rfc3339();
+        let report = match validate_plan_candidate_ir(
+            &ir,
+            &PlanCandidateValidationContext {
+                project_id: &self.session.project_id,
+                issue_id: &self.session.issue_id,
+                plan_id: &self.session.entity_id,
+                source_story_spec_ids: &plan.source_story_spec_ids,
+                source_design_spec_ids: &plan.source_design_spec_ids,
+                repository_profile: repository_profile.as_ref(),
+                now: &validation_now,
+            },
+        ) {
+            Ok(report) => report,
+            Err(diagnostics) => {
+                let messages = diagnostics
+                    .iter()
+                    .map(|diagnostic| {
+                        format!(
+                            "{}:{}:{}",
+                            diagnostic.code, diagnostic.line, diagnostic.message
+                        )
+                    })
+                    .collect();
+                let mut failed = turn.clone();
+                failed.status = HumanGateTurnStatus::Failed;
+                failed.failure_class = Some(HumanGateTurnFailureClass::ValidationReject);
+                failed.updated_at = chrono::Utc::now().to_rfc3339();
+                expected = lifecycle
+                    .update_human_gate_turn(&expected, failed)
+                    .map_err(|error| error.to_string())?;
+                self.session.provider_start_ledger = expected.provider_start_ledger;
+                return Ok(ScManualRevisionResult::ValidationRejected {
+                    diagnostics: messages,
+                });
+            }
+        };
+
+        let source_hash = hex::encode(Sha256::digest(source.as_bytes()));
+        let source_id = format!("source-{}", &source_hash[..16]);
+        let mut source_record = SourceRevisionRecord {
+            id: source_id.clone(),
+            source: source.clone(),
+            source_revision_hash: source_hash.clone(),
+            content_hash: String::new(),
+        };
+        source_record.content_hash = source_record
+            .content_hash()
+            .map_err(|error| error.code().to_string())?;
+        let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+        let source_ref = source_store
+            .put_source_revision(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+                &source_record,
+            )
+            .map_err(|error| error.code().to_string())?;
+        let ir_id = format!("ir-{}", &source_hash[..16]);
+        let mut ir_record = PlanCandidateIrRecord {
+            id: ir_id.clone(),
+            source_revision_id: source_id.clone(),
+            ir,
+            content_hash: String::new(),
+        };
+        ir_record.content_hash = ir_record
+            .content_hash()
+            .map_err(|error| error.code().to_string())?;
+        let ir_ref = source_store
+            .put_plan_candidate_ir(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+                &ir_record,
+            )
+            .map_err(|error| error.code().to_string())?;
+        let report_id = format!("report-{}", &source_hash[..16]);
+        let mut report_record = PlanCandidateMechanicalReportRecord {
+            id: report_id,
+            source_revision_id: source_id,
+            ir_id,
+            report,
+            content_hash: String::new(),
+        };
+        report_record.content_hash = report_record
+            .content_hash()
+            .map_err(|error| error.code().to_string())?;
+        let report_ref = source_store
+            .put_mechanical_report(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+                &report_record,
+            )
+            .map_err(|error| error.code().to_string())?;
+        let mut completed = turn;
+        completed.status = HumanGateTurnStatus::Completed;
+        completed.failure_class = None;
+        let artifact_versions = {
+            let mut versions = self.artifact_versions.clone();
+            for version in &mut versions {
+                version.is_current = false;
+            }
+            let version = versions.len() as u32 + 1;
+            versions.push(crate::web::workspace_ws_types::ArtifactVersion {
+                version,
+                payload: crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+                    markdown: source.clone(),
+                    diff: None,
+                },
+                generated_by: self.session.author_provider.clone(),
+                reviewed_by: None,
+                review_verdict: None,
+                confirmed_by: None,
+                is_current: true,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                source_node_id: self
+                    .active_node_id
+                    .clone()
+                    .unwrap_or_else(|| "timeline_node_unknown".to_string()),
+            });
+            versions
+        };
+        let artifact_id = format!(
+            "artifact_version_{:03}",
+            artifact_versions
+                .last()
+                .map(|version| version.version)
+                .unwrap_or(0)
+        );
+        let saved = lifecycle
+            .complete_human_gate_revision(
+                &expected,
+                completed,
+                &source_ref,
+                &ir_ref,
+                &report_ref,
+                &artifact_versions,
+                &artifact_id,
+            )
+            .map_err(|error| error.to_string())?;
+        self.artifact_versions = artifact_versions;
+        self.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+            markdown: source,
+            diff: None,
+        });
+        if let Some(node_id) = self.active_node_id.clone() {
+            let _ = self
+                .persist_artifact_ref(
+                    &node_id,
+                    crate::product::models::ArtifactRef {
+                        artifact_id: artifact_id.clone(),
+                        version: self
+                            .artifact_versions
+                            .last()
+                            .map(|version| version.version)
+                            .unwrap_or(0),
+                    },
+                )
+                .await;
+        }
+        let _ = self
+            .event_tx
+            .send(super::EngineEvent::ArtifactUpdate {
+                version: self
+                    .artifact_versions
+                    .last()
+                    .map(|version| version.version)
+                    .unwrap_or(0),
+                payload: self.session.artifact.clone().expect("artifact set above"),
+            })
+            .await;
+        self.session = super::WorkspaceSession::from_record(saved);
+        Ok(ScManualRevisionResult::Accepted {
+            artifact_ref: artifact_id,
+        })
+    }
+
     pub(crate) async fn handle_human_gate_feedback(
         &mut self,
         input: HumanGateFeedbackInput,
@@ -124,28 +457,40 @@ impl super::WorkspaceEngine {
 
         // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
         // 固定契约超出独立预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
-        let candidate_markdown = self
+        let candidate_markdown = match self
             .session
             .artifact
             .clone()
             .and_then(|artifact| artifact.into_markdown())
-            .unwrap_or_default();
+        {
+            Some(candidate_markdown) => candidate_markdown,
+            None => {
+                return Ok(rejected(
+                    "HUMAN_GATE_REVISION_CANDIDATE_MISSING",
+                    "current candidate markdown is required",
+                ));
+            }
+        };
         let grammar_boundary =
             crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
-        if let Err(error) = super::prompts::build_sc_manual_revision_prompt(
+        let prompt = super::prompts::build_sc_manual_revision_prompt(
             super::prompts::ScManualRevisionPromptInput {
                 candidate_markdown: &candidate_markdown,
                 feedback: &input.feedback,
                 grammar_boundary: &grammar_boundary,
                 language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
             },
-        ) {
-            let (code, reason) = error.split_once(':').map_or(
-                ("HUMAN_GATE_REVISION_PROMPT_TOO_LARGE", error.as_str()),
-                |(code, reason)| (code, reason.trim()),
-            );
-            return Ok(rejected(code, reason));
-        }
+        );
+        let _prompt = match prompt {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                let (code, reason) = error.split_once(':').map_or(
+                    ("HUMAN_GATE_REVISION_PROMPT_TOO_LARGE", error.as_str()),
+                    |(code, reason)| (code, reason.trim()),
+                );
+                return Ok(rejected(code, reason));
+            }
+        };
 
         let turns = store
             .list_human_gate_turns(&self.session.session_id)

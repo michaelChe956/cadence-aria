@@ -306,7 +306,7 @@ pub(crate) async fn handle_human_gate_feedback_from_handler(
         .await;
         let run_kind = ProviderRunKind::HumanGateScManualRevision {
             turn_id: turn.turn_id,
-            prompt: turn.feedback_text,
+            prompt: String::new(),
         };
         if let Err(message) =
             spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await

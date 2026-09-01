@@ -1,4 +1,5 @@
 use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES;
+use crate::product::workspace_engine::conversational_gate::trim_provider_preamble;
 use crate::product::workspace_engine::prompts::{
     SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES, SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES,
     ScManualRevisionPromptInput, build_sc_manual_revision_prompt,
@@ -118,6 +119,42 @@ async fn conversational_gate_revision_prompt_rejects_oversized_feedback_before_r
     );
 }
 
+#[tokio::test]
+async fn conversational_gate_revision_rejects_missing_candidate_before_reservation() {
+    let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(2);
+    engine.session.artifact = None;
+    let outcome = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "cmd_missing_candidate".to_string(),
+            feedback: "修正字段".to_string(),
+        })
+        .await
+        .expect("missing candidate rejection");
+    assert_eq!(
+        outcome,
+        HumanGateCommandOutcome::Rejected {
+            code: "HUMAN_GATE_REVISION_CANDIDATE_MISSING".to_string(),
+            reason: "current candidate markdown is required".to_string(),
+        }
+    );
+    assert!(
+        lifecycle
+            .list_human_gate_turns(engine.session().session_id.as_str())
+            .expect("list turns")
+            .is_empty()
+    );
+}
+
+#[test]
+fn conversational_gate_revision_trim_is_deterministic_and_only_removes_preamble() {
+    let source = "provider preamble\n# Work Item Plan\n## Work Item WI-001: x\n";
+    assert_eq!(
+        trim_provider_preamble(source),
+        "# Work Item Plan\n## Work Item WI-001: x\n"
+    );
+    let malformed = "provider output without canonical heading";
+    assert_eq!(trim_provider_preamble(malformed), malformed);
+}
 #[test]
 fn conversational_gate_revision_prompt_budget_is_independent_from_author_budget() {
     assert_eq!(

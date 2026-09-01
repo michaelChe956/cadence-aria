@@ -895,25 +895,241 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 );
             }
             ProviderRunKind::HumanGateScManualRevision { turn_id, prompt } => {
-                let _ = (turn_id, prompt);
-                engine.mark_active_run_finished(&run_label);
-                drop(engine);
-                let _ = send_json_outbound(
-                    &outbound_tx_for_task,
-                    &WsOutMessage::Error {
-                        message: "human gate provider run is not wired until SC revision task"
-                            .to_string(),
-                    },
+                use crate::product::models::HumanGateTurnFailureClass;
+                let mut command_rx = command_rx;
+                let prompt = if prompt.is_empty() {
+                    let turn = match LifecycleStore::new(run_context_clone.app_paths.clone())
+                        .get_human_gate_turn(&engine.session().session_id, &turn_id)
+                    {
+                        Ok(turn) => turn,
+                        Err(error) => {
+                            let message = format!("load human gate turn failed: {error}");
+                            let _ = engine
+                                .fail_human_gate_turn(
+                                    &turn_id,
+                                    HumanGateTurnFailureClass::ProviderErr,
+                                )
+                                .await;
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnFailed {
+                                    turn_id,
+                                    failure_class: "provider_err".to_string(),
+                                    message,
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    let candidate = match engine
+                        .session()
+                        .artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.markdown())
+                    {
+                        Some(candidate) => candidate.to_string(),
+                        None => {
+                            let message = "current candidate markdown is missing".to_string();
+                            let _ = engine
+                                .fail_human_gate_turn(
+                                    &turn_id,
+                                    HumanGateTurnFailureClass::ProviderErr,
+                                )
+                                .await;
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnFailed {
+                                    turn_id,
+                                    failure_class: "provider_err".to_string(),
+                                    message,
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    let grammar = crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
+                    match crate::product::workspace_engine::build_sc_manual_revision_prompt(
+                        crate::product::workspace_engine::ScManualRevisionPromptInput {
+                            candidate_markdown: &candidate,
+                            feedback: &turn.feedback_text,
+                            grammar_boundary: &grammar,
+                            language_rule:
+                                crate::product::workspace_engine::LANGUAGE_RULE_FILE_CONTENT,
+                        },
+                    ) {
+                        Ok(prompt) => prompt,
+                        Err(message) => {
+                            let _ = engine
+                                .fail_human_gate_turn(
+                                    &turn_id,
+                                    HumanGateTurnFailureClass::ProviderErr,
+                                )
+                                .await;
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnFailed {
+                                    turn_id,
+                                    failure_class: "provider_err".to_string(),
+                                    message,
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                } else {
+                    prompt
+                };
+
+                // Durable state must prove Running before the provider is started. This is
+                // deliberately inside the spawned task, after the handler has cancelled any
+                // previous run, so a crash cannot leave Reserved while a provider is active.
+                if let Err(message) = engine.mark_human_gate_turn_running(&turn_id) {
+                    let _ = engine
+                        .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                        .await;
+                    engine.mark_active_run_finished(&run_label);
+                    drop(engine);
+                    let _ = send_json_outbound(
+                        &outbound_tx_for_task,
+                        &WsOutMessage::HumanGateTurnFailed {
+                            turn_id,
+                            failure_class: "provider_err".to_string(),
+                            message,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
+                let node_id = if let Some(node_id) = engine.active_timeline_node_id() {
+                    node_id
+                } else {
+                    engine.begin_work_item_plan_author_run().await
+                };
+                let author_provider = engine.session().author_provider.clone();
+                engine
+                    .emit_provider_prompt_event(
+                        &node_id,
+                        prompt.clone(),
+                        "发送给 SC human-gate revision provider 的完整修订提示词",
+                        Some(author_provider.clone()),
+                    )
+                    .await;
+                let worktree_path = engine
+                    .session()
+                    .repository_path
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                let provider_input = engine.build_work_item_plan_streaming_input(
+                    crate::product::work_item_split_engine::types::provider_name_to_type(
+                        &author_provider,
+                    ),
+                    prompt.clone(),
+                    worktree_path.to_string_lossy().to_string(),
+                    author_provider.clone(),
+                );
+                let launch = match resolve_plan_author_launch(&engine, None, None) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        let message = error.details.clone();
+                        let _ = engine
+                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                            .await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "provider_err".to_string(),
+                                message,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let provider_session = start_work_item_plan_author(
+                    launch,
+                    provider_for_run.clone(),
+                    provider_input,
+                    run_cancel.clone(),
                 )
                 .await;
-                clear_active_run_if_token(
-                    &current_run_for_task,
-                    &workspace_runs_for_task,
-                    &session_id_for_task,
-                    run_token,
-                )
-                .await;
-                return;
+                let full_output = match engine
+                    .drive_work_item_plan_provider_session_to_output(
+                        provider_session,
+                        &mut command_rx,
+                        node_id,
+                        author_provider,
+                    )
+                    .await
+                {
+                    Ok(output) => output,
+                    Err(message) => {
+                        let _ = engine
+                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                            .await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "provider_err".to_string(),
+                                message,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                match engine
+                    .run_sc_manual_revision_turn(&turn_id, prompt, full_output)
+                    .await
+                {
+                    Ok(crate::product::workspace_engine::ScManualRevisionResult::Accepted { artifact_ref }) => {
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnCompleted { turn_id, artifact_ref },
+                        ).await;
+                    }
+                    Ok(crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { diagnostics }) => {
+                        let message = diagnostics.join("; ");
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "validation_reject".to_string(),
+                                message,
+                            },
+                        ).await;
+                    }
+                    Err(message) => {
+                        let _ = engine.fail_human_gate_turn(
+                            &turn_id,
+                            HumanGateTurnFailureClass::ProviderErr,
+                        ).await;
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::HumanGateTurnFailed {
+                                turn_id,
+                                failure_class: "provider_err".to_string(),
+                                message,
+                            },
+                        ).await;
+                    }
+                }
             }
         }
         workspace_ws_provider_run_followups!(

@@ -11,7 +11,7 @@ use crate::product::workspace_engine::HUMAN_GATE_PROVIDER_MAX_ATTEMPTS;
 use super::LifecycleStore;
 
 impl LifecycleStore {
-    fn human_gate_turn_path(
+    pub(super) fn human_gate_turn_path(
         &self,
         session: &WorkspaceSessionRecord,
         turn_id: &str,
@@ -26,7 +26,7 @@ impl LifecycleStore {
             .join(format!("{turn_id}.json")))
     }
 
-    fn validate_human_gate_turn(
+    pub(super) fn validate_human_gate_turn(
         turn: &HumanGateTurn,
         session_id: &str,
         turn_id: &str,
