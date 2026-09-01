@@ -710,7 +710,7 @@ impl WorkspaceEngine {
             .get_advance_for_plan(&input.project_id, &input.issue_id, &record.plan_id)
             .map_err(|error| format!("reload final advance record failed: {error}"))?
             .ok_or("advance record disappeared")?;
-        let _completed_group_journal = if !group_journal.phase.has_reached(
+        if !group_journal.phase.has_reached(
             crate::product::coding_attempt_store::CodingGroupInitializationPhase::Completed,
         ) {
             coding_store
@@ -720,11 +720,9 @@ impl WorkspaceEngine {
                 )
                 .map_err(|error| {
                     format!("checkpoint group initialization completion failed: {error}")
-                })?
-        } else {
-            group_journal
-        };
-        let _final_journal = advance_store
+                })?;
+        }
+        advance_store
             .advance_initialization_phase(&final_record, &outer, AdvanceInitializationPhase::Ready)
             .map_err(|error| format!("checkpoint ready initialization failed: {error}"))?;
         let mut ready_record = final_record;
