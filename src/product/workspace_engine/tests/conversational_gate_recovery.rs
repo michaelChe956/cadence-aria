@@ -1,6 +1,5 @@
 use crate::product::models::{HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus};
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
-use crate::product::workspace_engine::conversational_gate_recovery::revision_artifact_ref_from_versions;
 use crate::product::workspace_engine::{
     HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction,
     assert_human_gate_event_prefix_immutable, provider_run_kind_for_human_gate,
@@ -113,61 +112,229 @@ fn conversational_gate_recovery_preserves_event_prefix_and_budget() {
 
 #[test]
 fn conversational_gate_recovery_revision_crash_window_completes_without_mutating_refs_or_budget() {
-    use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
-    let artifact_version = |version: u32, is_current: bool| ArtifactVersion {
-        version,
-        payload: ArtifactPayload::Markdown {
-            markdown: format!("# Plan {version}\n"),
-            diff: None,
-        },
-        generated_by: crate::product::models::ProviderName::Fake,
-        reviewed_by: None,
-        review_verdict: None,
-        confirmed_by: None,
-        is_current,
-        created_at: "2026-08-31T00:00:00Z".to_string(),
-        source_node_id: "node_recovery".to_string(),
+    use crate::product::json_store::write_json;
+    use crate::product::models::{
+        HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
+        WorkspaceSessionStatus,
     };
-    let original = turn(HumanGateTurnStatus::Running, 1);
-    let versions = vec![artifact_version(1, true), artifact_version(2, false)];
-    assert_eq!(
-        revision_artifact_ref_from_versions(&versions).unwrap(),
-        "artifact_version_001"
+    use crate::product::work_item_plan_compiler::{
+        PlanCandidateValidationContext, WorkItemPlanSourceContext, compile_work_item_plan,
+        validate_plan_candidate_ir,
+    };
+    use crate::product::work_item_plan_policy::{
+        HumanGateSnapshot, HumanReason, ProviderStartLedgerEntry,
+    };
+    use crate::product::work_item_plan_source_store::{
+        PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+        WorkItemPlanSourceStore,
+    };
+    use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
+    use sha2::{Digest, Sha256};
+
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    let mut session = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session");
+    session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    session.status = WorkspaceSessionStatus::WaitingForHuman;
+    session.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: false,
+    });
+    let session_path = lifecycle
+        .app_paths()
+        .issue_root(&session.project_id, &session.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    write_json(&session_path, &session).expect("persist human gate session");
+
+    let now = "2026-08-31T00:00:00Z".to_string();
+    let reserved_turn = HumanGateTurn {
+        turn_id: "turn_recovery_revision_crash".to_string(),
+        session_id: session.id.clone(),
+        command_id: "command_recovery_revision_crash".to_string(),
+        feedback_text: "修正当前候选".to_string(),
+        status: HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let reservation = HumanGateReservation {
+        command_id: reserved_turn.command_id.clone(),
+        turn_id: reserved_turn.turn_id.clone(),
+        provider_start_idempotency_key: format!("human_gate:{}:attempt:1", reserved_turn.turn_id),
+        reserved_at: now,
+    };
+    let (reserved_session, _) = lifecycle
+        .compare_and_reserve_human_gate_turn(&session, reserved_turn.clone(), reservation)
+        .expect("reserve durable turn");
+    let mut running_turn = reserved_turn;
+    running_turn.status = HumanGateTurnStatus::Running;
+    let running_session = lifecycle
+        .update_human_gate_turn(&reserved_session, running_turn.clone())
+        .expect("persist running turn");
+
+    let revised_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
+    ))
+    .replace(
+        "## Work Item WI-001: Backend levels API",
+        "## Work Item WI-001: Recovered backend levels API",
     );
-    let before_budget = original.budget_reserved;
-    let before_ledger = vec!["human_gate:turn_recovery_001:attempt:1"];
+    let source_hash = hex::encode(Sha256::digest(revised_source.as_bytes()));
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let mut source = SourceRevisionRecord {
+        id: "source-recovery-revision".to_string(),
+        source: revised_source.clone(),
+        source_revision_hash: source_hash.clone(),
+        content_hash: String::new(),
+    };
+    source.content_hash = source.content_hash().expect("source content hash");
+    let source_ref = source_store
+        .put_source_revision("project_0001", "issue_0001", &plan_id, &source)
+        .expect("persist source");
+    let plan = lifecycle
+        .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+        .expect("plan");
+    let repository_id = engine
+        .work_item_plan_repository_id(&lifecycle, &plan)
+        .expect("repository id");
+    let ir = compile_work_item_plan(
+        &revised_source,
+        &WorkItemPlanSourceContext {
+            target_repository_id: repository_id,
+        },
+    )
+    .expect("compile revised source");
+    let repository_profile = plan.repository_profile_ref.as_deref().map(|profile_id| {
+        lifecycle
+            .get_repository_profile("project_0001", "issue_0001", profile_id)
+            .expect("repository profile")
+    });
+    let report = validate_plan_candidate_ir(
+        &ir,
+        &PlanCandidateValidationContext {
+            project_id: "project_0001",
+            issue_id: "issue_0001",
+            plan_id: &plan_id,
+            source_story_spec_ids: &plan.source_story_spec_ids,
+            source_design_spec_ids: &plan.source_design_spec_ids,
+            repository_profile: repository_profile.as_ref(),
+            now: "2026-08-31T00:00:00Z",
+        },
+    )
+    .expect("validate revised source");
+    let mut ir_record = PlanCandidateIrRecord {
+        id: "ir-recovery-revision".to_string(),
+        source_revision_id: source.id.clone(),
+        ir,
+        content_hash: String::new(),
+    };
+    ir_record.content_hash = ir_record.content_hash().expect("IR content hash");
+    let ir_ref = source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", &plan_id, &ir_record)
+        .expect("persist IR");
+    let mut report_record = PlanCandidateMechanicalReportRecord {
+        id: "report-recovery-revision".to_string(),
+        source_revision_id: source.id,
+        ir_id: ir_record.id,
+        report,
+        content_hash: String::new(),
+    };
+    report_record.content_hash = report_record.content_hash().expect("report content hash");
+    let report_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", &plan_id, &report_record)
+        .expect("persist report");
+
+    let versions = vec![
+        ArtifactVersion {
+            version: 1,
+            payload: ArtifactPayload::Markdown {
+                markdown: "# old candidate\n".to_string(),
+                diff: None,
+            },
+            generated_by: crate::product::models::ProviderName::Fake,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: false,
+            created_at: "2026-08-30T00:00:00Z".to_string(),
+            source_node_id: "node_recovery_old".to_string(),
+        },
+        ArtifactVersion {
+            version: 2,
+            payload: ArtifactPayload::Markdown {
+                markdown: revised_source,
+                diff: None,
+            },
+            generated_by: crate::product::models::ProviderName::Fake,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: "2026-08-31T00:00:00Z".to_string(),
+            source_node_id: "node_recovery_new".to_string(),
+        },
+    ];
+    lifecycle
+        .save_artifact_versions(&running_session.id, &versions)
+        .expect("persist artifact versions");
+
+    let mut torn_session = running_session;
+    torn_session.work_item_plan_source_revision_ref = Some(source_ref);
+    torn_session.plan_candidate_ir_ref = Some(ir_ref);
+    torn_session.mechanical_report_ref = Some(report_ref);
+    write_json(&session_path, &torn_session).expect("persist refs-before-turn crash fixture");
     let refs_before = (
-        "source_revision:old".to_string(),
-        "plan_candidate_ir:old".to_string(),
-        "mechanical_report:old".to_string(),
+        torn_session.work_item_plan_source_revision_ref.clone(),
+        torn_session.plan_candidate_ir_ref.clone(),
+        torn_session.mechanical_report_ref.clone(),
     );
-    let recovered = original.clone();
-    let mut completed = recovered;
-    completed.status = HumanGateTurnStatus::Completed;
-    completed.result_artifact_ref = Some(revision_artifact_ref_from_versions(&versions).unwrap());
+    let budget_before = torn_session.human_gate_snapshot.clone();
+    let ledger_before: Vec<ProviderStartLedgerEntry> = torn_session.provider_start_ledger.clone();
+    engine.session = super::WorkspaceSession::from_record(torn_session);
+
+    let actions = engine
+        .recover_human_gate_turns(false)
+        .expect("production human gate recovery entry");
+    assert_eq!(
+        actions,
+        vec![(
+            running_turn.turn_id.clone(),
+            HumanGateRecoveryAction::CompletedRevision,
+        )]
+    );
+    let completed = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &running_turn.turn_id)
+        .expect("completed recovered turn");
     assert_eq!(completed.status, HumanGateTurnStatus::Completed);
     assert_eq!(
         completed.result_artifact_ref.as_deref(),
-        Some("artifact_version_001")
+        Some("artifact_version_002")
     );
+    let recovered_session = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("recovered session");
     assert_eq!(
         refs_before,
-        refs_before.clone(),
-        "recovery does not rewrite refs"
+        (
+            recovered_session.work_item_plan_source_revision_ref,
+            recovered_session.plan_candidate_ir_ref,
+            recovered_session.mechanical_report_ref,
+        )
     );
-    assert_eq!(completed.budget_reserved, before_budget);
-    assert_eq!(
-        before_ledger,
-        vec!["human_gate:turn_recovery_001:attempt:1"]
-    );
-    assert!(
-        revision_artifact_ref_from_versions(&[
-            artifact_version(1, true),
-            artifact_version(2, true),
-        ])
-        .is_err()
-    );
-    assert!(revision_artifact_ref_from_versions(&[artifact_version(1, false)]).is_err());
+    assert_eq!(recovered_session.human_gate_snapshot, budget_before);
+    assert_eq!(recovered_session.provider_start_ledger, ledger_before);
 }
 #[test]
 fn conversational_gate_recovery_reservation_commit_restart_keeps_budget_and_turn() {

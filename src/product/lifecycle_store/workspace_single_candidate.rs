@@ -369,7 +369,12 @@ impl LifecycleStore {
             }
             let existing = read_json(&turn_path)?;
             Self::validate_human_gate_turn(&existing, &stored.id, &turn.turn_id)?;
-            if existing.command_id != turn.command_id
+            let immutable_fields_match = existing.session_id == turn.session_id
+                && existing.command_id == turn.command_id
+                && existing.feedback_text == turn.feedback_text
+                && existing.budget_reserved == turn.budget_reserved
+                && existing.created_at == turn.created_at;
+            if !immutable_fields_match
                 || existing.status == HumanGateTurnStatus::Completed
                 || existing.status == HumanGateTurnStatus::Failed
             {

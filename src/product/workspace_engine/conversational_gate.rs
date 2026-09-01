@@ -28,6 +28,7 @@ pub(crate) enum HumanGateCommandOutcome {
     TurnOpened {
         turn: HumanGateTurn,
         remaining_budget: u32,
+        prompt: String,
     },
     Busy {
         turn_id: String,
@@ -79,6 +80,33 @@ fn validate_command_id(command_id: &str) -> Result<(), String> {
 
 fn validate_feedback(feedback: &str) -> Result<(), String> {
     super::prompts::validate_sc_manual_revision_feedback(feedback)
+}
+
+impl super::WorkspaceEngine {
+    pub(crate) fn build_sc_manual_revision_prompt_for_turn(
+        &self,
+        feedback: &str,
+    ) -> Result<String, String> {
+        let candidate_markdown = self
+            .session
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown())
+            .ok_or_else(|| {
+                "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
+                    .to_string()
+            })?;
+        let grammar_boundary =
+            crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
+        super::prompts::build_sc_manual_revision_prompt(
+            super::prompts::ScManualRevisionPromptInput {
+                candidate_markdown,
+                feedback,
+                grammar_boundary: &grammar_boundary,
+                language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
+            },
+        )
+    }
 }
 
 pub(crate) fn trim_provider_preamble(source: &str) -> &str {
@@ -152,7 +180,6 @@ impl super::WorkspaceEngine {
     pub(crate) async fn run_sc_manual_revision_turn(
         &mut self,
         turn_id: &str,
-        _prompt: String,
         provider_output: String,
     ) -> Result<ScManualRevisionResult, String> {
         use crate::product::models::{HumanGateTurnFailureClass, HumanGateTurnStatus};
@@ -408,6 +435,13 @@ impl super::WorkspaceEngine {
             })
             .await;
         self.session = super::WorkspaceSession::from_record(saved);
+        if let Some(current_version) = self
+            .artifact_versions
+            .iter()
+            .find(|version| version.is_current)
+        {
+            self.session.artifact = Some(current_version.payload.clone());
+        }
         Ok(ScManualRevisionResult::Accepted {
             artifact_ref: artifact_id,
         })
@@ -457,31 +491,7 @@ impl super::WorkspaceEngine {
 
         // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
         // 固定契约超出独立预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
-        let candidate_markdown = match self
-            .session
-            .artifact
-            .clone()
-            .and_then(|artifact| artifact.into_markdown())
-        {
-            Some(candidate_markdown) => candidate_markdown,
-            None => {
-                return Ok(rejected(
-                    "HUMAN_GATE_REVISION_CANDIDATE_MISSING",
-                    "current candidate markdown is required",
-                ));
-            }
-        };
-        let grammar_boundary =
-            crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
-        let prompt = super::prompts::build_sc_manual_revision_prompt(
-            super::prompts::ScManualRevisionPromptInput {
-                candidate_markdown: &candidate_markdown,
-                feedback: &input.feedback,
-                grammar_boundary: &grammar_boundary,
-                language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
-            },
-        );
-        let _prompt = match prompt {
+        let prompt = match self.build_sc_manual_revision_prompt_for_turn(&input.feedback) {
             Ok(prompt) => prompt,
             Err(error) => {
                 let (code, reason) = error.split_once(':').map_or(
@@ -570,6 +580,7 @@ impl super::WorkspaceEngine {
         Ok(HumanGateCommandOutcome::TurnOpened {
             turn: saved_turn,
             remaining_budget: remaining_budget - 1,
+            prompt,
         })
     }
 

@@ -237,6 +237,7 @@ fn task_3_4_recovery_failure_records_durable_failed_diagnostic() {
 async fn task_3_4_single_candidate_crash_boundaries_reuse_durable_reservation() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
     for checkpoint in [
+        SingleCandidateCompileCheckpoint::ApprovalPersisted,
         SingleCandidateCompileCheckpoint::ReservationPersisted,
         SingleCandidateCompileCheckpoint::ProvenancePersisted,
     ] {

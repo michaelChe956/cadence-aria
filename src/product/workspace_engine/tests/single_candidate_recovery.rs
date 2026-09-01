@@ -32,12 +32,10 @@ use crate::web::workspace_ws_types::{
 };
 use sha2::{Digest, Sha256};
 
-/// failpoint key 由 persistent scope 构成；矩阵夹具复用同一 scope，必须串行模拟 crash。
+/// failpoint key 由 persistent scope 构成；所有 SingleCandidate compile failpoint
+/// 矩阵都必须复用模块级串行锁，避免跨测试文件注册同一 durable scope。
 async fn single_candidate_recovery_failpoint_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await
+    crate::product::workspace_engine::single_candidate_compile_test_lock().await
 }
 
 /// 以同一 persistent store 重建 engine，禁止测试通过内存 session 越过 durable 边界。

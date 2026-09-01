@@ -14,6 +14,7 @@ pub(crate) enum HumanGateRecoveryAction {
     ResumeSameTurn {
         next_attempt_no: u32,
     },
+    CompletedRevision,
     MarkFailed {
         failure_class: HumanGateTurnFailureClass,
     },
@@ -199,12 +200,13 @@ impl super::WorkspaceEngine {
                 expected = store
                     .update_human_gate_turn(&expected, completed)
                     .map_err(|error| error.to_string())?;
-                actions.push((turn.turn_id, HumanGateRecoveryAction::WaitForProvider));
+                actions.push((turn.turn_id, HumanGateRecoveryAction::CompletedRevision));
                 continue;
             }
             let action = recover_human_gate_turn(&turn, provider_is_running)?;
             match &action {
-                HumanGateRecoveryAction::WaitForProvider => {}
+                HumanGateRecoveryAction::WaitForProvider
+                | HumanGateRecoveryAction::CompletedRevision => {}
                 HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no } => {
                     let mut resumed = turn.clone();
                     resumed.status = HumanGateTurnStatus::Running;

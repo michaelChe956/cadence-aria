@@ -924,45 +924,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             return;
                         }
                     };
-                    let candidate = match engine
-                        .session()
-                        .artifact
-                        .as_ref()
-                        .and_then(|artifact| artifact.markdown())
-                    {
-                        Some(candidate) => candidate.to_string(),
-                        None => {
-                            let message = "current candidate markdown is missing".to_string();
-                            let _ = engine
-                                .fail_human_gate_turn(
-                                    &turn_id,
-                                    HumanGateTurnFailureClass::ProviderErr,
-                                )
-                                .await;
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let _ = send_json_outbound(
-                                &outbound_tx_for_task,
-                                &WsOutMessage::HumanGateTurnFailed {
-                                    turn_id,
-                                    failure_class: "provider_err".to_string(),
-                                    message,
-                                },
-                            )
-                            .await;
-                            return;
-                        }
-                    };
-                    let grammar = crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
-                    match crate::product::workspace_engine::build_sc_manual_revision_prompt(
-                        crate::product::workspace_engine::ScManualRevisionPromptInput {
-                            candidate_markdown: &candidate,
-                            feedback: &turn.feedback_text,
-                            grammar_boundary: &grammar,
-                            language_rule:
-                                crate::product::workspace_engine::LANGUAGE_RULE_FILE_CONTENT,
-                        },
-                    ) {
+                    match engine.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text) {
                         Ok(prompt) => prompt,
                         Err(message) => {
                             let _ = engine
@@ -1095,7 +1057,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     }
                 };
                 match engine
-                    .run_sc_manual_revision_turn(&turn_id, prompt, full_output)
+                    .run_sc_manual_revision_turn(&turn_id, full_output)
                     .await
                 {
                     Ok(crate::product::workspace_engine::ScManualRevisionResult::Accepted { artifact_ref }) => {
