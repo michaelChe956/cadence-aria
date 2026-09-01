@@ -11,7 +11,7 @@ use crate::product::coding_attempt_store::{
 use crate::product::coding_models::CodingAdmissionKind;
 use crate::product::issue_store::IssueStore;
 use crate::product::logical_codebase::{RepositoryRouting, resolve_issue_logical_codebase_id};
-use crate::product::models::{IssueWorkItemPlan, IssueWorkItemPlanStatus, WorkspaceType};
+use crate::product::models::{IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
@@ -182,7 +182,7 @@ impl WorkspaceEngine {
             });
         }
 
-        self.initialize_advance(input, advance_store, coding_store, authoritative, plan)
+        self.initialize_advance(input, advance_store, coding_store, authoritative)
             .await
             .map_err(|error| error.to_string())
     }
@@ -193,8 +193,10 @@ impl WorkspaceEngine {
         advance_store: AdvanceStore,
         coding_store: CodingAttemptStore,
         authoritative: AuthoritativeGroupPlanBinding,
-        plan: IssueWorkItemPlan,
     ) -> Result<AdvanceOutcome, String> {
+        let _initialization_guard = coding_store
+            .acquire_group_initialization_arbitration(&input.project_id, &input.issue_id)
+            .map_err(|error| format!("acquire advance initialization lock failed: {error}"))?;
         let record = advance_store
             .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
             .map_err(|error| format!("persist advance record failed: {error}"))?;
@@ -410,7 +412,6 @@ impl WorkspaceEngine {
         advance_store
             .update_record(&ready_record)
             .map_err(|error| format!("persist ready advance record failed: {error}"))?;
-        let _ = plan;
         let _ = final_journal;
         Ok(AdvanceOutcome::Completed {
             record: ready_record,
