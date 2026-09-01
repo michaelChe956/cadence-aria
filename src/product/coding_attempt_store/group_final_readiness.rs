@@ -63,8 +63,17 @@ fn validate_dependency_gate_snapshot(
     for unit_id in &snapshot.pending_unit_ids {
         validate_relative_id(unit_id)?;
     }
-    if let Some(unit_id) = snapshot.selected_unit_id.as_deref() {
-        validate_relative_id(unit_id)?;
+    for id in [
+        snapshot.selected_unit_id.as_deref(),
+        snapshot.dependency_unit_id.as_deref(),
+        snapshot.handoff_id.as_deref(),
+        snapshot.dependency_work_item_revision_id.as_deref(),
+        snapshot.handoff_work_item_revision_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_relative_id(id)?;
     }
     if snapshot.status == GroupDependencyGateStatus::Ready && snapshot.selected_unit_id.is_none() {
         return Err(ProductStoreError::InvalidRecord {

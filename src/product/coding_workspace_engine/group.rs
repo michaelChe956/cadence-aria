@@ -43,28 +43,49 @@ impl CodingWorkspaceEngine {
 
         let next = if attempt.admission_kind == CodingAdmissionKind::ScAdvance {
             let outcome = self.select_next_sc_group_unit(attempt)?;
-            self.persist_sc_group_dependency_gate_outcome(attempt, &outcome)?;
             match outcome {
-                GroupUnitSelectionOutcome::Ready { unit_id } => {
+                GroupUnitSelectionOutcome::Ready { unit_id, audit } => {
                     let next = units.iter().find(|unit| unit.id == unit_id).cloned();
                     let Some(next) = next else {
-                        return Err(CodingWorkspaceEngineError::ProviderProtocol(
-                            "SC dependency selector selected an unknown unit".to_string(),
-                        ));
+                        let failed = GroupUnitSelectionOutcome::FailedClosed {
+                            reason_code: "SC_GROUP_DEPENDENCY_UNKNOWN".to_string(),
+                            message: "SC dependency selector selected an unknown unit".to_string(),
+                            audit,
+                        };
+                        self.persist_sc_group_dependency_gate_outcome(attempt, &failed)?;
+                        return self
+                            .store
+                            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                            .map_err(CodingWorkspaceEngineError::from);
                     };
                     if !self
                         .store
                         .start_pending_coding_unit_run(attempt, &next.id)?
                     {
+                        let failed = GroupUnitSelectionOutcome::FailedClosed {
+                            reason_code: "SC_GROUP_UNIT_RUN_NOT_STARTABLE".to_string(),
+                            message: format!(
+                                "SC dependency-selected unit {} was not startable",
+                                next.id
+                            ),
+                            audit,
+                        };
+                        self.persist_sc_group_dependency_gate_outcome(attempt, &failed)?;
                         return self
                             .store
                             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
                             .map_err(CodingWorkspaceEngineError::from);
                     }
+                    let ready = GroupUnitSelectionOutcome::Ready {
+                        unit_id: next.id.clone(),
+                        audit,
+                    };
+                    self.persist_sc_group_dependency_gate_outcome(attempt, &ready)?;
                     Some(next)
                 }
                 GroupUnitSelectionOutcome::Waiting { .. }
                 | GroupUnitSelectionOutcome::FailedClosed { .. } => {
+                    self.persist_sc_group_dependency_gate_outcome(attempt, &outcome)?;
                     return self
                         .store
                         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)

@@ -16,6 +16,10 @@ pub struct GroupDependencyGateSnapshot {
     pub pending_unit_ids: Vec<String>,
     pub reason_code: Option<String>,
     pub message: Option<String>,
+    pub dependency_unit_id: Option<String>,
+    pub handoff_id: Option<String>,
+    pub dependency_work_item_revision_id: Option<String>,
+    pub handoff_work_item_revision_id: Option<String>,
     pub plan_revision_id: String,
     pub created_at: String,
 }
