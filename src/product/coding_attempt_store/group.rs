@@ -91,6 +91,7 @@ impl super::CodingAttemptStore {
         Ok(attempts.into_iter().next())
     }
 
+    #[cfg(test)]
     pub fn ensure_group_attempt_for_advance(
         &self,
         input: &CreateGroupCodingAttemptInput,
