@@ -224,15 +224,70 @@ impl WorkspaceEngine {
             .units
             .first()
             .ok_or_else(|| "authoritative group has no first unit".to_string())?;
-        let provider_config = Self::advance_provider_config(&self.session, current_unit);
-        let branch_name = format!("aria/issues/{}", input.issue_id);
-        let base_branch =
-            Self::current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
-        let worktree_path = repository
-            .path
-            .join(".worktrees")
-            .join("aria-issues")
-            .join(&input.issue_id);
+        let existing_group_journal = match coding_store.get_group_initialization(
+            &input.project_id,
+            &input.issue_id,
+            &input.plan_id,
+        ) {
+            Ok(journal) => {
+                if journal.attempt.admission_kind != CodingAdmissionKind::ScAdvance
+                    || journal.plan_binding.bound_plan_revision_id != authoritative.plan_revision_id
+                {
+                    return Err(
+                        "existing group initialization is bound to another advance identity"
+                            .to_string(),
+                    );
+                }
+                Some(journal)
+            }
+            Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => None,
+            Err(error) => {
+                return Err(format!(
+                    "load existing group initialization failed: {error}"
+                ));
+            }
+        };
+        let provider_config = existing_group_journal
+            .as_ref()
+            .map(|journal| ProviderConfigSnapshot {
+                author: journal.attempt.provider_config_snapshot.author.clone(),
+                reviewer: journal.attempt.provider_config_snapshot.reviewer.clone(),
+                review_rounds: journal.attempt.provider_config_snapshot.review_rounds,
+                permission_modes: journal
+                    .attempt
+                    .provider_config_snapshot
+                    .permission_modes
+                    .clone(),
+            })
+            .unwrap_or_else(|| Self::advance_provider_config(&self.session, current_unit));
+        let branch_name = existing_group_journal
+            .as_ref()
+            .map(|journal| journal.attempt.branch_name.clone())
+            .unwrap_or_else(|| format!("aria/issues/{}", input.issue_id));
+        let base_branch = existing_group_journal
+            .as_ref()
+            .map(|journal| journal.attempt.base_branch.clone())
+            .unwrap_or_else(|| {
+                Self::current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string())
+            });
+        let worktree_path = existing_group_journal
+            .as_ref()
+            .and_then(|journal| journal.attempt.worktree_path.clone())
+            .unwrap_or_else(|| {
+                repository
+                    .path
+                    .join(".worktrees")
+                    .join("aria-issues")
+                    .join(&input.issue_id)
+            });
+        let target_snapshot = existing_group_journal
+            .as_ref()
+            .and_then(|journal| journal.attempt.target_snapshot.clone())
+            .or(Self::advance_target_snapshot(
+                &advance_store.app_paths(),
+                &input,
+                &authoritative,
+            )?);
         let group_input = CreateGroupCodingAttemptInput {
             project_id: input.project_id.clone(),
             issue_id: input.issue_id.clone(),
@@ -242,21 +297,20 @@ impl WorkspaceEngine {
             branch_name,
             worktree_path: Some(worktree_path.clone()),
             provider_config_snapshot: provider_config,
-            target_snapshot: Self::advance_target_snapshot(
-                &advance_store.app_paths(),
-                &input,
-                &authoritative,
-            )?,
+            target_snapshot,
             max_auto_rework: 2,
         };
-        let group_journal = coding_store
-            .prepare_group_initialization_with_admission(
-                &group_input,
-                &authoritative.plan_revision_id,
-                &authoritative.units,
-                CodingAdmissionKind::ScAdvance,
-            )
-            .map_err(|error| format!("prepare group initialization failed: {error}"))?;
+        let group_journal = match existing_group_journal {
+            Some(journal) => journal,
+            None => coding_store
+                .prepare_group_initialization_with_admission(
+                    &group_input,
+                    &authoritative.plan_revision_id,
+                    &authoritative.units,
+                    CodingAdmissionKind::ScAdvance,
+                )
+                .map_err(|error| format!("prepare group initialization failed: {error}"))?,
+        };
         if group_journal.attempt.admission_kind != CodingAdmissionKind::ScAdvance {
             return Err("advance initialization journal is not an SC admission".to_string());
         }
