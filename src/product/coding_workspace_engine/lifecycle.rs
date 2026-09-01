@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
 use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::product::logical_codebase::provider_gateway::{
     ProviderGatewayError, SessionLaunchRequest, ValidatedSessionLaunchPolicy,
@@ -196,6 +196,13 @@ impl CodingWorkspaceEngine {
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         if current.scope == CodingAttemptScope::WorkItemGroup {
+            if current.status == CodingAttemptStatus::Created
+                && current.admission_kind == CodingAdmissionKind::ScAdvance
+            {
+                return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                    "SC advance attempt must be Ready before StartCoding".to_string(),
+                ));
+            }
             self.store.validate_group_attempt_integrity(&current)?;
         }
         let running = if current.status == CodingAttemptStatus::Running {
