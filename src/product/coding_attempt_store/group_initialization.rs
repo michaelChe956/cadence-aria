@@ -2,8 +2,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
-    CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingExecutionUnit, CodingExecutionUnitStatus,
+    CodingAdmissionKind, CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnit, CodingExecutionUnitStatus,
     CodingRoleProviderConfigSnapshot,
 };
 use crate::product::id::next_sequential_id;
@@ -104,12 +104,32 @@ impl super::CodingAttemptStore {
         bound_plan_revision_id: &str,
         unit_bindings: &[AuthoritativeCodingUnitBinding],
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
-        let routing =
-            RepositoryRouting::load_for_issue(&self.paths, &input.project_id, &input.issue_id)?;
-        validate_group_initialization_input(
+        self.prepare_group_initialization_with_admission(
             input,
             bound_plan_revision_id,
             unit_bindings,
+            CodingAdmissionKind::LegacyGroup,
+        )
+    }
+
+    pub fn prepare_group_initialization_with_admission(
+        &self,
+        input: &CreateGroupCodingAttemptInput,
+        bound_plan_revision_id: &str,
+        unit_bindings: &[AuthoritativeCodingUnitBinding],
+        admission_kind: CodingAdmissionKind,
+    ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
+        let routing =
+            RepositoryRouting::load_for_issue(&self.paths, &input.project_id, &input.issue_id)?;
+        let ordered_unit_bindings = if admission_kind == CodingAdmissionKind::ScAdvance {
+            topologically_order_unit_bindings(unit_bindings)?
+        } else {
+            unit_bindings.to_vec()
+        };
+        validate_group_initialization_input(
+            input,
+            bound_plan_revision_id,
+            &ordered_unit_bindings,
             &routing,
         )?;
         let path = self.group_initialization_journal_path(
@@ -120,7 +140,13 @@ impl super::CodingAttemptStore {
         if super::path_is_regular_file(&path)? {
             let journal: CodingGroupInitializationJournal = read_json(&path)?;
             validate_group_initialization_journal(&journal)?;
-            if journal_matches_request(&journal, input, bound_plan_revision_id, unit_bindings) {
+            if journal_matches_request(
+                &journal,
+                input,
+                bound_plan_revision_id,
+                &ordered_unit_bindings,
+                admission_kind,
+            ) {
                 return Ok(journal);
             }
             return Err(incomplete_group_attempt(
@@ -152,8 +178,12 @@ impl super::CodingAttemptStore {
             )));
         }
 
-        let journal =
-            self.build_group_initialization_journal(input, bound_plan_revision_id, unit_bindings)?;
+        let journal = self.build_group_initialization_journal(
+            input,
+            bound_plan_revision_id,
+            &ordered_unit_bindings,
+            admission_kind,
+        )?;
         write_json(&path, &journal)?;
         Ok(journal)
     }
@@ -433,6 +463,7 @@ impl super::CodingAttemptStore {
         input: &CreateGroupCodingAttemptInput,
         bound_plan_revision_id: &str,
         unit_bindings: &[AuthoritativeCodingUnitBinding],
+        admission_kind: CodingAdmissionKind,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         let id = self.allocate_coding_attempt_id();
         let attempt_no = self
@@ -459,6 +490,7 @@ impl super::CodingAttemptStore {
             version: 0,
             manual_recovery_reason: None,
             admission_ticket_consumed_at: None,
+            admission_kind,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch.clone(),
             branch_name: input.branch_name.clone(),
@@ -630,6 +662,7 @@ fn journal_matches_request(
     input: &CreateGroupCodingAttemptInput,
     bound_plan_revision_id: &str,
     unit_bindings: &[AuthoritativeCodingUnitBinding],
+    admission_kind: CodingAdmissionKind,
 ) -> bool {
     journal.project_id == input.project_id
         && journal.issue_id == input.issue_id
@@ -641,6 +674,7 @@ fn journal_matches_request(
         && journal.attempt.provider_config_snapshot == input.provider_config_snapshot
         && journal.attempt.target_snapshot == input.target_snapshot
         && journal.attempt.max_auto_rework == input.max_auto_rework
+        && journal.attempt.admission_kind == admission_kind
         && journal.plan_binding.bound_plan_revision_id == bound_plan_revision_id
         && journal.units.len() == unit_bindings.len()
         && journal
@@ -655,6 +689,93 @@ fn journal_matches_request(
             })
 }
 
+fn topologically_order_unit_bindings(
+    bindings: &[AuthoritativeCodingUnitBinding],
+) -> Result<Vec<AuthoritativeCodingUnitBinding>, ProductStoreError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let known = bindings
+        .iter()
+        .map(|binding| binding.logical_work_item_id.clone())
+        .collect::<BTreeSet<_>>();
+    if known.len() != bindings.len() {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "coding_group_dependency_graph",
+            id: "duplicate_work_item".to_string(),
+        });
+    }
+    let mut indegree = BTreeMap::new();
+    let mut dependents = BTreeMap::<String, Vec<String>>::new();
+    for binding in bindings {
+        let mut dependencies = BTreeSet::new();
+        for dependency in &binding.dependency_logical_work_item_ids {
+            if dependency == &binding.logical_work_item_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_dependency_graph",
+                    id: binding.logical_work_item_id.clone(),
+                });
+            }
+            if !known.contains(dependency) || !dependencies.insert(dependency.clone()) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_dependency_graph",
+                    id: dependency.clone(),
+                });
+            }
+            dependents
+                .entry(dependency.clone())
+                .or_default()
+                .push(binding.logical_work_item_id.clone());
+        }
+        indegree.insert(binding.logical_work_item_id.clone(), dependencies.len());
+    }
+    let original_order = bindings
+        .iter()
+        .enumerate()
+        .map(|(index, binding)| (binding.logical_work_item_id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let sort_ready = |ready: &mut Vec<String>| {
+        ready.sort_by(|left, right| {
+            original_order[left]
+                .cmp(&original_order[right])
+                .then_with(|| left.cmp(right))
+        });
+    };
+    sort_ready(&mut ready);
+    let mut ordered_ids = Vec::with_capacity(bindings.len());
+    while let Some(id) = ready.first().cloned() {
+        ready.remove(0);
+        ordered_ids.push(id.clone());
+        for dependent in dependents.get(&id).into_iter().flatten() {
+            let degree = indegree
+                .get_mut(dependent)
+                .expect("dependency endpoint was registered");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push(dependent.clone());
+            }
+        }
+        sort_ready(&mut ready);
+    }
+    if ordered_ids.len() != bindings.len() {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "coding_group_dependency_graph",
+            id: "cycle".to_string(),
+        });
+    }
+    let mut by_id = bindings
+        .iter()
+        .map(|binding| (binding.logical_work_item_id.clone(), binding.clone()))
+        .collect::<BTreeMap<_, _>>();
+    Ok(ordered_ids
+        .into_iter()
+        .map(|id| by_id.remove(&id).expect("ordered binding was registered"))
+        .collect())
+}
 fn same_group_initialization_identity(
     left: &CodingGroupInitializationJournal,
     right: &CodingGroupInitializationJournal,

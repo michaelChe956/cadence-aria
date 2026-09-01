@@ -996,6 +996,7 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
         version: 0,
         manual_recovery_reason: None,
         admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "HEAD".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),

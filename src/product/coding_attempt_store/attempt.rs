@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
 use crate::product::coding_models::WorkItemExecutionPlan;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingRoleProviderConfigSnapshot,
+    CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+    CodingExecutionStage, CodingRoleProviderConfigSnapshot,
 };
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
@@ -84,6 +84,7 @@ impl super::CodingAttemptStore {
             version: 0,
             manual_recovery_reason: None,
             admission_ticket_consumed_at: None,
+            admission_kind: CodingAdmissionKind::LegacyGroup,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
             branch_name: input.branch_name,
@@ -161,6 +162,7 @@ impl super::CodingAttemptStore {
                 version: stored.version,
                 manual_recovery_reason: stored.manual_recovery_reason,
                 admission_ticket_consumed_at: stored.admission_ticket_consumed_at,
+                admission_kind: stored.admission_kind,
                 stage: attempt.stage.clone(),
                 base_branch: attempt.base_branch.clone(),
                 branch_name: attempt.branch_name.clone(),

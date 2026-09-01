@@ -19,7 +19,8 @@ use std::process::Command;
 use axum::http::{Method, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_models::{
-    AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+    AttemptTargetSnapshot, CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus,
+ CodingExecutionAttempt,
     CodingExecutionStage,
 };
 use cadence_aria::product::json_store::write_json;
@@ -380,6 +381,7 @@ fn attempt_fixture(
         version: 0,
         manual_recovery_reason: None,
         admission_ticket_consumed_at: None,
+        admission_kind: CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),

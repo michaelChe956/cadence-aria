@@ -63,6 +63,14 @@ impl CodingAttemptStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingAdmissionKind {
+    #[default]
+    LegacyGroup,
+    ScAdvance,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderRole {
@@ -117,12 +125,11 @@ pub struct CodingExecutionAttempt {
     pub version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_recovery_reason: Option<String>,
-    /// Authoritative single-file marker written together with the Running transition.
-    ///
-    /// The admission ticket file is merely a pre-transition credential. Keeping consumption in
-    /// the attempt record prevents a second ticket-file write from creating a half-commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_ticket_consumed_at: Option<String>,
+    #[serde(default)]
+    pub admission_kind: CodingAdmissionKind,
+    /// Authoritative single-file marker written together with the Running transition.
     pub stage: CodingExecutionStage,
     pub base_branch: String,
     pub branch_name: String,
@@ -164,6 +171,8 @@ struct CodingExecutionAttemptSerde {
     manual_recovery_reason: Option<String>,
     #[serde(default)]
     admission_ticket_consumed_at: Option<String>,
+    #[serde(default)]
+    admission_kind: CodingAdmissionKind,
     stage: CodingExecutionStage,
     base_branch: String,
     branch_name: String,
@@ -213,6 +222,7 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             version: raw.version,
             manual_recovery_reason: raw.manual_recovery_reason,
             admission_ticket_consumed_at: raw.admission_ticket_consumed_at,
+            admission_kind: raw.admission_kind,
             stage: raw.stage,
             base_branch: raw.base_branch,
             branch_name: raw.branch_name,

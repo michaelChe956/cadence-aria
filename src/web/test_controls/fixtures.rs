@@ -365,6 +365,7 @@ fn create_coding_role_run_fixture(
         version: 0,
         manual_recovery_reason: None,
         admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: if blocked_stage_internal {
             FixtureStage::InternalPrReview
         } else {

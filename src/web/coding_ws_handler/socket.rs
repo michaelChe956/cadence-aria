@@ -6,7 +6,9 @@ use tokio::sync::mpsc;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
+use crate::product::coding_models::{
+    CodingAdmissionKind, CodingAttemptStatus, CodingExecutionStage,
+};
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
@@ -233,6 +235,20 @@ async fn handle_coding_socket(
                     }
                 };
                 if inbound == CodingWsInMessage::StartCoding {
+                    if current_attempt.admission_kind == CodingAdmissionKind::ScAdvance
+                        && current_attempt.status == CodingAttemptStatus::Created
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "SC_CODING_REQUIRES_ADVANCE".to_string(),
+                                message: "SC coding attempts must be made ready through advance before StartCoding".to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
                     if runner_started {
                         drop(mutation_lease);
                         let _ = send_coding_json(

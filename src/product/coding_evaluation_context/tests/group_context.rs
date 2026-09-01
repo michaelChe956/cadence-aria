@@ -144,6 +144,7 @@ fn group_attempt_fixture(
         version: 0,
         manual_recovery_reason: None,
         admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),

@@ -1,9 +1,9 @@
 use chrono::Utc;
 
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnit, CodingExecutionUnitStatus, CodingRoleProviderConfigSnapshot,
-    CodingUnitRunStatus,
+    CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+    CodingExecutionStage, CodingExecutionUnit, CodingExecutionUnitStatus,
+    CodingRoleProviderConfigSnapshot, CodingUnitRunStatus,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -91,6 +91,53 @@ impl super::CodingAttemptStore {
         Ok(attempts.into_iter().next())
     }
 
+    pub fn ensure_group_attempt_for_advance(
+        &self,
+        input: &CreateGroupCodingAttemptInput,
+        plan_revision_id: &str,
+        command_id: &str,
+        unit_bindings: &[super::group_validation::AuthoritativeCodingUnitBinding],
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        validate_relative_id(plan_revision_id)?;
+        validate_relative_id(command_id)?;
+        let _initialization_guard =
+            self.acquire_group_initialization_arbitration(&input.project_id, &input.issue_id)?;
+        let creation_guard = self.acquire_work_item_attempt_creation(
+            &input.project_id,
+            &input.issue_id,
+            &input.current_work_item_id,
+        )?;
+        if let Some(existing) = self.get_attempt_for_work_item_group(
+            &input.project_id,
+            &input.issue_id,
+            &input.plan_id,
+        )? {
+            if existing.admission_kind != CodingAdmissionKind::ScAdvance {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_attempt_admission_kind",
+                    id: existing.id,
+                });
+            }
+            let binding = self.get_plan_binding(&existing)?;
+            if binding.plan_id != input.plan_id
+                || binding.bound_plan_revision_id != plan_revision_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_attempt_plan_revision",
+                    id: existing.id,
+                });
+            }
+            return Ok(existing);
+        }
+        let journal = self.prepare_group_initialization_with_admission(
+            input,
+            plan_revision_id,
+            unit_bindings,
+            CodingAdmissionKind::ScAdvance,
+        )?;
+        self.ensure_group_initialization_attempt(&journal, &creation_guard)
+    }
+
     pub fn create_group_attempt(
         &self,
         input: CreateGroupCodingAttemptInput,
@@ -149,6 +196,7 @@ impl super::CodingAttemptStore {
             version: 0,
             manual_recovery_reason: None,
             admission_ticket_consumed_at: None,
+            admission_kind: CodingAdmissionKind::LegacyGroup,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
             branch_name: input.branch_name,
