@@ -150,7 +150,7 @@ async fn workspace_session_takeover_returns_interactive_child_and_associated_eve
         .as_str()
         .expect("child workspace session id");
     assert_eq!(response["workspace_type"], "work_item_plan");
-    assert_eq!(response["status"], "open");
+    assert_eq!(response["status"], "waiting_for_human");
     assert_eq!(response["parent_session_id"], fixture.parent_id);
     assert_eq!(
         response["takeover_event_id"],
@@ -160,9 +160,9 @@ async fn workspace_session_takeover_returns_interactive_child_and_associated_eve
         .store
         .get_workspace_session(child_id)
         .expect("takeover child persisted");
-    assert_eq!(child.status, WorkspaceSessionStatus::Open);
+    assert_eq!(child.status, WorkspaceSessionStatus::WaitingForHuman);
     assert_eq!(child.run_policy, RunPolicy::Interactive);
-    assert!(child.human_gate_snapshot.is_none());
+    assert_eq!(child.human_gate_snapshot, Some(human_gate(true)));
     assert_eq!(
         fixture
             .store

@@ -307,6 +307,7 @@ impl LifecycleStore {
         let parent = self.get_workspace_session(parent_session_id)?;
         if parent.workspace_type != WorkspaceType::WorkItemPlan
             || parent.status != WorkspaceSessionStatus::StoppedNeedsHuman
+            || parent.run_policy != crate::product::work_item_plan_policy::RunPolicy::AutoIfValid
             || !parent
                 .human_gate_snapshot
                 .as_ref()
@@ -315,6 +316,16 @@ impl LifecycleStore {
             return Err(ProductStoreError::InvalidRecord {
                 kind: "human_gate_takeover",
                 reason: "parent must be a resumable stopped work_item_plan session".to_string(),
+            });
+        }
+        if parent
+            .policy_diagnostics
+            .iter()
+            .any(|diagnostic| Self::is_fatal_takeover_diagnostic(&diagnostic.code))
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "human_gate_takeover",
+                reason: "parent contains a fatal or persistence diagnostic".to_string(),
             });
         }
 
@@ -337,7 +348,7 @@ impl LifecycleStore {
             }
 
             let child_id = format!("workspace_session_takeover_{}", parent.id);
-            let child = self.create_workspace_session_with_id(
+            let mut child = self.create_workspace_session_with_id(
                 CreateWorkspaceSessionInput {
                     project_id: parent.project_id.clone(),
                     issue_id: parent.issue_id.clone(),
@@ -356,6 +367,35 @@ impl LifecycleStore {
                 },
                 child_id,
             )?;
+
+            // A stopped auto session is the immutable source of truth for the
+            // interactive successor. Copy only resumable context and remaining
+            // budget; never copy a provider-start or in-flight reservation.
+            child.status = WorkspaceSessionStatus::WaitingForHuman;
+            child.permission_modes = parent.permission_modes.clone();
+            child.provisional_reviewer_provider = parent.provisional_reviewer_provider.clone();
+            child.reviewer_enabled_at_start = parent.reviewer_enabled_at_start;
+            child.run_history = parent.run_history.clone();
+            child.review_invocation_scope = parent.review_invocation_scope.clone();
+            child.human_gate_snapshot = parent.human_gate_snapshot.clone();
+            child.policy_diagnostics = parent.policy_diagnostics.clone();
+            child.single_candidate_phase = parent.single_candidate_phase;
+            child.work_item_plan_source_revision_ref =
+                parent.work_item_plan_source_revision_ref.clone();
+            child.plan_candidate_ir_ref = parent.plan_candidate_ir_ref.clone();
+            child.mechanical_report_ref = parent.mechanical_report_ref.clone();
+            child.publication_provenance_ref = parent.publication_provenance_ref.clone();
+            child.messages = parent.messages.clone();
+            child.provider_conversations = parent.provider_conversations.clone();
+            child.repair_reservation = None;
+            child.human_gate_reservation = None;
+            child.provider_start_ledger = Vec::new();
+            child.updated_at = Utc::now().to_rfc3339();
+            let child_path = self
+                .workspace_sessions_root(&parent.project_id, &parent.issue_id)
+                .join(format!("{}.json", child.id));
+            write_json(&child_path, &child)?;
+
             let event = HumanGateTakeoverEvent {
                 id: event_id,
                 parent_session_id: parent.id.clone(),
@@ -389,6 +429,20 @@ impl LifecycleStore {
             });
         }
         Ok(Some(event))
+    }
+
+    fn is_fatal_takeover_diagnostic(code: &str) -> bool {
+        matches!(
+            code,
+            "transition_budget_exhausted"
+                | "unknown_category"
+                | "unknown_class_hint"
+                | "invalid_structured_output"
+                | "state_corruption"
+                | "protocol_violation"
+                | "persistence_failure"
+                | "safety_invariant_violation"
+        )
     }
 
     pub fn list_workspace_sessions(

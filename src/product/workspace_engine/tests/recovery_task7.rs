@@ -310,8 +310,11 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
         child.run_policy,
         crate::product::work_item_plan_policy::RunPolicy::Interactive
     );
-    assert_eq!(child.status, WorkspaceSessionStatus::Open);
-    assert!(child.human_gate_snapshot.is_none());
+    assert_eq!(child.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert_eq!(
+        child.human_gate_snapshot,
+        persisted.human_gate_snapshot
+    );
     assert!(child.provider_start_ledger.is_empty());
     assert_eq!(
         serde_json::to_value(store.get_workspace_session(&persisted.id).unwrap()).unwrap(),
@@ -347,6 +350,168 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
         2,
         "the durable takeover event must prevent duplicate child creation"
     );
+}
+
+#[test]
+fn conversational_gate_takeover_inherits_snapshot_budget_and_refs() {
+    let (_tmp, store, _checkpoints) = recovery_store();
+    let parent = stopped_takeover_parent(&store, "work_item_plan_conversational_inherit", true);
+    store
+        .append_workspace_message(
+            &parent.id,
+            "assistant".to_string(),
+            "# Candidate\n\n## Work item\n\ncontent".to_string(),
+        )
+        .expect("persist candidate context");
+    let parent = store
+        .get_workspace_session(&parent.id)
+        .expect("reload stopped parent");
+    let parent_path = store
+        .app_paths()
+        .issue_lifecycle_root(&parent.project_id, &parent.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", parent.id));
+    let parent_bytes_before = std::fs::read(&parent_path).expect("read parent bytes");
+
+    let child = store
+        .takeover_stopped_needs_human(&parent.id)
+        .expect("takeover stopped run");
+
+    assert_eq!(
+        child.run_policy,
+        crate::product::work_item_plan_policy::RunPolicy::Interactive
+    );
+    assert_eq!(child.flow_kind, parent.flow_kind);
+    assert_eq!(child.human_gate_snapshot, parent.human_gate_snapshot);
+    assert_eq!(child.run_history, parent.run_history);
+    assert_eq!(child.review_invocation_scope, parent.review_invocation_scope);
+    assert_eq!(child.policy_diagnostics, parent.policy_diagnostics);
+    assert_eq!(
+        child.work_item_plan_source_revision_ref,
+        parent.work_item_plan_source_revision_ref
+    );
+    assert_eq!(child.plan_candidate_ir_ref, parent.plan_candidate_ir_ref);
+    assert_eq!(child.mechanical_report_ref, parent.mechanical_report_ref);
+    assert_eq!(
+        child.publication_provenance_ref,
+        parent.publication_provenance_ref
+    );
+    assert_eq!(child.messages, parent.messages);
+    assert_eq!(
+        std::fs::read(&parent_path).expect("read parent after takeover"),
+        parent_bytes_before
+    );
+}
+
+#[test]
+fn conversational_gate_takeover_replay_returns_same_child_without_parent_mutation() {
+    let (_tmp, store, _checkpoints) = recovery_store();
+    let parent = stopped_takeover_parent(&store, "work_item_plan_conversational_replay", true);
+    let parent_path = store
+        .app_paths()
+        .issue_lifecycle_root(&parent.project_id, &parent.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", parent.id));
+    let parent_bytes_before = std::fs::read(&parent_path).expect("read parent bytes");
+
+    let first = store
+        .takeover_stopped_needs_human(&parent.id)
+        .expect("first takeover");
+    let child_path = store
+        .app_paths()
+        .issue_lifecycle_root(&first.project_id, &first.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", first.id));
+    let child_bytes_before = std::fs::read(&child_path).expect("read child bytes");
+    let event = store
+        .get_human_gate_takeover_event(&parent.id)
+        .expect("read takeover event")
+        .expect("takeover event exists");
+    let event_path = store
+        .app_paths()
+        .issue_lifecycle_root(&parent.project_id, &parent.issue_id)
+        .join("human-gate-takeovers")
+        .join(format!("{}.json", event.id));
+    let event_bytes_before = std::fs::read(&event_path).expect("read event bytes");
+
+    let second = store
+        .takeover_stopped_needs_human(&parent.id)
+        .expect("replayed takeover");
+
+    assert_eq!(second.id, first.id);
+    assert_eq!(
+        std::fs::read(&parent_path).expect("read parent after replay"),
+        parent_bytes_before
+    );
+    assert_eq!(
+        std::fs::read(&child_path).expect("read child after replay"),
+        child_bytes_before
+    );
+    assert_eq!(
+        std::fs::read(&event_path).expect("read event after replay"),
+        event_bytes_before
+    );
+    assert_eq!(
+        store
+            .list_workspace_sessions(&parent.project_id, &parent.issue_id)
+            .expect("list sessions")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn conversational_gate_takeover_rejects_fatal_or_persistence_diagnostic() {
+    for diagnostic_code in ["state_corruption", "persistence_failure"] {
+        let (_tmp, store, _checkpoints) = recovery_store();
+        let parent = stopped_takeover_parent(
+            &store,
+            &format!("work_item_plan_conversational_{diagnostic_code}"),
+            true,
+        );
+        let parent = store
+            .compare_and_save_policy_route(
+                &parent,
+                PolicyRoutePersist {
+                    status: WorkspaceSessionStatus::StoppedNeedsHuman,
+                    single_candidate_phase: None,
+                    run_history: parent.run_history.clone(),
+                    scope: parent.review_invocation_scope.clone(),
+                    gate: parent.human_gate_snapshot.clone(),
+                    diagnostics: vec![
+                        crate::product::work_item_plan_policy::PolicyDiagnostic {
+                            code: diagnostic_code.to_string(),
+                            message: "fatal takeover diagnostic".to_string(),
+                            field: None,
+                        },
+                    ],
+                    repair_reservation: None,
+                    provider_start_ledger: Vec::new(),
+                },
+            )
+            .expect("persist fatal diagnostic");
+        let error = store
+            .takeover_stopped_needs_human(&parent.id)
+            .expect_err("fatal diagnostic must reject takeover");
+        assert!(matches!(
+            error,
+            ProductStoreError::InvalidRecord {
+                kind: "human_gate_takeover",
+                ..
+            }
+        ));
+        assert!(store
+            .get_human_gate_takeover_event(&parent.id)
+            .expect("read rejected event")
+            .is_none());
+        assert_eq!(
+            store
+                .list_workspace_sessions(&parent.project_id, &parent.issue_id)
+                .expect("list sessions after rejection")
+                .len(),
+            1
+        );
+    }
 }
 
 #[test]
