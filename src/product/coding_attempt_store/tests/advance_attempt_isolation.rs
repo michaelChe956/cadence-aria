@@ -118,13 +118,13 @@ fn advance_attempt_repeated_plan_returns_same_attempt() {
 }
 
 #[test]
-fn advance_attempt_units_follow_dependency_topology_with_stable_tie_break() {
+fn advance_attempt_units_follow_dependency_topology_with_order_index_tiebreak() {
     let (_tmp, store) = setup_store();
     let input = group_input("plan_0003", "work_item_a");
     let units = vec![
+        binding("work_item_b", &[]),
         binding("work_item_a", &[]),
         binding("work_item_c", &["work_item_a", "work_item_b"]),
-        binding("work_item_b", &[]),
     ];
 
     let attempt = store

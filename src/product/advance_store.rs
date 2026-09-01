@@ -46,6 +46,8 @@ pub struct AdvanceInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdvanceInitializationPhase {
+    /// The durable AdvanceRecord itself represents this checkpoint; no separate journal phase is
+    /// written until JournalPrepared has an attempt identity.
     RecordPersisted,
     JournalPrepared,
     AttemptPersisted,
@@ -367,7 +369,9 @@ impl AdvanceStore {
         validate_advance_initialization_journal(&journal, record)?;
         Ok(Some(journal))
     }
-    pub fn put_advance_initialization_if_absent(
+    /// This helper is retained for the legacy store-level API; production advance orchestration
+    /// uses the checkpointed engine path above.
+    pub(crate) fn put_advance_initialization_if_absent(
         &self,
         record: &AdvanceRecord,
         attempt_id: &str,
@@ -435,6 +439,8 @@ impl AdvanceStore {
         Ok(journal.clone())
     }
 
+    /// The group journal is the durable source for this phase; the outer journal only records the
+    /// corresponding checkpoint after the group-side write succeeds.
     pub fn load_or_prepare_advance_initialization(
         &self,
         record: &AdvanceRecord,
@@ -544,7 +550,6 @@ fn validate_advance_record_identity(record: &AdvanceRecord) -> Result<(), Produc
     Ok(())
 }
 
-#[allow(dead_code)]
 fn validate_advance_initialization_journal(
     journal: &AdvanceInitializationJournal,
     record: &AdvanceRecord,

@@ -125,11 +125,14 @@ pub struct CodingExecutionAttempt {
     pub version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_recovery_reason: Option<String>,
+    /// Authoritative single-file marker written together with the Running transition.
+    ///
+    /// The admission ticket file is merely a pre-transition credential. Keeping consumption in
+    /// the attempt record prevents a second ticket-file write from creating a half-commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_ticket_consumed_at: Option<String>,
     #[serde(default)]
     pub admission_kind: CodingAdmissionKind,
-    /// Authoritative single-file marker written together with the Running transition.
     pub stage: CodingExecutionStage,
     pub base_branch: String,
     pub branch_name: String,

@@ -752,22 +752,13 @@ fn topologically_order_unit_bindings(
         }
         indegree.insert(binding.logical_work_item_id.clone(), dependencies.len());
     }
-    let original_order = bindings
-        .iter()
-        .enumerate()
-        .map(|(index, binding)| (binding.logical_work_item_id.clone(), index))
-        .collect::<BTreeMap<_, _>>();
     let mut ready = indegree
         .iter()
         .filter(|(_, degree)| **degree == 0)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let sort_ready = |ready: &mut Vec<String>| {
-        ready.sort_by(|left, right| {
-            original_order[left]
-                .cmp(&original_order[right])
-                .then_with(|| left.cmp(right))
-        });
+        ready.sort();
     };
     sort_ready(&mut ready);
     let mut ordered_ids = Vec::with_capacity(bindings.len());
