@@ -2,6 +2,8 @@ use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 
 include!("tests/part_01.rs");
 mod advance_handler;
+#[path = "tests/advance_initialization.rs"]
+mod advance_initialization;
 include!("tests/part_02.rs");
 include!("tests/part_03.rs");
 include!("tests/part_03/task_3_4_oracles.rs");

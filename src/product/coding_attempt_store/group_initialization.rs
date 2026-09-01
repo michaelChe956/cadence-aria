@@ -400,6 +400,30 @@ impl super::CodingAttemptStore {
         Ok(expected.clone())
     }
 
+    pub fn mark_group_initialization_error(
+        &self,
+        journal: &CodingGroupInitializationJournal,
+        error: &str,
+    ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
+        validate_group_initialization_journal(journal)?;
+        let path = self.group_initialization_journal_path(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.plan_id,
+        );
+        let mut current: CodingGroupInitializationJournal = read_json(&path)?;
+        validate_group_initialization_journal(&current)?;
+        if !same_group_initialization_identity(&current, journal) {
+            return Err(incomplete_group_attempt(
+                &journal.attempt.id,
+                "initialization journal changed while recording failure",
+            ));
+        }
+        current.error = Some(error.to_string());
+        current.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &current)?;
+        Ok(current)
+    }
     pub fn advance_group_initialization_phase(
         &self,
         expected: &CodingGroupInitializationJournal,

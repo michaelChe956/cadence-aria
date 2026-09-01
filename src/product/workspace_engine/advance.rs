@@ -211,6 +211,17 @@ impl WorkspaceEngine {
         {
             if let Ok(Some(journal)) = advance_store.get_advance_initialization(&record) {
                 let _ = advance_store.mark_advance_initialization_error(&record, &journal, error);
+            } else if let Ok(group_journal) = CodingAttemptStore::new(advance_store.app_paths())
+                .get_group_initialization(&record.project_id, &record.issue_id, &record.plan_id)
+            {
+                let _ = CodingAttemptStore::new(advance_store.app_paths())
+                    .mark_group_initialization_error(&group_journal, error);
+                let mut failed = record.clone();
+                failed.status = AdvanceStatus::Failed;
+                failed.error = Some(error.clone());
+                failed.attempt_id = Some(group_journal.attempt.id);
+                failed.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = advance_store.update_record(&failed);
             } else if record.status == AdvanceStatus::Initializing {
                 let mut failed = record.clone();
                 failed.status = AdvanceStatus::Failed;
