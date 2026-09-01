@@ -246,7 +246,6 @@ impl WorkspaceEngine {
         let record = advance_store
             .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
             .map_err(|error| format!("persist advance record failed: {error}"))?;
-
         if record.plan_revision_id != authoritative.plan_revision_id {
             return Err(
                 "advance record plan revision differs from authoritative plan revision".to_string(),
