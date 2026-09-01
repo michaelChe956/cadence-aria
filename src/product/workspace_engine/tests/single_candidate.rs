@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use crate::product::workspace_engine::review::policy_routing::RoutingAction;
 
-fn single_candidate_record(
+pub(super) fn single_candidate_record(
     lifecycle: &LifecycleStore,
     engine: &mut WorkspaceEngine,
     phase: SingleCandidatePhase,

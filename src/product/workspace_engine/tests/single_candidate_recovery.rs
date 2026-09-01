@@ -177,7 +177,7 @@ async fn single_candidate_recovery_mark_transaction_recovery(
         .await;
 }
 
-fn single_candidate_recovery_record(
+pub(super) fn single_candidate_recovery_record(
     lifecycle: &LifecycleStore,
     engine: &mut WorkspaceEngine,
     phase: SingleCandidatePhase,

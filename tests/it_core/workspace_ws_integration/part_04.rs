@@ -50,6 +50,35 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
             },
         )
         .expect("create SC session");
+    let mut session_record = lifecycle
+        .get_workspace_session(&session.id)
+        .expect("load SC session");
+    session_record.status = cadence_aria::product::models::WorkspaceSessionStatus::WaitingForHuman;
+    session_record.single_candidate_phase = Some(
+        cadence_aria::product::models::SingleCandidatePhase::Approval,
+    );
+    session_record.human_gate_snapshot = Some(
+        cadence_aria::product::work_item_plan_policy::HumanGateSnapshot {
+            findings: vec![],
+            repeated_fingerprints: vec![],
+            attempts_used: 0,
+            manual_repairs_remaining: 1,
+            trigger: cadence_aria::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+            resumable: false,
+        },
+    );
+    session_record.messages.push(cadence_aria::product::models::WorkspaceMessageRecord {
+        role: "assistant".to_string(),
+        content: "# Work Item Plan\n".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+    let session_path = lifecycle
+        .app_paths()
+        .issue_root(&session_record.project_id, &session_record.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session_record.id));
+    cadence_aria::product::json_store::write_json(&session_path, &session_record)
+        .expect("persist SC approval state");
     let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -75,8 +104,10 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
     let response = recv_json(&mut ws).await;
     assert!(matches!(
         response,
-        WsOutMessage::ProtocolError { code, .. }
-            if code == "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID"
+        WsOutMessage::HumanGateTurnOpen {
+            ref command_id,
+            ..
+        } if command_id == "cmd-socket-gate"
     ));
 
     let _ = ws.close(None).await;

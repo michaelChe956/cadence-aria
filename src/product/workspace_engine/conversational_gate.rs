@@ -690,15 +690,17 @@ impl super::WorkspaceEngine {
                     .map_err(|error| error.to_string())?;
                 self.session.session_status = saved.status;
                 self.session.human_gate_snapshot = saved.human_gate_snapshot;
+                let terminal_stage = super::WorkspaceStage::Completed;
+                self.session.stage = terminal_stage.clone();
                 let _ = self
                     .event_tx
                     .send(super::EngineEvent::HumanGateClosed {
                         decision: "terminate".to_string(),
-                        stage: "completed".to_string(),
+                        stage: terminal_stage.as_str().to_string(),
                     })
                     .await;
                 self.complete_active_node(Some("已终止".to_string())).await;
-                self.transition_stage(super::WorkspaceStage::Completed).await;
+                self.transition_stage(terminal_stage).await;
                 let _ = self
                     .create_timeline_node(super::TimelineNodeDraft {
                         node_type: super::TimelineNodeType::Completed,
@@ -719,6 +721,3 @@ impl super::WorkspaceEngine {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _close_outcome_marker(_outcome: HumanGateCloseOutcome) {}

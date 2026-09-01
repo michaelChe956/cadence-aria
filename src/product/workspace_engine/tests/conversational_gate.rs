@@ -16,7 +16,7 @@ pub(super) fn gate_fixture(budget: u32) -> (TempDir, LifecycleStore, WorkspaceEn
     (root, lifecycle, engine)
 }
 
-fn gate_fixture_with_event_rx(
+pub(super) fn gate_fixture_with_event_rx(
     budget: u32,
 ) -> (
     TempDir,
@@ -79,7 +79,7 @@ fn gate_fixture_with_event_rx(
     (root, lifecycle, engine, event_rx)
 }
 
-fn feedback(command_id: &str) -> HumanGateFeedbackInput {
+pub(super) fn feedback(command_id: &str) -> HumanGateFeedbackInput {
     HumanGateFeedbackInput {
         command_id: command_id.to_string(),
         feedback: "只修正这个字段".to_string(),

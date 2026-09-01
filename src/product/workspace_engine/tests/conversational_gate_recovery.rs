@@ -1,9 +1,10 @@
 use crate::product::models::{HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus};
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::workspace_engine::conversational_gate_recovery::{
+    assert_human_gate_event_prefix_immutable, recover_human_gate_turn,
+};
 use crate::product::workspace_engine::{
-    HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction,
-    assert_human_gate_event_prefix_immutable, provider_run_kind_for_human_gate,
-    recover_human_gate_turn,
+    HUMAN_GATE_PROVIDER_MAX_ATTEMPTS, HumanGateRecoveryAction, provider_run_kind_for_human_gate,
 };
 
 fn turn(status: HumanGateTurnStatus, attempt_no: u32) -> HumanGateTurn {
