@@ -551,6 +551,8 @@ mod retry_push;
 mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;
 mod runtime_handoff_impact;
+#[path = "tests/sc_group_dependency_gate.rs"]
+mod sc_group_dependency_gate;
 mod schema_v2_runtime;
 
 #[test]

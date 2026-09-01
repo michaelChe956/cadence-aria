@@ -1,5 +1,8 @@
 use super::*;
-use crate::product::coding_models::{CodingAttemptScope, CodingExecutionUnitStatus};
+use crate::product::coding_models::{
+    CodingAdmissionKind, CodingAttemptScope, CodingExecutionUnitStatus,
+};
+use crate::product::coding_workspace_engine::group_dependency_gate::GroupUnitSelectionOutcome;
 
 impl CodingWorkspaceEngine {
     pub async fn complete_current_group_unit(
@@ -38,21 +41,55 @@ impl CodingWorkspaceEngine {
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
 
-        let mut next = None;
-        let mut pending_units = units
-            .iter()
-            .filter(|unit| unit.status == CodingExecutionUnitStatus::Pending)
-            .collect::<Vec<_>>();
-        pending_units.sort_by_key(|unit| unit.order_index);
-        for candidate in pending_units {
-            if self
-                .store
-                .start_pending_coding_unit_run(attempt, &candidate.id)?
-            {
-                next = Some(candidate);
-                break;
+        let next = if attempt.admission_kind == CodingAdmissionKind::ScAdvance {
+            let outcome = self.select_next_sc_group_unit(attempt)?;
+            self.persist_sc_group_dependency_gate_outcome(attempt, &outcome)?;
+            match outcome {
+                GroupUnitSelectionOutcome::Ready { unit_id } => {
+                    let next = units.iter().find(|unit| unit.id == unit_id).cloned();
+                    let Some(next) = next else {
+                        return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                            "SC dependency selector selected an unknown unit".to_string(),
+                        ));
+                    };
+                    if !self
+                        .store
+                        .start_pending_coding_unit_run(attempt, &next.id)?
+                    {
+                        return self
+                            .store
+                            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                            .map_err(CodingWorkspaceEngineError::from);
+                    }
+                    Some(next)
+                }
+                GroupUnitSelectionOutcome::Waiting { .. }
+                | GroupUnitSelectionOutcome::FailedClosed { .. } => {
+                    return self
+                        .store
+                        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                        .map_err(CodingWorkspaceEngineError::from);
+                }
+                GroupUnitSelectionOutcome::Complete => None,
             }
-        }
+        } else {
+            let mut pending_units = units
+                .iter()
+                .filter(|unit| unit.status == CodingExecutionUnitStatus::Pending)
+                .collect::<Vec<_>>();
+            pending_units.sort_by_key(|unit| unit.order_index);
+            let mut next = None;
+            for candidate in pending_units {
+                if self
+                    .store
+                    .start_pending_coding_unit_run(attempt, &candidate.id)?
+                {
+                    next = Some(candidate.clone());
+                    break;
+                }
+            }
+            next
+        };
         if let Some(next) = next {
             self.store.update_coding_unit_status(
                 &attempt.project_id,

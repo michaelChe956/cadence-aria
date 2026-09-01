@@ -63,6 +63,7 @@ mod gates;
 mod git_operation;
 mod group;
 mod group_completion;
+mod group_dependency_gate;
 mod group_final_readiness;
 mod group_review_budget;
 mod group_review_errors;

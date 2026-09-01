@@ -83,6 +83,14 @@ impl super::CodingAttemptStore {
             .join("admission-ticket.json")
     }
 
+    pub(crate) fn group_dependency_gate_snapshot_path(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> PathBuf {
+        self.attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("group-dependency-gate.json")
+    }
+
     pub(crate) fn group_final_readiness_snapshot_path(
         &self,
         attempt: &crate::product::coding_models::CodingExecutionAttempt,

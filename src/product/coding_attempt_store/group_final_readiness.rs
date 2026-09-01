@@ -1,7 +1,8 @@
 use chrono::Utc;
 
 use crate::product::coding_models::{
-    CodingExecutionAttempt, GroupFinalReadinessSnapshot, GroupFinalReadinessStatus,
+    CodingExecutionAttempt, GroupDependencyGateSnapshot, GroupDependencyGateStatus,
+    GroupFinalReadinessSnapshot, GroupFinalReadinessStatus,
 };
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
@@ -9,7 +10,91 @@ use crate::product::json_store::{
 use crate::product::models::PlanDefectEvidence;
 
 const SNAPSHOT_KIND: &str = "group_final_readiness_snapshot";
+const DEPENDENCY_GATE_SNAPSHOT_KIND: &str = "group_dependency_gate_snapshot";
 
+impl super::CodingAttemptStore {
+    pub fn write_group_dependency_gate_snapshot(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        snapshot: &GroupDependencyGateSnapshot,
+    ) -> Result<(), ProductStoreError> {
+        let stored_attempt = self.validate_attempt_lineage(attempt)?;
+        if snapshot.attempt_id != stored_attempt.id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: DEPENDENCY_GATE_SNAPSHOT_KIND,
+                id: snapshot.attempt_id.clone(),
+            });
+        }
+        validate_dependency_gate_snapshot(snapshot)?;
+        let mut snapshot = snapshot.clone();
+        snapshot.created_at = Utc::now().to_rfc3339();
+        write_json(
+            &self.group_dependency_gate_snapshot_path(&stored_attempt),
+            &snapshot,
+        )
+    }
+
+    pub fn get_group_dependency_gate_snapshot(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Option<GroupDependencyGateSnapshot>, ProductStoreError> {
+        let stored_attempt = self.validate_attempt_lineage(attempt)?;
+        let path = self.group_dependency_gate_snapshot_path(&stored_attempt);
+        if !super::path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        let snapshot: GroupDependencyGateSnapshot = read_json(&path)?;
+        if snapshot.attempt_id != stored_attempt.id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: DEPENDENCY_GATE_SNAPSHOT_KIND,
+                id: snapshot.attempt_id.clone(),
+            });
+        }
+        validate_dependency_gate_snapshot(&snapshot)?;
+        Ok(Some(snapshot))
+    }
+}
+
+fn validate_dependency_gate_snapshot(
+    snapshot: &GroupDependencyGateSnapshot,
+) -> Result<(), ProductStoreError> {
+    validate_relative_id(&snapshot.attempt_id)?;
+    validate_relative_id(&snapshot.plan_revision_id)?;
+    for unit_id in &snapshot.pending_unit_ids {
+        validate_relative_id(unit_id)?;
+    }
+    if let Some(unit_id) = snapshot.selected_unit_id.as_deref() {
+        validate_relative_id(unit_id)?;
+    }
+    if snapshot.status == GroupDependencyGateStatus::Ready && snapshot.selected_unit_id.is_none() {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: DEPENDENCY_GATE_SNAPSHOT_KIND,
+            reason: "ready snapshot must include selected unit".to_string(),
+        });
+    }
+    if snapshot.status != GroupDependencyGateStatus::Ready && snapshot.selected_unit_id.is_some() {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: DEPENDENCY_GATE_SNAPSHOT_KIND,
+            reason: "non-ready snapshot must not include selected unit".to_string(),
+        });
+    }
+    if snapshot.status == GroupDependencyGateStatus::Waiting && snapshot.pending_unit_ids.is_empty()
+    {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: DEPENDENCY_GATE_SNAPSHOT_KIND,
+            reason: "waiting snapshot must include pending units".to_string(),
+        });
+    }
+    if snapshot.status == GroupDependencyGateStatus::FailedClosed
+        && (snapshot.reason_code.is_none() || snapshot.message.is_none())
+    {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: DEPENDENCY_GATE_SNAPSHOT_KIND,
+            reason: "failed-closed snapshot must include reason and message".to_string(),
+        });
+    }
+    Ok(())
+}
 impl super::CodingAttemptStore {
     pub fn write_group_final_readiness_snapshot(
         &self,
