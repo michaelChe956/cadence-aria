@@ -194,6 +194,57 @@ mod tests {
             .expect("completed unrelated unit");
     }
 
+    fn provider_ledger_count(fixture: &Fixture) -> usize {
+        fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("provider ledger")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn sc_group_dependency_waiting_clears_active_unit_and_writes_no_provider_ledger() {
+        let fixture = fixture();
+        complete_unit_without_handoff(&fixture, "work_item_0003");
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        assert!(current.active_unit_id.is_some());
+        let before = provider_ledger_count(&fixture);
+
+        let updated = fixture
+            .engine
+            .advance_to_next_group_unit(&current)
+            .await
+            .expect("waiting advance");
+
+        assert!(updated.active_unit_id.is_none());
+        assert_eq!(
+            updated.current_work_item_id.as_deref(),
+            Some("work_item_0001")
+        );
+        let snapshot = fixture
+            .store
+            .get_group_dependency_gate_snapshot(&updated)
+            .expect("gate snapshot")
+            .expect("waiting snapshot");
+        assert_eq!(
+            snapshot.status,
+            crate::product::coding_models::GroupDependencyGateStatus::Waiting
+        );
+        assert_eq!(snapshot.pending_unit_ids.len(), 1);
+        assert_eq!(provider_ledger_count(&fixture), before);
+    }
+
     #[test]
     fn sc_group_dependency_gate_blocks_consumer_until_dependency_completed_and_handoff_published() {
         let fixture = fixture();
@@ -256,6 +307,97 @@ mod tests {
             assert!(pending_unit_ids.contains(&unit(&fixture, "work_item_0002").id));
             assert!(!message.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn sc_group_dependency_gate_fails_closed_on_mismatched_handoff_without_start_or_provider_ledger()
+     {
+        let fixture = fixture();
+        complete_unit_without_handoff(&fixture, "work_item_0003");
+        completed_run(&fixture, "work_item_0001", "commit_0001");
+        let dependency = unit(&fixture, "work_item_0001");
+        let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &dependency.plan_id,
+            )
+            .expect("lineage");
+        let mismatched_handoff = HandoffRevision {
+            id: "handoff_mismatch_0001".to_string(),
+            logical_work_item_id: dependency.logical_work_item_id.clone(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            coding_unit_run_id: format!("{}_run_0001", dependency.id),
+            provided_contracts: Vec::new(),
+            provided_capabilities: BTreeMap::new(),
+            contract_hash: "contract_hash_0001".to_string(),
+            commit_sha: "commit_0001".to_string(),
+            created_at: "2026-08-31T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_handoff_revision(&lineage, &mismatched_handoff)
+            .expect("mismatched handoff");
+        fixture
+            .store
+            .update_coding_unit_latest_handoff_revision_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &dependency.id,
+                Some(mismatched_handoff.id.clone()),
+            )
+            .expect("mismatched pointer");
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        let before = provider_ledger_count(&fixture);
+
+        let updated = fixture
+            .engine
+            .advance_to_next_group_unit(&current)
+            .await
+            .expect("mismatch advance");
+
+        assert!(updated.active_unit_id.is_none());
+        let snapshot = fixture
+            .store
+            .get_group_dependency_gate_snapshot(&updated)
+            .expect("gate snapshot")
+            .expect("failed-closed snapshot");
+        assert_eq!(
+            snapshot.status,
+            crate::product::coding_models::GroupDependencyGateStatus::FailedClosed
+        );
+        assert_eq!(
+            snapshot.reason_code.as_deref(),
+            Some("SC_GROUP_HANDOFF_PLAN_BINDING_MISMATCH")
+        );
+        assert_eq!(
+            snapshot.handoff_id.as_deref(),
+            Some("handoff_mismatch_0001")
+        );
+        assert_eq!(
+            snapshot.dependency_work_item_revision_id.as_deref(),
+            Some("work_item_revision_0001")
+        );
+        assert_eq!(
+            snapshot.handoff_work_item_revision_id.as_deref(),
+            Some("work_item_revision_0002")
+        );
+        assert_eq!(provider_ledger_count(&fixture), before);
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&updated, &unit(&fixture, "work_item_0002").id)
+                .expect("consumer runs")
+                .is_empty()
+        );
     }
 
     #[test]

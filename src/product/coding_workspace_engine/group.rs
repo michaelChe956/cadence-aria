@@ -86,6 +86,17 @@ impl CodingWorkspaceEngine {
                 GroupUnitSelectionOutcome::Waiting { .. }
                 | GroupUnitSelectionOutcome::FailedClosed { .. } => {
                     self.persist_sc_group_dependency_gate_outcome(attempt, &outcome)?;
+                    let mut persisted = self.store.get_attempt(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                    )?;
+                    // Dependency waiting/fail-closed is not an executable unit state. Clear
+                    // only the execution-authority pointer; current_work_item_id remains the
+                    // progress/display pointer for the next pending work item.
+                    persisted.active_unit_id = None;
+                    persisted.updated_at = Utc::now().to_rfc3339();
+                    self.store.update_attempt_non_status_fields(&persisted)?;
                     return self
                         .store
                         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
