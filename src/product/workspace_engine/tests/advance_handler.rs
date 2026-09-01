@@ -9,6 +9,11 @@ use crate::product::models::{
     WorkItemDraftVerificationPlan, WorkItemGenerationMode,
 };
 use crate::product::repository_store::RepositoryStore;
+#[cfg(test)]
+use crate::product::workspace_engine::{
+    AdvanceInitializationFailpoint, AdvanceInitializationFailpointMode,
+    register_advance_initialization_failpoint,
+};
 
 const PROJECT_ID: &str = "project_advance";
 const ISSUE_ID: &str = "issue_advance";
@@ -68,7 +73,7 @@ fn confirmed_plan(lifecycle: &LifecycleStore, work_item_ids: Vec<String>) {
         .unwrap();
 }
 
-fn active_lineage(lifecycle: &LifecycleStore) {
+fn active_lineage(lifecycle: &LifecycleStore, active_amendment_id: Option<&str>) {
     let revision_store =
         crate::product::work_item_revision_store::WorkItemRevisionStore::new(lifecycle.app_paths());
     let lineage = WorkItemPlanLineage {
@@ -78,7 +83,7 @@ fn active_lineage(lifecycle: &LifecycleStore) {
         story_spec_refs: Vec::new(),
         design_spec_refs: Vec::new(),
         active_revision_id: Some("revision_advance".to_string()),
-        active_amendment_id: None,
+        active_amendment_id: active_amendment_id.map(str::to_string),
         created_at: "2026-08-31T00:00:00Z".to_string(),
         updated_at: "2026-08-31T00:00:00Z".to_string(),
     };
@@ -161,6 +166,58 @@ fn input(command_id: &str) -> AdvanceInput {
         project_id: PROJECT_ID.to_string(),
         issue_id: ISSUE_ID.to_string(),
         plan_id: PLAN_ID.to_string(),
+    }
+}
+
+fn build_advance_engine(root: &TempDir, lifecycle: LifecycleStore) -> WorkspaceEngine {
+    let session_record = lifecycle
+        .list_workspace_sessions("project_0001", "issue_plan_0001")
+        .unwrap()
+        .into_iter()
+        .find(|session| {
+            session.workspace_type == WorkspaceType::WorkItemPlan
+                && session.entity_id == "work_item_plan_0001"
+        })
+        .expect("fixture plan workspace session");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle,
+        event_tx,
+        WorkspaceSession::from_record(session_record),
+    )
+}
+
+async fn advance_fixture() -> (TempDir, ProductAppPaths, LifecycleStore, WorkspaceEngine) {
+    let root = tempfile::tempdir().unwrap();
+    crate::web::test_controls::PlanRepairFixtureRuntime::seed(
+        root.path(),
+        crate::web::test_controls::PlanRepairFixtureControl::default(),
+    )
+    .await
+    .expect("seed authoritative advance fixture");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let coding_store =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+    let seeded_attempt = coding_store
+        .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .unwrap()
+        .expect("seeded group attempt");
+    coding_store
+        .delete_attempt("project_0001", "issue_plan_0001", &seeded_attempt.id)
+        .unwrap();
+    seed_advance_draft_records(&app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let engine = build_advance_engine(&root, lifecycle.clone());
+    (root, app_paths, lifecycle, engine)
+}
+
+fn fixture_input(command_id: &str) -> AdvanceInput {
+    AdvanceInput {
+        command_id: command_id.to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_plan_0001".to_string(),
+        plan_id: "work_item_plan_0001".to_string(),
     }
 }
 
@@ -636,6 +693,211 @@ async fn advance_checkpoint_recovery_reuses_materialized_units_without_duplicate
 }
 
 #[tokio::test]
+async fn advance_initialization_replay_resumes_same_record_attempt_and_units() {
+    let checkpoints = [
+        AdvanceInitializationFailpoint::RecordPersisted,
+        AdvanceInitializationFailpoint::JournalPrepared,
+        AdvanceInitializationFailpoint::AttemptPersisted,
+        AdvanceInitializationFailpoint::WorktreeBound,
+        AdvanceInitializationFailpoint::PlanBindingSaved,
+        AdvanceInitializationFailpoint::UnitsMaterialized,
+    ];
+    for checkpoint in checkpoints {
+        let (root, app_paths, lifecycle, mut engine) = advance_fixture().await;
+        let command_id = format!("command_failpoint_{checkpoint:?}");
+        let request = fixture_input(&command_id);
+        let _failpoint = register_advance_initialization_failpoint(
+            &request,
+            checkpoint,
+            AdvanceInitializationFailpointMode::Crash,
+        );
+        let first = tokio::spawn(async move { engine.handle_advance(request).await });
+        assert!(
+            first.await.is_err(),
+            "{checkpoint:?} must interrupt the engine"
+        );
+
+        let advance_store = AdvanceStore::new(app_paths.clone());
+        let first_record = advance_store
+            .get_advance_by_command_id("project_0001", "issue_plan_0001", &command_id)
+            .unwrap()
+            .expect("record is durable before every checkpoint");
+        let first_outer = advance_store
+            .get_advance_initialization(&first_record)
+            .unwrap();
+        let coding_store =
+            crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+        let first_group = coding_store
+            .get_group_initialization("project_0001", "issue_plan_0001", "work_item_plan_0001")
+            .ok();
+        let first_attempt_id = first_group.as_ref().map(|group| group.attempt.id.clone());
+        let first_unit_ids = first_group.as_ref().map(|group| {
+            group
+                .units
+                .iter()
+                .map(|unit| unit.id.clone())
+                .collect::<Vec<_>>()
+        });
+        match checkpoint {
+            AdvanceInitializationFailpoint::RecordPersisted => {
+                assert!(first_outer.is_none());
+                assert!(first_group.is_none());
+            }
+            AdvanceInitializationFailpoint::JournalPrepared => {
+                assert_eq!(
+                    first_outer.as_ref().map(|journal| journal.phase),
+                    Some(AdvanceInitializationPhase::JournalPrepared)
+                );
+                assert_eq!(
+                    first_group.as_ref().map(|group| group.phase),
+                    Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::Prepared)
+                );
+            }
+            AdvanceInitializationFailpoint::AttemptPersisted => {
+                assert_eq!(
+                    first_outer.as_ref().map(|journal| journal.phase),
+                    Some(AdvanceInitializationPhase::JournalPrepared)
+                );
+                assert_eq!(
+                    first_group.as_ref().map(|group| group.phase),
+                    Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::AttemptPersisted)
+                );
+            }
+            AdvanceInitializationFailpoint::WorktreeBound => {
+                assert_eq!(
+                    first_outer.as_ref().map(|journal| journal.phase),
+                    Some(AdvanceInitializationPhase::AttemptPersisted)
+                );
+                assert_eq!(
+                    first_group.as_ref().map(|group| group.phase),
+                    Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::WorktreeBound)
+                );
+            }
+            AdvanceInitializationFailpoint::PlanBindingSaved => {
+                assert_eq!(
+                    first_outer.as_ref().map(|journal| journal.phase),
+                    Some(AdvanceInitializationPhase::PlanBindingSaved)
+                );
+                assert_eq!(
+                    first_group.as_ref().map(|group| group.phase),
+                    Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::PlanBindingSaved)
+                );
+            }
+            AdvanceInitializationFailpoint::UnitsMaterialized => {
+                assert_eq!(
+                    first_outer.as_ref().map(|journal| journal.phase),
+                    Some(AdvanceInitializationPhase::UnitsMaterialized)
+                );
+                assert_eq!(
+                    first_group.as_ref().map(|group| group.phase),
+                    Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::UnitsMaterialized)
+                );
+            }
+            AdvanceInitializationFailpoint::GroupAttemptPersisted => unreachable!(),
+        }
+
+        let mut restarted = build_advance_engine(&root, lifecycle);
+        let outcome = restarted
+            .handle_advance(fixture_input(&command_id))
+            .await
+            .expect("restart must resume the interrupted initialization");
+        assert!(matches!(outcome, AdvanceOutcome::Completed { .. }));
+        let final_record = advance_store
+            .get_advance_by_command_id("project_0001", "issue_plan_0001", &command_id)
+            .unwrap()
+            .expect("final record");
+        assert_eq!(final_record.id, first_record.id);
+        let final_group = coding_store
+            .get_group_initialization("project_0001", "issue_plan_0001", "work_item_plan_0001")
+            .unwrap();
+        if let Some(first_attempt_id) = first_attempt_id {
+            assert_eq!(final_group.attempt.id, first_attempt_id);
+        }
+        if let Some(first_unit_ids) = first_unit_ids {
+            assert_eq!(
+                final_group
+                    .units
+                    .iter()
+                    .map(|unit| unit.id.clone())
+                    .collect::<Vec<_>>(),
+                first_unit_ids
+            );
+        }
+        assert_eq!(
+            coding_store
+                .list_attempts_for_issue("project_0001", "issue_plan_0001")
+                .unwrap()
+                .len(),
+            1
+        );
+        let replay = restarted
+            .handle_advance(fixture_input(&format!("{command_id}_replay")))
+            .await
+            .expect("completed advance replay");
+        assert!(matches!(
+            replay,
+            AdvanceOutcome::Replayed { record } if record.status == AdvanceStatus::Ready
+        ));
+    }
+}
+
+#[tokio::test]
+async fn advance_initialization_engine_failure_is_durable_on_record_and_journal() {
+    let (root, app_paths, lifecycle, mut engine) = advance_fixture().await;
+    let request = fixture_input("command_engine_failure");
+    let _failpoint = register_advance_initialization_failpoint(
+        &request,
+        AdvanceInitializationFailpoint::PlanBindingSaved,
+        AdvanceInitializationFailpointMode::Error,
+    );
+    let error = engine
+        .handle_advance(request)
+        .await
+        .expect_err("injected engine failure must be returned");
+    assert!(error.contains("advance_initialization_failpoint:PlanBindingSaved"));
+    let store = AdvanceStore::new(app_paths);
+    let record = store
+        .get_advance_by_command_id("project_0001", "issue_plan_0001", "command_engine_failure")
+        .unwrap()
+        .expect("failed record");
+    assert_eq!(record.status, AdvanceStatus::Failed);
+    assert!(record.error.is_some());
+    let journal = store
+        .get_advance_initialization(&record)
+        .unwrap()
+        .expect("failed initialization journal");
+    assert_eq!(journal.error, record.error);
+    assert!(
+        lifecycle
+            .list_workspace_sessions("project_0001", "issue_plan_0001")
+            .unwrap()
+            .iter()
+            .all(|session| session.provider_start_ledger.is_empty())
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn advance_rejects_active_amendment_without_any_durable_write() {
+    let root = TempDir::new().unwrap();
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    confirmed_plan(&lifecycle, Vec::new());
+    active_lineage(&lifecycle, Some("amendment_active"));
+    let mut engine = engine_fixture(&root, lifecycle);
+    let outcome = engine.handle_advance(input(COMMAND_ID)).await.unwrap();
+    assert!(
+        matches!(outcome, AdvanceOutcome::Rejected { code, .. } if code == "ADVANCE_ACTIVE_PLAN_REVISION")
+    );
+    assert!(
+        !app_paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("advance-records")
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn advance_rejects_unconfirmed_plan_without_any_durable_write() {
     let root = TempDir::new().unwrap();
     let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -674,7 +936,7 @@ async fn advance_rejects_missing_child_session_without_any_durable_write() {
     let root = TempDir::new().unwrap();
     let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
     confirmed_plan(&lifecycle, vec!["work_item_missing".to_string()]);
-    active_lineage(&lifecycle);
+    active_lineage(&lifecycle, None);
     let mut engine = engine_fixture(&root, lifecycle);
     let outcome = engine.handle_advance(input(COMMAND_ID)).await.unwrap();
     assert!(
@@ -694,7 +956,7 @@ async fn advance_rejects_active_compile_or_revision_without_any_durable_write() 
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
     confirmed_plan(&lifecycle, Vec::new());
-    active_lineage(&lifecycle);
+    active_lineage(&lifecycle, None);
     WorkItemPlanStore::new(app_paths)
         .put_compile_transaction(&WorkItemPlanCompileTransaction {
             compile_id: "compile_active".to_string(),

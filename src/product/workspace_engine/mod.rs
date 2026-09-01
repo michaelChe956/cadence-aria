@@ -72,6 +72,11 @@ use crate::web::workspace_ws_types::{
 };
 
 mod advance;
+#[cfg(test)]
+pub(crate) use advance::{
+    AdvanceInitializationFailpoint, AdvanceInitializationFailpointMode,
+    register_advance_initialization_failpoint,
+};
 pub mod aggregate_output_parser;
 mod artifact_constraints;
 mod author_confirm;

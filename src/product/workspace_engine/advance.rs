@@ -1,5 +1,157 @@
 use std::process::Command;
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AdvanceInitializationFailpoint {
+    RecordPersisted,
+    JournalPrepared,
+    GroupAttemptPersisted,
+    AttemptPersisted,
+    WorktreeBound,
+    PlanBindingSaved,
+    UnitsMaterialized,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvanceInitializationFailpointAction {
+    Crash,
+    Error,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdvanceInitializationFailpointMode {
+    Crash,
+    Error,
+}
+
+#[cfg(test)]
+fn maybe_fail_advance_initialization(
+    input: &AdvanceInput,
+    checkpoint: AdvanceInitializationFailpoint,
+) -> Result<(), String> {
+    let key = AdvanceInitializationFailpointKey {
+        project_id: input.project_id.clone(),
+        issue_id: input.issue_id.clone(),
+        plan_id: input.plan_id.clone(),
+        command_id: input.command_id.clone(),
+        checkpoint,
+    };
+    let action = advance_initialization_failpoints()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&key)
+        .map(|(_, action)| action);
+    match action {
+        Some(AdvanceInitializationFailpointAction::Crash) => {
+            panic!("advance_initialization_failpoint:{checkpoint:?}");
+        }
+        Some(AdvanceInitializationFailpointAction::Error) => {
+            Err(format!("advance_initialization_failpoint:{checkpoint:?}"))
+        }
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(test))]
+fn maybe_fail_advance_initialization(
+    _input: &AdvanceInput,
+    _checkpoint: AdvanceInitializationFailpoint,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn register_advance_initialization_failpoint(
+    input: &AdvanceInput,
+    checkpoint: AdvanceInitializationFailpoint,
+    mode: AdvanceInitializationFailpointMode,
+) -> AdvanceInitializationFailpointGuard {
+    let key = AdvanceInitializationFailpointKey {
+        project_id: input.project_id.clone(),
+        issue_id: input.issue_id.clone(),
+        plan_id: input.plan_id.clone(),
+        command_id: input.command_id.clone(),
+        checkpoint,
+    };
+    let registration_id =
+        NEXT_ADVANCE_INITIALIZATION_FAILPOINT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let action = match mode {
+        AdvanceInitializationFailpointMode::Crash => AdvanceInitializationFailpointAction::Crash,
+        AdvanceInitializationFailpointMode::Error => AdvanceInitializationFailpointAction::Error,
+    };
+    let previous = advance_initialization_failpoints()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.clone(), (registration_id, action));
+    assert!(
+        previous.is_none(),
+        "advance initialization failpoint already registered"
+    );
+    AdvanceInitializationFailpointGuard {
+        key,
+        registration_id,
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AdvanceInitializationFailpointKey {
+    project_id: String,
+    issue_id: String,
+    plan_id: String,
+    command_id: String,
+    checkpoint: AdvanceInitializationFailpoint,
+}
+
+#[cfg(test)]
+pub(crate) struct AdvanceInitializationFailpointGuard {
+    key: AdvanceInitializationFailpointKey,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static ADVANCE_INITIALIZATION_FAILPOINTS: OnceLock<
+    Mutex<
+        std::collections::HashMap<
+            AdvanceInitializationFailpointKey,
+            (u64, AdvanceInitializationFailpointAction),
+        >,
+    >,
+> = OnceLock::new();
+
+#[cfg(test)]
+static NEXT_ADVANCE_INITIALIZATION_FAILPOINT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(test)]
+fn advance_initialization_failpoints() -> &'static Mutex<
+    std::collections::HashMap<
+        AdvanceInitializationFailpointKey,
+        (u64, AdvanceInitializationFailpointAction),
+    >,
+> {
+    ADVANCE_INITIALIZATION_FAILPOINTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+impl Drop for AdvanceInitializationFailpointGuard {
+    fn drop(&mut self) {
+        let mut failpoints = advance_initialization_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if failpoints
+            .get(&self.key)
+            .is_some_and(|(registration_id, _)| *registration_id == self.registration_id)
+        {
+            failpoints.remove(&self.key);
+        }
+    }
+}
+
 pub use crate::product::advance_store::{
     AdvanceInitializationPhase, AdvanceInput, AdvanceOutcome, AdvanceRecord, AdvanceStatus,
     AdvanceStore,
@@ -246,6 +398,7 @@ impl WorkspaceEngine {
         let record = advance_store
             .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
             .map_err(|error| format!("persist advance record failed: {error}"))?;
+        maybe_fail_advance_initialization(&input, AdvanceInitializationFailpoint::RecordPersisted)?;
         if record.plan_revision_id != authoritative.plan_revision_id {
             return Err(
                 "advance record plan revision differs from authoritative plan revision".to_string(),
@@ -351,6 +504,7 @@ impl WorkspaceEngine {
         let mut outer = advance_store
             .load_or_prepare_advance_initialization(&record, &group_journal)
             .map_err(|error| format!("persist advance initialization failed: {error}"))?;
+        maybe_fail_advance_initialization(&input, AdvanceInitializationFailpoint::JournalPrepared)?;
         if outer.phase.order_for_engine()
             >= AdvanceInitializationPhase::AttemptPersisted.order_for_engine()
             && record.attempt_id.as_deref() != Some(outer.attempt_id.as_str())
@@ -376,12 +530,20 @@ impl WorkspaceEngine {
                         })?,
                 )
                 .map_err(|error| format!("persist group attempt failed: {error}"))?;
+            maybe_fail_advance_initialization(
+                &input,
+                AdvanceInitializationFailpoint::GroupAttemptPersisted,
+            )?;
             group_journal = coding_store
                 .advance_group_initialization_phase(
                     &group_journal,
                     crate::product::coding_attempt_store::CodingGroupInitializationPhase::AttemptPersisted,
                 )
                 .map_err(|error| format!("checkpoint group attempt persistence failed: {error}"))?;
+            maybe_fail_advance_initialization(
+                &input,
+                AdvanceInitializationFailpoint::AttemptPersisted,
+            )?;
             if group_journal.attempt.id != record_attempt.id {
                 return Err(
                     "group initialization attempt identity changed during replay".to_string(),
@@ -452,6 +614,10 @@ impl WorkspaceEngine {
                     crate::product::coding_attempt_store::CodingGroupInitializationPhase::WorktreeBound,
                 )
                 .map_err(|error| format!("checkpoint group worktree binding failed: {error}"))?;
+            maybe_fail_advance_initialization(
+                &input,
+                AdvanceInitializationFailpoint::WorktreeBound,
+            )?;
         }
         if outer.phase.order_for_engine()
             < AdvanceInitializationPhase::WorktreeBound.order_for_engine()
@@ -495,6 +661,10 @@ impl WorkspaceEngine {
                     AdvanceInitializationPhase::PlanBindingSaved,
                 )
                 .map_err(|error| format!("checkpoint plan binding failed: {error}"))?;
+            maybe_fail_advance_initialization(
+                &input,
+                AdvanceInitializationFailpoint::PlanBindingSaved,
+            )?;
         }
         if !group_journal.phase.has_reached(
             crate::product::coding_attempt_store::CodingGroupInitializationPhase::UnitsMaterialized,
@@ -521,6 +691,10 @@ impl WorkspaceEngine {
                     AdvanceInitializationPhase::UnitsMaterialized,
                 )
                 .map_err(|error| format!("checkpoint units materialization failed: {error}"))?;
+            maybe_fail_advance_initialization(
+                &input,
+                AdvanceInitializationFailpoint::UnitsMaterialized,
+            )?;
         }
         let persisted_attempt = coding_store
             .get_attempt(
@@ -536,7 +710,7 @@ impl WorkspaceEngine {
             .get_advance_for_plan(&input.project_id, &input.issue_id, &record.plan_id)
             .map_err(|error| format!("reload final advance record failed: {error}"))?
             .ok_or("advance record disappeared")?;
-        let completed_group_journal = if !group_journal.phase.has_reached(
+        let _completed_group_journal = if !group_journal.phase.has_reached(
             crate::product::coding_attempt_store::CodingGroupInitializationPhase::Completed,
         ) {
             coding_store
@@ -550,7 +724,7 @@ impl WorkspaceEngine {
         } else {
             group_journal
         };
-        let final_journal = advance_store
+        let _final_journal = advance_store
             .advance_initialization_phase(&final_record, &outer, AdvanceInitializationPhase::Ready)
             .map_err(|error| format!("checkpoint ready initialization failed: {error}"))?;
         let mut ready_record = final_record;
@@ -561,8 +735,6 @@ impl WorkspaceEngine {
         advance_store
             .update_record(&ready_record)
             .map_err(|error| format!("persist ready advance record failed: {error}"))?;
-        let _ = completed_group_journal;
-        let _ = final_journal;
         Ok(AdvanceOutcome::Completed {
             record: ready_record,
             attempt_id: persisted_attempt.id.clone(),
