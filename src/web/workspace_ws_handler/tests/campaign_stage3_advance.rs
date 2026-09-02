@@ -24,12 +24,12 @@ use tokio::time::{Duration, timeout};
 /// Confirmed 前置态:复用 8.2 campaign fixture,经真实 typed `Confirm` 关门
 /// (compile→publish→Confirmed→stage Completed 全部由真实引擎路径产生)。
 /// 与 8.2 多轮用例同构:以 durable 落盘为准,不等待 outbound 转发面。
-/// 按强权威链要求补齐 accepted source-draft 记录(镜像
-/// `advance_handler::seed_advance_draft_records` 的既有 fixture 形态):
-/// SC 编译产生的 work item revision 溯源 draft id,但 durable draft 列表
-/// 是 fixture 基座的 outline 草稿;没有对应 accepted draft 时 authoritative
-/// binding 解析会以 source_draft_error 拒绝。这只是前置态补齐,不触碰
-/// 任何被断言的终态(Ready 仍由真实 advance 引擎路径产生)。
+///
+/// 生产真链路形态(8.3 review Major-1 修复后):SC 编译提交段把
+/// `InitialPlanCompileInput.draft_records` 落盘,advance 的 authoritative
+/// binding 解析直接从 durable 草稿库溯源 source draft——本 harness **不
+/// seed 任何草稿**,与生产完全一致。历史 seed 形态保留在
+/// [`confirmed_campaign_harness_with_seeded_source_drafts`] 作对照。
 async fn confirmed_campaign_harness() -> CampaignStage3Harness {
     let harness = campaign_stage3_fixture(2, Vec::new()).await;
     harness.send(WsInMessage::Confirm).await;
@@ -42,7 +42,6 @@ async fn confirmed_campaign_harness() -> CampaignStage3Harness {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    seed_accepted_source_drafts(&harness);
     assert_eq!(
         harness.engine.lock().await.current_stage(),
         WorkspaceStage::Completed,
@@ -51,9 +50,23 @@ async fn confirmed_campaign_harness() -> CampaignStage3Harness {
     harness
 }
 
+/// 8.3 原测试形态对照:在 [`confirmed_campaign_harness`] 基础上按
+/// `advance_handler::seed_advance_draft_records` 的既有 fixture 形态补齐
+/// accepted source-draft 前置态。seed 语义是「前置态补齐」——仅当 durable
+/// 草稿库缺少对应 source draft 时才写;生产链(SC 编译提交段落盘)已提供
+/// 时零写入,避免制造跨 round 的重复 draft_id(authoritative binding 解析
+/// 对重复 draft_id 按 ambiguous 拒绝)。
+async fn confirmed_campaign_harness_with_seeded_source_drafts() -> CampaignStage3Harness {
+    let harness = confirmed_campaign_harness().await;
+    seed_accepted_source_drafts(&harness);
+    harness
+}
+
 /// 与 `advance_handler::seed_advance_draft_records` 同构:按编译后的
 /// work item revision 溯源补 accepted draft 记录,使 authoritative group
 /// binding 能解析出全量 unit(Legacy routing 全 None target)。
+/// 「补齐」语义:durable 草稿库已有该 source draft(生产 SC 编译提交段
+/// 已落盘)时跳过,不覆盖、不跨 round 复制。
 fn seed_accepted_source_drafts(harness: &CampaignStage3Harness) {
     use crate::product::models::{
         IssueWorkItemPlanStatus, WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
@@ -93,10 +106,20 @@ fn seed_accepted_source_drafts(harness: &CampaignStage3Harness) {
         .expect("confirmed plan");
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
     let plan_store = WorkItemPlanStore::new(harness.app_paths.clone());
+    // 前置态补齐守卫:生产链已落盘的 source draft 直接复用,不重复写。
+    let durable_draft_ids = plan_store
+        .list_draft_records(&harness.project_id, &harness.issue_id, &harness.record_plan_id())
+        .expect("list durable draft records")
+        .into_iter()
+        .map(|record| record.draft_id)
+        .collect::<std::collections::BTreeSet<_>>();
     for (logical_id, revision_id) in &revision.work_item_bindings {
         let work_item_revision = revision_store
             .get_work_item_revision(&lineage, logical_id, revision_id)
             .expect("compiled work item revision");
+        if durable_draft_ids.contains(&work_item_revision.source_draft_revision_id) {
+            continue;
+        }
         let draft = WorkItemDraftRecord {
             project_id: harness.project_id.clone(),
             issue_id: harness.issue_id.clone(),
@@ -173,6 +196,26 @@ fn campaign_attempt(
         .expect("durable campaign attempt")
 }
 
+/// 等待任一终态 advance 事件(完成或拒绝)。RED 阶段(修复前)生产链路会
+/// 返回 advance_rejected,不允许无限等待 advance_completed 挂死测试。
+async fn await_gate_event_any(
+    harness: &CampaignStage3Harness,
+    kinds: &[&str],
+) -> WsOutMessage {
+    loop {
+        let message = harness.next_outbound().await;
+        let r#type = serde_json::to_value(&message)
+            .expect("serialize outbound")
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if kinds.contains(&r#type.as_str()) {
+            return message;
+        }
+    }
+}
+
 #[tokio::test]
 async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start() {
     let harness = confirmed_campaign_harness().await;
@@ -184,20 +227,27 @@ async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start(
         "fixture 至少含 plan/child session 记录"
     );
 
+    // —— 核心真链路断言:不 seed 任何草稿,advance 必须经由 SC 编译提交段
+    // 落盘的 source draft 解析 authoritative binding(修复前此处必红:
+    // 草稿库无 SC 记录 → source_draft_error → mixed_target_group_rejected)——
+    //
     // —— typed advance:稳定 command_id,真实 ws 分发 ——
     harness
         .send(WsInMessage::Advance {
             command_id: "cmd-campaign-adv-1".to_string(),
         })
         .await;
-    let completed = harness.await_gate_event("advance_completed").await;
+    let completed =
+        await_gate_event_any(&harness, &["advance_completed", "advance_rejected"]).await;
     let WsOutMessage::AdvanceCompleted {
         command_id,
         attempt_id,
         workspace_entry,
     } = completed
     else {
-        panic!("expected advance_completed, got {completed:?}");
+        panic!(
+            "生产 SC 链不 seed 草稿必须能 advance(源 draft 应由编译提交段落盘): {completed:?}"
+        );
     };
     assert_eq!(command_id, "cmd-campaign-adv-1");
     let attempt_id = attempt_id.clone();
@@ -374,6 +424,64 @@ impl CampaignStage3Harness {
     fn record_plan_id(&self) -> String {
         self.session_record_blocking().entity_id.clone()
     }
+}
+
+/// 8.3 原测试形态对照(保留历史 seeded 形态):同样经真实 confirm 链产生
+/// Confirmed 前置态后,按既有 fixture 形态补齐 source-draft 前置态再 advance,
+/// 终态必须与不 seed 的真链路主测试完全一致(Ready + 唯一 attempt)。
+/// 修复后 seed 为零写入(草稿已由编译链落盘),因此本对照同时证明:
+/// seeded 前置态与生产真链路收敛到同一终态,不因修复商产生分叉。
+#[tokio::test]
+async fn campaign_stage3_advance_seeded_draft_control_matches_real_chain() {
+    let harness = confirmed_campaign_harness_with_seeded_source_drafts().await;
+    let advance_store = AdvanceStore::new(harness.app_paths.clone());
+    let coding_store = CodingAttemptStore::new(harness.app_paths.clone());
+
+    // seed 补齐语义:生产链已落盘 → 零写入,durable 草稿库只有 SC 编译轮次。
+    let plan_store = crate::product::work_item_plan_store::WorkItemPlanStore::new(
+        harness.app_paths.clone(),
+    );
+    let durable_drafts = plan_store
+        .list_draft_records(&harness.project_id, &harness.issue_id, &harness.record_plan_id())
+        .expect("durable draft records");
+    // (零写入断言放在终态断言之后:主干先证明 seeded 形态与真链路同终态。)
+    harness
+        .send(WsInMessage::Advance {
+            command_id: "cmd-campaign-adv-seed-control".to_string(),
+        })
+        .await;
+    let completed =
+        await_gate_event_any(&harness, &["advance_completed", "advance_rejected"]).await;
+    let WsOutMessage::AdvanceCompleted { attempt_id, .. } = completed else {
+        panic!("seeded 对照必须与真链路同为 Ready: {completed:?}");
+    };
+    let record = advance_store
+        .get_advance_by_command_id(
+            &harness.project_id,
+            &harness.issue_id,
+            "cmd-campaign-adv-seed-control",
+        )
+        .expect("durable advance record")
+        .expect("advance record persisted");
+    assert_eq!(record.status, AdvanceStatus::Ready);
+    assert_eq!(record.attempt_id.as_deref(), Some(attempt_id.as_str()));
+    assert_eq!(
+        coding_store
+            .list_attempts_for_issue(&harness.project_id, &harness.issue_id)
+            .expect("attempts for issue")
+            .len(),
+        1,
+        "seeded 对照同样只初始化唯一 group attempt"
+    );
+
+    // seed 补齐语义锁定:生产链已落盘 source draft 时零写入,不得另造 round
+    // (无条件写入会制造跨 round 重复 draft_id → ambiguity 拒绝)。
+    assert!(
+        durable_drafts
+            .iter()
+            .all(|record| record.generation_round_id != "round_campaign_advance"),
+        "seed 不得另造 round(生产链已提供 source draft 时必须零写入)"
+    );
 }
 
 fn attempts_work_item_count(harness: &CampaignStage3Harness) -> usize {
