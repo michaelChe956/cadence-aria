@@ -1,6 +1,6 @@
 use super::*;
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
 use crate::product::coding_workspace_engine::group::GroupUnitFailureOutcome;
 use crate::protocol::provider_errors::ProviderErrorCode;
 
@@ -649,7 +649,10 @@ impl CodingWorkspaceEngine {
                         .await?;
                     return Err(error);
                 }
-                let group_unit_failure = if attempt.scope == CodingAttemptScope::WorkItemGroup {
+                let group_unit_failure = if attempt.scope == CodingAttemptScope::WorkItemGroup
+                    && attempt.admission_kind == CodingAdmissionKind::ScAdvance
+                    && attempt.stage == CodingExecutionStage::Coding
+                {
                     attempt.active_unit_id.as_deref().and_then(|unit_id| {
                         self.store
                             .get_active_unit_run(attempt)
@@ -724,6 +727,7 @@ impl CodingWorkspaceEngine {
                 interaction_wait,
             } => {
                 if attempt.scope == CodingAttemptScope::WorkItemGroup
+                    && attempt.admission_kind == CodingAdmissionKind::ScAdvance
                     && attempt.stage == CodingExecutionStage::Coding
                     && attempt.active_unit_id.is_some()
                     && self.store.get_active_unit_run(attempt).is_ok()
