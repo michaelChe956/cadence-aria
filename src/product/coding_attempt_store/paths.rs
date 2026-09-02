@@ -251,6 +251,16 @@ impl super::CodingAttemptStore {
             .join("amendment-applications")
     }
 
+    pub(crate) fn plan_amendment_contexts_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("plan-amendment-contexts")
+    }
+
     pub(crate) fn amendment_application_path(
         &self,
         project_id: &str,

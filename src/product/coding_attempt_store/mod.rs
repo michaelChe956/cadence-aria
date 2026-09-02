@@ -21,6 +21,7 @@ mod inputs;
 mod issue_delivery;
 pub(crate) mod locking;
 mod paths;
+mod plan_amendment_context;
 mod plan_binding;
 pub(crate) mod plan_repair_reconcile;
 mod recovery;

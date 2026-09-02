@@ -5,7 +5,7 @@ use chrono::Utc;
 use super::*;
 use crate::product::coding_models::{
     CodingAmendmentApplicationJournal, CodingAmendmentApplicationPhase, CodingAttemptScope,
-    CodingPlanAmendmentDeliveryStatus,
+    CodingPlanAmendmentDeliveryStatus, PlanAmendmentContext, PlanAmendmentContextStatus,
 };
 use crate::product::models::{
     AmendmentResumeMode, PlanAmendmentManifest, PlanRepairRequest, PlanRepairRequestStatus,
@@ -92,6 +92,26 @@ impl CodingWorkspaceEngine {
         self.recover_plan_amendment_with_history_session(attempt)
             .await
             .map(|(attempt, _)| attempt)
+    }
+
+    /// REQ-GCE-03: resume the ORIGINAL group attempt after an amendment is
+    /// approved. The explicit `PlanAmendmentContext` anchors the original plan
+    /// session gate, the previous plan revision and the manifest-driven resume
+    /// target; incompatible revisions fail the context closed (durable) and
+    /// never switch to another plan, legacy admission, or a new attempt.
+    pub(crate) async fn resume_group_after_plan_amendment(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        context: &PlanAmendmentContext,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let _ = (attempt, context, manifest);
+        Err(CodingWorkspaceEngineError::Store(
+            ProductStoreError::NotFound {
+                kind: "coding_plan_amendment_context",
+                id: "resume_not_wired".to_string(),
+            },
+        ))
     }
 
     pub(crate) async fn recover_plan_amendment_with_history_session(

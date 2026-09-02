@@ -518,6 +518,7 @@ mod gate_rework;
 mod gates_worktree_routing;
 mod git_operation_reconcile;
 mod group_completion_authority;
+mod group_amendment_chain;
 mod group_failure_same_attempt;
 mod group_final_readiness;
 mod group_final_readiness_builder;
