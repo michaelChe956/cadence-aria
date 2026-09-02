@@ -175,6 +175,23 @@ impl WorkspaceEngine {
             .collect::<Vec<_>>();
 
         if let Some(store) = &self.lifecycle_store
+            && self.session.flow_kind
+                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+        {
+            // SC 计划批准链：Confirmed 落库必须保留 human_gate_snapshot（D11 预算
+            // 接续原 session 快照的单一预算源；D16 原 plan session 是唯一门宿主）。
+            // REQ-GCE-03 修订链重开同一门依赖该快照在场，因此这里用只改 status 的
+            // CAS 写入，绕开通用终态清理（update_workspace_session_status 会清快照）。
+            // 非_SC/legacy 路径继续走通用清理，语义不变。
+            if let Ok(expected) = store.get_workspace_session(&self.session.session_id)
+                && let Ok(record) = store.compare_and_update_workspace_session_status(
+                    &expected,
+                    WorkspaceSessionStatus::Confirmed,
+                )
+            {
+                self.session.session_status = record.status;
+            }
+        } else if let Some(store) = &self.lifecycle_store
             && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::Confirmed,

@@ -351,7 +351,9 @@ async fn group_amendment_reachable_from_real_approval_chain() {
         diff: None,
     });
     let mut feedback_engine = WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(root.path().join("checkpoints-feedback"))),
+        Arc::new(CheckpointStore::new(
+            root.path().join("checkpoints-feedback"),
+        )),
         lifecycle.clone(),
         feedback_tx,
         session,
@@ -395,6 +397,9 @@ async fn group_amendment_reachable_from_real_approval_chain() {
     let attempt_after = store
         .get_attempt(&project_id, &issue_id, &paused.id)
         .expect("attempt after feedback");
-    assert_eq!(attempt_after.status, CodingAttemptStatus::AwaitingPlanAmendment);
+    assert_eq!(
+        attempt_after.status,
+        CodingAttemptStatus::AwaitingPlanAmendment
+    );
     assert_ne!(child.id, plan_session_id);
 }
