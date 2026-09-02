@@ -641,6 +641,31 @@ function advanceSimulationAction({ confirmedPlan, existingAdvance, action }) {
   return 'send';
 }
 
+// advance 等待期的收尾决策（task 8.1 修复轮 M2）：rejected 不消费脚本动作，但对 rejected
+// 无条件清 advanceFinishPending 并按既定策略收尾（plan 已 Confirmed，不悬挂至 hard timeout；
+// 语义对齐断线分支 stage3_advance_outcome_unknown）；completed 仍要求动作确认消费后才收尾。
+// 返回收尾日志事件（writeLog 条目）或 null（继续等待）。
+function stage3AdvanceFinishPlan({ finishPending, message, consumedKinds }) {
+  if (finishPending !== true) return null;
+  if (message?.type === 'advance_rejected') {
+    return {
+      event: 'stage3_advance_rejected',
+      command_id: message.command_id ?? null,
+      code: message.code ?? null,
+    };
+  }
+  if (message?.type === 'advance_completed' && (consumedKinds ?? []).includes('advance')) {
+    return {
+      event: 'stage3_advance_simulation',
+      decision: message.type,
+      command_id: message.command_id ?? null,
+      attempt_id: message.attempt_id ?? null,
+      code: message.code ?? null,
+    };
+  }
+  return null;
+}
+
 // 阶段 3 门控制器：command/turn 级状态机（open→running→completed/failed→下一脚本动作）。
 // 脱账/审计字段只含 digest/长度/command_id/turn_id；脚本耗尽仅在门 Waiting 且无 in-flight
 // 时沿用 human_script_exhausted_default。
@@ -810,7 +835,7 @@ function createStage3GateController({
       return { consumed, outbound: null };
     }
     if (message?.type === 'advance_completed' || message?.type === 'advance_rejected') {
-      if (current?.decision === 'advance' && shouldConsumeHumanAction(message, {}, current)) {
+      if (current?.decision === 'advance') {
         const record = advanceActions.find((entry) => entry.command_id === current.commandId)
           ?? {
             action_index: actionIndex,
@@ -820,16 +845,20 @@ function createStage3GateController({
             attempt_id: null,
             workspace_entry: null,
           };
-        if (!advanceActions.includes(record)) advanceActions.push(record);
-        if (message.type === 'advance_completed') {
+        if (shouldConsumeHumanAction(message, {}, current)) {
+          if (!advanceActions.includes(record)) advanceActions.push(record);
           record.status = 'completed';
           record.attempt_id = message.attempt_id;
           record.workspace_entry = message.workspace_entry;
-        } else {
+          consumeCurrent(consumed, message.type);
+        } else if (message.type === 'advance_rejected') {
+          // rejected：记录 advance_actions[].status='rejected' 审计，但不消费脚本动作
+          // （只有 completed/同 record replay 才消费）；收尾由 driver 的 stage3AdvanceFinishPlan
+          // 对 rejected 无条件执行，不再悬挂至 hard timeout。
+          if (!advanceActions.includes(record)) advanceActions.push(record);
           record.status = 'rejected';
-          record.code = message.code;
+          record.code = message.code ?? null;
         }
-        consumeCurrent(consumed, message.type);
       }
       return { consumed, outbound: null };
     }
@@ -2272,19 +2301,18 @@ async function runCampaign({
             });
           }
           if (outcome.outbound) deliverStage3Submission(outcome.outbound);
-          if (advanceFinishPending
-            && (message.type === 'advance_completed' || message.type === 'advance_rejected')
-            && outcome.consumed.some((entry) => entry.kind === 'advance')) {
+          // advance 等待期收尾：rejected 不消费脚本动作，但必须无条件收尾（不悬挂至 hard
+          // timeout）；completed 仍要求动作确认消费后才收尾。
+          const advanceFinishPlan = stage3AdvanceFinishPlan({
+            finishPending: advanceFinishPending,
+            message,
+            consumedKinds: outcome.consumed.map((entry) => entry.kind),
+          });
+          if (advanceFinishPlan) {
             advanceFinishPending = false;
             controller.noteProviderLedgerAfter(result.provider_start_ledger ?? []);
             syncStage3Fields();
-            writeLog({
-              event: 'stage3_advance_simulation',
-              decision: message.type,
-              command_id: message.command_id ?? null,
-              attempt_id: message.attempt_id ?? null,
-              code: message.code ?? null,
-            });
+            writeLog(advanceFinishPlan);
             writeHandoffAndFinish();
           }
           syncStage3Fields();
@@ -2403,6 +2431,7 @@ export {
   shouldClearPendingGateNode,
   shouldConsumeHumanAction,
   singleCandidateOutboundAllowed,
+  stage3AdvanceFinishPlan,
   stage3FeedbackDigest,
   stage3HumanMessage,
   stage3OutboundLogEntry,

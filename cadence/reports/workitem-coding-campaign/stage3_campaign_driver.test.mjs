@@ -14,6 +14,7 @@ import {
   resultTemplate,
   shouldConsumeHumanAction,
   singleCandidateOutboundAllowed,
+  stage3AdvanceFinishPlan,
   stage3FeedbackDigest,
   stage3HumanMessage,
   stage3OutboundLogEntry,
@@ -24,6 +25,7 @@ import {
   STAGE3_SAMPLE_CAMPAIGN_RUN_ID,
   STAGE3_SAMPLE_SCRIPT,
   stage3AdvanceCompleted,
+  stage3AdvanceRejected,
   stage3GateBusy,
   stage3GateClosed,
   stage3HappyPathTranscript,
@@ -341,4 +343,81 @@ test('campaign_stage3_multi_turn_flow_survives_reconnect_fault_transcript', () =
   assert.equal(fields.human_gate_turns[0].turn_id, null);
   assert.equal(fields.human_gate_turns[0].status, 'completed');
   assert.ok(fields.durable_recovery_checks.some((entry) => entry.check === 'durable_command_replay_consumed'));
+});
+
+test('campaign_stage3_advance_rejected_records_audit_and_finishes_without_consuming', () => {
+  // ws 在线时的完整路径：confirm 消费 → Confirmed 回读 → 发 advance → 服务端拒绝（前置不满足零副作用拒绝）。
+  const { controller } = newController({ actions: parseHumanScript('confirm;advance') });
+  const confirmSend = controller.onGateWaiting();
+  assert.equal(confirmSend.message.type, 'confirm');
+  controller.onInbound(stage3GateClosed('confirm'));
+  const advance = controller.onConfirmedDurable({ providerStartLedger: stage3ProviderStartLedgerFixture() });
+  assert.equal(advance.decision, 'send');
+  assert.equal(advance.outbound.type, 'advance');
+
+  // rejected：记录 advance_actions[].status='rejected' 审计，但不消费脚本动作（只有 completed/replay 才消费）。
+  const rejected = controller.onInbound(stage3AdvanceRejected(advance.commandId));
+  assert.deepEqual(rejected.consumed, [], 'advance_rejected 不消费脚本动作');
+  assert.equal(controller.currentAction().decision, 'advance', '脚本指针仍停在 advance，未被 rejected 推进');
+  const fields = controller.resultFields();
+  assert.equal(fields.advance_actions.length, 1);
+  assert.equal(fields.advance_actions[0].command_id, advance.commandId);
+  assert.equal(fields.advance_actions[0].status, 'rejected');
+  assert.equal(fields.advance_actions[0].code, 'ADVANCE_PRECONDITION_FAILED');
+  // 镜像 driver 收尾分支的 noteProviderLedgerAfter 调用后再比对前后快照。
+  controller.noteProviderLedgerAfter(stage3ProviderStartLedgerFixture());
+  const fieldsAfterNote = controller.resultFields();
+  assert.deepEqual(
+    fieldsAfterNote.provider_start_ledger_before_after.before,
+    fieldsAfterNote.provider_start_ledger_before_after.after,
+    'rejected 零副作用：provider-start ledger 前后不变',
+  );
+
+  // 收尾判定：rejected 无条件清 advanceFinishPending 并按既定策略收尾（不悬挂至 hard timeout）；
+  // completed 仍要求确认消费后才收尾。
+  assert.deepEqual(
+    stage3AdvanceFinishPlan({
+      finishPending: true,
+      message: stage3AdvanceRejected(advance.commandId),
+      consumedKinds: [],
+    }),
+    {
+      event: 'stage3_advance_rejected',
+      command_id: advance.commandId,
+      code: 'ADVANCE_PRECONDITION_FAILED',
+    },
+    'ws 在线时 advance 被拒必须立即收尾（rejected 不消费脚本动作也不得悬挂）',
+  );
+  assert.equal(
+    stage3AdvanceFinishPlan({
+      finishPending: true,
+      message: stage3AdvanceCompleted(advance.commandId),
+      consumedKinds: [],
+    }),
+    null,
+    'completed 未确认消费（幂等命中/replay 未定）时不收尾',
+  );
+  assert.deepEqual(
+    stage3AdvanceFinishPlan({
+      finishPending: true,
+      message: stage3AdvanceCompleted(advance.commandId),
+      consumedKinds: ['advance'],
+    }),
+    {
+      event: 'stage3_advance_simulation',
+      decision: 'advance_completed',
+      command_id: advance.commandId,
+      attempt_id: 'attempt_fixture_0001',
+      code: null,
+    },
+  );
+  assert.equal(
+    stage3AdvanceFinishPlan({
+      finishPending: false,
+      message: stage3AdvanceRejected(advance.commandId),
+      consumedKinds: [],
+    }),
+    null,
+    '非 advance 等待期收到 rejected 不触发收尾',
+  );
 });
