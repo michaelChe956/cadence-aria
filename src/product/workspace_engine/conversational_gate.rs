@@ -1,7 +1,10 @@
 use chrono::Utc;
 
+use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_models::{CodingAttemptStatus, PlanAmendmentContext};
 use crate::product::models::{
-    HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, WorkspaceSessionStatus, WorkspaceType,
+    HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
@@ -81,6 +84,61 @@ fn validate_feedback(feedback: &str) -> Result<(), String> {
 }
 
 impl super::WorkspaceEngine {
+    /// 校验当前 session 是否可在 amendment 上下文下重开原对话门（REQ-GCE-03）。
+    /// 仅当：本 session 是单候选 WorkItemPlan、已过首次 approve（Confirmed +
+    /// phase Completed）、门快照仍在（预算接续 manual_repairs_remaining）、存在
+    /// 指向本 session 的 Open/Applying PlanAmendmentContext、且其 group attempt
+    /// 处于 AwaitingPlanAmendment。任何一项不满足都保持既有 stage 拒绝路径。
+    fn probe_amendment_gate_context(&self) -> Result<Option<PlanAmendmentContext>, String> {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.stage == super::WorkspaceStage::HumanConfirm
+        {
+            return Ok(None);
+        }
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let record = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        if record.status != WorkspaceSessionStatus::Confirmed
+            || record.single_candidate_phase != Some(SingleCandidatePhase::Completed)
+            || record.human_gate_snapshot.is_none()
+        {
+            return Ok(None);
+        }
+        let coding_store = CodingAttemptStore::new(store.app_paths());
+        let context = coding_store
+            .find_open_plan_amendment_context_for_plan_session(
+                &record.project_id,
+                &record.issue_id,
+                &record.entity_id,
+                &record.id,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "human gate feedback is only available for a single-candidate work-item plan in human_confirm"
+                    .to_string()
+            })?;
+        let attempt = coding_store
+            .get_attempt(
+                &record.project_id,
+                &record.issue_id,
+                &context.group_attempt_id,
+            )
+            .map_err(|error| error.to_string())?;
+        if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment
+            || attempt.work_item_group_id.as_deref() != Some(record.entity_id.as_str())
+        {
+            return Err(
+                "group attempt is not awaiting plan amendment for this plan session".to_string(),
+            );
+        }
+        Ok(Some(context))
+    }
+
     pub(crate) fn build_sc_manual_revision_prompt_for_turn(
         &self,
         feedback: &str,
@@ -470,9 +528,15 @@ impl super::WorkspaceEngine {
             return Ok(HumanGateCommandOutcome::Replayed { turn });
         }
 
+        // REQ-GCE-03 场景二：attempt 处于 AwaitingPlanAmendment 期间，原 SC plan
+        // session 以 amendment 上下文重开同一人工门接受 typed feedback。stage 不在
+        // HumanConfirm 时先探测并校验 session/plan lineage 与 PlanAmendmentContext，
+        // 命中才放行；否则保持既有 stage 拒绝语义（零副作用）。
+        let amendment_gate = self.probe_amendment_gate_context()?;
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
-            || self.session.stage != super::WorkspaceStage::HumanConfirm
+            || (self.session.stage != super::WorkspaceStage::HumanConfirm
+                && amendment_gate.is_none())
         {
             return Ok(rejected(
                 "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
@@ -559,6 +623,26 @@ impl super::WorkspaceEngine {
         // may have retained a fresh-looking in-memory stage while another
         // worker already advanced the session; reserving a turn in that stale
         // window would reopen a closed gate.
+        let expected =
+            if expected.status == WorkspaceSessionStatus::Confirmed && amendment_gate.is_some() {
+                // amendment 上下文重开：CAS Confirmed→WaitingForHuman，门快照与预算
+                // 原样保留（D11 单一预算源），不新建第二个门实例。
+                match store.compare_and_reopen_amendment_gate(&expected) {
+                    Ok(saved) => {
+                        self.session.session_status = saved.status.clone();
+                        self.session.human_gate_snapshot = saved.human_gate_snapshot.clone();
+                        saved
+                    }
+                    Err(_) => {
+                        return Ok(rejected(
+                            "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+                            "amendment gate reopen lost the durable race",
+                        ));
+                    }
+                }
+            } else {
+                expected
+            };
         if expected.status != WorkspaceSessionStatus::WaitingForHuman {
             return Ok(rejected(
                 "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",

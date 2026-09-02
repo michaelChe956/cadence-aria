@@ -58,14 +58,12 @@ impl super::CodingAttemptStore {
                     kind: "coding_linked_plan_repair",
                     id: current.id.clone(),
                 })?;
-            let amendment_id = snapshot
-                .request
-                .amendment_id
-                .clone()
-                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+            let amendment_id = snapshot.request.amendment_id.clone().ok_or(
+                ProductStoreError::IdentityMismatch {
                     kind: "coding_plan_amendment_context_amendment",
                     id: snapshot.request.id,
-                })?;
+                },
+            )?;
             let lifecycle = LifecycleStore::new(self.paths());
             let parent = canonical_plan_repair_parent_session(
                 &lifecycle,
@@ -100,8 +98,11 @@ impl super::CodingAttemptStore {
                 created_at: now.clone(),
                 updated_at: now,
             };
-            let root =
-                self.plan_amendment_contexts_root(&current.project_id, &current.issue_id, &current.id);
+            let root = self.plan_amendment_contexts_root(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+            );
             write_json(&root.join(format!("{}.json", context.id)), &context)?;
             Ok(context)
         })
@@ -143,6 +144,15 @@ impl super::CodingAttemptStore {
             self.plan_amendment_contexts_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let mut contexts = Vec::new();
         for path in super::json_file_paths(&root)? {
+            // 同目录下的 fail-closed diagnostic sidecar（{id}.diagnostic.json）
+            // 不是 context 记录，跳过。
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".diagnostic.json"))
+            {
+                continue;
+            }
             let context: PlanAmendmentContext = read_json(&path)?;
             if context.group_attempt_id != attempt.id {
                 return Err(ProductStoreError::IdentityMismatch {
@@ -182,8 +192,7 @@ impl super::CodingAttemptStore {
                 context.plan_session_id == plan_session_id
                     && matches!(
                         context.status,
-                        PlanAmendmentContextStatus::Open
-                            | PlanAmendmentContextStatus::Applying
+                        PlanAmendmentContextStatus::Open | PlanAmendmentContextStatus::Applying
                     )
             });
         let found = matching.next();
@@ -205,13 +214,22 @@ impl super::CodingAttemptStore {
             attempt,
             context_id,
             &[
-                (PlanAmendmentContextStatus::Open, PlanAmendmentContextStatus::Applying),
-                (PlanAmendmentContextStatus::Applying, PlanAmendmentContextStatus::Applying),
+                (
+                    PlanAmendmentContextStatus::Open,
+                    PlanAmendmentContextStatus::Applying,
+                ),
+                (
+                    PlanAmendmentContextStatus::Applying,
+                    PlanAmendmentContextStatus::Applying,
+                ),
             ],
             None,
         )
     }
 
+    /// 仅由 resume_group_after_plan_amendment 的可重试失败回退路径使用；
+    /// 生产 approve 链尚未接入 typed 入口，先保留（#[allow(dead_code)]）。
+    #[allow(dead_code)]
     pub(crate) fn revert_plan_amendment_context_to_open(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -220,7 +238,10 @@ impl super::CodingAttemptStore {
         self.update_plan_amendment_context_status(
             attempt,
             context_id,
-            &[(PlanAmendmentContextStatus::Applying, PlanAmendmentContextStatus::Open)],
+            &[(
+                PlanAmendmentContextStatus::Applying,
+                PlanAmendmentContextStatus::Open,
+            )],
             None,
         )
     }
@@ -265,6 +286,9 @@ impl super::CodingAttemptStore {
         )
     }
 
+    /// 仅由 resume_group_after_plan_amendment 的不兼容 fail-closed 路径使用；
+    /// 生产 approve 链尚未接入 typed 入口，先保留（#[allow(dead_code)]）。
+    #[allow(dead_code)]
     pub(crate) fn fail_closed_plan_amendment_context(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -275,7 +299,10 @@ impl super::CodingAttemptStore {
             attempt,
             context_id,
             &[
-                (PlanAmendmentContextStatus::Open, PlanAmendmentContextStatus::FailedClosed),
+                (
+                    PlanAmendmentContextStatus::Open,
+                    PlanAmendmentContextStatus::FailedClosed,
+                ),
                 (
                     PlanAmendmentContextStatus::Applying,
                     PlanAmendmentContextStatus::FailedClosed,

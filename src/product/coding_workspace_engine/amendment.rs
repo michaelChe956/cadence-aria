@@ -99,19 +99,136 @@ impl CodingWorkspaceEngine {
     /// session gate, the previous plan revision and the manifest-driven resume
     /// target; incompatible revisions fail the context closed (durable) and
     /// never switch to another plan, legacy admission, or a new attempt.
+    /// 显式 typed 入口（brief 7.2 契约签名）：amendment approve 后回原 attempt。
+    /// 生产 approve 链（activate_published_plan_amendment→runner→recover）统一经由
+    /// `apply_plan_amendment_from_journal` 的 context 记账；本入口供显式调用与
+    /// 契约测试使用，§8 campaign 接线时由 driver 消费。
+    #[allow(dead_code)]
     pub(crate) async fn resume_group_after_plan_amendment(
         &self,
         attempt: &CodingExecutionAttempt,
         context: &PlanAmendmentContext,
         manifest: &PlanAmendmentManifest,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let _ = (attempt, context, manifest);
-        Err(CodingWorkspaceEngineError::Store(
-            ProductStoreError::NotFound {
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        if context.group_attempt_id != current.id {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context_attempt",
+                    id: context.id.clone(),
+                },
+            ));
+        }
+        let stored = self
+            .store
+            .find_plan_amendment_context_by_finding(&current, &context.trigger_finding_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
                 kind: "coding_plan_amendment_context",
-                id: "resume_not_wired".to_string(),
-            },
-        ))
+                id: context.id.clone(),
+            })?;
+        if stored.id != context.id {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context",
+                    id: context.id.clone(),
+                },
+            ));
+        }
+        if stored.status == PlanAmendmentContextStatus::FailedClosed {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context_failed_closed",
+                    id: format!("{} requires manual disposition", stored.id),
+                },
+            ));
+        }
+        if manifest.previous_plan_revision_id != stored.previous_plan_revision_id {
+            let reason = format!(
+                "product_store_identity_mismatch: manifest previous revision {} does not match context {}",
+                manifest.previous_plan_revision_id, stored.previous_plan_revision_id
+            );
+            self.store
+                .fail_closed_plan_amendment_context(&current, &stored.id, &reason)?;
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context_revision",
+                    id: stored.id,
+                },
+            ));
+        }
+        if stored.status == PlanAmendmentContextStatus::Open {
+            self.store
+                .transition_plan_amendment_context_to_applying(&current, &stored.id)?;
+        }
+        let result = self.apply_plan_amendment(&current, manifest).await;
+        match result {
+            Ok(updated) => {
+                let completed = self.store.complete_plan_amendment_context(
+                    &updated,
+                    &stored.id,
+                    &manifest.new_plan_revision_id,
+                    &manifest.resume_target,
+                )?;
+                self.close_reopened_amendment_gate_if_idle(&completed.plan_session_id)?;
+                Ok(updated)
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    CodingWorkspaceEngineError::Store(
+                        ProductStoreError::IdentityMismatch { .. }
+                            | ProductStoreError::Ambiguous { .. }
+                    )
+                ) {
+                    // 新 revision 或 binding identity 不兼容：context durable
+                    // FailedClosed 并保留 diagnostic，要求人工处置。
+                    self.store.fail_closed_plan_amendment_context(
+                        &current,
+                        &stored.id,
+                        &error.to_string(),
+                    )?;
+                } else if stored.status == PlanAmendmentContextStatus::Open {
+                    // 可重试的应用层失败：回到 Open，允许既有 recover 路径重试。
+                    self.store
+                        .revert_plan_amendment_context_to_open(&current, &stored.id)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// amendment 应用完成后，把原 plan session 上重开的门关回 Confirmed。仅
+    /// 处理重开特征（WaitingForHuman + phase Completed + 保留快照）且无
+    /// in-flight turn 的会话；首次人工门（phase Approval）不经此路径。
+    fn close_reopened_amendment_gate_if_idle(
+        &self,
+        plan_session_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let Ok(record) = lifecycle.get_workspace_session(plan_session_id) else {
+            return Ok(());
+        };
+        if record.status != WorkspaceSessionStatus::WaitingForHuman
+            || record.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Completed)
+        {
+            return Ok(());
+        }
+        let has_active_turn = lifecycle
+            .list_human_gate_turns(plan_session_id)?
+            .into_iter()
+            .any(|turn| {
+                matches!(
+                    turn.status,
+                    crate::product::models::HumanGateTurnStatus::Reserved
+                        | crate::product::models::HumanGateTurnStatus::Running
+                )
+            });
+        if has_active_turn {
+            return Ok(());
+        }
+        lifecycle.compare_and_close_reopened_amendment_gate(&record)?;
+        Ok(())
     }
 
     pub(crate) async fn recover_plan_amendment_with_history_session(
@@ -195,6 +312,19 @@ impl CodingWorkspaceEngine {
             manifest,
             journal.phase == CodingAmendmentApplicationPhase::Completed,
         )?;
+        // REQ-GCE-03：approve 显式链路与 recover 重放路径都经由本函数；这里对
+        // 已登记的 PlanAmendmentContext 做幂等记账（Open→Applying，成功后 Applied），
+        // 保证断线恢复后 context 与 attempt/binding 状态一致。
+        let amendment_context = self.store.find_plan_amendment_context_by_finding(
+            attempt,
+            &authority.request.trigger_finding_id,
+        )?;
+        if let Some(context) = &amendment_context
+            && context.status == PlanAmendmentContextStatus::Open
+        {
+            self.store
+                .transition_plan_amendment_context_to_applying(attempt, &context.id)?;
+        }
         if journal.error.is_some() {
             *journal = self
                 .store
@@ -294,9 +424,20 @@ impl CodingWorkspaceEngine {
         )?;
         self.reconcile_plan_amendment_delivery(attempt, manifest)
             .await?;
-        self.store
+        let resumed = self
+            .store
             .resume_attempt_after_amendment(attempt, manifest)
-            .map_err(CodingWorkspaceEngineError::from)
+            .map_err(CodingWorkspaceEngineError::from)?;
+        if let Some(context) = amendment_context {
+            let completed = self.store.complete_plan_amendment_context(
+                &resumed,
+                &context.id,
+                &manifest.new_plan_revision_id,
+                &manifest.resume_target,
+            )?;
+            self.close_reopened_amendment_gate_if_idle(&completed.plan_session_id)?;
+        }
+        Ok(resumed)
     }
 
     fn validate_amendment_application_identity(

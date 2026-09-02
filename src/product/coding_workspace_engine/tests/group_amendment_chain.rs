@@ -2,20 +2,19 @@ use super::*;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::coding_models::PlanAmendmentContext;
 use crate::product::coding_models::{
-    CodingAdmissionKind, CodingExecutionStage, CodingExecutionUnitStatus, CodingUnitRun,
-    CodingUnitRunStatus, PlanAmendmentContextStatus,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
+    PlanAmendmentContextStatus,
 };
 use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, WorkItemPlanSessionOptions};
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, ContractDeltaKind, HumanGateTurnStatus,
     PlanAmendmentManifest, PlanDefectClass, PlanDefectEvidence, PlanRepairRequest,
     PlanRepairRequestStatus, PlanRepairSessionStage, RepairTarget, RepairTargetKind,
-    SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType, WorkItemRevisionReplacement,
+    SingleCandidatePhase, WorkItemRevisionReplacement, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
 use crate::product::workspace_engine::{
-    EngineEvent, HumanGateCommandOutcome, HumanGateFeedbackInput, WorkspaceEngine,
-    WorkspaceSession,
+    EngineEvent, HumanGateCommandOutcome, HumanGateFeedbackInput, WorkspaceEngine, WorkspaceSession,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -79,7 +78,11 @@ fn seed_unit_run_with_status(
 ) {
     let revisions = WorkItemRevisionStore::new(store.paths());
     let revision = revisions
-        .get_work_item_revision(plan, &unit.logical_work_item_id, &unit.work_item_revision_id)
+        .get_work_item_revision(
+            plan,
+            &unit.logical_work_item_id,
+            &unit.work_item_revision_id,
+        )
         .unwrap();
     let bundle = revisions
         .get_work_item_projection_bundle(plan, &revision.work_item_projection_bundle_id)
@@ -118,9 +121,7 @@ fn seed_unit_run_with_status(
         .unwrap();
 }
 
-async fn amendment_chain_fixture(
-    resume_mode: AmendmentResumeMode,
-) -> AmendmentChainFixture {
+async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentChainFixture {
     let root = TempDir::new().unwrap();
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -167,7 +168,8 @@ async fn amendment_chain_fixture(
             superpowers_enabled: true,
             openspec_enabled: true,
             work_item_plan_options: Some(WorkItemPlanSessionOptions {
-                flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+                flow_kind:
+                    crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
                 run_policy: RunPolicy::Interactive,
                 rollout_snapshot: true,
             }),
@@ -333,7 +335,9 @@ fn publish_amendment_manifest(
     revised.source_draft_revision_id = "draft_revision_0101".to_string();
     revised.work_item_projection_bundle_id = "projection_bundle_0101".to_string();
     revised.created_at = "2026-08-31T00:00:01Z".to_string();
-    revision_store.put_work_item_revision(plan, &revised).unwrap();
+    revision_store
+        .put_work_item_revision(plan, &revised)
+        .unwrap();
     WorkItemPlanStore::new(paths.clone())
         .put_draft_record(&WorkItemDraftRecord {
             project_id: "project_0001".to_string(),
@@ -375,11 +379,13 @@ fn publish_amendment_manifest(
     revised_bundle.work_item_revision_id = revised.id.clone();
     revised_bundle.coder_projection.work_item_revision_id = revised.id.clone();
     revised_bundle.reviewer_projection.work_item_revision_id = revised.id.clone();
-    let revised_hashes = projection_hashes(&crate::product::work_item_projection::CompiledWorkItemProjections {
-        human: revised_bundle.human_projection.clone(),
-        coder: revised_bundle.coder_projection.clone(),
-        reviewer: revised_bundle.reviewer_projection.clone(),
-    })
+    let revised_hashes = projection_hashes(
+        &crate::product::work_item_projection::CompiledWorkItemProjections {
+            human: revised_bundle.human_projection.clone(),
+            coder: revised_bundle.coder_projection.clone(),
+            reviewer: revised_bundle.reviewer_projection.clone(),
+        },
+    )
     .unwrap();
     revised_bundle.human_projection_hash = revised_hashes.human;
     revised_bundle.coder_projection_hash = revised_hashes.coder;
@@ -395,7 +401,12 @@ fn publish_amendment_manifest(
         .set_active_work_item_revision(plan, &logical, Some("work_item_revision_0001"), &revised.id)
         .unwrap();
     let previous_plan = revision_store
-        .get_plan_revision(&plan.project_id, &plan.issue_id, &plan.id, "plan_revision_0001")
+        .get_plan_revision(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            "plan_revision_0001",
+        )
         .unwrap();
     let mut next_bindings = previous_plan.work_item_bindings.clone();
     next_bindings.insert("work_item_0001".to_string(), revised.id.clone());
@@ -475,7 +486,9 @@ fn publish_amendment_manifest(
         },
         created_at: "2026-08-31T00:00:02Z".to_string(),
     };
-    revision_store.put_amendment_manifest(plan, &manifest).unwrap();
+    revision_store
+        .put_amendment_manifest(plan, &manifest)
+        .unwrap();
     let published_request = revision_store
         .update_repair_request_status(
             plan,
@@ -504,9 +517,7 @@ fn publish_amendment_manifest(
     manifest
 }
 
-fn plan_session_engine(
-    fixture: &AmendmentChainFixture,
-) -> WorkspaceEngine {
+fn plan_session_engine(fixture: &AmendmentChainFixture) -> WorkspaceEngine {
     let record = fixture
         .lifecycle
         .get_workspace_session(&fixture.plan_session_id)
@@ -518,7 +529,9 @@ fn plan_session_engine(
         diff: None,
     });
     WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(fixture._root.path().join("checkpoints"))),
+        Arc::new(CheckpointStore::new(
+            fixture._root.path().join("checkpoints"),
+        )),
         fixture.lifecycle.clone(),
         event_tx,
         session,
@@ -539,9 +552,16 @@ async fn group_amendment_plan_defect_stays_on_same_attempt() {
 
     let persisted = fixture
         .store
-        .get_attempt(&fixture.attempt.project_id, &fixture.attempt.issue_id, &fixture.attempt.id)
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
         .unwrap();
-    assert_eq!(persisted.id, fixture.attempt.id, "defect stays on the same attempt");
+    assert_eq!(
+        persisted.id, fixture.attempt.id,
+        "defect stays on the same attempt"
+    );
     assert_eq!(persisted.status, CodingAttemptStatus::AwaitingPlanAmendment);
     let trigger_run = fixture
         .store
@@ -578,7 +598,10 @@ async fn group_amendment_plan_defect_stays_on_same_attempt() {
         reconciliation.attempt.status,
         CodingAttemptStatus::AwaitingPlanAmendment
     );
-    let contexts = fixture.store.list_plan_amendment_contexts(&persisted).unwrap();
+    let contexts = fixture
+        .store
+        .list_plan_amendment_contexts(&persisted)
+        .unwrap();
     assert_eq!(contexts.len(), 1, "no second context may be opened");
     assert_eq!(contexts[0], context);
 }
@@ -589,7 +612,11 @@ async fn group_amendment_feedback_reuses_original_plan_session_budget() {
     let mut engine = plan_session_engine(&fixture);
     let attempt_before = fixture
         .store
-        .get_attempt(&fixture.attempt.project_id, &fixture.attempt.issue_id, &fixture.attempt.id)
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
         .unwrap();
     let sessions_before = fixture
         .lifecycle
@@ -609,7 +636,9 @@ async fn group_amendment_feedback_reuses_original_plan_session_budget() {
 
     let (turn, remaining_budget) = match opened {
         HumanGateCommandOutcome::TurnOpened {
-            turn, remaining_budget, ..
+            turn,
+            remaining_budget,
+            ..
         } => (turn, remaining_budget),
         other => panic!("expected amendment turn opened, got {other:?}"),
     };
@@ -622,7 +651,10 @@ async fn group_amendment_feedback_reuses_original_plan_session_budget() {
         .unwrap();
     assert_eq!(durable.status, WorkspaceSessionStatus::WaitingForHuman);
     let snapshot = durable.human_gate_snapshot.as_ref().expect("gate snapshot");
-    assert_eq!(snapshot.manual_repairs_remaining, 1, "budget decremented once on the original session");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 1,
+        "budget decremented once on the original session"
+    );
     assert_eq!(durable.provider_start_ledger.len(), 1);
     let turns = fixture
         .lifecycle
@@ -634,13 +666,21 @@ async fn group_amendment_feedback_reuses_original_plan_session_budget() {
     // group attempt 侧不产生新预算账：attempt 状态不变、无新门、无第三个 session。
     let attempt_after = fixture
         .store
-        .get_attempt(&fixture.attempt.project_id, &fixture.attempt.issue_id, &fixture.attempt.id)
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
         .unwrap();
     assert_eq!(attempt_after, attempt_before);
     assert!(
         fixture
             .store
-            .list_open_blocked_gates(&attempt_after.project_id, &attempt_after.issue_id, &attempt_after.id)
+            .list_open_blocked_gates(
+                &attempt_after.project_id,
+                &attempt_after.issue_id,
+                &attempt_after.id
+            )
             .unwrap()
             .is_empty()
     );
@@ -651,7 +691,10 @@ async fn group_amendment_feedback_reuses_original_plan_session_budget() {
         .into_iter()
         .filter(|session| session.entity_id == fixture.plan.id)
         .count();
-    assert_eq!(sessions_after, sessions_before, "no second human gate instance");
+    assert_eq!(
+        sessions_after, sessions_before,
+        "no second human gate instance"
+    );
 
     // 同 command_id 重放：同 turn，预算与 ledger 不再变化。
     let replayed = engine
@@ -705,25 +748,41 @@ async fn group_amendment_approve_updates_binding_and_resumes_target() {
             .await
             .unwrap_or_else(|error| panic!("resume {mode:?}: {error}"));
 
-        assert_eq!(resumed.id, fixture.attempt.id, "resume keeps the same attempt ({mode:?})");
+        assert_eq!(
+            resumed.id, fixture.attempt.id,
+            "resume keeps the same attempt ({mode:?})"
+        );
         assert_eq!(resumed.status, expected_status, "{mode:?}");
         assert_eq!(resumed.stage, expected_stage, "{mode:?}");
         let binding = fixture.store.get_plan_binding(&resumed).unwrap();
-        assert_eq!(binding.bound_plan_revision_id, "plan_revision_0002", "{mode:?}");
-        assert_eq!(binding.applied_amendment_ids, vec![fixture.manifest.id.clone()], "{mode:?}");
+        assert_eq!(
+            binding.bound_plan_revision_id, "plan_revision_0002",
+            "{mode:?}"
+        );
+        assert_eq!(
+            binding.applied_amendment_ids,
+            vec![fixture.manifest.id.clone()],
+            "{mode:?}"
+        );
 
         let updated_context = trigger_context(&fixture);
         assert_eq!(updated_context.id, context.id);
-        assert_eq!(updated_context.status, PlanAmendmentContextStatus::Applied, "{mode:?}");
+        assert_eq!(
+            updated_context.status,
+            PlanAmendmentContextStatus::Applied,
+            "{mode:?}"
+        );
         assert_eq!(
             updated_context.new_plan_revision_id.as_deref(),
             Some("plan_revision_0002"),
             "{mode:?}"
         );
-        assert_eq!(updated_context.resume_target, fixture.manifest.resume_target, "{mode:?}");
         assert_eq!(
-            updated_context.previous_plan_revision_id,
-            context.previous_plan_revision_id,
+            updated_context.resume_target, fixture.manifest.resume_target,
+            "{mode:?}"
+        );
+        assert_eq!(
+            updated_context.previous_plan_revision_id, context.previous_plan_revision_id,
             "{mode:?}"
         );
 
@@ -741,7 +800,11 @@ async fn group_amendment_approve_updates_binding_and_resumes_target() {
             .lifecycle
             .get_workspace_session(&fixture.plan_session_id)
             .unwrap();
-        assert_eq!(durable.status, WorkspaceSessionStatus::Confirmed, "{mode:?}");
+        assert_eq!(
+            durable.status,
+            WorkspaceSessionStatus::Confirmed,
+            "{mode:?}"
+        );
     }
 }
 
@@ -765,17 +828,27 @@ async fn group_amendment_incompatible_revision_fails_closed() {
 
     let persisted = fixture
         .store
-        .get_attempt(&fixture.attempt.project_id, &fixture.attempt.issue_id, &fixture.attempt.id)
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
         .unwrap();
     assert_eq!(persisted.id, fixture.attempt.id);
     assert_eq!(persisted.status, CodingAttemptStatus::AwaitingPlanAmendment);
-    assert_eq!(fixture.store.get_plan_binding(&persisted).unwrap(), binding_before);
+    assert_eq!(
+        fixture.store.get_plan_binding(&persisted).unwrap(),
+        binding_before
+    );
 
     let failed = trigger_context(&fixture);
     assert_eq!(failed.id, context.id);
     assert_eq!(failed.status, PlanAmendmentContextStatus::FailedClosed);
     assert_eq!(failed.new_plan_revision_id, None);
-    assert_eq!(failed.previous_plan_revision_id, context.previous_plan_revision_id);
+    assert_eq!(
+        failed.previous_plan_revision_id,
+        context.previous_plan_revision_id
+    );
     let diagnostic = fixture
         .store
         .get_plan_amendment_context_diagnostic(&persisted, &failed.id)
@@ -830,7 +903,10 @@ async fn group_amendment_reconnect_recovers_original_gate_and_context() {
         .expect("context survives reconnect");
     assert_eq!(recovered_context.id, context.id);
     assert_eq!(recovered_context.plan_session_id, fixture.plan_session_id);
-    assert_eq!(recovered_context.status, PlanAmendmentContextStatus::Applied);
+    assert_eq!(
+        recovered_context.status,
+        PlanAmendmentContextStatus::Applied
+    );
     assert_eq!(
         recovered_context.new_plan_revision_id.as_deref(),
         Some("plan_revision_0002")

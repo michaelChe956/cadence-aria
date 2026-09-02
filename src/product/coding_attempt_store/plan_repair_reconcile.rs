@@ -7,7 +7,8 @@ use crate::product::coding_models::{
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    PlanRepairRequestStatus, PlanRepairSessionSnapshotDto, PlanRepairSessionStage,
+    AmendmentResumeMode, AmendmentResumeTarget, PlanRepairRequestStatus,
+    PlanRepairSessionSnapshotDto, PlanRepairSessionStage,
 };
 use crate::product::plan_repair::PlanRepairError;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
@@ -75,6 +76,27 @@ impl super::CodingAttemptStore {
             }
             _ => unreachable!("pause status was validated above"),
         }
+        // REQ-GCE-03：BlockedByPlanDefect → AwaitingPlanAmendment 的同一次锁内
+        // 转换必须创建（或幂等命中）PlanAmendmentContext，把原 plan session、
+        // 触发 unit/finding、previous revision 与初始 resume target 关联起来。
+        // 重复事件返回原 context，不重复开门。
+        let trigger_unit = self
+            .list_coding_units(&paused.project_id, &paused.issue_id, &paused.id)?
+            .into_iter()
+            .find(|unit| unit.id == trigger_run.unit_id)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_plan_amendment_context_trigger_unit",
+                id: trigger_run.unit_id.clone(),
+            })?;
+        self.open_plan_amendment_context(
+            &paused,
+            &trigger_run.unit_id,
+            &snapshot.request.trigger_finding_id,
+            AmendmentResumeTarget {
+                logical_work_item_id: trigger_unit.logical_work_item_id,
+                mode: AmendmentResumeMode::AwaitHandoff,
+            },
+        )?;
         let (timeline_node, timeline_created) =
             self.ensure_plan_repair_timeline_node(&paused, &snapshot.request.id)?;
 
