@@ -523,6 +523,10 @@ impl WorkspaceEngine {
             ir_adapter::initial_plan_compile_input_from_ir(&context, &ir.ir, &report.report)?;
         let durable_context = ir_adapter::durable_compile_context_from_ir(&context, &provenance)?;
         let prepared = prepare_initial_plan_compile(input, durable_context)?;
+        // 恢复重放与首次执行经同一提交段语义:source draft 先于 publication
+        // 重放落盘(同 draft_id 覆盖写,幂等)。见
+        // persist_initial_plan_compile_draft_records 的说明。
+        persist_initial_plan_compile_draft_records(store, &prepared.draft_records)?;
         let publication_input = prepared
             .publication_input
             .ok_or_else(|| "single candidate recovery publication input is missing".to_string())?;

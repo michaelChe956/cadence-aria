@@ -108,6 +108,10 @@ pub struct PreparedInitialPlanCompile {
     pub verification_plans: Vec<VerificationPlan>,
     pub validation_report: WorkItemSplitValidationReport,
     pub publication_input: Option<super::plan_projection::InitialPlanPublicationInput>,
+    /// 编译输入的 source draft 记录。SC 链由 IR adapter 在内存确定性构造,
+    /// 必须在提交段落盘才能让 advance 的 authoritative binding 解析溯源
+    /// (legacy 链已在草稿生成阶段落盘,重写为同 id 覆盖,内容相同)。
+    pub draft_records: Vec<WorkItemDraftRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,7 +262,36 @@ pub fn prepare_initial_plan_compile(
         verification_plans,
         validation_report,
         publication_input,
+        draft_records: input.draft_records,
     })
+}
+
+/// 把编译输入的 source draft 记录落盘(8.3 review Major-1 修复)。
+///
+/// * SC 链:IR adapter 只在内存构造 `InitialPlanCompileInput.draft_records`,
+///   不落盘则生产 advance 的 authoritative binding 解析必落
+///   `source_draft_error` → `mixed_target_group_rejected`,SC confirm→advance
+///   是死路。draft_id=`draft_{compile_id}_{n}`、generation_round_id=
+///   `single_candidate_{compile_id}` 均由 durable compile reservation
+///   确定性派生,编译恢复重放是同路径覆盖写,天然幂等。
+/// * legacy 链:草稿在生成阶段已落盘,重写为同 id 同内容覆盖(仅在共享
+///   提交段被调用时发生);此函数只写不读,不改变 SC compile
+///   「不读草稿库」的纪律(panic_on_legacy_compile_reads 只挂读方法)。
+fn persist_initial_plan_compile_draft_records(
+    store: &WorkItemPlanStore,
+    records: &[WorkItemDraftRecord],
+) -> Result<(), String> {
+    for record in records {
+        store
+            .put_draft_record(record)
+            .map_err(|error| {
+                format!(
+                    "persist compile source draft `{}` failed: {error}",
+                    record.draft_id
+                )
+            })?;
+    }
+    Ok(())
 }
 
 /// 执行阶段仅持有 writer；所有输入读取和时间/ID 分配均在 adapter 外层完成。
@@ -333,6 +366,10 @@ pub fn execute_initial_plan_compile(
         .plan_store
         .put_compile_transaction(&transaction)
         .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
+    // SC 链的 source draft 必须先于 publication 落盘:任何 durable work item
+    // revision 一旦可见,其 source_draft_revision_id 必须可在草稿库解析。
+    // legacy 链同样重写一份同 id 同内容记录(幂等覆盖)。
+    persist_initial_plan_compile_draft_records(&stores.plan_store, &prepared.draft_records)?;
     let publication_input = prepared.publication_input.ok_or_else(|| {
         "valid initial compile preparation is missing publication input".to_string()
     })?;
