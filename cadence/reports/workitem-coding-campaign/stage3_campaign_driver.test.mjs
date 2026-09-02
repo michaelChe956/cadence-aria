@@ -12,6 +12,8 @@ import test from 'node:test';
 import {
   advanceSimulationAction,
   campaignCommandId,
+  confirmedCountForPlanStatus,
+  generationModeSelectionForNode,
   createStage3GateController,
   parseHumanScript,
   resultTemplate,
@@ -694,3 +696,87 @@ test('campaign_stage3_group_snapshot_evidence_fails_closed_on_mismatched_attempt
 function stage3AdvanceCompletedForEvidence() {
   return { type: 'advance_completed', command_id: 'cmd-adv-0', attempt_id: 'attempt_fixture_0001', workspace_entry: '/w' };
 }
+
+// —— 阶段 3 Task 8.4 Step 4：REQ-WSC-01 auto/generation-mode 回归锁定 ——
+// 过滤名统一使用 campaign_stage3_wsc_regression_ 前缀（Step 5 定向门禁）。
+
+test('campaign_stage3_wsc_regression_auto_if_valid_reaches_confirmed_without_human', () => {
+  // auto_if_valid：typed 人工门流不激活（human script 惰性），人工消息出站全被拒。
+  assert.equal(stage3TypedFlowActive('single_candidate', 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'human_gate_feedback' }, 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'human_confirm' }, 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'auto_if_valid'), false);
+  // 合法候选的 durable 终局按 Confirmed 计数：无需人工往返即可到 Confirmed。
+  assert.equal(confirmedCountForPlanStatus('confirmed'), 1);
+  assert.equal(confirmedCountForPlanStatus('COMPLETED'), 0, '仅 confirmed 计数，其他状态不计');
+  // auto 门停止（stopped_needs_human）不冒充 Confirmed：必须走 takeover 链。
+  assert.equal(confirmedCountForPlanStatus('stopped_needs_human'), 0);
+  // 驱动层守卫：auto 下 typed 流不激活（stage3TypedFlowActive=false），
+  // gate controller 根本不被接线；人工消息出站也被准入表拒绝（上方断言）。
+  // 即便脚本误配人工动作，结果模板也只记录 advance 审计而不产生人工回合。
+  const template = resultTemplate('codex', 1, '/tmp/out', {}, 'digest', 'auto_if_valid');
+  assert.equal(template.humanGateActions, undefined, 'auto 结果模板不保留人工门审计（无人工动作可记）');
+});
+
+test('campaign_stage3_wsc_regression_single_candidate_never_sends_generation_mode_request', () => {
+  // SingleCandidate（batch/serial 内部选择）不经过 generation-mode 请求：
+  // 出站准入表对两种策略都拒绝 select_work_item_generation_mode。
+  assert.equal(singleCandidateOutboundAllowed({ type: 'select_work_item_generation_mode' }, 'interactive'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'select_work_item_generation_mode' }, 'auto_if_valid'), false);
+  // 对照：legacy work-item 流的 generation-mode 选择仍存在（内部选择 batch），
+  // 但它只能出现在 author_confirm 节点路径，SingleCandidate 会话永不到达。
+  const responded = new Set();
+  assert.deepEqual(generationModeSelectionForNode('node_gen_1', responded), {
+    type: 'select_work_item_generation_mode',
+    mode: 'batch',
+  });
+  assert.equal(generationModeSelectionForNode('node_gen_1', responded), null, '同一节点只发送一次');
+  // typed 人工门消息族永不编码 generation-mode / legacy 决策形态。
+  const typed = stage3HumanMessage({ decision: 'request-change', description: 'x' }, { commandId: 'cmd-wsc-0' });
+  assert.equal(typed.type, 'human_gate_feedback');
+  assert.notEqual(typed.type, 'select_work_item_generation_mode');
+});
+
+test('campaign_stage3_wsc_regression_interactive_multi_turn_stays_typed', () => {
+  // interactive 多轮修订全程 typed：feedback/confirm，绝不经过 legacy 逐段消息
+  // （review_decision_response / human_confirm{request-change} / author_decision）。
+  const { controller } = newController({ actions: parseHumanScript('request-change:反馈A;request-change:反馈B;confirm') });
+  const sent = [];
+  const first = controller.onGateWaiting();
+  assert.equal(first.message.type, 'human_gate_feedback');
+  sent.push(first.message);
+  let commandId = first.commandId;
+  for (let round = 0; round < 2; round += 1) {
+    controller.onInbound(stage3TurnOpen(commandId, `turn-wsc-${round}`, 2 - round));
+    const completed = controller.onInbound(stage3TurnCompleted(`turn-wsc-${round}`));
+    if (completed.outbound) {
+      sent.push(completed.outbound.message);
+      commandId = completed.outbound.commandId;
+    }
+  }
+  assert.deepEqual(sent.at(-1), { type: 'confirm' }, '批准编码为裸 typed confirm');
+  for (const message of sent) {
+    assert.ok(['human_gate_feedback', 'confirm'].includes(message.type), `非法出站形态: ${message.type}`);
+  }
+  controller.onInbound(stage3GateClosed('confirm'));
+  const fields = controller.resultFields();
+  assert.equal(fields.human_gate_turns.length, 2, '两轮反馈各一条 turn 审计');
+});
+
+test('campaign_stage3_wsc_regression_confirmed_ready_only_after_explicit_advance', () => {
+  // Confirmed 之后只有脚本里的显式 advance 动作才触发推进（Ready）：
+  // 无 advance 动作时 advanceSimulationAction 永远 wait，不自动推进。
+  const advanceAction = { decision: 'advance', description: null };
+  assert.equal(advanceSimulationAction({ confirmedPlan: true, existingAdvance: null, action: null }), 'wait');
+  assert.equal(advanceSimulationAction({ confirmedPlan: true, existingAdvance: null, action: { decision: 'confirm' } }), 'wait');
+  assert.equal(advanceSimulationAction({ confirmedPlan: true, existingAdvance: null, action: advanceAction }), 'send');
+  // controller 面：confirm 结束 + Confirmed 回读后，无 advance 脚本则零出站。
+  const { controller } = newController({ actions: parseHumanScript('confirm') });
+  controller.onGateWaiting();
+  controller.onInbound(stage3GateClosed('confirm'));
+  assert.equal(
+    controller.onConfirmedDurable({ providerStartLedger: stage3ProviderStartLedgerFixture() }).decision,
+    null,
+    'Confirmed 后无显式 advance 不得 Ready',
+  );
+});
