@@ -476,6 +476,16 @@ function humanConfirmRequestChangeMessage(feedback) {
   };
 }
 
+// 阶段 3 语法：action := "request-change:" feedback | "confirm" | "abandon" | "advance"。
+// 旧 request-change/confirm 拼写逐字保留（阶段 2 脚本兼容）；abandon 映射 terminate，
+// advance 只在 durable Confirmed 回读后作为独立 typed command 发送。
+export const STAGE3_HUMAN_SCRIPT_GRAMMAR = {
+  version: 3,
+  actions: ['request-change:<反馈文本>', 'confirm', 'abandon', 'advance'],
+};
+
+const STAGE3_COMMAND_KINDS = new Set(['human_gate_feedback', 'advance']);
+
 function parseHumanScript(script) {
   if (script === undefined || script === null) return [];
   if (typeof script !== 'string') throw new Error('ARIA_HUMAN_SCRIPT 必须是字符串');
@@ -491,6 +501,14 @@ function parseHumanScript(script) {
         if (separator !== -1) throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条 confirm 不接受描述`);
         return { decision: 'confirm', description: null };
       }
+      if (decision === 'abandon') {
+        if (separator !== -1) throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条 abandon 不接受描述`);
+        return { decision: 'abandon', description: null };
+      }
+      if (decision === 'advance') {
+        if (separator !== -1) throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条 advance 不接受描述`);
+        return { decision: 'advance', description: null };
+      }
       if (decision === 'request-change') {
         const description = separator === -1 ? '' : entry.slice(separator + 1).trim();
         if (!description) {
@@ -498,7 +516,7 @@ function parseHumanScript(script) {
         }
         return { decision: 'request-change', description };
       }
-      throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条仅支持 confirm 或 request-change:<文本>`);
+      throw new Error(`ARIA_HUMAN_SCRIPT 第 ${index + 1} 条仅支持 confirm、request-change:<文本>、abandon 或 advance`);
     });
 }
 
@@ -517,6 +535,397 @@ function humanConfirmMessage(action) {
     return humanConfirmRequestChangeMessage(action.description);
   }
   throw new Error(`不支持的人工确认决策: ${String(action.decision)}`);
+}
+
+// —— 阶段 3 typed 人工门与 advance 模拟（task 8.1）——
+
+// 仅 flow_kind=single_candidate && run_policy=interactive 切换到 typed 编码；其余 flow 维持阶段 2 行为。
+function stage3TypedFlowActive(flowKind, runPolicy) {
+  return flowKind === 'single_candidate' && runPolicy === 'interactive';
+}
+
+// 客户端幂等键：由稳定 run 身份（provider/rep/issue-or-existing-session）+ 脚本序号 + kind
+// 确定性生成；重连/重复发送/进程重启（同 checkpoint 或同身份）都复用原值。
+function campaignCommandId({ campaignRunId, actionIndex, kind }) {
+  if (typeof campaignRunId !== 'string' || !campaignRunId.trim()) {
+    throw new Error('campaignCommandId 要求非空 campaignRunId');
+  }
+  if (!Number.isInteger(actionIndex) || actionIndex < 0) {
+    throw new Error('campaignCommandId 要求非负整数 actionIndex');
+  }
+  if (!STAGE3_COMMAND_KINDS.has(kind)) {
+    throw new Error(`campaignCommandId kind 必须是 ${[...STAGE3_COMMAND_KINDS].join(' 或 ')}`);
+  }
+  const digest = sha256(`${campaignRunId}\n${kind}\n${String(actionIndex)}`).slice(0, 10);
+  return `cmd-${kind}-${actionIndex}-${digest}`;
+}
+
+// SC typed flow 的 wire 映射：request-change 绝不再编码 HumanConfirmDecision::RequestChange。
+function stage3HumanMessage(action, context) {
+  const commandId = context?.commandId ?? null;
+  if (action?.decision === 'request-change') {
+    if (!commandId) throw new Error('request-change 的 typed 编码必须携带 commandId');
+    return { type: 'human_gate_feedback', command_id: commandId, feedback: action.description };
+  }
+  if (action?.decision === 'confirm') {
+    return { type: 'human_confirm', decision: 'confirm', payload: null };
+  }
+  if (action?.decision === 'abandon') {
+    return { type: 'human_confirm', decision: 'terminate', payload: null };
+  }
+  if (action?.decision === 'advance') {
+    if (!commandId) throw new Error('advance 的 typed 编码必须携带 commandId');
+    return { type: 'advance', command_id: commandId };
+  }
+  throw new Error(`不支持的人工脚本动作: ${String(action?.decision)}`);
+}
+
+function stage3FeedbackDigest(feedback) {
+  return sha256(String(feedback ?? ''));
+}
+
+// ws.jsonl 出站脱敏：typed feedback 只留 digest/长度/command_id，不写反馈全文。
+function stage3OutboundLogEntry(message) {
+  if (message?.type === 'human_gate_feedback') {
+    return {
+      type: message.type,
+      command_id: message.command_id,
+      feedback_digest: stage3FeedbackDigest(message.feedback),
+      feedback_length: typeof message.feedback === 'string' ? message.feedback.length : 0,
+    };
+  }
+  return message;
+}
+
+// 事件驱动消费判定：只有服务端事件/durable replay 证明“服务端已接受该动作”才消费。
+// busy/rejected/failed 均不消费；duplicate 由调用侧状态机去重。
+function shouldConsumeHumanAction(message, durableState, action) {
+  if (!isRecord(message) || !isRecord(action)) return false;
+  if (action.decision === 'request-change') {
+    const commandId = action.commandId;
+    if (message.type === 'human_gate_turn_open' && message.command_id === commandId) return true;
+    if (Array.isArray(durableState?.replayedCommandIds) && durableState.replayedCommandIds.includes(commandId)) {
+      return true;
+    }
+    return false;
+  }
+  if (action.decision === 'confirm') {
+    if (message.type === 'human_gate_closed' && ['confirm', 'approve'].includes(String(message.decision))) return true;
+    if (durableState?.confirmedPlan === true) return true;
+    return false;
+  }
+  if (action.decision === 'abandon') {
+    return message.type === 'human_gate_closed' && String(message.decision) === 'terminate';
+  }
+  if (action.decision === 'advance') {
+    const commandId = action.commandId;
+    if (message.type === 'advance_completed' && message.command_id === commandId) return true;
+    if (Array.isArray(durableState?.advanceRecords)
+      && durableState.advanceRecords.some((record) => record?.command_id === commandId)) {
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+// advance 模拟决策：已有 durable advance 记录（幂等命中）优先；否则必须 durable
+// Confirmed 回读成功且此前未 advance 才允许发送 typed command。
+function advanceSimulationAction({ confirmedPlan, existingAdvance, action }) {
+  if (existingAdvance) return 'complete';
+  if (!action || action.decision !== 'advance') return 'wait';
+  if (!confirmedPlan) return 'wait';
+  return 'send';
+}
+
+// 阶段 3 门控制器：command/turn 级状态机（open→running→completed/failed→下一脚本动作）。
+// 脱账/审计字段只含 digest/长度/command_id/turn_id；脚本耗尽仅在门 Waiting 且无 in-flight
+// 时沿用 human_script_exhausted_default。
+function createStage3GateController({
+  actions,
+  campaignRunId,
+  checkpoint = null,
+  persistCheckpoint = null,
+}) {
+  const script = Array.isArray(actions) ? actions : [];
+  const commandIds = {
+    ...(isRecord(checkpoint?.command_ids) ? checkpoint.command_ids : {}),
+  };
+  const checkpointState = { campaign_run_id: campaignRunId, command_ids: commandIds };
+  const syntheticActions = [];
+  const turns = [];
+  const advanceActions = [];
+  const recoveryChecks = [];
+  const ledger = { before: null, after: null };
+  let actionIndex = 0;
+  let awaitingAccept = null;
+  let inFlightTurn = null;
+  let exhaustedEpisodeOpen = false;
+
+  const actionAt = (index) => script[index] ?? syntheticActions[index - script.length] ?? null;
+  const keyFor = (index, kind) => `${kind}#${index}`;
+  const resolveCommandId = (index, kind) => {
+    const key = keyFor(index, kind);
+    if (typeof commandIds[key] === 'string') return commandIds[key];
+    return campaignCommandId({ campaignRunId, actionIndex: index, kind });
+  };
+  const materializeCommandId = (index, kind) => {
+    const key = keyFor(index, kind);
+    if (typeof commandIds[key] === 'string') {
+      recoveryChecks.push({
+        check: 'checkpoint_command_id_reused',
+        key,
+        command_id: commandIds[key],
+        actionIndex: index,
+        kind,
+      });
+      return commandIds[key];
+    }
+    commandIds[key] = campaignCommandId({ campaignRunId, actionIndex: index, kind });
+    if (persistCheckpoint) persistCheckpoint(structuredClone(checkpointState));
+    return commandIds[key];
+  };
+  const currentWithCommand = () => {
+    const action = actionAt(actionIndex);
+    if (!action) return null;
+    if (action.decision === 'request-change') {
+      return { ...action, commandId: resolveCommandId(actionIndex, 'human_gate_feedback') };
+    }
+    if (action.decision === 'advance') {
+      return { ...action, commandId: resolveCommandId(actionIndex, 'advance') };
+    }
+    return { ...action, commandId: null };
+  };
+  const turnRecordFor = (action, commandId) => {
+    const existing = turns.find((turn) => turn.command_id === commandId);
+    if (existing) return existing;
+    const record = {
+      action_index: actionIndex,
+      command_id: commandId,
+      feedback_digest: stage3FeedbackDigest(action.description),
+      feedback_length: typeof action.description === 'string' ? action.description.length : 0,
+      turn_id: null,
+      remaining_budget: null,
+      status: 'sent',
+      busy_events: 0,
+    };
+    turns.push(record);
+    return record;
+  };
+  const commandKindForAction = (action) => {
+    if (!action) return null;
+    if (action.decision === 'request-change') return 'human_gate_feedback';
+    return action.decision;
+  };
+  const consumeCurrent = (consumed, via) => {
+    const action = actionAt(actionIndex);
+    consumed.push({ actionIndex, kind: commandKindForAction(action), via });
+    actionIndex += 1;
+    awaitingAccept = null;
+    exhaustedEpisodeOpen = false;
+    return action;
+  };
+
+  const onGateWaiting = ({ reconnect = false } = {}) => {
+    if (inFlightTurn) return null;
+    const action = actionAt(actionIndex);
+    if (action?.decision === 'advance') return null;
+    if (!action) {
+      if (exhaustedEpisodeOpen) return null;
+      exhaustedEpisodeOpen = true;
+      return {
+        message: stage3HumanMessage({ decision: 'confirm' }, { commandId: null }),
+        actionIndex: null,
+        commandId: null,
+        source: 'human_script_exhausted_default',
+      };
+    }
+    if (awaitingAccept && !reconnect) return null;
+    const commandId = action.decision === 'request-change'
+      ? materializeCommandId(actionIndex, 'human_gate_feedback')
+      : null;
+    const message = stage3HumanMessage(action, { commandId });
+    awaitingAccept = { actionIndex, kind: action.decision, commandId };
+    if (action.decision === 'request-change') turnRecordFor(action, commandId);
+    return { message, actionIndex, commandId, source: 'human_script' };
+  };
+
+  const onInbound = (message) => {
+    const consumed = [];
+    const current = currentWithCommand();
+    const openTurnFor = (commandId) => turns.find((turn) => turn.command_id === commandId && turn.status !== 'completed' && turn.status !== 'failed');
+    const terminalFor = (turnId) => turns.find((turn) => (turn.turn_id === turnId || turn.turn_id === null)
+      && (turn.status === 'sent' || turn.status === 'open'));
+
+    if (message?.type === 'human_gate_turn_open') {
+      if (current?.decision === 'request-change' && shouldConsumeHumanAction(message, {}, current)) {
+        const record = turnRecordFor(current, current.commandId);
+        record.turn_id = message.turn_id;
+        record.remaining_budget = message.remaining_budget;
+        record.status = 'open';
+        inFlightTurn = { turnId: message.turn_id, commandId: message.command_id };
+        consumeCurrent(consumed, 'human_gate_turn_open');
+      } else {
+        const replayed = turns.find((turn) => turn.command_id === message.command_id);
+        if (replayed) {
+          replayed.turn_id ??= message.turn_id;
+          replayed.remaining_budget ??= message.remaining_budget;
+          recoveryChecks.push({
+            check: 'duplicate_turn_open_replayed',
+            command_id: message.command_id,
+            turn_id: message.turn_id,
+          });
+        }
+      }
+      return { consumed, outbound: null };
+    }
+    if (message?.type === 'human_gate_turn_completed' || message?.type === 'human_gate_turn_failed') {
+      const record = terminalFor(message.turn_id);
+      if (record) {
+        record.status = message.type === 'human_gate_turn_completed' ? 'completed' : 'failed';
+        if (message.type === 'human_gate_turn_completed') record.artifact_ref = message.artifact_ref;
+        else record.failure_class = message.failure_class;
+        if (inFlightTurn && (inFlightTurn.turnId === message.turn_id || inFlightTurn.turnId === null)) {
+          inFlightTurn = null;
+        }
+        return { consumed, outbound: onGateWaiting() };
+      }
+      return { consumed, outbound: null };
+    }
+    if (message?.type === 'human_gate_busy') {
+      const record = terminalFor(message.turn_id);
+      if (record) record.busy_events += 1;
+      return { consumed, outbound: null };
+    }
+    if (message?.type === 'human_gate_closed') {
+      exhaustedEpisodeOpen = false;
+      if (current && shouldConsumeHumanAction(message, {}, current)) {
+        consumeCurrent(consumed, 'human_gate_closed');
+      } else if (awaitingAccept?.kind === 'confirm' || awaitingAccept?.kind === 'abandon') {
+        awaitingAccept = null;
+      }
+      return { consumed, outbound: null };
+    }
+    if (message?.type === 'advance_completed' || message?.type === 'advance_rejected') {
+      if (current?.decision === 'advance' && shouldConsumeHumanAction(message, {}, current)) {
+        const record = advanceActions.find((entry) => entry.command_id === current.commandId)
+          ?? {
+            action_index: actionIndex,
+            command_id: current.commandId,
+            decision: 'send',
+            status: 'sent',
+            attempt_id: null,
+            workspace_entry: null,
+          };
+        if (!advanceActions.includes(record)) advanceActions.push(record);
+        if (message.type === 'advance_completed') {
+          record.status = 'completed';
+          record.attempt_id = message.attempt_id;
+          record.workspace_entry = message.workspace_entry;
+        } else {
+          record.status = 'rejected';
+          record.code = message.code;
+        }
+        consumeCurrent(consumed, message.type);
+      }
+      return { consumed, outbound: null };
+    }
+    return { consumed, outbound: null };
+  };
+
+  const onDurableState = ({ replayedCommandIds = [], advanceRecords = [], confirmedPlan = false } = {}) => {
+    const consumed = [];
+    const current = currentWithCommand();
+    if (current?.decision === 'request-change'
+      && replayedCommandIds.includes(current.commandId)) {
+      const record = turnRecordFor(current, current.commandId);
+      record.status = 'open';
+      inFlightTurn = { turnId: null, commandId: current.commandId };
+      recoveryChecks.push({
+        check: 'durable_command_replay_consumed',
+        command_id: current.commandId,
+        actionIndex,
+      });
+      consumeCurrent(consumed, 'durable_replay');
+    } else if (current?.decision === 'advance'
+      && advanceRecords.some((entry) => entry?.command_id === current.commandId)) {
+      const replayed = advanceRecords.find((entry) => entry?.command_id === current.commandId);
+      advanceActions.push({
+        action_index: actionIndex,
+        command_id: current.commandId,
+        decision: 'complete',
+        status: 'completed',
+        attempt_id: replayed?.attempt_id ?? null,
+        workspace_entry: null,
+      });
+      recoveryChecks.push({
+        check: 'durable_advance_record_replayed',
+        command_id: current.commandId,
+        actionIndex,
+      });
+      consumeCurrent(consumed, 'durable_replay');
+    } else if (current?.decision === 'confirm' && confirmedPlan === true) {
+      consumeCurrent(consumed, 'durable_confirmed_readback');
+    }
+    return { consumed, outbound: null };
+  };
+
+  const onConfirmedDurable = ({ providerStartLedger = [], existingAdvance = null } = {}) => {
+    const action = actionAt(actionIndex);
+    if (action?.decision !== 'advance') return { decision: null, commandId: null, outbound: null };
+    const decision = advanceSimulationAction({ confirmedPlan: true, existingAdvance, action });
+    if (decision === 'complete') {
+      ledger.before = providerStartLedger;
+      const commandId = resolveCommandId(actionIndex, 'advance');
+      advanceActions.push({
+        action_index: actionIndex,
+        command_id: commandId,
+        decision: 'complete',
+        status: 'completed',
+        attempt_id: existingAdvance?.attempt_id ?? null,
+        workspace_entry: null,
+      });
+      ledger.after = providerStartLedger;
+      actionIndex += 1;
+      return { decision: 'complete', commandId, outbound: null };
+    }
+    if (decision !== 'send') return { decision: 'wait', commandId: null, outbound: null };
+    ledger.before = providerStartLedger;
+    const commandId = materializeCommandId(actionIndex, 'advance');
+    const message = stage3HumanMessage(action, { commandId });
+    advanceActions.push({
+      action_index: actionIndex,
+      command_id: commandId,
+      decision: 'send',
+      status: 'sent',
+      attempt_id: null,
+      workspace_entry: null,
+    });
+    return { decision: 'send', commandId, outbound: message };
+  };
+
+  return {
+    commandIdFor: (index, kind) => resolveCommandId(index, kind),
+    currentAction: () => actionAt(actionIndex),
+    enqueueAction: (action) => {
+      syntheticActions.push({ ...action });
+      return script.length + syntheticActions.length - 1;
+    },
+    onGateWaiting,
+    onInbound,
+    onDurableState,
+    onConfirmedDurable,
+    noteProviderLedgerAfter: (ledgerAfter) => {
+      ledger.after = Array.isArray(ledgerAfter) ? ledgerAfter : [];
+    },
+    resultFields: () => ({
+      human_gate_turns: structuredClone(turns),
+      advance_actions: structuredClone(advanceActions),
+      takeover_actions: [],
+      durable_recovery_checks: structuredClone(recoveryChecks),
+      provider_start_ledger_before_after: structuredClone(ledger),
+    }),
+  };
 }
 
 function isHumanGateStage(stage) {
@@ -543,8 +952,10 @@ function activeNodeTypeForActiveNode(nodesById, activeNodeId, previousActiveNode
 }
 
 function singleCandidateOutboundAllowed(message, runPolicy = CONFIGURED_RUN_POLICY) {
+  // 阶段 3：interactive 下增加 typed human_gate_feedback/advance；legacy SC 决策族依旧拒绝。
   return message?.type === 'start_generation' || (
-    runPolicy === 'interactive' && message?.type === 'human_confirm'
+    runPolicy === 'interactive'
+    && ['human_confirm', 'human_gate_feedback', 'advance'].includes(message?.type)
   );
 }
 
@@ -903,6 +1314,14 @@ function resultTemplate(
     policy_diagnostics: [],
     human_gate_snapshot: null,
     ...(runPolicy === 'interactive' ? { humanGateActions: [] } : {}),
+    // 阶段 3 typed 审计面：仅 interactive 预留；auto 策略保持阶段 2 模板不变。
+    ...(runPolicy === 'interactive' ? {
+      human_gate_turns: [],
+      advance_actions: [],
+      takeover_actions: [],
+      durable_recovery_checks: [],
+      provider_start_ledger_before_after: null,
+    } : {}),
     provider_start_count: 0,
     provider_start_ledger: [],
     legacy_decision_messages: [],
@@ -980,12 +1399,41 @@ async function runCampaign({
   const nodesById = new Map();
   const respondedAuthorNodeIds = new Set();
   const acceptedDrafts = new Set();
+  // —— 阶段 3 typed 门/advance 控制器（仅 flow_kind=single_candidate + interactive 激活）——
+  let stage3Controller = null;
+  let stage3CheckpointPath = null;
+  const ensureStage3Controller = () => {
+    if (!stage3TypedFlowActive(result.flow_kind, runPolicy)) return null;
+    if (stage3Controller) return stage3Controller;
+    stage3CheckpointPath = path.join(outDir, 'stage3_command_checkpoint.json');
+    let checkpoint = null;
+    if (fs.existsSync(stage3CheckpointPath)) {
+      try {
+        checkpoint = JSON.parse(fs.readFileSync(stage3CheckpointPath, 'utf8'));
+      } catch {
+        checkpoint = null; // checkpoint 损坏时回退确定性重算，不阻断恢复
+      }
+    }
+    stage3Controller = createStage3GateController({
+      actions: humanScript,
+      campaignRunId: `workitem:${provider}:rep${rep}:${result.issue_id ?? result.workspace_session_id ?? 'unknown'}`,
+      checkpoint,
+      // command id 一经 materialize 立即落盘，进程重启复用原值。
+      persistCheckpoint: (next) => fs.writeFileSync(stage3CheckpointPath, json(next), 'utf8'),
+    });
+    return stage3Controller;
+  };
+  const syncStage3Fields = () => {
+    if (!stage3Controller) return;
+    Object.assign(result, stage3Controller.resultFields());
+  };
 
   const finish = (exitCode = 0) => {
     if (ended) return;
     ended = true;
     if (hardTimer) clearTimeout(hardTimer);
     if (!result.completed && !result.failureClass) result.failureClass = result.error ? 'driver_error' : 'incomplete';
+    syncStage3Fields();
     result.usage_by_role = Object.keys(usageByRole).length
       ? usageByRole
       : { usage_unavailable: true };
@@ -1021,7 +1469,7 @@ async function runCampaign({
       );
       return;
     }
-    writeLog({ direction: 'out', message });
+    writeLog({ direction: 'out', message: stage3OutboundLogEntry(message) });
     ws.send(JSON.stringify(message));
   };
   const recordStage = (stage, source) => {
@@ -1073,13 +1521,109 @@ async function runCampaign({
     send({ type: 'work_item_batch_decision', decision: 'accept_all', feedback: null, first_affected_outline_id: null });
     return true;
   };
+  const stage3AuditForOutbound = (message) => {
+    if (message?.type === 'human_gate_feedback') {
+      return {
+        type: message.type,
+        decision: null,
+        command_id: message.command_id,
+        feedback_digest: stage3FeedbackDigest(message.feedback),
+        feedback_length: typeof message.feedback === 'string' ? message.feedback.length : 0,
+      };
+    }
+    return {
+      type: message?.type ?? null,
+      decision: message?.decision ?? null,
+      command_id: message?.command_id ?? null,
+      feedback_digest: null,
+      feedback_length: null,
+    };
+  };
+  const deliverStage3Submission = (submission) => {
+    if (!submission?.message || ended) return;
+    const { message, source } = submission;
+    const gateSequence = result.humanGateActions.length + 1;
+    const gateAction = humanGateActionAudit({
+      sequence: gateSequence,
+      enteredAt: humanGateEnteredAt ?? now(),
+      elapsedSec: elapsedSec(),
+      stage: currentStage,
+      reviewVerdict,
+      activeNodeId,
+      response: {
+        decision: message.decision ?? message.type,
+        description: null,
+        source,
+      },
+      message,
+      sentAt: now(),
+    });
+    // 脱敏：审计面只留 digest/长度/command_id，不写反馈全文。
+    gateAction.message = stage3AuditForOutbound(message);
+    result.humanGateActions.push(gateAction);
+    writeLog({ event: 'human_gate_action', ...gateAction });
+    if (message.type === 'human_gate_feedback') manualRepairRequestsSent += 1;
+    send(message);
+    syncStage3Fields();
+  };
+  const handleHumanConfirmStage3 = async () => {
+    if (activeNodeType === null) return;
+    if (activeNodeType !== 'human_confirm') {
+      fail('unexpected_human_confirm', 'interactive human_confirm 未关联到 human_confirm 节点');
+      return;
+    }
+    const controller = ensureStage3Controller();
+    if (!controller) return;
+    try {
+      if (humanScriptConfigured) {
+        deliverStage3Submission(controller.onGateWaiting());
+        return;
+      }
+      if (humanMode === 'stdin' && process.stdin.isTTY) {
+        const raw = await readHumanStdinAction({
+          sequence: result.humanGateActions.length + 1,
+          stage: currentStage,
+          reviewVerdict,
+        });
+        if (ended || !isHumanGateStage(currentStage)) return;
+        controller.enqueueAction({ decision: raw.decision, description: raw.description });
+        deliverStage3Submission(controller.onGateWaiting());
+        return;
+      }
+      // 无脚本时沿用阶段 2 启发式，但 request-change 一律切 typed 编码。
+      const action = humanConfirmAction({
+        activeNodeType,
+        reviewVerdict,
+        reviewComplete: latestReviewComplete,
+        humanGateSnapshot: result.human_gate_snapshot,
+        manualRepairsUsed: durableRunHistory?.manual_repairs_used ?? 0,
+        manualRepairRequestsSent,
+      });
+      if (action.kind === 'wait') return;
+      if (action.kind === 'fail') {
+        fail(action.failureClass, 'interactive human_confirm 的 manual 返修预算已耗尽或节点类型未知');
+        return;
+      }
+      controller.enqueueAction(action.kind === 'confirm'
+        ? { decision: 'confirm', description: null }
+        : { decision: 'request-change', description: feedback });
+      deliverStage3Submission(controller.onGateWaiting());
+    } catch (error) {
+      fail('human_confirm_input_invalid', error);
+    }
+  };
   const handleHumanConfirm = async () => {
     if (
       runPolicy !== 'interactive'
       || !activeNodeId
-      || humanConfirmSentNodeIds.has(activeNodeId)
       || result.failureClass
     ) return;
+    // 阶段 3：SC+interactive 走 command/turn 级状态机，不再受 node 级“只应答一次”限制。
+    if (stage3TypedFlowActive(result.flow_kind, runPolicy)) {
+      void handleHumanConfirmStage3();
+      return;
+    }
+    if (humanConfirmSentNodeIds.has(activeNodeId)) return;
     if (activeNodeType === null) return;
     if (activeNodeType !== 'human_confirm') {
       fail('unexpected_human_confirm', 'interactive human_confirm 未关联到 human_confirm 节点');
@@ -1246,6 +1790,13 @@ async function runCampaign({
     if (action.failureClass !== 'stopped_needs_human') result.error = `SessionState 终态: ${detail}`;
     finish(action.failureClass === 'stopped_needs_human' ? 0 : 1);
   };
+  let confirmedHandoff = null;
+  let advanceFinishPending = false;
+  const writeHandoffAndFinish = () => {
+    if (!confirmedHandoff || ended) return;
+    fs.writeFileSync(path.join(outDir, 'handoff.json'), json(confirmedHandoff), 'utf8');
+    finish(0);
+  };
   const completeConfirmedSession = () => {
     if (completionVerificationStarted) return;
     completionVerificationStarted = true;
@@ -1255,7 +1806,7 @@ async function runCampaign({
         result.confirmed_count = confirmedCountForPlanStatus(plan.status);
         result.work_item_ids = workItemIds;
         result.validator_findings.push(...(Array.isArray(plan.validator_findings) ? plan.validator_findings : []));
-        const handoff = {
+        confirmedHandoff = {
           project_id: PROJECT_ID,
           issue_id: result.issue_id,
           plan_id: result.plan_id,
@@ -1267,13 +1818,42 @@ async function runCampaign({
           execution_plan_confirm_required: Boolean(plan.options?.require_execution_plan_confirm),
           outDir,
         };
-        fs.writeFileSync(path.join(outDir, 'handoff.json'), json(handoff), 'utf8');
-        finish(0);
+        // Confirmed 回读后若脚本下一项为 advance：发送 typed command 并等待
+        // advance_completed/advance_rejected；否则保持阶段 2 handoff finish 行为。
+        const controller = stage3TypedFlowActive(result.flow_kind, runPolicy)
+          ? ensureStage3Controller()
+          : null;
+        if (controller?.currentAction()?.decision === 'advance') {
+          const advanceDecision = controller.onConfirmedDurable({
+            providerStartLedger: result.provider_start_ledger ?? [],
+          });
+          syncStage3Fields();
+          if (advanceDecision.decision === 'send' && advanceDecision.outbound) {
+            advanceFinishPending = true;
+            writeLog({
+              event: 'stage3_advance_simulation',
+              decision: 'send',
+              command_id: advanceDecision.commandId,
+            });
+            send(advanceDecision.outbound);
+            return;
+          }
+        }
+        writeHandoffAndFinish();
       })
       .catch((error) => fail('handoff_verification_failed', error));
   };
   const finalizeFromDurableSession = (trigger, closeEvent = null) => {
-    if (ended || completionVerificationStarted) return true;
+    if (ended || completionVerificationStarted) {
+      // Confirmed 后等待 advance 结果期间传输层断开：plan 已 Confirmed，durable advance
+      // 记录的对账留待 8.4b 重连矩阵；此处不悬挂，按已知事实收尾。
+      if (advanceFinishPending && !ended) {
+        advanceFinishPending = false;
+        writeLog({ event: 'stage3_advance_outcome_unknown', trigger });
+        writeHandoffAndFinish();
+      }
+      return true;
+    }
     let durable;
     try {
       durable = readDurableSessionState();
@@ -1658,6 +2238,54 @@ async function runCampaign({
         case 'provider_status':
         case 'execution_event':
           break;
+        case 'human_gate_turn_open':
+        case 'human_gate_turn_completed':
+        case 'human_gate_turn_failed':
+        case 'human_gate_busy':
+        case 'human_gate_closed':
+        case 'advance_completed':
+        case 'advance_rejected': {
+          // 阶段 3 typed 事件只允许出现在 SC+interactive；其他 flow 视为协议回归失败关闭。
+          const controller = stage3TypedFlowActive(result.flow_kind, runPolicy)
+            ? ensureStage3Controller()
+            : null;
+          if (!controller) {
+            fail(
+              'stage3_event_outside_typed_flow',
+              `非 typed flow（flow_kind=${String(result.flow_kind)}, run_policy=${String(runPolicy)}）收到 ${message.type}`,
+            );
+            break;
+          }
+          const outcome = controller.onInbound(message);
+          for (const consumed of outcome.consumed) {
+            writeLog({
+              event: 'stage3_action_consumed',
+              actionIndex: consumed.actionIndex,
+              kind: consumed.kind,
+              via: consumed.via,
+              command_id: message.command_id ?? null,
+              turn_id: message.turn_id ?? null,
+            });
+          }
+          if (outcome.outbound) deliverStage3Submission(outcome.outbound);
+          if (advanceFinishPending
+            && (message.type === 'advance_completed' || message.type === 'advance_rejected')
+            && outcome.consumed.some((entry) => entry.kind === 'advance')) {
+            advanceFinishPending = false;
+            controller.noteProviderLedgerAfter(result.provider_start_ledger ?? []);
+            syncStage3Fields();
+            writeLog({
+              event: 'stage3_advance_simulation',
+              decision: message.type,
+              command_id: message.command_id ?? null,
+              attempt_id: message.attempt_id ?? null,
+              code: message.code ?? null,
+            });
+            writeHandoffAndFinish();
+          }
+          syncStage3Fields();
+          break;
+        }
         case 'timeline_node_updated':
         case 'stream_chunk':
         case 'message_complete':
@@ -1730,6 +2358,14 @@ async function main() {
       prepare_options: options.existingSessionId
         ? null
         : prepareOptionsForProvider(options.provider, options.runPolicy),
+      human_script_grammar: STAGE3_HUMAN_SCRIPT_GRAMMAR,
+      advance_simulation: {
+        enabled: true,
+        scope: 'flow_kind=single_candidate && run_policy=interactive',
+        precondition: 'durable Confirmed 回读成功且此前未 advance',
+        command: 'advance { command_id }',
+        starts_coding_provider: false,
+      },
       no_http_or_websocket_requests: true,
     }));
     return;
@@ -1743,10 +2379,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 
 export {
   activeNodeTypeForActiveNode,
+  advanceSimulationAction,
   applyResultTiming,
   authorConfirmAction,
+  campaignCommandId,
   collectUsageByRole,
   confirmedCountForPlanStatus,
+  createStage3GateController,
   generationModeSelectionForNode,
   legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
@@ -1758,7 +2397,12 @@ export {
   isHumanGateStage,
   parseHumanScript,
   shouldClearPendingGateNode,
+  shouldConsumeHumanAction,
   singleCandidateOutboundAllowed,
+  stage3FeedbackDigest,
+  stage3HumanMessage,
+  stage3OutboundLogEntry,
+  stage3TypedFlowActive,
   providerRolesForSelection,
   prepareOptionsForProvider,
   resultTemplate,

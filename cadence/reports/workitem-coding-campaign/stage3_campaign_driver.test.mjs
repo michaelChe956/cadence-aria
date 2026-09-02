@@ -172,8 +172,9 @@ test('campaign_stage3_reconnect_reuses_command_id_without_consuming_script_twice
   const send1 = singleFlight.onGateWaiting();
   singleFlight.onInbound(stage3TurnOpen(send1.commandId, 'turn-1', 1));
   assert.equal(singleFlight.onGateWaiting(), null, 'turn 未终态（in-flight）期间不得发送下一动作');
-  singleFlight.onInbound(stage3TurnFailed('turn-1', 'provider_err', '合成失败原因'));
-  const send2 = singleFlight.onGateWaiting();
+  const failedOutcome = singleFlight.onInbound(stage3TurnFailed('turn-1', 'provider_err', '合成失败原因'));
+  assert.ok(failedOutcome.outbound, '回合终态（含失败）后门回到 Waiting，应给出下一脚本动作');
+  const send2 = failedOutcome.outbound;
   assert.equal(send2.message.feedback, '合成反馈 2 号');
   assert.notEqual(send2.commandId, send1.commandId);
 });
