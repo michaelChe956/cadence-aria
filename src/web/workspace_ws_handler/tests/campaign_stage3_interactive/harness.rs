@@ -132,18 +132,15 @@ impl StreamingProviderAdapter for ScriptedRevisionProvider {
                 let release = self.hang_release.clone();
                 tokio::spawn(async move {
                     entered.notify_one();
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            _ = release.notified() => {
-                                let _ = event_tx
-                                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
-                                        REP4_CANDIDATE.to_string(),
-                                        None,
-                                    )))
-                                    .await;
-                                return;
-                            }
+                    tokio::select! {
+                        _ = cancel.cancelled() => {}
+                        _ = release.notified() => {
+                            let _ = event_tx
+                                .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                                    REP4_CANDIDATE.to_string(),
+                                    None,
+                                )))
+                                .await;
                         }
                     }
                 });
@@ -457,6 +454,7 @@ impl CampaignStage3Harness {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn campaign_step_audit(
     scenario_id: &'static str,
     command_id: &str,

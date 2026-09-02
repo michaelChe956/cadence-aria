@@ -249,7 +249,7 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
 
     // 案 1：反馈文本超长。
     let oversized_feedback = "x".repeat(
-        crate::product::workspace_engine::SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES as usize + 1,
+        crate::product::workspace_engine::SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES + 1,
     );
     let before = harness.session_bytes();
     harness
