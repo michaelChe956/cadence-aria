@@ -1,8 +1,10 @@
 use super::*;
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_workspace_engine::group::GroupUnitFailureOutcome;
 use crate::protocol::provider_errors::ProviderErrorCode;
 
-const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
+pub(crate) const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
 
 pub(crate) struct ProviderRetryCycleSuccess {
     pub(crate) outcome: ProviderStreamOutcome,
@@ -637,7 +639,7 @@ impl CodingWorkspaceEngine {
                 Err(CodingWorkspaceEngineError::Aborted)
             }
             ProviderInvocationOutcome::RetryableTransport {
-                failure: _,
+                failure,
                 reason_code,
                 message,
                 partial_output: _,
@@ -646,6 +648,49 @@ impl CodingWorkspaceEngine {
                     self.finalize_retry_cycle_state_change(attempt, node, role_run)
                         .await?;
                     return Err(error);
+                }
+                let group_unit_failure = if attempt.scope == CodingAttemptScope::WorkItemGroup {
+                    attempt.active_unit_id.as_deref().and_then(|unit_id| {
+                        self.store
+                            .get_active_unit_run(attempt)
+                            .ok()
+                            .map(|_| unit_id.to_string())
+                    })
+                } else {
+                    None
+                };
+                if let Some(unit_id) = group_unit_failure {
+                    let group_outcome = self
+                        .handle_group_unit_failure(
+                            attempt,
+                            &unit_id,
+                            ProviderFailureClassification::Retryable {
+                                failure,
+                                reason_code: reason_code.clone(),
+                                message: message.clone(),
+                            },
+                        )
+                        .await?;
+                    if !matches!(group_outcome, GroupUnitFailureOutcome::RetrySameUnit { .. }) {
+                        self.store.update_role_run_status(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &role_run.id,
+                            CodingRoleRunStatus::Failed,
+                            Some(reason_code),
+                        )?;
+                        self.complete_timeline_node(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &node.id,
+                            CodingTimelineNodeStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await?;
+                        return Err(CodingWorkspaceEngineError::ProviderStream(message));
+                    }
                 }
                 self.store.update_role_run_status(
                     &attempt.project_id,
@@ -678,6 +723,50 @@ impl CodingWorkspaceEngine {
                 error,
                 interaction_wait,
             } => {
+                if attempt.scope == CodingAttemptScope::WorkItemGroup
+                    && attempt.stage == CodingExecutionStage::Coding
+                    && attempt.active_unit_id.is_some()
+                    && self.store.get_active_unit_run(attempt).is_ok()
+                {
+                    let group_outcome = self
+                        .handle_group_unit_failure(
+                            attempt,
+                            attempt.active_unit_id.as_deref().expect("checked above"),
+                            ProviderFailureClassification::NonRetryable {
+                                reason_code: reason_code.clone(),
+                                interaction_wait,
+                            },
+                        )
+                        .await?;
+                    if matches!(
+                        group_outcome,
+                        GroupUnitFailureOutcome::AwaitingManualRecovery { .. }
+                            | GroupUnitFailureOutcome::Aborted { .. }
+                    ) {
+                        self.store.update_role_run_status(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &role_run.id,
+                            if matches!(group_outcome, GroupUnitFailureOutcome::Aborted { .. }) {
+                                CodingRoleRunStatus::Aborted
+                            } else {
+                                CodingRoleRunStatus::Failed
+                            },
+                            Some(reason_code),
+                        )?;
+                        self.complete_timeline_node(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &node.id,
+                            CodingTimelineNodeStatus::Failed,
+                            Some(error.to_string()),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                }
                 if interaction_wait && reason_code != "permission_timeout" {
                     self.store.update_role_run_status(
                         &attempt.project_id,

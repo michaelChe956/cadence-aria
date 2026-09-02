@@ -4,7 +4,160 @@ use crate::product::coding_workspace_engine::group_dependency_gate::{
     GroupUnitSelectionOutcome, dependency_gate_applies,
 };
 
+#[allow(dead_code)]
+pub(crate) enum GroupUnitFailureOutcome {
+    RetrySameUnit {
+        attempt_id: String,
+        unit_id: String,
+        run_no: u32,
+    },
+    AwaitingManualRecovery {
+        attempt_id: String,
+        reason_code: String,
+    },
+    AwaitingPlanAmendment {
+        attempt_id: String,
+        unit_id: String,
+        finding_id: String,
+    },
+    Aborted {
+        attempt_id: String,
+        reason_code: String,
+    },
+}
+
 impl CodingWorkspaceEngine {
+    pub(crate) async fn handle_group_unit_failure(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit_id: &str,
+        failure: ProviderFailureClassification,
+    ) -> Result<GroupUnitFailureOutcome, CodingWorkspaceEngineError> {
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        if current.scope != CodingAttemptScope::WorkItemGroup {
+            return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                "group_unit_failure_requires_group_attempt".to_string(),
+            ));
+        }
+        if current.status == CodingAttemptStatus::Aborted {
+            return Ok(GroupUnitFailureOutcome::Aborted {
+                attempt_id: current.id,
+                reason_code: "abort_attempt".to_string(),
+            });
+        }
+        if current.stage != CodingExecutionStage::Coding {
+            return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                "group_unit_failure_requires_coding_stage".to_string(),
+            ));
+        }
+        let unit = self
+            .store
+            .list_coding_units(&current.project_id, &current.issue_id, &current.id)?
+            .into_iter()
+            .find(|unit| unit.id == unit_id)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_execution_unit",
+                id: unit_id.to_string(),
+            })?;
+        if !matches!(current.status, CodingAttemptStatus::Running) {
+            let reason_code = current
+                .manual_recovery_reason
+                .clone()
+                .unwrap_or_else(|| "attempt_blocked".to_string());
+            return Ok(GroupUnitFailureOutcome::AwaitingManualRecovery {
+                attempt_id: current.id,
+                reason_code,
+            });
+        }
+        let active = self.store.get_active_unit_run(&current)?;
+        if active.unit_id != unit.id {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_active_unit_run",
+                    id: unit_id.to_string(),
+                },
+            ));
+        }
+        match failure {
+            ProviderFailureClassification::Retryable { .. }
+                if active.operational_retry_count + 1 < MAX_PROVIDER_INVOCATIONS_PER_CYCLE =>
+            {
+                let retry = self
+                    .store
+                    .create_retry_coding_unit_run(&current, unit_id, &active.id)?;
+                Ok(GroupUnitFailureOutcome::RetrySameUnit {
+                    attempt_id: current.id,
+                    unit_id: unit.id,
+                    run_no: retry.execution_no,
+                })
+            }
+            ProviderFailureClassification::Retryable { reason_code, .. } => {
+                self.store
+                    .fail_coding_unit_run(&current, unit_id, &active.id)?;
+                self.store.update_coding_unit_status(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    unit_id,
+                    CodingExecutionUnitStatus::Failed,
+                    Some(reason_code.clone()),
+                )?;
+                self.store
+                    .transition_to_awaiting_manual_recovery(&current.id, &reason_code)
+                    .map_err(|error| {
+                        CodingWorkspaceEngineError::ProviderProtocol(error.to_string())
+                    })?;
+                Ok(GroupUnitFailureOutcome::AwaitingManualRecovery {
+                    attempt_id: current.id,
+                    reason_code,
+                })
+            }
+            ProviderFailureClassification::NonRetryable { reason_code, .. } => {
+                self.store
+                    .fail_coding_unit_run(&current, unit_id, &active.id)?;
+                self.store.update_coding_unit_status(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    unit_id,
+                    CodingExecutionUnitStatus::Blocked,
+                    Some(reason_code.clone()),
+                )?;
+                let blocked = self.store.update_attempt_status(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    CodingAttemptStatus::Blocked,
+                )?;
+                let gate = self.store.create_blocked_gate(
+                    &blocked,
+                    CreateBlockedGateInput {
+                        attempt_id: blocked.id.clone(),
+                        stage: blocked.stage.clone(),
+                        node_id: None,
+                        role: Some(CodingProviderRole::Coder),
+                        title: "Group unit 执行需要人工处理".to_string(),
+                        description: format!("unit {} failure: {}", unit.id, reason_code),
+                        reason_code: Some(reason_code.clone()),
+                        evidence_refs: Vec::new(),
+                        raw_provider_output_ref: None,
+                        available_actions: vec![
+                            coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                            coding_gate_action_for_id("abort").expect("abort action"),
+                        ],
+                    },
+                )?;
+                let _ = self
+                    .event_tx
+                    .send(CodingWsOutMessage::CodingGateRequired { gate })
+                    .await;
+                Ok(GroupUnitFailureOutcome::AwaitingManualRecovery {
+                    attempt_id: blocked.id,
+                    reason_code,
+                })
+            }
+        }
+    }
     pub async fn complete_current_group_unit(
         &self,
         attempt: &CodingExecutionAttempt,
