@@ -641,6 +641,58 @@ function advanceSimulationAction({ confirmedPlan, existingAdvance, action }) {
   return 'send';
 }
 
+// —— 8.3 advance 完成后的 group snapshot readback（纯函数，task 8.3）——
+// advance_completed 的 attempt_id 可直接映射为 GET group attempt snapshot URL；
+// 参数缺失显式 fail，不静默拼出半截 URL。
+export function stage3GroupSnapshotUrl({ base, projectId, issueId, attemptId }) {
+  for (const [name, value] of [['projectId', projectId], ['issueId', issueId], ['attemptId', attemptId]]) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`stage3GroupSnapshotUrl: ${name} 必填`);
+  }
+  return `${String(base).replace(/\/$/, '')}/api/projects/${projectId}/issues/${issueId}/coding-attempts/${attemptId}`;
+}
+
+// 脱敏 evidence：只保留 attempt_id、unit logical IDs/status、binding revision digest、
+// lock owner（=lock 持有身份）、advance command/record、provider-start 计数。
+// attempt 不匹配时返回 null（fail-closed，不生成错配 evidence）；
+// ledger 前后计数变化时以 provider_start_violation 显式标注。
+export function stage3GroupSnapshotEvidence({
+  snapshot,
+  advanceMessage,
+  providerStartLedgerBefore = [],
+  providerStartLedgerAfter = [],
+}) {
+  const attemptId = advanceMessage?.attempt_id ?? null;
+  if (!isRecord(snapshot) || snapshot.attempt?.attempt_id !== attemptId) return null;
+  const progress = Array.isArray(snapshot.group_coding_progress) ? snapshot.group_coding_progress : [];
+  const bindingRevisions = progress
+    .map((item) => item?.plan_revision_id)
+    .filter((value) => typeof value === 'string' && value.length > 0);
+  if (bindingRevisions.length === 0) return null;
+  const bindingDigest = sha256(bindingRevisions.join('\n'));
+  const before = providerStartCount(providerStartLedgerBefore);
+  const after = providerStartCount(providerStartLedgerAfter);
+  return {
+    source: 'group_attempt_snapshot_readback',
+    attempt_id: attemptId,
+    attempt_status: snapshot.attempt?.status ?? null,
+    units: (Array.isArray(snapshot.units) ? snapshot.units : []).map((unit) => ({
+      logical_work_item_id: unit?.logical_work_item_id ?? null,
+      status: unit?.status ?? null,
+    })),
+    binding_revision_digest: bindingDigest,
+    binding_revision_sources: bindingRevisions.length,
+    lock_id: snapshot.issue_shared_worktree?.current_lock_owner_id ?? null,
+    advance_record: {
+      command_id: advanceMessage?.command_id ?? null,
+      record_id: snapshot.advance_record?.id ?? null,
+      status: snapshot.advance_record?.status ?? null,
+      attempt_id: attemptId,
+    },
+    provider_start_counts: { before, after },
+    provider_start_violation: before !== after,
+  };
+}
+
 // advance 等待期的收尾决策（task 8.1 修复轮 M2）：rejected 不消费脚本动作，但对 rejected
 // 无条件清 advanceFinishPending 并按既定策略收尾（plan 已 Confirmed，不悬挂至 hard timeout；
 // 语义对齐断线分支 stage3_advance_outcome_unknown）；completed 仍要求动作确认消费后才收尾。
@@ -2084,6 +2136,31 @@ async function runCampaign({
     connectWorkspace();
     return true;
   };
+  // 8.3 readback 辅助：从 durable .aria 读 advance record 与 issue shared worktree
+  // （readback evidence 的 lock/record 事实来源；缺失时返回 null，不阻塞收尾）。
+  const readDurableAdvanceForAttempt = (attemptId) => {
+    try {
+      const dir = path.join(ARIA_ROOT, 'projects', PROJECT_ID, 'issues', result.issue_id ?? '', 'advance-records');
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.json') || name.endsWith('.initialization.json')) continue;
+        const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+        if (record?.attempt_id === attemptId) {
+          return { id: record.id ?? null, status: record.status ?? null, command_id: record.command_id ?? null };
+        }
+      }
+    } catch {
+      // durable advance 记录缺失按 null 处理。
+    }
+    return null;
+  };
+  const readDurableIssueWorktree = () => {
+    try {
+      const file = path.join(ARIA_ROOT, 'projects', PROJECT_ID, 'issues', result.issue_id ?? '', 'issue-shared-worktree.json');
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
   const finalizeFromDurableSession = (trigger, closeEvent = null) => {
     if (stage3SwitchingSession) return true;
     if (ended || completionVerificationStarted) {
@@ -2450,7 +2527,50 @@ async function runCampaign({
               controller.noteProviderLedgerAfter(result.provider_start_ledger ?? []);
               syncStage3Fields();
               writeLog(advanceFinishPlan);
-              writeHandoffAndFinish();
+              // 8.3：advance completed 后从 workspace entry GET group attempt snapshot，
+              // 生成脱敏 readback evidence（不启动 StartCoding，不触碰 provider）。
+              // readback 是异步 HTTP，收尾延后到 readback 落账后执行（ended 守卫幂等）；
+              // rejected 不做 readback，立即按既定策略收尾。
+              if (advanceFinishPlan.event === 'stage3_advance_simulation') {
+                void (async () => {
+                  try {
+                    const attemptId = advanceFinishPlan.attempt_id;
+                    const snapshotUrl = stage3GroupSnapshotUrl({
+                      base: BASE,
+                      projectId: PROJECT_ID,
+                      issueId: result.issue_id,
+                      attemptId,
+                    });
+                    const snapshotResponse = await requestJson(snapshotUrl, {}, elapsedMs());
+                    const evidence = stage3GroupSnapshotEvidence({
+                      snapshot: {
+                        ...snapshotResponse.body,
+                        advance_record: readDurableAdvanceForAttempt(attemptId),
+                        issue_shared_worktree: readDurableIssueWorktree(),
+                      },
+                      advanceMessage: {
+                        type: 'advance_completed',
+                        command_id: advanceFinishPlan.command_id,
+                        attempt_id: attemptId,
+                        workspace_entry: null,
+                      },
+                      providerStartLedgerBefore: result.provider_start_ledger ?? [],
+                      providerStartLedgerAfter: result.provider_start_ledger ?? [],
+                    });
+                    if (evidence) {
+                      result.stage3_group_snapshot = evidence;
+                      writeLog({ event: 'stage3_group_snapshot_readback', ...evidence });
+                    } else {
+                      writeLog({ event: 'stage3_group_snapshot_readback_failed', attempt_id: attemptId });
+                    }
+                  } catch (readbackError) {
+                    writeLog({ event: 'stage3_group_snapshot_readback_failed', error: errorText(readbackError) });
+                  }
+                  writeHandoffAndFinish();
+                })();
+              } else {
+                writeHandoffAndFinish();
+              }
             }
             syncStage3Fields();
             break;

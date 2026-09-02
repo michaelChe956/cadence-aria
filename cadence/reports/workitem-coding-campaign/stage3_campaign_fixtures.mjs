@@ -124,3 +124,44 @@ export function stage3ProviderStartLedgerFixture() {
     { provider_start_idempotency_key: 'fixture-provider-start-2', started: true },
   ];
 }
+
+// 8.3 advance 完成后的 group attempt snapshot fixture(GET coding-attempts/{id} 形态,
+// 对齐 CodingAttemptSnapshotResponse 的脱敏子集:attempt/units/group_coding_progress/
+// group_progress)。纯合成数据,不含真实运行载荷。
+export function stage3GroupAttemptSnapshotFixture() {
+  const attemptId = 'attempt_fixture_0001';
+  const units = [
+    { logical_work_item_id: 'wi_a', status: 'running' },
+    { logical_work_item_id: 'wi_b', status: 'pending' },
+  ];
+  return {
+    attempt: {
+      attempt_id: attemptId,
+      attempt_scope: 'work_item_group',
+      status: 'created',
+      stage: 'coding',
+      work_item_group_id: 'work_item_plan_0001',
+      current_work_item_id: 'wi_a',
+    },
+    units: units.map((unit) => ({
+      unit_id: `coding_unit_${unit.logical_work_item_id}`,
+      logical_work_item_id: unit.logical_work_item_id,
+      status: unit.status,
+      completion_commit: null,
+      latest_handoff_revision_id: null,
+    })),
+    group_coding_progress: units.map((unit) => ({
+      logical_work_item_id: unit.logical_work_item_id,
+      status: unit.status,
+      plan_revision_id: 'plan_revision_fixture_0001',
+    })),
+    group_progress: { total: 2, pending: 1, active: 1, completed: 0, failed_or_blocked: 0 },
+    // advance record fixture:readback evidence 的 record 事实来源。
+    advance_record: { id: 'advance_fixture_0001', status: 'ready' },
+    // issue shared worktree lock fixture(lock owner = attempt)。
+    issue_shared_worktree: {
+      current_active_work_item_id: 'wi_a',
+      current_lock_owner_id: attemptId,
+    },
+  };
+}

@@ -608,3 +608,89 @@ test('campaign_stage3_confirm_conflict_waits_for_gate_reopen', () => {
   assert.deepEqual(closed.consumed, [{ actionIndex: 1, kind: 'confirm', via: 'human_gate_closed' }]);
   assert.ok(controller.resultFields().durable_recovery_checks.some((entry) => entry.check === 'confirm_conflict_awaiting_gate'));
 });
+
+// —— 阶段 3 Task 8.3 —— advance 完成后的 group snapshot readback ——
+test('campaign_stage3_group_snapshot_readback_after_advance_completed', async () => {
+  const {
+    stage3GroupAttemptSnapshotFixture,
+    stage3AdvanceCompleted,
+  } = await import('./stage3_campaign_fixtures.mjs');
+  const {
+    stage3GroupSnapshotUrl,
+    stage3GroupSnapshotEvidence,
+  } = await import('./workitem_run_campaign.mjs');
+
+  // workspace entry → HTTP GET URL:advance_completed 的 attempt_id 可直接读 group snapshot。
+  const url = stage3GroupSnapshotUrl({
+    base: 'http://127.0.0.1:4317',
+    projectId: 'project_0001',
+    issueId: 'issue_0001',
+    attemptId: 'attempt_fixture_0001',
+  });
+  assert.equal(url, 'http://127.0.0.1:4317/api/projects/project_0001/issues/issue_0001/coding-attempts/attempt_fixture_0001');
+  assert.throws(() => stage3GroupSnapshotUrl({ base: 'http://x', projectId: '', issueId: 'i', attemptId: 'a' }), /projectId/u);
+  assert.throws(() => stage3GroupSnapshotUrl({ base: 'http://x', projectId: 'p', issueId: '', attemptId: 'a' }), /issueId/u);
+  assert.throws(() => stage3GroupSnapshotUrl({ base: 'http://x', projectId: 'p', issueId: 'i', attemptId: '' }), /attemptId/u);
+
+  // 脱敏 evidence:只含 attempt_id、unit logical IDs/status、binding revision digest、
+  // lock ID、advance command/record、provider-start counts;不含候选文本/反馈全文。
+  const snapshot = stage3GroupAttemptSnapshotFixture();
+  const completed = stage3AdvanceCompleted('cmd-adv-0', 'attempt_fixture_0001');
+  const evidence = stage3GroupSnapshotEvidence({
+    snapshot,
+    advanceMessage: completed,
+    providerStartLedgerBefore: stage3ProviderStartLedgerFixture(),
+    providerStartLedgerAfter: stage3ProviderStartLedgerFixture(),
+  });
+  assert.equal(evidence.attempt_id, 'attempt_fixture_0001');
+  assert.deepEqual(evidence.units.map((unit) => [unit.logical_work_item_id, unit.status]), [
+    ['wi_a', 'running'],
+    ['wi_b', 'pending'],
+  ]);
+  assert.match(evidence.binding_revision_digest, /^[0-9a-f]{64}$/u, 'binding revision 只留 digest');
+  assert.equal(evidence.lock_id, 'attempt_fixture_0001');
+  assert.deepEqual(evidence.advance_record, {
+    command_id: 'cmd-adv-0',
+    record_id: 'advance_fixture_0001',
+    status: 'ready',
+    attempt_id: 'attempt_fixture_0001',
+  });
+  assert.deepEqual(evidence.provider_start_counts, { before: 2, after: 2 },
+    'advance 不启动 provider:前后计数相等');
+  const serialized = JSON.stringify(evidence);
+  assert.doesNotMatch(serialized, /合成/u, 'evidence 不含反馈全文');
+  assert.doesNotMatch(serialized, /markdown/u, 'evidence 不含候选文本载荷');
+  assert.doesNotMatch(serialized, /plan_revision_fixture_0001/u, 'binding revision 原文不落 evidence');
+  assert.equal(evidence.source, 'group_attempt_snapshot_readback');
+});
+
+test('campaign_stage3_group_snapshot_evidence_fails_closed_on_mismatched_attempt', async () => {
+  const { stage3GroupAttemptSnapshotFixture } = await import('./stage3_campaign_fixtures.mjs');
+  const { stage3GroupSnapshotEvidence } = await import('./workitem_run_campaign.mjs');
+  const snapshot = stage3GroupAttemptSnapshotFixture();
+  // advance 指向另一 attempt:readback 必须拒绝生成 evidence(而非静默错配)。
+  const mismatched = stage3GroupSnapshotEvidence({
+    snapshot,
+    advanceMessage: { type: 'advance_completed', command_id: 'cmd-adv-x', attempt_id: 'attempt_other', workspace_entry: '/x' },
+    providerStartLedgerBefore: [],
+    providerStartLedgerAfter: [],
+  });
+  assert.equal(mismatched, null, 'attempt 不匹配时 readback fail-closed');
+  // provider-start 计数不等:advance 期间出现 provider 启动,必须以 violation 标出。
+  const violated = stage3GroupSnapshotEvidence({
+    snapshot,
+    advanceMessage: stage3AdvanceCompletedForEvidence(),
+    providerStartLedgerBefore: [{ provider_start_idempotency_key: 'k1', started: true }],
+    providerStartLedgerAfter: [
+      { provider_start_idempotency_key: 'k1', started: true },
+      { provider_start_idempotency_key: 'k2', started: true },
+    ],
+  });
+  assert.equal(violated.provider_start_counts.before, 1);
+  assert.equal(violated.provider_start_counts.after, 2);
+  assert.equal(violated.provider_start_violation, true, 'ledger 计数变化必须显式标注违规');
+});
+
+function stage3AdvanceCompletedForEvidence() {
+  return { type: 'advance_completed', command_id: 'cmd-adv-0', attempt_id: 'attempt_fixture_0001', workspace_entry: '/w' };
+}
