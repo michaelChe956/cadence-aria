@@ -10,6 +10,7 @@ use crate::web::workspace_ws_types::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod campaign_stage3_interactive;
 #[path = "tests/conversational_gate_protocol.rs"]
 mod conversational_gate_protocol;
 #[path = "tests/conversational_gate_stage.rs"]

@@ -177,7 +177,7 @@ async fn single_candidate_recovery_mark_transaction_recovery(
         .await;
 }
 
-pub(super) fn single_candidate_recovery_record(
+pub(crate) fn single_candidate_recovery_record(
     lifecycle: &LifecycleStore,
     engine: &mut WorkspaceEngine,
     phase: SingleCandidatePhase,
@@ -210,15 +210,31 @@ fn single_candidate_recovery_persist_artifacts(
     engine: &WorkspaceEngine,
     suffix: &str,
 ) -> (String, String, String) {
+    single_candidate_recovery_persist_candidate_artifacts(
+        lifecycle,
+        engine,
+        suffix,
+        &format!("# immutable single candidate source {suffix}\\n"),
+    )
+}
+
+/// 把任意候选文本（如 campaign 门的真实 markdown 候选）持久化为同一套
+/// source/IR/mechanical-report durable 三 refs，供 fixture 以真实门候选文本
+/// 铺出 SC 流在门开启前的 durable 形态。
+pub(crate) fn single_candidate_recovery_persist_candidate_artifacts(
+    lifecycle: &LifecycleStore,
+    engine: &WorkspaceEngine,
+    suffix: &str,
+    source_text: &str,
+) -> (String, String, String) {
     let project_id = &engine.session().project_id;
     let issue_id = &engine.session().issue_id;
     let plan_id = &engine.session().entity_id;
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
-    let source_text = format!("# immutable single candidate source {suffix}\\n");
     let source_hash = hex::encode(Sha256::digest(source_text.as_bytes()));
     let mut source = SourceRevisionRecord {
         id: format!("source-{suffix}"),
-        source: source_text,
+        source: source_text.to_string(),
         source_revision_hash: source_hash.clone(),
         content_hash: String::new(),
     };
@@ -284,7 +300,7 @@ fn single_candidate_recovery_persist_artifacts(
     (source_ref, ir_ref, report_ref)
 }
 
-fn single_candidate_recovery_update_refs(
+pub(crate) fn single_candidate_recovery_update_refs(
     lifecycle: &LifecycleStore,
     engine: &mut WorkspaceEngine,
     phase: SingleCandidatePhase,

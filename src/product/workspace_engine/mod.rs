@@ -112,7 +112,7 @@ mod single_candidate;
 mod types;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use advance::{AdvanceInput, AdvanceOutcome, AdvanceRecord, AdvanceStatus};
 pub use compile::{

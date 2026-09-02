@@ -52,7 +52,7 @@ async fn prepare_outline_review_decision_without_index(
     (tmp, lifecycle, source_node_id, engine)
 }
 
-fn make_work_item_plan_engine_with_accepted_contract_drafts()
+pub(crate) fn make_work_item_plan_engine_with_accepted_contract_drafts()
 -> (TempDir, LifecycleStore, String, WorkspaceEngine) {
     let (tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_initial_plan_revision_compile");
