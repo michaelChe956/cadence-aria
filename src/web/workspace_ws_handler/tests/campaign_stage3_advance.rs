@@ -108,7 +108,11 @@ fn seed_accepted_source_drafts(harness: &CampaignStage3Harness) {
     let plan_store = WorkItemPlanStore::new(harness.app_paths.clone());
     // 前置态补齐守卫:生产链已落盘的 source draft 直接复用,不重复写。
     let durable_draft_ids = plan_store
-        .list_draft_records(&harness.project_id, &harness.issue_id, &harness.record_plan_id())
+        .list_draft_records(
+            &harness.project_id,
+            &harness.issue_id,
+            &harness.record_plan_id(),
+        )
         .expect("list durable draft records")
         .into_iter()
         .map(|record| record.draft_id)
@@ -198,10 +202,7 @@ fn campaign_attempt(
 
 /// 等待任一终态 advance 事件(完成或拒绝)。RED 阶段(修复前)生产链路会
 /// 返回 advance_rejected,不允许无限等待 advance_completed 挂死测试。
-async fn await_gate_event_any(
-    harness: &CampaignStage3Harness,
-    kinds: &[&str],
-) -> WsOutMessage {
+async fn await_gate_event_any(harness: &CampaignStage3Harness, kinds: &[&str]) -> WsOutMessage {
     loop {
         let message = harness.next_outbound().await;
         let r#type = serde_json::to_value(&message)
@@ -245,9 +246,7 @@ async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start(
         workspace_entry,
     } = completed
     else {
-        panic!(
-            "生产 SC 链不 seed 草稿必须能 advance(源 draft 应由编译提交段落盘): {completed:?}"
-        );
+        panic!("生产 SC 链不 seed 草稿必须能 advance(源 draft 应由编译提交段落盘): {completed:?}");
     };
     assert_eq!(command_id, "cmd-campaign-adv-1");
     let attempt_id = attempt_id.clone();
@@ -438,11 +437,14 @@ async fn campaign_stage3_advance_seeded_draft_control_matches_real_chain() {
     let coding_store = CodingAttemptStore::new(harness.app_paths.clone());
 
     // seed 补齐语义:生产链已落盘 → 零写入,durable 草稿库只有 SC 编译轮次。
-    let plan_store = crate::product::work_item_plan_store::WorkItemPlanStore::new(
-        harness.app_paths.clone(),
-    );
+    let plan_store =
+        crate::product::work_item_plan_store::WorkItemPlanStore::new(harness.app_paths.clone());
     let durable_drafts = plan_store
-        .list_draft_records(&harness.project_id, &harness.issue_id, &harness.record_plan_id())
+        .list_draft_records(
+            &harness.project_id,
+            &harness.issue_id,
+            &harness.record_plan_id(),
+        )
         .expect("durable draft records");
     // (零写入断言放在终态断言之后:主干先证明 seeded 形态与真链路同终态。)
     harness

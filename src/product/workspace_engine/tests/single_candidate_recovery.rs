@@ -973,11 +973,9 @@ fn single_candidate_recovery_sc_draft_snapshot(
 #[tokio::test(flavor = "current_thread")]
 async fn single_candidate_recovery_replays_source_drafts_idempotently() {
     let _serial = single_candidate_recovery_failpoint_lock().await;
-    let (_tmp, lifecycle, plan_id, mut engine) =
-        single_candidate_recovery_prepare_approval().await;
+    let (_tmp, lifecycle, plan_id, mut engine) = single_candidate_recovery_prepare_approval().await;
     let compile_id =
-        single_candidate_recovery_prepare_after_provenance_boundary(&mut engine, &lifecycle)
-            .await;
+        single_candidate_recovery_prepare_after_provenance_boundary(&mut engine, &lifecycle).await;
     let mut restarted = single_candidate_recovery_restart(&engine, &lifecycle);
     let publication_failpoint = restarted
         .revision_store()
@@ -1011,9 +1009,7 @@ async fn single_candidate_recovery_replays_source_drafts_idempotently() {
             .list_draft_records("project_0001", "issue_0001", &plan_id)
             .expect("draft records")
             .into_iter()
-            .filter(|record| {
-                record.generation_round_id == format!("single_candidate_{compile_id}")
-            })
+            .filter(|record| record.generation_round_id == format!("single_candidate_{compile_id}"))
             .collect::<Vec<_>>()
     };
     let drafts_after_crash = list_sc_drafts(&lifecycle);
@@ -1034,13 +1030,15 @@ async fn single_candidate_recovery_replays_source_drafts_idempotently() {
     let bytes_after_crash =
         single_candidate_recovery_sc_draft_snapshot(&lifecycle, &plan_id, &compile_id);
     assert_eq!(bytes_after_crash.len(), 2);
-    let total_after_crash = crate::product::work_item_plan_store::WorkItemPlanStore::new(
-        lifecycle.app_paths(),
-    )
-    .list_draft_records("project_0001", "issue_0001", &plan_id)
-    .expect("draft records")
-    .len();
-    assert_eq!(total_after_crash, 4, "fixture 基座 2 条 legacy + SC 恰 2 条");
+    let total_after_crash =
+        crate::product::work_item_plan_store::WorkItemPlanStore::new(lifecycle.app_paths())
+            .list_draft_records("project_0001", "issue_0001", &plan_id)
+            .expect("draft records")
+            .len();
+    assert_eq!(
+        total_after_crash, 4,
+        "fixture 基座 2 条 legacy + SC 恰 2 条"
+    );
 
     // 第一次恢复重放:resume 在 publication 重放前重写同一套 draft,再次 crash。
     single_candidate_recovery_mark_transaction_recovery(
@@ -1097,11 +1095,10 @@ async fn single_candidate_recovery_replays_source_drafts_idempotently() {
         bytes_after_crash,
         "最终恢复后草稿字节仍不变(恰一套,不重复不缺失)"
     );
-    let final_tx = crate::product::work_item_plan_store::WorkItemPlanStore::new(
-        lifecycle.app_paths(),
-    )
-    .get_compile_transaction("project_0001", "issue_0001", &plan_id, &compile_id)
-    .expect("final transaction");
+    let final_tx =
+        crate::product::work_item_plan_store::WorkItemPlanStore::new(lifecycle.app_paths())
+            .get_compile_transaction("project_0001", "issue_0001", &plan_id, &compile_id)
+            .expect("final transaction");
     assert_eq!(final_tx.status, WorkItemPlanCompileStatus::Committed);
     assert_eq!(
         list_sc_drafts(&lifecycle)

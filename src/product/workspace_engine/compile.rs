@@ -282,14 +282,12 @@ fn persist_initial_plan_compile_draft_records(
     records: &[WorkItemDraftRecord],
 ) -> Result<(), String> {
     for record in records {
-        store
-            .put_draft_record(record)
-            .map_err(|error| {
-                format!(
-                    "persist compile source draft `{}` failed: {error}",
-                    record.draft_id
-                )
-            })?;
+        store.put_draft_record(record).map_err(|error| {
+            format!(
+                "persist compile source draft `{}` failed: {error}",
+                record.draft_id
+            )
+        })?;
     }
     Ok(())
 }
