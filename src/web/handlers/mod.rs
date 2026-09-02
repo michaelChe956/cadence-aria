@@ -102,6 +102,8 @@ pub(crate) use coding::{
 pub use codebases::{
     create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
 };
+#[cfg(test)]
+pub(crate) use coding::scope::CodingAttemptRoutePath;
 pub use evidence_query::evidence_query;
 pub use health::{health, runtime_info};
 pub use image_create::{

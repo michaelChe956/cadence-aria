@@ -47,7 +47,7 @@ fn campaign_candidate_base() -> String {
 /// 脚本化 fake revision provider：按脚本依次返回完整 SC markdown 候选、
 /// validation reject（坏 markdown）、transport 死亡或挂起（单飞）。
 /// 只经测试构造器注入，生产路径不读取。
-enum RevisionScriptStep {
+pub(super) enum RevisionScriptStep {
     Complete(String),
     ValidationReject,
     TransportDeath,
@@ -181,23 +181,23 @@ struct CampaignStepAudit {
     observed_status: String,
 }
 
-struct CampaignStage3Harness {
-    root: TempDir,
-    app_paths: ProductAppPaths,
-    lifecycle: LifecycleStore,
-    engine: Arc<Mutex<WorkspaceEngine>>,
+pub(super) struct CampaignStage3Harness {
+    pub(super) root: TempDir,
+    pub(super) app_paths: ProductAppPaths,
+    pub(super) lifecycle: LifecycleStore,
+    pub(super) engine: Arc<Mutex<WorkspaceEngine>>,
     provider: Arc<ScriptedRevisionProvider>,
     outbound_tx: mpsc::Sender<OutboundControl>,
     outbound_rx: tokio::sync::Mutex<mpsc::Receiver<OutboundControl>>,
-    session_id: String,
-    project_id: String,
-    issue_id: String,
+    pub(super) session_id: String,
+    pub(super) project_id: String,
+    pub(super) issue_id: String,
 }
 
 /// 真实批准链基座（accepted contract drafts → SC Approval 门），镜像
 /// `conversational_gate_amendment_real_chain::real_approval_fixture`：
 /// 生产 SC 流在门开启前经 `update_artifact(Markdown)` 持久化候选文本。
-async fn campaign_stage3_fixture(
+pub(super) async fn campaign_stage3_fixture(
     budget: u32,
     script: Vec<RevisionScriptStep>,
 ) -> CampaignStage3Harness {
@@ -287,7 +287,7 @@ async fn campaign_stage3_fixture(
 impl CampaignStage3Harness {
     /// 每条入站消息一个全新 context（context 按值消费），共享 harness 的
     /// outbound channel 与引擎。
-    async fn send(&self, message: WsInMessage) {
+    pub(super) async fn send(&self, message: WsInMessage) {
         let record = self.session_record().await;
         let current_run = Arc::new(Mutex::new(None));
         let workspace_runs = WorkspaceRunRegistry::default();
@@ -371,19 +371,19 @@ impl CampaignStage3Harness {
         handle_workspace_inbound_message(context, message).await;
     }
 
-    async fn session_record(&self) -> WorkspaceSessionRecord {
+    pub(super) async fn session_record(&self) -> WorkspaceSessionRecord {
         self.lifecycle
             .get_workspace_session(&self.session_id)
             .expect("durable session")
     }
 
-    fn session_record_blocking(&self) -> WorkspaceSessionRecord {
+    pub(super) fn session_record_blocking(&self) -> WorkspaceSessionRecord {
         self.lifecycle
             .get_workspace_session(&self.session_id)
             .expect("durable session")
     }
 
-    async fn next_outbound(&self) -> WsOutMessage {
+    pub(super) async fn next_outbound(&self) -> WsOutMessage {
         let mut rx = self.outbound_rx.lock().await;
         let outbound = timeout(Duration::from_secs(10), rx.recv())
             .await
@@ -396,7 +396,7 @@ impl CampaignStage3Harness {
     }
 
     /// 跳过非门事件（session_state/provider_status/stream），返回下一个匹配事件。
-    async fn await_gate_event(&self, kind: &str) -> WsOutMessage {
+    pub(super) async fn await_gate_event(&self, kind: &str) -> WsOutMessage {
         loop {
             let message = self.next_outbound().await;
             let r#type = serde_json::to_value(&message)
@@ -411,7 +411,7 @@ impl CampaignStage3Harness {
         }
     }
 
-    fn durable_turns(&self) -> Vec<crate::product::models::HumanGateTurn> {
+    pub(super) fn durable_turns(&self) -> Vec<crate::product::models::HumanGateTurn> {
         self.lifecycle
             .list_human_gate_turns(&self.session_id)
             .expect("durable turns")

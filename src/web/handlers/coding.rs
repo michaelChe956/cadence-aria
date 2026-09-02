@@ -17,7 +17,7 @@ mod advance;
 mod group;
 mod progress;
 pub(crate) mod repository_resolution;
-mod scope;
+pub(crate) mod scope;
 mod worktree_route;
 #[allow(unused_imports)]
 pub(crate) use advance::map_advance_outcome;
