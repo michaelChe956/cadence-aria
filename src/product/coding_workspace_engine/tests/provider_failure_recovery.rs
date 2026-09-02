@@ -11,7 +11,7 @@ const ISSUE_ID: &str = "issue_0001";
 const WORK_ITEM_ID: &str = "work_item_0001";
 const NODE_ID: &str = "coding_node_0009";
 
-struct TransportFailuresThenSuccessProvider {
+pub(super) struct TransportFailuresThenSuccessProvider {
     failures_before_success: usize,
     starts: AtomicUsize,
     inputs: Mutex<Vec<StreamingProviderInput>>,
@@ -38,7 +38,7 @@ impl CancelledProvider {
     }
 }
 
-enum RetryBoundaryMutation {
+pub(super) enum RetryBoundaryMutation {
     Abort {
         store: CodingAttemptStore,
         attempt: CodingExecutionAttempt,
@@ -57,13 +57,13 @@ enum RetryBoundaryMutation {
     },
 }
 
-struct RetryBoundaryMutationProvider {
+pub(super) struct RetryBoundaryMutationProvider {
     starts: AtomicUsize,
     mutation: Mutex<Option<RetryBoundaryMutation>>,
 }
 
 impl RetryBoundaryMutationProvider {
-    fn new(mutation: RetryBoundaryMutation) -> Self {
+    pub(super) fn new(mutation: RetryBoundaryMutation) -> Self {
         Self {
             starts: AtomicUsize::new(0),
             mutation: Mutex::new(Some(mutation)),
@@ -72,7 +72,7 @@ impl RetryBoundaryMutationProvider {
 }
 
 impl TransportFailuresThenSuccessProvider {
-    fn new(failures_before_success: usize, output: impl Into<String>) -> Self {
+    pub(super) fn new(failures_before_success: usize, output: impl Into<String>) -> Self {
         Self {
             failures_before_success,
             starts: AtomicUsize::new(0),
