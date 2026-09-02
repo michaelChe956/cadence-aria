@@ -141,6 +141,39 @@ async fn conversational_gate_approve_confirms_only_after_durable_compile() {
 }
 
 #[tokio::test]
+async fn conversational_gate_approve_retains_gate_snapshot_in_confirmed_terminal() {
+    // 7.2 快照断裂追修：SC 计划批准链（close_human_gate → compile →
+    // confirm_work_item_plan）必须在 Confirmed+Completed 终态保留
+    // human_gate_snapshot——D11（预算接续原 session 快照，单一预算源）与
+    // D16（原 plan session 是唯一门宿主）；REQ-GCE-03 修订链重开同一门依赖
+    // 该快照在场。终态由真实引擎批准链产生，禁止手工构造终态快照。
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine) = approval_fixture();
+    let (event_tx, _event_rx) = mpsc::channel(32);
+    engine.event_tx = event_tx;
+    let session_id = engine.session().session_id.clone();
+    let result = engine
+        .handle_human_gate_termination(
+            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
+        )
+        .await;
+    assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Confirmed);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed)
+    );
+    let snapshot = durable.human_gate_snapshot.as_ref().expect(
+        "SC plan approval must retain the gate snapshot on the Confirmed terminal (D11/D16)",
+    );
+    assert_eq!(snapshot.manual_repairs_remaining, 1);
+    assert_eq!(durable.human_gate_reservation, None);
+}
+
+#[tokio::test]
 async fn conversational_gate_post_approve_feedback_keeps_structured_stage_rejection() {
     // D11 单一预算源:首次 approve 成功后的终态是 Confirmed+Completed 且门快照保留
     // 在 session record 上(与 group_amendment_chain 的 amendment_chain_fixture 同构),

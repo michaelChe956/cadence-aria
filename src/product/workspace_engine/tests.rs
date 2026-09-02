@@ -43,6 +43,7 @@ include!("review/tests_policy_routing.rs");
 mod author_revision_loop;
 mod author_revision_review_routing;
 mod conversational_gate;
+mod conversational_gate_amendment_real_chain;
 mod conversational_gate_close;
 mod conversational_gate_recovery;
 mod conversational_gate_revision;
