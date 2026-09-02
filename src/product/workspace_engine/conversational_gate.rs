@@ -150,6 +150,16 @@ impl super::WorkspaceEngine {
             .artifact
             .as_ref()
             .and_then(|artifact| artifact.markdown())
+            // 批准链 compile 会把 current artifact 推成非 Markdown 投影；修订基线
+            // 回落到最近一个 Markdown artifact version（批准时经 SC 流程
+            // update_artifact(Markdown) 持久化的候选文本，语义上正是修订基线）。
+            // 版本列表完全无 Markdown 时保持既有拒绝语义不变。
+            .or_else(|| {
+                self.artifact_versions
+                    .iter()
+                    .rev()
+                    .find_map(|version| version.payload.markdown())
+            })
             .ok_or_else(|| {
                 "HUMAN_GATE_REVISION_CANDIDATE_MISSING: current candidate markdown is required"
                     .to_string()

@@ -146,6 +146,53 @@ async fn conversational_gate_revision_rejects_missing_candidate_before_reservati
     );
 }
 
+#[tokio::test]
+async fn conversational_gate_revision_rejects_when_no_markdown_artifact_version_exists() {
+    // 批准链 compile 后 current artifact 是非 Markdown 投影，回落只能依赖版本列表；
+    // 版本列表也完全无 Markdown 时必须保持既有拒绝语义（不放宽 CANDIDATE_MISSING）。
+    let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(2);
+    engine.session.stage = super::WorkspaceStage::HumanConfirm;
+    let non_markdown_payload =
+        crate::web::workspace_ws_types::ArtifactPayload::WorkItemRevisionHistory {
+            history: Box::new(crate::web::workspace_ws_types::WorkItemRevisionHistoryDto {
+                entries: Vec::new(),
+            }),
+        };
+    engine.session.artifact = Some(non_markdown_payload.clone());
+    engine.artifact_versions = vec![crate::web::workspace_ws_types::ArtifactVersion {
+        version: 1,
+        payload: non_markdown_payload,
+        generated_by: crate::product::models::ProviderName::Fake,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: true,
+        created_at: "2026-08-31T00:00:00Z".to_string(),
+        source_node_id: "timeline_node_unknown".to_string(),
+    }];
+    let outcome = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "cmd_no_markdown_artifact_version".to_string(),
+            feedback: "修正字段".to_string(),
+        })
+        .await
+        .expect("no markdown artifact version rejection");
+    assert_eq!(
+        outcome,
+        HumanGateCommandOutcome::Rejected {
+            code: "HUMAN_GATE_REVISION_CANDIDATE_MISSING".to_string(),
+            reason: "current candidate markdown is required".to_string(),
+        }
+    );
+    assert!(
+        lifecycle
+            .list_human_gate_turns(engine.session().session_id.as_str())
+            .expect("list turns")
+            .is_empty(),
+        "missing candidate must not reserve a turn"
+    );
+}
+
 #[test]
 fn conversational_gate_revision_trim_is_deterministic_and_only_removes_preamble() {
     let source = "provider preamble\n# Work Item Plan\n## Work Item WI-001: x\n";

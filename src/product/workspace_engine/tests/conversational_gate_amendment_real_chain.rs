@@ -29,7 +29,7 @@ const TRIGGER_RUN_ID: &str = "coding_unit_run_blocked";
 
 /// 真实批准链 fixture：accepted contract drafts → SingleCandidate Approval 门
 /// （快照在场、预算 `budget`）→ 裸 Confirm 走完整 close→compile→confirm 链。
-fn real_approval_fixture(budget: u32) -> (TempDir, LifecycleStore, String, WorkspaceEngine) {
+async fn real_approval_fixture(budget: u32) -> (TempDir, LifecycleStore, String, WorkspaceEngine) {
     let (tmp, lifecycle, plan_id, mut engine) =
         super::make_work_item_plan_engine_with_accepted_contract_drafts();
     super::single_candidate_recovery::single_candidate_recovery_record(
@@ -38,6 +38,16 @@ fn real_approval_fixture(budget: u32) -> (TempDir, LifecycleStore, String, Works
         SingleCandidatePhase::Approval,
         RunPolicy::Interactive,
     );
+    // 生产 SC 流在门开启前会经 update_artifact(Markdown{source}) 把候选文本持久化
+    // 为 artifact version（single_candidate 流程）；recovery 式 fixture 需补齐这
+    // 一 durable 形态，否则批准链 compile 后 durable versions 完全无 Markdown，
+    // 修订回落的「批准时计划文本」无从取材。
+    engine
+        .update_artifact(ArtifactPayload::Markdown {
+            markdown: "# Work Item Plan\n\n## Work Item WI-001: candidate\n".to_string(),
+            diff: None,
+        })
+        .await;
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)
         .expect("session");
@@ -125,7 +135,7 @@ async fn group_amendment_reachable_from_real_approval_chain() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
 
     // ---- 1) 真批准链：裸 Confirm → close → compile → confirm_work_item_plan ----
-    let (root, lifecycle, plan_id, mut engine) = real_approval_fixture(2);
+    let (root, lifecycle, plan_id, mut engine) = real_approval_fixture(2).await;
     let (event_tx, _event_rx) = mpsc::channel(32);
     engine.event_tx = event_tx;
     let plan_session_id = engine.session().session_id.clone();
