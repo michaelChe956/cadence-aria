@@ -393,3 +393,130 @@ async fn conversational_gate_blank_command_id_is_rejected_through_dispatch() {
         WsOutMessage::ProtocolError { code, .. } if code == "INVALID_COMMAND_ID"
     ));
 }
+
+#[tokio::test]
+async fn conversational_gate_post_approve_feedback_is_structured_protocol_error() {
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
+    };
+    use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType};
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
+    use tempfile::tempdir;
+
+    let root = tempdir().expect("tempdir");
+    let app_paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let mut record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "plan_post_approve_feedback".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::Interactive,
+                rollout_snapshot: true,
+            }),
+        })
+        .expect("create gate session");
+    // approve 成功后的持久层状态:close CAS 目标 Running 不清快照,phase CAS
+    // Confirmed+Completed 也不清快照(lifecycle_store workspace.rs /
+    // workspace_single_candidate.rs)。无任何 Open/Applying PlanAmendmentContext。
+    record.status = WorkspaceSessionStatus::Confirmed;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Completed);
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: false,
+    });
+    let session_path = app_paths
+        .issue_lifecycle_root(&record.project_id, &record.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", record.id));
+    crate::product::json_store::write_json(&session_path, &record).expect("persist gate session");
+    let before = serde_json::to_vec(&record).expect("serialize session before");
+
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let mut session = WorkspaceSession::from_record(record.clone());
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Work Item Plan\n".to_string(),
+        diff: None,
+    });
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    )));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        run_context: ProviderRunContext {
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            engine: engine.clone(),
+            current_run: current_run.clone(),
+            workspace_runs: workspace_runs.clone(),
+            session_id: record.id.clone(),
+            next_run_id: Arc::new(Mutex::new(0)),
+            app_paths: app_paths.clone(),
+            session_record: record.clone(),
+        },
+        engine: engine.clone(),
+        outbound_tx,
+        current_run,
+        workspace_runs,
+        session_id: record.id.clone(),
+    };
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::HumanGateFeedback {
+            command_id: "cmd_post_approve_feedback".to_string(),
+            feedback: "只修正这个字段".to_string(),
+        },
+    )
+    .await;
+
+    let outbound = outbound_rx.recv().await.expect("protocol error outbound");
+    let OutboundControl::Text(json) = outbound else {
+        panic!("expected protocol error text");
+    };
+    let message: WsOutMessage = serde_json::from_str(&json).expect("protocol error json");
+    let WsOutMessage::ProtocolError { code, .. } = &message else {
+        panic!("post-approve feedback must stay a structured protocol error, got {message:?}");
+    };
+    assert_eq!(code, "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID");
+    assert_eq!(
+        serde_json::to_vec(
+            &lifecycle
+                .get_workspace_session(&record.id)
+                .expect("durable session")
+        )
+        .expect("serialize session after"),
+        before,
+        "post-approve feedback rejection must not mutate durable state"
+    );
+    assert!(
+        lifecycle
+            .list_human_gate_turns(&record.id)
+            .expect("turns")
+            .is_empty()
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "stage rejection must not emit events"
+    );
+}

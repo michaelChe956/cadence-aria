@@ -141,6 +141,88 @@ async fn conversational_gate_approve_confirms_only_after_durable_compile() {
 }
 
 #[tokio::test]
+async fn conversational_gate_post_approve_feedback_keeps_structured_stage_rejection() {
+    // D11 单一预算源:首次 approve 成功后的终态是 Confirmed+Completed 且门快照保留
+    // 在 session record 上(与 group_amendment_chain 的 amendment_chain_fixture 同构),
+    // 此处无任何 Open/Applying PlanAmendmentContext。该状态下收到 human_gate_feedback
+    // 必须保持 7.2 之前的结构化 stage 拒绝,而不是上抛泛型 Err(经 ws 层变成
+    // WsOutMessage::Error)。
+    let (root, lifecycle, _engine) = super::conversational_gate::gate_fixture(1);
+    let session_id = lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .expect("list sessions")
+        .into_iter()
+        .find(|record| record.entity_id == "plan_0001")
+        .expect("gate session")
+        .id;
+    let mut record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("gate session");
+    record.status = WorkspaceSessionStatus::Confirmed;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Completed);
+    record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+        resumable: false,
+    });
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_lifecycle_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist post-approve session");
+    let before = record.clone();
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = WorkspaceSession::from_record(record);
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Work Item Plan\n".to_string(),
+        diff: None,
+    });
+    let mut engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+
+    let outcome = engine
+        .handle_human_gate_feedback(super::conversational_gate::feedback(
+            "cmd_post_approve_feedback",
+        ))
+        .await;
+
+    assert_eq!(
+        outcome,
+        Ok(HumanGateCommandOutcome::Rejected {
+            code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+            reason: "human gate feedback is only available for a single-candidate work-item plan in human_confirm"
+                .to_string(),
+        }),
+        "post-approve feedback without an amendment context must keep the structured stage rejection"
+    );
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("durable session after rejection"),
+        before,
+        "stage rejection must stay zero side effect"
+    );
+    assert!(
+        lifecycle
+            .list_human_gate_turns(&engine.session().session_id)
+            .expect("turns")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn conversational_gate_abandon_is_terminal_without_compile() {
     let (_root, lifecycle, mut engine, mut event_rx) =
         super::conversational_gate::gate_fixture_with_event_rx(1);

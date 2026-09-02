@@ -110,7 +110,10 @@ impl super::WorkspaceEngine {
             return Ok(None);
         }
         let coding_store = CodingAttemptStore::new(store.app_paths());
-        let context = coding_store
+        // 无 Open/Applying PlanAmendmentContext 时保持既有 stage 拒绝路径
+        // (结构化 WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID),不上抛泛型 Err;否则
+        // ws 层会把 7.2 之前结构化 Rejected 的同类输入映射成泛型 Error。
+        let Some(context) = coding_store
             .find_open_plan_amendment_context_for_plan_session(
                 &record.project_id,
                 &record.issue_id,
@@ -118,10 +121,9 @@ impl super::WorkspaceEngine {
                 &record.id,
             )
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                "human gate feedback is only available for a single-candidate work-item plan in human_confirm"
-                    .to_string()
-            })?;
+        else {
+            return Ok(None);
+        };
         let attempt = coding_store
             .get_attempt(
                 &record.project_id,
