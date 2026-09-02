@@ -26,6 +26,7 @@ impl super::CodingAttemptStore {
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("unit-runs-index.json");
         with_exclusive_lock(&lock_target, || {
+            let runs = self.list_coding_unit_runs(attempt, &run.unit_id)?;
             if let Some((_, existing)) = self.find_unit_run_by_id(attempt, &run.id)? {
                 if existing == *run {
                     return Ok(());
@@ -33,7 +34,13 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch("coding_unit_run", &run.id));
             }
             if self
-                .list_coding_unit_runs(attempt, &run.unit_id)?
+                .list_all_coding_unit_runs(attempt)?
+                .iter()
+                .any(|existing| existing.id == run.id)
+            {
+                return Err(identity_mismatch("coding_unit_run", &run.id));
+            }
+            if runs
                 .iter()
                 .any(|existing| existing.execution_no == run.execution_no)
             {
@@ -78,6 +85,13 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch("coding_unit_run", &requested.id));
             }
             if self.find_unit_run_by_id(attempt, &requested.id)?.is_some() {
+                return Err(identity_mismatch("coding_unit_run", &requested.id));
+            }
+            if self
+                .list_all_coding_unit_runs(attempt)?
+                .iter()
+                .any(|run| run.id == requested.id)
+            {
                 return Err(identity_mismatch("coding_unit_run", &requested.id));
             }
             let now = Utc::now().to_rfc3339();
@@ -225,8 +239,16 @@ impl super::CodingAttemptStore {
             write_json(&prior_path, &failed)?;
 
             let now = Utc::now().to_rfc3339();
+            let all_runs = self.list_all_coding_unit_runs(&current)?;
             let mut retry = prior.clone();
-            retry.id = next_sequential_id("coding_unit_run", runs.len());
+            let mut next_id = all_runs.len();
+            loop {
+                retry.id = next_sequential_id("coding_unit_run", next_id);
+                if all_runs.iter().all(|existing| existing.id != retry.id) {
+                    break;
+                }
+                next_id = next_id.saturating_add(1);
+            }
             retry.execution_no = prior.execution_no.saturating_add(1);
             retry.status = CodingUnitRunStatus::Running;
             retry.completion_commit = None;
@@ -447,6 +469,22 @@ impl super::CodingAttemptStore {
             write_json(&path, &run)?;
             Ok(run)
         })
+    }
+
+    /// Lists every durable unit run in an attempt, across all units.
+    ///
+    /// This is intentionally attempt-scoped: unit-run IDs are durable attempt records and must
+    /// remain unique even when separate units each start at execution number one.
+    pub(crate) fn list_all_coding_unit_runs(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<CodingUnitRun>, ProductStoreError> {
+        self.list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .try_fold(Vec::new(), |mut all_runs, unit| {
+                all_runs.extend(self.list_coding_unit_runs(attempt, &unit.id)?);
+                Ok(all_runs)
+            })
     }
 
     pub(super) fn authoritative_unit(

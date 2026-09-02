@@ -45,6 +45,14 @@ impl CodingWorkspaceEngine {
                 reason_code: "abort_attempt".to_string(),
             });
         }
+        if matches!(
+            current.status,
+            CodingAttemptStatus::Completed | CodingAttemptStatus::Failed
+        ) {
+            return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                "group_unit_failure_terminal_attempt".to_string(),
+            ));
+        }
         if current.stage != CodingExecutionStage::Coding {
             return Err(CodingWorkspaceEngineError::ProviderProtocol(
                 "group_unit_failure_requires_coding_stage".to_string(),

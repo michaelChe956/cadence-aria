@@ -653,12 +653,21 @@ impl CodingWorkspaceEngine {
                     && attempt.admission_kind == CodingAdmissionKind::ScAdvance
                     && attempt.stage == CodingExecutionStage::Coding
                 {
-                    attempt.active_unit_id.as_deref().and_then(|unit_id| {
-                        self.store
-                            .get_active_unit_run(attempt)
-                            .ok()
-                            .map(|_| unit_id.to_string())
-                    })
+                    match attempt.active_unit_id.as_deref() {
+                        Some(unit_id) => {
+                            let active = self.store.get_active_unit_run(attempt)?;
+                            if active.unit_id != unit_id {
+                                return Err(CodingWorkspaceEngineError::Store(
+                                    ProductStoreError::IdentityMismatch {
+                                        kind: "coding_active_unit_run",
+                                        id: unit_id.to_string(),
+                                    },
+                                ));
+                            }
+                            Some(unit_id.to_string())
+                        }
+                        None => None,
+                    }
                 } else {
                     None
                 };
@@ -730,12 +739,21 @@ impl CodingWorkspaceEngine {
                     && attempt.admission_kind == CodingAdmissionKind::ScAdvance
                     && attempt.stage == CodingExecutionStage::Coding
                     && attempt.active_unit_id.is_some()
-                    && self.store.get_active_unit_run(attempt).is_ok()
                 {
+                    let unit_id = attempt.active_unit_id.as_deref().expect("checked above");
+                    let active = self.store.get_active_unit_run(attempt)?;
+                    if active.unit_id != unit_id {
+                        return Err(CodingWorkspaceEngineError::Store(
+                            ProductStoreError::IdentityMismatch {
+                                kind: "coding_active_unit_run",
+                                id: unit_id.to_string(),
+                            },
+                        ));
+                    }
                     let group_outcome = self
                         .handle_group_unit_failure(
                             attempt,
-                            attempt.active_unit_id.as_deref().expect("checked above"),
+                            unit_id,
                             ProviderFailureClassification::NonRetryable {
                                 reason_code: reason_code.clone(),
                                 interaction_wait,
