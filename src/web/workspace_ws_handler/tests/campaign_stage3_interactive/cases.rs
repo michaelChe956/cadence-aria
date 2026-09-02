@@ -464,20 +464,19 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
         .find(|turn| turn.command_id == "cmd-campaign-crash-a")
         .expect("durable reserved turn");
     // “重启”：丢弃内存态，仅从磁盘重建（Step 6 面）。
-    let recovered_engine = |root: &TempDir, lifecycle: &LifecycleStore| {
+    let recovered_engine = |root: &TempDir, lifecycle: &LifecycleStore, session_id: &str| {
         let (event_tx, _event_rx) = mpsc::channel(64);
         WorkspaceEngine::new_persistent(
             Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
             lifecycle.clone(),
             event_tx,
             WorkspaceSession::from_record(
-                lifecycle
-                    .get_workspace_session(&harness.session_id)
-                    .expect("durable session"),
+                lifecycle.get_workspace_session(session_id).expect("durable session"),
             ),
         )
     };
-    let mut recovered = recovered_engine(&harness.root, &harness.lifecycle);
+    let mut recovered =
+        recovered_engine(&harness.root, &harness.lifecycle, &harness.session_id);
     let actions = recovered
         .recover_human_gate_turns(false)
         .expect("recover fp-a");
@@ -537,7 +536,8 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
 
     // provider alive：恢复分类为等待，turn/ledger 不动。
     {
-        let mut recovered_alive = recovered_engine(&harness.root, &harness.lifecycle);
+        let mut recovered_alive =
+            recovered_engine(&harness.root, &harness.lifecycle, &harness.session_id);
         let alive_actions = recovered_alive
             .recover_human_gate_turns(true)
             .expect("recover alive");
@@ -563,7 +563,8 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     }
 
     // provider dead：同 turn attempt_no++（≤ 上限），ledger 增 attempt:2，预算不再扣。
-    let mut recovered_dead = recovered_engine(&harness.root, &harness.lifecycle);
+    let mut recovered_dead =
+        recovered_engine(&harness.root, &harness.lifecycle, &harness.session_id);
     let dead_actions = recovered_dead
         .recover_human_gate_turns(false)
         .expect("recover dead");

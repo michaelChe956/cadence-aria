@@ -204,6 +204,46 @@ pub(super) async fn campaign_stage3_fixture(
     let (root, lifecycle, _plan_id, mut engine) =
         crate::product::workspace_engine::tests::make_work_item_plan_engine_with_accepted_contract_drafts();
     let app_paths = lifecycle.app_paths();
+    // —— 会话 scope 唯一化(并发隔离)——
+    // 基座 fixture 的 durable scope(project_0001/issue_0001/
+    // issue_work_item_plan_0001/首个顺序 session id)与 single_candidate_recovery、
+    // task_3_4 等 failpoint 家族完全相同,而这些 failpoint 注册表是进程级全局、
+    // 以该 scope 作键。全量并行下,同 scope 的并发注册会把本 fixture 的真实
+    // confirm 链(run_single_candidate_initial_plan_compile 的 maybe_fail 检查点)
+    // 击断,Confirmed 前置态永远无法达成(无超时轮询 → suite 挂死);反向地,
+    // 本 fixture 的 confirm 链也会消费掉别人注册的 failpoint 使对方测试失败。
+    // 把 session id 换成进程内唯一值后,campaign 家族与所有 failpoint 注册者的
+    // 键永不相等,双向互扰都消失;各断言只依赖 durable 落盘回读,
+    // 不依赖 session id 字面值。旧 id 的 session 文件随之删除,保持
+    // sessions 目录单一记录,不引入“最新 session”歧义。
+    {
+        static CAMPAIGN_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let mut record = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("fixture session record");
+        let previous_session_path = app_paths
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id));
+        record.id = format!(
+            "{}-campaign-{}",
+            record.id,
+            CAMPAIGN_SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let artifact = engine.session.artifact.clone();
+        crate::product::json_store::write_json(
+            &app_paths
+                .issue_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist campaign-unique session");
+        std::fs::remove_file(&previous_session_path)
+            .expect("drop fixture session before unique rescope");
+        engine.session = WorkspaceSession::from_record(record);
+        engine.session.artifact = artifact;
+    }
     crate::product::workspace_engine::tests::single_candidate_recovery::single_candidate_recovery_record(
         &lifecycle,
         &mut engine,
