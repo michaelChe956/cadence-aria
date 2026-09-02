@@ -683,6 +683,7 @@ function createStage3GateController({
   const syntheticActions = [];
   const turns = [];
   const advanceActions = [];
+  const takeoverActions = [];
   const recoveryChecks = [];
   const ledger = { before: null, after: null };
   let actionIndex = 0;
@@ -865,18 +866,38 @@ function createStage3GateController({
     return { consumed, outbound: null };
   };
 
-  const onDurableState = ({ replayedCommandIds = [], advanceRecords = [], confirmedPlan = false } = {}) => {
+  const onDurableState = ({
+    replayedCommandIds = [],
+    replayedTurns = [],
+    advanceRecords = [],
+    confirmedPlan = false,
+  } = {}) => {
     const consumed = [];
     const current = currentWithCommand();
+    // 8.2c：重连后由驱动把 durable turn 记录喂进来。终态 turn（completed/failed）
+    // 直接收敛回合状态并释放单飞；非终态 turn 恢复为 in-flight 等待服务端恢复。
+    const durableTurnFor = (commandId) => replayedTurns.find((entry) => entry?.command_id === commandId);
     if (current?.decision === 'request-change'
       && replayedCommandIds.includes(current.commandId)) {
       const record = turnRecordFor(current, current.commandId);
-      record.status = 'open';
-      inFlightTurn = { turnId: null, commandId: current.commandId };
+      const replay = durableTurnFor(current.commandId);
+      const turnStatus = replay?.status ?? 'open';
+      if (turnStatus === 'completed' || turnStatus === 'failed') {
+        record.status = turnStatus;
+        if (turnStatus === 'completed') record.artifact_ref = replay?.artifact_ref ?? null;
+        else record.failure_class = replay?.failure_class ?? null;
+        if (record.turn_id === null) record.turn_id = replay?.turn_id ?? null;
+        inFlightTurn = null;
+      } else {
+        record.status = 'open';
+        record.turn_id ??= replay?.turn_id ?? null;
+        inFlightTurn = { turnId: replay?.turn_id ?? null, commandId: current.commandId };
+      }
       recoveryChecks.push({
         check: 'durable_command_replay_consumed',
         command_id: current.commandId,
         actionIndex,
+        turn_status: turnStatus,
       });
       consumeCurrent(consumed, 'durable_replay');
     } else if (current?.decision === 'advance'
@@ -950,10 +971,14 @@ function createStage3GateController({
     noteProviderLedgerAfter: (ledgerAfter) => {
       ledger.after = Array.isArray(ledgerAfter) ? ledgerAfter : [];
     },
+    noteTakeoverAction: (entry) => {
+      if (isRecord(entry)) takeoverActions.push(structuredClone(entry));
+      return takeoverActions.length;
+    },
     resultFields: () => ({
       human_gate_turns: structuredClone(turns),
       advance_actions: structuredClone(advanceActions),
-      takeover_actions: [],
+      takeover_actions: structuredClone(takeoverActions),
       durable_recovery_checks: structuredClone(recoveryChecks),
       provider_start_ledger_before_after: structuredClone(ledger),
     }),
@@ -1381,6 +1406,75 @@ async function verifyConfirmedPlan(result, elapsedMs) {
   return { plan, workItemIds: ids, lifecycle };
 }
 
+// 8.2a：durable stopped_needs_human 的 auto parent 是否应转为 interactive takeover。
+// 只在 SC+interactive typed flow 且尚未 takeover 过时放行；其余保持既有收尾语义。
+export function stage3TakeoverDecision({ failureClass, flowKind, runPolicy, alreadyTakenOver }) {
+  if (failureClass !== 'stopped_needs_human') return 'finish';
+  if (flowKind !== 'single_candidate' || runPolicy !== 'interactive') return 'finish';
+  if (alreadyTakenOver) return 'finish';
+  return 'takeover';
+}
+
+// 8.2c：从 .aria durable 存储读取重连恢复面（真实 replay 消息来源）：
+// - session JSON → confirmedPlan（status=confirmed 且 phase=completed）
+// - human-gate-turns/*.json → replayedTurns（command/turn/status/artifact/failure）
+// - advance-records/*.json → advanceRecords（command_id/attempt_id）
+// 缺目录/坏文件一律按“无记录”处理，绝不抛出阻断恢复。
+export function stage3DurableReplayState({ ariaRoot, projectId, issueId, sessionId }) {
+  const readJsonOrNull = (file) => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  const sessionDir = path.join(ariaRoot, 'projects', projectId, 'issues', issueId, 'workspace-sessions');
+  const session = readJsonOrNull(path.join(sessionDir, `${sessionId}.json`));
+  const confirmedPlan = session?.status === 'confirmed'
+    && session?.single_candidate_phase === 'completed';
+  const replayedTurns = [];
+  try {
+    for (const name of fs.readdirSync(path.join(sessionDir, sessionId, 'human-gate-turns'))) {
+      if (!name.endsWith('.json')) continue;
+      const turn = readJsonOrNull(path.join(sessionDir, sessionId, 'human-gate-turns', name));
+      if (turn?.command_id) {
+        replayedTurns.push({
+          command_id: turn.command_id,
+          turn_id: turn.turn_id ?? null,
+          status: turn.status ?? null,
+          artifact_ref: turn.result_artifact_ref ?? null,
+          failure_class: turn.failure_class ?? null,
+        });
+      }
+    }
+  } catch {
+    // 目录不存在（尚无 turn 记录）是正常形态。
+  }
+  const advanceRecords = [];
+  try {
+    for (const name of fs.readdirSync(path.join(sessionDir, '..', 'advance-records'))) {
+      if (!name.endsWith('.json') || name.endsWith('.initialization.json')) continue;
+      const record = readJsonOrNull(path.join(sessionDir, '..', 'advance-records', name));
+      if (record?.command_id) {
+        advanceRecords.push({
+          command_id: record.command_id,
+          attempt_id: record.attempt_id ?? null,
+        });
+      }
+    }
+  } catch {
+    // 目录不存在（尚无 advance 记录）是正常形态。
+  }
+  replayedTurns.sort((left, right) => String(left.command_id).localeCompare(String(right.command_id)));
+  advanceRecords.sort((left, right) => String(left.command_id).localeCompare(String(right.command_id)));
+  return {
+    confirmedPlan,
+    replayedCommandIds: replayedTurns.map((turn) => turn.command_id),
+    replayedTurns,
+    advanceRecords,
+  };
+}
+
 async function runCampaign({
   provider,
   rep,
@@ -1435,6 +1529,10 @@ async function runCampaign({
   // —— 阶段 3 typed 门/advance 控制器（仅 flow_kind=single_candidate + interactive 激活）——
   let stage3Controller = null;
   let stage3CheckpointPath = null;
+  // 8.2a/8.2c：takeover 与重连恢复的 bounded 状态。
+  let stage3ReconnectsRemaining = 3;
+  let stage3TakeoverDone = false;
+  let stage3SwitchingSession = false;
   const ensureStage3Controller = () => {
     if (!stage3TypedFlowActive(result.flow_kind, runPolicy)) return null;
     if (stage3Controller) return stage3Controller;
@@ -1811,7 +1909,68 @@ async function runCampaign({
     };
     return { message, protocol: sessionStateProtocol(message, runPolicy), sessionPath };
   };
-  const finishDurableTerminal = (action, trigger) => {
+  // 8.2a：durable stopped_needs_human 的 auto parent 转 interactive child（幂等
+  // takeover 端点），ws 切到 child；parent 证据（parent_workspace_session_id、
+  // 既有 turn/ledger 审计）原样保留在 result。
+  const takeoverStoppedParentSession = async (trigger) => {
+    const parentSessionId = result.workspace_session_id;
+    stage3SwitchingSession = true;
+    try {
+      const takeover = await requestJson(
+        `${BASE}/api/workspace-sessions/${encodeURIComponent(parentSessionId)}/takeover`,
+        { method: 'POST', label: 'workspace session takeover' },
+        elapsedMs,
+      );
+      const childSessionId = takeover?.workspace_session?.workspace_session_id
+        ?? takeover?.workspace_session?.id
+        ?? null;
+      if (!childSessionId) throw new Error('takeover 响应缺少 workspace_session id');
+      const controller = ensureStage3Controller();
+      controller?.noteTakeoverAction({
+        parent_session_id: takeover.parent_session_id ?? parentSessionId,
+        child_session_id: childSessionId,
+        takeover_event_id: takeover.takeover_event_id ?? null,
+        trigger,
+        at: now(),
+      });
+      writeLog({
+        event: 'stage3_takeover',
+        parent_session_id: parentSessionId,
+        child_session_id: childSessionId,
+        takeover_event_id: takeover.takeover_event_id ?? null,
+        trigger,
+      });
+      result.parent_workspace_session_id = parentSessionId;
+      result.workspace_session_id = childSessionId;
+      // child ws 以全新 session_state 开场；start_generation 已发过，不重发。
+      sessionProtocolSeen = false;
+      syncStage3Fields();
+      try { ws?.close(); } catch { /* 旧连接可能已关闭 */ }
+      connectWorkspace();
+    } catch (error) {
+      writeLog({ event: 'stage3_takeover_failed', trigger, error: errorText(error) });
+      return false;
+    } finally {
+      stage3SwitchingSession = false;
+    }
+    return true;
+  };
+  const finishDurableTerminal = (action, trigger, takeoverAllowed = true) => {
+    if (
+      takeoverAllowed
+      && stage3TakeoverDecision({
+        failureClass: action.failureClass,
+        flowKind: result.flow_kind,
+        runPolicy,
+        alreadyTakenOver: stage3TakeoverDone,
+      }) === 'takeover'
+    ) {
+      stage3TakeoverDone = true;
+      void takeoverStoppedParentSession(trigger).then((takenOver) => {
+        if (!takenOver) finishDurableTerminal(action, trigger, false);
+      });
+      return;
+    }
     const detail = json({
       trigger,
       session_status: result.session_status,
@@ -1876,7 +2035,43 @@ async function runCampaign({
       })
       .catch((error) => fail('handoff_verification_failed', error));
   };
+  // 8.2c（销项 8.1 Observation-1）：ws 非正常关闭且 durable session 未终态时，
+  // typed flow 以 durable 记录为真实 replay 消息源喂给 onDurableState 后重连
+  // 同一 session（bounded），而不是立刻 ws_closed 失败。
+  const recoverStage3FromDurableAndReconnect = (trigger, closeEvent, sessionStatus) => {
+    if (!stage3TypedFlowActive(result.flow_kind, runPolicy)) return false;
+    if (stage3ReconnectsRemaining <= 0) return false;
+    const controller = ensureStage3Controller();
+    if (!controller) return false;
+    stage3ReconnectsRemaining -= 1;
+    const replayState = stage3DurableReplayState({
+      ariaRoot: ARIA_ROOT,
+      projectId: PROJECT_ID,
+      issueId: result.issue_id,
+      sessionId: result.workspace_session_id,
+    });
+    const replay = controller.onDurableState(replayState);
+    for (const consumed of replay.consumed) {
+      writeLog({
+        event: 'stage3_durable_replay',
+        actionIndex: consumed.actionIndex,
+        kind: consumed.kind,
+        via: consumed.via,
+      });
+    }
+    writeLog({
+      event: 'stage3_ws_reconnect',
+      trigger,
+      code: closeEvent?.code ?? null,
+      session_status: sessionStatus,
+      reconnects_remaining: stage3ReconnectsRemaining,
+    });
+    syncStage3Fields();
+    connectWorkspace();
+    return true;
+  };
   const finalizeFromDurableSession = (trigger, closeEvent = null) => {
+    if (stage3SwitchingSession) return true;
     if (ended || completionVerificationStarted) {
       // Confirmed 后等待 advance 结果期间传输层断开：plan 已 Confirmed，durable advance
       // 记录的对账留待 8.4b 重连矩阵；此处不悬挂，按已知事实收尾。
@@ -1931,10 +2126,19 @@ async function runCampaign({
       return true;
     }
     if (trigger === 'ws_close') {
+      if (recoverStage3FromDurableAndReconnect(trigger, closeEvent, durable.protocol.session_status)) {
+        return true;
+      }
       fail(
         'ws_closed',
         `workspace WebSocket 关闭: code=${closeEvent?.code ?? 'unknown'}; 持久 session 未到终态: ${durable.protocol.session_status}`,
       );
+      return true;
+    }
+    if (
+      trigger === 'ws_error'
+      && recoverStage3FromDurableAndReconnect(trigger, null, durable.protocol.session_status)
+    ) {
       return true;
     }
     return false;
@@ -1982,6 +2186,296 @@ async function runCampaign({
       handleAuthorConfirm();
     }
   };
+
+  // —— workspace ws 连接（初连与 8.2c 重连共用；旧 socket 的事件被 socket 守卫丢弃）——
+  function connectWorkspace() {
+      const socket = new WebSocket(`${WS_BASE}/api/workspace-sessions/${encodeURIComponent(result.workspace_session_id)}/ws`);
+      ws = socket;
+      socket.onopen = () => {
+        if (ended || ws !== socket) return;
+        writeLog({ event: 'ws_open' });
+        send({ type: 'hello', session_id: result.workspace_session_id, last_seen_node_id: null });
+      };
+      socket.onmessage = (event) => {
+        if (ended || ws !== socket) return;
+        try {
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch {
+            writeLog({ direction: 'in', malformed_raw: String(event.data) });
+            fail('malformed_ws_message', `无法解析 WebSocket 消息: ${String(event.data).slice(0, 500)}`);
+            return;
+          }
+          writeLog({ direction: 'in', message });
+          if (message.type === 'session_state') {
+            const protocol = sessionStateProtocol(message, runPolicy);
+            applySessionProtocol(protocol, message);
+            const action = terminalSessionAction(
+              message,
+              awaitingReviewNeedsHumanTerminal,
+              false,
+              protocol.flow_kind,
+            );
+            if (action.kind === 'fail') {
+              fail(action.failureClass, `SessionState 失败关闭: ${json({
+                session_status: protocol.session_status,
+                policy_diagnostics: protocol.policy_diagnostics,
+              })}`);
+              return;
+            }
+            if (action.kind === 'terminal') {
+              finishDurableTerminal(action, 'session_state');
+              return;
+            }
+            if (action.kind === 'complete') {
+              finalizeFromDurableSession('session_state_terminal');
+              return;
+            }
+          }
+          // completed 是服务端终局通知；即使初始 session_state 丢失，也必须以持久记录为准回读。
+          if (message.type === 'stage_change' && message.stage === 'completed') {
+            handleStage(message.stage, message.type);
+            return;
+          }
+          if (!sessionProtocolSeen) {
+            fail('session_state_missing', `自动处理前必须先收到并校验 session_state，实际为 ${String(message.type)}`);
+            return;
+          }
+          const legacyDecision = result.flow_kind === 'single_candidate'
+            ? legacySingleCandidateDecisionMessage(message, runPolicy)
+            : null;
+          if (legacyDecision) {
+            result.legacy_decision_messages.push(legacyDecision);
+            fail(
+              'legacy_single_candidate_decision',
+              `SingleCandidate 收到旧决策消息，拒绝自动应答: ${String(legacyDecision.type)}`,
+            );
+            return;
+          }
+          collectUsageByRole(message, usageByRole);
+          collectFindings(message, result.validator_findings);
+          if (message.stage) recordStage(message.stage, message.type);
+          if (ended) return;
+          if (Array.isArray(message.timeline_nodes)) {
+            message.timeline_nodes.forEach((node) => {
+              if (node?.node_id) nodesById.set(node.node_id, node);
+            });
+          }
+          if (message.type === 'timeline_node_created' && message.node?.node_id) {
+            nodesById.set(message.node.node_id, message.node);
+          }
+          if (message.active_node_id) {
+            const previousActiveNodeId = activeNodeId;
+            const previousActiveNodeType = activeNodeType;
+            activeNodeId = message.active_node_id;
+            activeNodeType = activeNodeTypeForActiveNode(
+              nodesById,
+              activeNodeId,
+              previousActiveNodeId,
+              previousActiveNodeType,
+            );
+            if (isHumanGateStage(currentStage) && activeNodeId !== previousActiveNodeId) {
+              humanGateEnteredAt = now();
+            }
+          }
+          switch (message.type) {
+          case 'session_state':
+          case 'stage_change':
+            handleStage(message.stage, message.type, message.active_node_id ?? null);
+            break;
+          case 'artifact_update':
+            writeArtifact(message);
+            // 只落盘；Draft/Batch 决策必须等对应确认节点成为 active 后再发送。
+            break;
+          case 'provider_select_request': {
+            const selection = providerRolesForSelection(message, currentStage);
+            result.provider_selections.push({
+              elapsedSec: elapsedSec(),
+              stage: message.stage ?? currentStage ?? null,
+              defaults: message.defaults ?? null,
+              roles: selection.roles,
+              strategy: selection.strategy,
+              assumption: selection.assumption,
+            });
+            selection.roles.forEach((role) => send({ type: 'provider_select', role, provider }));
+            break;
+          }
+          case 'permission_request':
+            result.permission_approvals += 1;
+            send({ type: 'permission_response', id: message.id, approved: true, reason: null });
+            break;
+          case 'choice_request': {
+            const choice = firstChoice(message);
+            if (!choice.ids.length) {
+              fail('choice_without_options', `choice_request ${message.id ?? '<missing>'} 没有可选项`);
+              break;
+            }
+            result.choices.push({ id: message.id, elapsedSec: elapsedSec(), selected_option_ids: choice.ids, strategy: choice.strategy });
+            send({ type: 'choice_response', id: message.id, selected_option_ids: choice.ids, free_text: null, answers: choice.answers });
+            break;
+          }
+          case 'review_complete': {
+            reviewVerdict = message.verdict;
+            latestReviewComplete = message;
+            const findings = message.findings ?? [];
+            result.verdicts.push({ verdict: message.verdict, round: message.round ?? null, elapsedSec: elapsedSec(), findings });
+            if (Array.isArray(findings)) result.validator_findings.push(...findings);
+            const action = reviewCompleteAction(reviewVerdict, runPolicy);
+            if (action.kind === 'human_confirm_request_change') {
+              // review_complete 可能先于 human_confirm timeline node 广播；此处只记录
+              // 非终态事实，等 node 成为 active 后由 handleHumanConfirm 发送。
+              awaitingReviewNeedsHumanTerminal = false;
+              if (isHumanGateStage(currentStage) && activeNodeType === 'human_confirm') {
+                void handleHumanConfirm();
+              }
+            } else if (action.kind === 'await_terminal_session_state') {
+              awaitingReviewNeedsHumanTerminal = true;
+              const terminal = terminalSessionAction(latestSessionStateMessage, true);
+              if (terminal.kind === 'fail') {
+                fail(terminal.failureClass, `SessionState 失败关闭: ${json({
+                  session_status: result.session_status,
+                  policy_diagnostics: result.policy_diagnostics,
+                })}`);
+                break;
+              }
+              writeLog({
+                event: 'review_needs_human_waiting_for_session_terminal',
+                verdict: reviewVerdict,
+              });
+            }
+            break;
+          }
+          case 'review_decision_required': {
+            const action = reviewDecisionAction(message, reviewVerdict, latestReviewComplete);
+            const audit = {
+              node_id: message.node_id ?? null,
+              round: message.round ?? null,
+              elapsedSec: elapsedSec(),
+              verdict: reviewVerdict,
+              options: message.options ?? null,
+              selected_option: action.decision ?? null,
+              strategy: action.strategy,
+            };
+            result.review_decisions.push(audit);
+            if (action.kind === 'respond') {
+              send({
+                type: 'review_decision_response',
+                decision: action.decision,
+                extra_context: action.extra_context,
+              });
+              break;
+            }
+            if (action.kind === 'revise') {
+              const repairAction = reviewRepairAction(durableRunHistory, latestReviewComplete);
+              if (repairAction.kind === 'fail') {
+                fail(repairAction.failureClass, 'durable run_history 不允许继续自动返修');
+              } else {
+                reviewVerdict = null;
+                send({ type: 'select_revision_path', path: action.decision, extra_context: FEEDBACK });
+              }
+              break;
+            }
+            const detail = Array.isArray(message.options) && message.options.length
+              ? `未提供“跳过可选建议”选项: ${JSON.stringify(message.options)}`
+              : `缺少 options，且 verdict=${reviewVerdict ?? 'unknown'} 不允许猜测响应`;
+            fail('review_decision_unhandled', `review_decision_required ${detail}`);
+            break;
+          }
+          case 'timeline_node_created':
+            if (message.node?.status === 'active') {
+              activeNodeId = message.node.node_id ?? activeNodeId;
+              activeNodeType = message.node.node_type ?? activeNodeType;
+              if (currentStage === 'author_confirm') handleAuthorConfirm();
+              // stage_change 可能早于节点创建；节点补齐后重试统一人工门，仍由 node id 去重。
+              if (isHumanGateStage(currentStage)) void handleHumanConfirm();
+            }
+            break;
+          case 'provider_status':
+          case 'execution_event':
+            break;
+          case 'human_gate_turn_open':
+          case 'human_gate_turn_completed':
+          case 'human_gate_turn_failed':
+          case 'human_gate_busy':
+          case 'human_gate_closed':
+          case 'advance_completed':
+          case 'advance_rejected': {
+            // 阶段 3 typed 事件只允许出现在 SC+interactive；其他 flow 视为协议回归失败关闭。
+            const controller = stage3TypedFlowActive(result.flow_kind, runPolicy)
+              ? ensureStage3Controller()
+              : null;
+            if (!controller) {
+              fail(
+                'stage3_event_outside_typed_flow',
+                `非 typed flow（flow_kind=${String(result.flow_kind)}, run_policy=${String(runPolicy)}）收到 ${message.type}`,
+              );
+              break;
+            }
+            const outcome = controller.onInbound(message);
+            for (const consumed of outcome.consumed) {
+              writeLog({
+                event: 'stage3_action_consumed',
+                actionIndex: consumed.actionIndex,
+                kind: consumed.kind,
+                via: consumed.via,
+                command_id: message.command_id ?? null,
+                turn_id: message.turn_id ?? null,
+              });
+            }
+            if (outcome.outbound) deliverStage3Submission(outcome.outbound);
+            // advance 等待期收尾：rejected 不消费脚本动作，但必须无条件收尾（不悬挂至 hard
+            // timeout）；completed 仍要求动作确认消费后才收尾。
+            const advanceFinishPlan = stage3AdvanceFinishPlan({
+              finishPending: advanceFinishPending,
+              message,
+              consumedKinds: outcome.consumed.map((entry) => entry.kind),
+            });
+            if (advanceFinishPlan) {
+              advanceFinishPending = false;
+              controller.noteProviderLedgerAfter(result.provider_start_ledger ?? []);
+              syncStage3Fields();
+              writeLog(advanceFinishPlan);
+              writeHandoffAndFinish();
+            }
+            syncStage3Fields();
+            break;
+          }
+          case 'timeline_node_updated':
+          case 'stream_chunk':
+          case 'message_complete':
+          case 'provider_locked':
+          case 'pong':
+          case 'human_presentation_revision_saved':
+          case 'human_presentation_revision_save_failed':
+          case 'linked_workspace_amendment_created':
+            break;
+          case 'error':
+            fail('workspace_error', message.message ?? 'workspace error');
+            break;
+          case 'protocol_error':
+            fail('protocol_error', `${message.code ?? 'protocol_error'}: ${message.message ?? ''}`);
+            break;
+          default:
+            fail('unknown_ws_message', `未知 workspace WebSocket 消息类型: ${String(message.type)}`);
+          }
+        } catch (error) {
+          fail('driver_error', error);
+        }
+      };
+      socket.onerror = (event) => {
+        if (ended || ws !== socket) return;
+        writeLog({ event: 'ws_error', message: event?.message ?? 'workspace WebSocket error' });
+        if (!finalizeFromDurableSession('ws_error')) {
+          fail('ws_transport_error', event?.message ?? 'workspace WebSocket error');
+        }
+      };
+      socket.onclose = (event) => {
+        if (ended || ws !== socket) return;
+        writeLog({ event: 'ws_close', code: event?.code, reason: event?.reason, wasClean: event?.wasClean });
+        finalizeFromDurableSession('ws_close', event);
+      };
+  }
 
   hardTimer = setTimeout(() => {
     fail(result.failureClass ?? 'hard_timeout', result.error ?? `硬超时 ${HARD_LIMIT_MS}ms`);
@@ -2069,289 +2563,7 @@ async function runCampaign({
     }
 
     if (elapsedMs() >= HARD_LIMIT_MS) throw new Error('hard-timeout before WebSocket connection');
-    ws = new WebSocket(`${WS_BASE}/api/workspace-sessions/${encodeURIComponent(result.workspace_session_id)}/ws`);
-    ws.onopen = () => {
-      writeLog({ event: 'ws_open' });
-      send({ type: 'hello', session_id: result.workspace_session_id, last_seen_node_id: null });
-    };
-    ws.onmessage = (event) => {
-      try {
-        let message;
-        try {
-          message = JSON.parse(event.data);
-        } catch {
-          writeLog({ direction: 'in', malformed_raw: String(event.data) });
-          fail('malformed_ws_message', `无法解析 WebSocket 消息: ${String(event.data).slice(0, 500)}`);
-          return;
-        }
-        writeLog({ direction: 'in', message });
-        if (message.type === 'session_state') {
-          const protocol = sessionStateProtocol(message, runPolicy);
-          applySessionProtocol(protocol, message);
-          const action = terminalSessionAction(
-            message,
-            awaitingReviewNeedsHumanTerminal,
-            false,
-            protocol.flow_kind,
-          );
-          if (action.kind === 'fail') {
-            fail(action.failureClass, `SessionState 失败关闭: ${json({
-              session_status: protocol.session_status,
-              policy_diagnostics: protocol.policy_diagnostics,
-            })}`);
-            return;
-          }
-          if (action.kind === 'terminal') {
-            finishDurableTerminal(action, 'session_state');
-            return;
-          }
-          if (action.kind === 'complete') {
-            finalizeFromDurableSession('session_state_terminal');
-            return;
-          }
-        }
-        // completed 是服务端终局通知；即使初始 session_state 丢失，也必须以持久记录为准回读。
-        if (message.type === 'stage_change' && message.stage === 'completed') {
-          handleStage(message.stage, message.type);
-          return;
-        }
-        if (!sessionProtocolSeen) {
-          fail('session_state_missing', `自动处理前必须先收到并校验 session_state，实际为 ${String(message.type)}`);
-          return;
-        }
-        const legacyDecision = result.flow_kind === 'single_candidate'
-          ? legacySingleCandidateDecisionMessage(message, runPolicy)
-          : null;
-        if (legacyDecision) {
-          result.legacy_decision_messages.push(legacyDecision);
-          fail(
-            'legacy_single_candidate_decision',
-            `SingleCandidate 收到旧决策消息，拒绝自动应答: ${String(legacyDecision.type)}`,
-          );
-          return;
-        }
-        collectUsageByRole(message, usageByRole);
-        collectFindings(message, result.validator_findings);
-        if (message.stage) recordStage(message.stage, message.type);
-        if (ended) return;
-        if (Array.isArray(message.timeline_nodes)) {
-          message.timeline_nodes.forEach((node) => {
-            if (node?.node_id) nodesById.set(node.node_id, node);
-          });
-        }
-        if (message.type === 'timeline_node_created' && message.node?.node_id) {
-          nodesById.set(message.node.node_id, message.node);
-        }
-        if (message.active_node_id) {
-          const previousActiveNodeId = activeNodeId;
-          const previousActiveNodeType = activeNodeType;
-          activeNodeId = message.active_node_id;
-          activeNodeType = activeNodeTypeForActiveNode(
-            nodesById,
-            activeNodeId,
-            previousActiveNodeId,
-            previousActiveNodeType,
-          );
-          if (isHumanGateStage(currentStage) && activeNodeId !== previousActiveNodeId) {
-            humanGateEnteredAt = now();
-          }
-        }
-        switch (message.type) {
-        case 'session_state':
-        case 'stage_change':
-          handleStage(message.stage, message.type, message.active_node_id ?? null);
-          break;
-        case 'artifact_update':
-          writeArtifact(message);
-          // 只落盘；Draft/Batch 决策必须等对应确认节点成为 active 后再发送。
-          break;
-        case 'provider_select_request': {
-          const selection = providerRolesForSelection(message, currentStage);
-          result.provider_selections.push({
-            elapsedSec: elapsedSec(),
-            stage: message.stage ?? currentStage ?? null,
-            defaults: message.defaults ?? null,
-            roles: selection.roles,
-            strategy: selection.strategy,
-            assumption: selection.assumption,
-          });
-          selection.roles.forEach((role) => send({ type: 'provider_select', role, provider }));
-          break;
-        }
-        case 'permission_request':
-          result.permission_approvals += 1;
-          send({ type: 'permission_response', id: message.id, approved: true, reason: null });
-          break;
-        case 'choice_request': {
-          const choice = firstChoice(message);
-          if (!choice.ids.length) {
-            fail('choice_without_options', `choice_request ${message.id ?? '<missing>'} 没有可选项`);
-            break;
-          }
-          result.choices.push({ id: message.id, elapsedSec: elapsedSec(), selected_option_ids: choice.ids, strategy: choice.strategy });
-          send({ type: 'choice_response', id: message.id, selected_option_ids: choice.ids, free_text: null, answers: choice.answers });
-          break;
-        }
-        case 'review_complete': {
-          reviewVerdict = message.verdict;
-          latestReviewComplete = message;
-          const findings = message.findings ?? [];
-          result.verdicts.push({ verdict: message.verdict, round: message.round ?? null, elapsedSec: elapsedSec(), findings });
-          if (Array.isArray(findings)) result.validator_findings.push(...findings);
-          const action = reviewCompleteAction(reviewVerdict, runPolicy);
-          if (action.kind === 'human_confirm_request_change') {
-            // review_complete 可能先于 human_confirm timeline node 广播；此处只记录
-            // 非终态事实，等 node 成为 active 后由 handleHumanConfirm 发送。
-            awaitingReviewNeedsHumanTerminal = false;
-            if (isHumanGateStage(currentStage) && activeNodeType === 'human_confirm') {
-              void handleHumanConfirm();
-            }
-          } else if (action.kind === 'await_terminal_session_state') {
-            awaitingReviewNeedsHumanTerminal = true;
-            const terminal = terminalSessionAction(latestSessionStateMessage, true);
-            if (terminal.kind === 'fail') {
-              fail(terminal.failureClass, `SessionState 失败关闭: ${json({
-                session_status: result.session_status,
-                policy_diagnostics: result.policy_diagnostics,
-              })}`);
-              break;
-            }
-            writeLog({
-              event: 'review_needs_human_waiting_for_session_terminal',
-              verdict: reviewVerdict,
-            });
-          }
-          break;
-        }
-        case 'review_decision_required': {
-          const action = reviewDecisionAction(message, reviewVerdict, latestReviewComplete);
-          const audit = {
-            node_id: message.node_id ?? null,
-            round: message.round ?? null,
-            elapsedSec: elapsedSec(),
-            verdict: reviewVerdict,
-            options: message.options ?? null,
-            selected_option: action.decision ?? null,
-            strategy: action.strategy,
-          };
-          result.review_decisions.push(audit);
-          if (action.kind === 'respond') {
-            send({
-              type: 'review_decision_response',
-              decision: action.decision,
-              extra_context: action.extra_context,
-            });
-            break;
-          }
-          if (action.kind === 'revise') {
-            const repairAction = reviewRepairAction(durableRunHistory, latestReviewComplete);
-            if (repairAction.kind === 'fail') {
-              fail(repairAction.failureClass, 'durable run_history 不允许继续自动返修');
-            } else {
-              reviewVerdict = null;
-              send({ type: 'select_revision_path', path: action.decision, extra_context: FEEDBACK });
-            }
-            break;
-          }
-          const detail = Array.isArray(message.options) && message.options.length
-            ? `未提供“跳过可选建议”选项: ${JSON.stringify(message.options)}`
-            : `缺少 options，且 verdict=${reviewVerdict ?? 'unknown'} 不允许猜测响应`;
-          fail('review_decision_unhandled', `review_decision_required ${detail}`);
-          break;
-        }
-        case 'timeline_node_created':
-          if (message.node?.status === 'active') {
-            activeNodeId = message.node.node_id ?? activeNodeId;
-            activeNodeType = message.node.node_type ?? activeNodeType;
-            if (currentStage === 'author_confirm') handleAuthorConfirm();
-            // stage_change 可能早于节点创建；节点补齐后重试统一人工门，仍由 node id 去重。
-            if (isHumanGateStage(currentStage)) void handleHumanConfirm();
-          }
-          break;
-        case 'provider_status':
-        case 'execution_event':
-          break;
-        case 'human_gate_turn_open':
-        case 'human_gate_turn_completed':
-        case 'human_gate_turn_failed':
-        case 'human_gate_busy':
-        case 'human_gate_closed':
-        case 'advance_completed':
-        case 'advance_rejected': {
-          // 阶段 3 typed 事件只允许出现在 SC+interactive；其他 flow 视为协议回归失败关闭。
-          const controller = stage3TypedFlowActive(result.flow_kind, runPolicy)
-            ? ensureStage3Controller()
-            : null;
-          if (!controller) {
-            fail(
-              'stage3_event_outside_typed_flow',
-              `非 typed flow（flow_kind=${String(result.flow_kind)}, run_policy=${String(runPolicy)}）收到 ${message.type}`,
-            );
-            break;
-          }
-          const outcome = controller.onInbound(message);
-          for (const consumed of outcome.consumed) {
-            writeLog({
-              event: 'stage3_action_consumed',
-              actionIndex: consumed.actionIndex,
-              kind: consumed.kind,
-              via: consumed.via,
-              command_id: message.command_id ?? null,
-              turn_id: message.turn_id ?? null,
-            });
-          }
-          if (outcome.outbound) deliverStage3Submission(outcome.outbound);
-          // advance 等待期收尾：rejected 不消费脚本动作，但必须无条件收尾（不悬挂至 hard
-          // timeout）；completed 仍要求动作确认消费后才收尾。
-          const advanceFinishPlan = stage3AdvanceFinishPlan({
-            finishPending: advanceFinishPending,
-            message,
-            consumedKinds: outcome.consumed.map((entry) => entry.kind),
-          });
-          if (advanceFinishPlan) {
-            advanceFinishPending = false;
-            controller.noteProviderLedgerAfter(result.provider_start_ledger ?? []);
-            syncStage3Fields();
-            writeLog(advanceFinishPlan);
-            writeHandoffAndFinish();
-          }
-          syncStage3Fields();
-          break;
-        }
-        case 'timeline_node_updated':
-        case 'stream_chunk':
-        case 'message_complete':
-        case 'provider_locked':
-        case 'pong':
-        case 'human_presentation_revision_saved':
-        case 'human_presentation_revision_save_failed':
-        case 'linked_workspace_amendment_created':
-          break;
-        case 'error':
-          fail('workspace_error', message.message ?? 'workspace error');
-          break;
-        case 'protocol_error':
-          fail('protocol_error', `${message.code ?? 'protocol_error'}: ${message.message ?? ''}`);
-          break;
-        default:
-          fail('unknown_ws_message', `未知 workspace WebSocket 消息类型: ${String(message.type)}`);
-        }
-      } catch (error) {
-        fail('driver_error', error);
-      }
-    };
-    ws.onerror = (event) => {
-      if (ended) return;
-      writeLog({ event: 'ws_error', message: event?.message ?? 'workspace WebSocket error' });
-      if (!finalizeFromDurableSession('ws_error')) {
-        fail('ws_transport_error', event?.message ?? 'workspace WebSocket error');
-      }
-    };
-    ws.onclose = (event) => {
-      if (ended) return;
-      writeLog({ event: 'ws_close', code: event?.code, reason: event?.reason, wasClean: event?.wasClean });
-      finalizeFromDurableSession('ws_close', event);
-    };
+    connectWorkspace();
   } catch (error) {
     const message = errorText(error);
     fail(/timeout/i.test(message) ? 'hard_timeout' : 'setup_error', message);

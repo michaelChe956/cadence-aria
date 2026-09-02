@@ -91,6 +91,32 @@ export function stage3ReconnectFaultTranscript({ commandId, replayedCommandIds }
   };
 }
 
+// 8.2a takeover fixture：幂等 takeover 端点响应 + child 侧门事件 transcript。
+// 两次调用返回同一 child/takeover_event（幂等语义），parent 证据不动。
+export function stage3TakeoverResponse(parentSessionId = 'ws_fixture_parent_0001') {
+  return {
+    workspace_session: {
+      workspace_session_id: 'ws_fixture_child_0001',
+      session_id: 'ws_fixture_child_0001',
+      run_policy: 'interactive',
+      flow_kind: 'single_candidate',
+      session_status: 'waiting_for_human',
+    },
+    parent_session_id: parentSessionId,
+    takeover_event_id: 'takeover_event_fixture_0001',
+  };
+}
+
+// takeover 之后的 child WS transcript：parent 侧已发生的 turn 审计保留，
+// child 门重新 Waiting，typed feedback 以同 campaign 身份继续。
+export function stage3TakeoverChildTranscript(commandId) {
+  return [
+    { type: 'human_gate_turn_open', turn_id: 'child-turn-1', command_id: commandId, remaining_budget: 1 },
+    { type: 'human_gate_turn_completed', turn_id: 'child-turn-1', artifact_ref: 'artifact://fixture/candidate-child-v2' },
+    stage3GateClosed('confirm'),
+  ];
+}
+
 // provider-start ledger fixture（advance 前后必须 byte 级不变）。
 export function stage3ProviderStartLedgerFixture() {
   return [

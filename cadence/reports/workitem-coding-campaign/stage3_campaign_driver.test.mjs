@@ -4,6 +4,9 @@
 // 通过 fixture transcript 驱动 driver 的 stage-3 gate controller。
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -420,4 +423,160 @@ test('campaign_stage3_advance_rejected_records_audit_and_finishes_without_consum
     null,
     '非 advance 等待期收到 rejected 不触发收尾',
   );
+});
+
+test('campaign_stage3_takeover_transcript_switches_child_ws_and_keeps_parent_evidence', async () => {
+  const { stage3TakeoverResponse, stage3TakeoverChildTranscript } = await import('./stage3_campaign_fixtures.mjs');
+  const { stage3TakeoverDecision } = await import('./workitem_run_campaign.mjs');
+
+  // takeover 门控：仅 SC+interactive 且未 takeover 过的 stopped_needs_human 放行。
+  assert.equal(
+    stage3TakeoverDecision({ failureClass: 'stopped_needs_human', flowKind: 'single_candidate', runPolicy: 'interactive', alreadyTakenOver: false }),
+    'takeover',
+  );
+  assert.equal(
+    stage3TakeoverDecision({ failureClass: 'stopped_needs_human', flowKind: 'single_candidate', runPolicy: 'auto_if_valid', alreadyTakenOver: false }),
+    'finish',
+    'auto 策略不走 takeover',
+  );
+  assert.equal(
+    stage3TakeoverDecision({ failureClass: 'stopped_needs_human', flowKind: 'legacy', runPolicy: 'interactive', alreadyTakenOver: false }),
+    'finish',
+    'legacy flow 不走 takeover',
+  );
+  assert.equal(
+    stage3TakeoverDecision({ failureClass: 'stopped_needs_human', flowKind: 'single_candidate', runPolicy: 'interactive', alreadyTakenOver: true }),
+    'finish',
+    '重复 takeover 必须幂等收尾',
+  );
+  assert.equal(
+    stage3TakeoverDecision({ failureClass: 'confirmed', flowKind: 'single_candidate', runPolicy: 'interactive', alreadyTakenOver: false }),
+    'finish',
+    '非 stopped_needs_human 终态不触发 takeover',
+  );
+
+  // transcript：parent 侧一轮 turn 审计先落账 → takeover → child ws 事件继续消费。
+  const { controller } = newController({
+    actions: parseHumanScript('request-change:合成反馈 1 号;request-change:合成反馈 2 号;confirm'),
+  });
+  const parentSend = controller.onGateWaiting();
+  controller.onInbound(stage3TurnOpen(parentSend.commandId, 'parent-turn-1', 2));
+  // 回合终态后门回到 Waiting，driver 自动发送第二个 request-change。
+  const parentComplete = controller.onInbound(stage3TurnCompleted('parent-turn-1'));
+  assert.equal(parentComplete.outbound.message.type, 'human_gate_feedback');
+  const secondCommandId = parentComplete.outbound.commandId;
+  const parentLedger = stage3ProviderStartLedgerFixture();
+  controller.noteProviderLedgerAfter(parentLedger);
+
+  // durable terminal(stopped_needs_human) 在第二个动作受理前到达 → takeover。
+  const takeover = stage3TakeoverResponse('ws_fixture_parent_0001');
+  controller.noteTakeoverAction({
+    parent_session_id: takeover.parent_session_id,
+    child_session_id: takeover.workspace_session.workspace_session_id,
+    takeover_event_id: takeover.takeover_event_id,
+    trigger: 'durable_session_terminal',
+    at: '2026-08-31T00:00:00Z',
+  });
+
+  // child ws 重连：门 Waiting，重发复用 checkpoint 里的同 command id。
+  const childSend = controller.onGateWaiting({ reconnect: true });
+  assert.equal(childSend.message.type, 'human_gate_feedback');
+  assert.equal(childSend.commandId, secondCommandId, 'child 侧重连重发必须复用 checkpoint command id');
+  assert.notEqual(childSend.commandId, parentSend.commandId);
+  for (const event of stage3TakeoverChildTranscript(childSend.commandId)) {
+    controller.onInbound(event);
+  }
+
+  const fields = controller.resultFields();
+  // parent 证据保留：parent-era turn 审计仍在，且 takeover 审计就位。
+  assert.equal(fields.human_gate_turns.length, 2, 'parent 与 child 的 turn 审计并存');
+  assert.equal(fields.human_gate_turns[0].turn_id, 'parent-turn-1');
+  assert.equal(fields.human_gate_turns[1].turn_id, 'child-turn-1');
+  assert.equal(fields.takeover_actions.length, 1);
+  assert.equal(fields.takeover_actions[0].parent_session_id, 'ws_fixture_parent_0001');
+  assert.equal(fields.takeover_actions[0].child_session_id, 'ws_fixture_child_0001');
+  assert.equal(fields.takeover_actions[0].takeover_event_id, 'takeover_event_fixture_0001');
+  // takeover 切换不触碰 provider-start ledger（after 镜像快照，before 未经 advance 置位）。
+  assert.equal(fields.provider_start_ledger_before_after.before, null);
+  assert.deepEqual(fields.provider_start_ledger_before_after.after, parentLedger);
+  assert.doesNotMatch(JSON.stringify(fields), /合成反馈/u, '审计只留 digest/长度，不含反馈全文');
+});
+
+test('campaign_stage3_ws_close_wires_durable_replay_to_on_durable_state', async () => {
+  const { stage3DurableReplayState } = await import('./workitem_run_campaign.mjs');
+
+  // 用真实 .aria 布局铺 durable 恢复面：session JSON + 终态 turn + advance 记录。
+  const ariaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-stage3-durable-'));
+  const sessionDir = path.join(ariaRoot, 'projects', 'project_0001', 'issues', 'issue_0001', 'workspace-sessions');
+  fs.mkdirSync(path.join(sessionDir, 'ws_fixture_child_0001', 'human-gate-turns'), { recursive: true });
+  fs.mkdirSync(path.join(ariaRoot, 'projects', 'project_0001', 'issues', 'issue_0001', 'advance-records'), { recursive: true });
+  fs.writeFileSync(path.join(sessionDir, 'ws_fixture_child_0001.json'), JSON.stringify({
+    id: 'ws_fixture_child_0001',
+    status: 'waiting_for_human',
+    single_candidate_phase: 'approval',
+  }));
+  const { controller } = newController({
+    actions: parseHumanScript('request-change:合成反馈 1 号;confirm;advance'),
+  });
+  const first = controller.onGateWaiting();
+  fs.writeFileSync(path.join(sessionDir, 'ws_fixture_child_0001', 'human-gate-turns', 'turn-1.json'), JSON.stringify({
+    turn_id: 'durable-turn-1',
+    command_id: first.commandId,
+    status: 'completed',
+    result_artifact_ref: 'artifact_version_002',
+  }));
+  const advanceCommandId = controller.commandIdFor(2, 'advance');
+  fs.writeFileSync(path.join(ariaRoot, 'projects', 'project_0001', 'issues', 'issue_0001', 'advance-records', 'advance_0001.json'), JSON.stringify({
+    id: 'advance_0001',
+    command_id: advanceCommandId,
+    attempt_id: 'attempt_fixture_0001',
+    status: 'ready',
+  }));
+
+  // durable 读取：坏 JSON/缺目录按无记录处理，不抛出。
+  const state = stage3DurableReplayState({
+    ariaRoot,
+    projectId: 'project_0001',
+    issueId: 'issue_0001',
+    sessionId: 'ws_fixture_child_0001',
+  });
+  assert.equal(state.confirmedPlan, false);
+  assert.deepEqual(state.replayedCommandIds, [first.commandId]);
+  assert.deepEqual(state.replayedTurns, [{
+    command_id: first.commandId,
+    turn_id: 'durable-turn-1',
+    status: 'completed',
+    artifact_ref: 'artifact_version_002',
+    failure_class: null,
+  }]);
+  assert.deepEqual(state.advanceRecords, [{ command_id: advanceCommandId, attempt_id: 'attempt_fixture_0001' }]);
+  const missingDirs = stage3DurableReplayState({
+    ariaRoot,
+    projectId: 'project_missing',
+    issueId: 'issue_missing',
+    sessionId: 'ws_none',
+  });
+  assert.deepEqual(missingDirs, { confirmedPlan: false, replayedCommandIds: [], replayedTurns: [], advanceRecords: [] });
+
+  // 8.2c 销项（8.1 Observation-1）：ws 关闭后驱动把 durable 记录作为真实
+  // replay 消息喂给 onDurableState —— 终态 turn 收敛回合并放行下一动作。
+  const replay = controller.onDurableState(state);
+  assert.deepEqual(replay.consumed, [{ actionIndex: 0, kind: 'human_gate_feedback', via: 'durable_replay' }]);
+  const turn = controller.resultFields().human_gate_turns[0];
+  assert.equal(turn.status, 'completed', 'durable 终态 turn 直接收敛回合状态');
+  assert.equal(turn.artifact_ref, 'artifact_version_002');
+  const next = controller.onGateWaiting();
+  assert.equal(next.message.type, 'confirm', '终态回放释放单飞后门回到 Waiting');
+  // confirm 由 confirmedPlan 的 durable 回读消费。
+  const confirmReplay = controller.onDurableState({ confirmedPlan: true });
+  assert.deepEqual(confirmReplay.consumed, [{ actionIndex: 1, kind: 'confirm', via: 'durable_confirmed_readback' }]);
+  // advance 由 durable advance 记录回放消费（幂等命中）。
+  const advanceReplay = controller.onDurableState(state);
+  assert.deepEqual(advanceReplay.consumed, [{ actionIndex: 2, kind: 'advance', via: 'durable_replay' }]);
+  const fields = controller.resultFields();
+  assert.ok(fields.durable_recovery_checks.some((entry) => entry.check === 'durable_command_replay_consumed' && entry.turn_status === 'completed'));
+  assert.ok(fields.durable_recovery_checks.some((entry) => entry.check === 'durable_advance_record_replayed'));
+  assert.equal(fields.advance_actions[0].status, 'completed');
+  assert.equal(fields.advance_actions[0].attempt_id, 'attempt_fixture_0001');
+  fs.rmSync(ariaRoot, { recursive: true, force: true });
 });
