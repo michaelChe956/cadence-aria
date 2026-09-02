@@ -22,7 +22,10 @@ import {
   isHumanGateStage,
   parseHumanScript,
   shouldClearPendingGateNode,
+  shouldConsumeHumanAction,
   singleCandidateOutboundAllowed,
+  stage3HumanMessage,
+  stage3TypedFlowActive,
   providerRolesForSelection,
   reviewCompleteAction,
   reviewDecisionAction,
@@ -211,6 +214,81 @@ test('interactive needs_human and final-pass gates use human_confirm messages an
     driverSource,
     /send\(\{\s*type:\s*['"]stage_change['"]/u,
     'interactive 人工门不得发送旧 stage_change 协议',
+  );
+});
+
+test('campaign_stage3_script_parses_multiple_request_changes_confirm_abandon_and_advance', () => {
+  const script = parseHumanScript(
+    'request-change:合成反馈 1 号;request-change:合成反馈 2 号;confirm;abandon;advance',
+  );
+  assert.deepEqual(script, [
+    { decision: 'request-change', description: '合成反馈 1 号' },
+    { decision: 'request-change', description: '合成反馈 2 号' },
+    { decision: 'confirm', description: null },
+    { decision: 'abandon', description: null },
+    { decision: 'advance', description: null },
+  ]);
+  assert.deepEqual(parseHumanScript('abandon;advance'), [
+    { decision: 'abandon', description: null },
+    { decision: 'advance', description: null },
+  ]);
+  assert.throws(() => parseHumanScript('abandon:理由'), /abandon 不接受描述/u);
+  assert.throws(() => parseHumanScript('advance:参数'), /advance 不接受描述/u);
+  assert.throws(() => parseHumanScript('confirm:描述'), /confirm 不接受描述/u);
+  assert.throws(() => parseHumanScript('request-change:'), /必须提供冒号后的反馈文本/u);
+  assert.throws(() => parseHumanScript('retry'), /仅支持 confirm、request-change:<文本>、abandon 或 advance/u);
+  assert.deepEqual(parseHumanScript(undefined), []);
+
+  // 阶段 2 的 gate-index 语义保持不变：abandon/advance 不进入 legacy 应答。
+  assert.equal(humanConfirmScriptAction(script, 0, 'interactive').description, '合成反馈 1 号');
+  assert.deepEqual(humanConfirmScriptAction(script, 5, 'interactive'), {
+    decision: 'confirm',
+    description: null,
+    source: 'human_script_exhausted_default',
+  });
+  assert.throws(
+    () => humanConfirmMessage({ decision: 'abandon', description: null, source: 'human_script' }),
+    /不支持的人工确认决策/u,
+    'legacy 消息编码继续 fail-closed，不悄悄扩展 legacy 枚举',
+  );
+});
+
+test('campaign_stage3_legacy_request_change_wire_stays_unchanged', () => {
+  // 阶段 2 既有 wire 拼写与 payload 逐字保留（legacy flow 行为不变）。
+  assert.deepEqual(humanConfirmRequestChangeMessage('请修订甲'), {
+    type: 'human_confirm',
+    decision: 'request-change',
+    payload: { description: '请修订甲', source: 'human' },
+  });
+  assert.deepEqual(humanConfirmMessage({ decision: 'confirm', description: null, source: 'human_script' }), {
+    type: 'human_confirm',
+    decision: 'confirm',
+    payload: null,
+  });
+
+  // typed flow 只在 single_candidate+interactive 激活，且绝不回退到旧 request-change 编码。
+  assert.equal(stage3TypedFlowActive('single_candidate', 'interactive'), true);
+  assert.equal(stage3TypedFlowActive('legacy', 'interactive'), false);
+  assert.equal(stage3TypedFlowActive('single_candidate', 'auto_if_valid'), false);
+  const typed = stage3HumanMessage(
+    { decision: 'request-change', description: '请修订甲' },
+    { commandId: 'cmd-fixture' },
+  );
+  assert.equal(typed.type, 'human_gate_feedback');
+  assert.notEqual(typed.decision, 'request-change');
+
+  // 出站 allowlist：typed 两命令只对 interactive 放行，legacy 决策族维持拒绝。
+  assert.equal(singleCandidateOutboundAllowed({ type: 'human_confirm' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'human_gate_feedback' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'advance' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'human_gate_feedback' }, 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'advance' }, 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'review_decision_response' }, 'interactive'), false);
+
+  // legacy 门阶段的消费判定不因 stage-3 事件误触发（阶段 2 回归护栏）。
+  assert.equal(
+    shouldConsumeHumanAction({ type: 'human_gate_turn_open', command_id: 'c', turn_id: 't' }, {}, { decision: 'confirm', commandId: null }),
+    false,
   );
 });
 
