@@ -100,6 +100,10 @@ test('campaign_stage3_feedback_uses_typed_message_and_stable_command_id', () => 
   assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'interactive'), true,
     '裸 confirm wire（REQ-CG-02 SC 准入表）只对 interactive 放行');
   assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'auto_if_valid'), false);
+  // hello/pong 是连接层心跳：初连与 8.2c 重连（此时 flow_kind 已知）都必须放行。
+  assert.equal(singleCandidateOutboundAllowed({ type: 'hello' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'hello' }, 'auto_if_valid'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'pong' }, 'auto_if_valid'), true);
   assert.equal(singleCandidateOutboundAllowed({ type: 'start_generation' }, 'auto_if_valid'), true);
   assert.equal(singleCandidateOutboundAllowed({ type: 'review_decision_response' }, 'interactive'), false,
     'legacy SC 决策族依旧不允许出站');
@@ -579,4 +583,28 @@ test('campaign_stage3_ws_close_wires_durable_replay_to_on_durable_state', async 
   assert.equal(fields.advance_actions[0].status, 'completed');
   assert.equal(fields.advance_actions[0].attempt_id, 'attempt_fixture_0001');
   fs.rmSync(ariaRoot, { recursive: true, force: true });
+});
+
+test('campaign_stage3_confirm_conflict_waits_for_gate_reopen', () => {
+  const { controller } = newController({ actions: parseHumanScript('request-change:合成反馈 1 号;confirm') });
+  const send = controller.onGateWaiting();
+  controller.onInbound(stage3TurnOpen(send.commandId, 'turn-1', 1));
+  const afterTurn = controller.onInbound(stage3TurnCompleted('turn-1'));
+  assert.equal(afterTurn.outbound.message.type, 'confirm', '回合终态后立即给出下一动作（既有契约不变）');
+
+  // 真实链路：服务端复评期间门未回 approval → confirm 撞 CAS conflict。
+  const swallowed = controller.noteGateCloseConflict('product_store_conflict: human_gate_close ws_0001');
+  assert.equal(swallowed, true);
+  // 非本 conflict 形态的错误不消化；重复通报不再消化。
+  assert.equal(controller.noteGateCloseConflict('other error'), false);
+  assert.equal(controller.noteGateCloseConflict('product_store_conflict: human_gate_close ws_0001'), false, '重复通报不再消化');
+
+  // 门重新 Waiting（复评完成 stage_change human_confirm）→ 下一次 onGateWaiting
+  // 重发同一 confirm；驱动只在门 Waiting 信号时调用，不会自发重发。
+  const resend = controller.onGateWaiting();
+  assert.equal(resend.message.type, 'confirm');
+  assert.equal(resend.actionIndex, 1, '脚本指针仍停在 confirm');
+  const closed = controller.onInbound(stage3GateClosed('confirm'));
+  assert.deepEqual(closed.consumed, [{ actionIndex: 1, kind: 'confirm', via: 'human_gate_closed' }]);
+  assert.ok(controller.resultFields().durable_recovery_checks.some((entry) => entry.check === 'confirm_conflict_awaiting_gate'));
 });

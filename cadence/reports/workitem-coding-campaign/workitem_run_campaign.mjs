@@ -975,6 +975,16 @@ function createStage3GateController({
       if (isRecord(entry)) takeoverActions.push(structuredClone(entry));
       return takeoverActions.length;
     },
+    // 8.2：confirm 撞上 human_gate_close CAS conflict（修订 turn 后服务端仍在
+    // evaluate 复评、门未回到 approval）时，撤销 awaitingAccept，等门真正回到
+    // Waiting 再重发同一 confirm；返回是否由本方法消化。
+    noteGateCloseConflict: (errorMessage) => {
+      if (awaitingAccept?.kind !== 'confirm') return false;
+      if (!String(errorMessage ?? '').includes('human_gate_close')) return false;
+      awaitingAccept = null;
+      recoveryChecks.push({ check: 'confirm_conflict_awaiting_gate' });
+      return true;
+    },
     resultFields: () => ({
       human_gate_turns: structuredClone(turns),
       advance_actions: structuredClone(advanceActions),
@@ -1010,8 +1020,12 @@ function activeNodeTypeForActiveNode(nodesById, activeNodeId, previousActiveNode
 
 function singleCandidateOutboundAllowed(message, runPolicy = CONFIGURED_RUN_POLICY) {
   // 阶段 3：interactive 下增加 typed human_gate_feedback/advance/裸 confirm（REQ-CG-02 SC 准入表）；
-  // legacy SC 决策族依旧拒绝。
-  return message?.type === 'start_generation' || (
+  // legacy SC 决策族依旧拒绝。hello/pong 是连接层心跳，不承载任何决策，初连与
+  // 8.2c 重连一律放行（重连时 flow_kind 已知，不能把 hello 误判为决策出站）。
+  return message?.type === 'start_generation'
+    || message?.type === 'hello'
+    || message?.type === 'pong'
+    || (
     runPolicy === 'interactive'
     && ['human_confirm', 'human_gate_feedback', 'advance', 'confirm'].includes(message?.type)
   );
@@ -2450,9 +2464,22 @@ async function runCampaign({
           case 'human_presentation_revision_save_failed':
           case 'linked_workspace_amendment_created':
             break;
-          case 'error':
+          case 'error': {
+            // 8.2 真实链路：修订 turn 完成后服务端先复评（phase=evaluate），门尚未
+            // 回到 approval；此刻的 confirm 会收到 human_gate_close CAS conflict。
+            // typed flow 下按“门未重开”处理：撤销待接受动作，等下一次门 Waiting
+            // （stage_change human_confirm）重发，不视为失败。
+            const conflictController = stage3TypedFlowActive(result.flow_kind, runPolicy)
+              ? ensureStage3Controller()
+              : null;
+            if (conflictController?.noteGateCloseConflict(message.message)) {
+              writeLog({ event: 'stage3_confirm_conflict_awaiting_gate', error: message.message ?? null });
+              syncStage3Fields();
+              break;
+            }
             fail('workspace_error', message.message ?? 'workspace error');
             break;
+          }
           case 'protocol_error':
             fail('protocol_error', `${message.code ?? 'protocol_error'}: ${message.message ?? ''}`);
             break;
