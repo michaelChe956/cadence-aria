@@ -568,7 +568,10 @@ function stage3HumanMessage(action, context) {
     return { type: 'human_gate_feedback', command_id: commandId, feedback: action.description };
   }
   if (action?.decision === 'confirm') {
-    return { type: 'human_confirm', decision: 'confirm', payload: null };
+    // REQ-CG-02：SC HumanConfirm stage 的服务端准入表只收 HumanGateFeedback|Confirm|HumanConfirm{Terminate}；
+    // confirm 编码为裸 typed 消息（WsInMessage::Confirm，snake_case tag），不得发 human_confirm{decision:"confirm"}。
+    // （台账 Ruling：契约效力高于 brief 原文；legacy 分支的 human_confirm 原样不动。）
+    return { type: 'confirm' };
   }
   if (action?.decision === 'abandon') {
     return { type: 'human_confirm', decision: 'terminate', payload: null };
@@ -952,10 +955,11 @@ function activeNodeTypeForActiveNode(nodesById, activeNodeId, previousActiveNode
 }
 
 function singleCandidateOutboundAllowed(message, runPolicy = CONFIGURED_RUN_POLICY) {
-  // 阶段 3：interactive 下增加 typed human_gate_feedback/advance；legacy SC 决策族依旧拒绝。
+  // 阶段 3：interactive 下增加 typed human_gate_feedback/advance/裸 confirm（REQ-CG-02 SC 准入表）；
+  // legacy SC 决策族依旧拒绝。
   return message?.type === 'start_generation' || (
     runPolicy === 'interactive'
-    && ['human_confirm', 'human_gate_feedback', 'advance'].includes(message?.type)
+    && ['human_confirm', 'human_gate_feedback', 'advance', 'confirm'].includes(message?.type)
   );
 }
 

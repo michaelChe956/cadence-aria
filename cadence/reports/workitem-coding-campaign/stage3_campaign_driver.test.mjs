@@ -59,10 +59,10 @@ test('campaign_stage3_feedback_uses_typed_message_and_stable_command_id', () => 
     feedback: '合成反馈 1 号',
   });
   assert.notEqual(typed.decision, 'request-change', 'SC typed flow 绝不再编码 HumanConfirmDecision::RequestChange');
+  // REQ-CG-02：SC HumanConfirm stage 的服务端准入表只收 HumanGateFeedback|Confirm|HumanConfirm{Terminate}；
+  // confirm 必须编码为裸 typed 消息（{"type":"confirm"}），不得再发 human_confirm{decision:"confirm"}。
   assert.deepEqual(stage3HumanMessage({ decision: 'confirm', description: null }, { commandId: null }), {
-    type: 'human_confirm',
-    decision: 'confirm',
-    payload: null,
+    type: 'confirm',
   });
   assert.deepEqual(stage3HumanMessage({ decision: 'abandon', description: null }, { commandId: null }), {
     type: 'human_confirm',
@@ -92,6 +92,9 @@ test('campaign_stage3_feedback_uses_typed_message_and_stable_command_id', () => 
   assert.equal(singleCandidateOutboundAllowed({ type: 'human_gate_feedback' }, 'auto_if_valid'), false);
   assert.equal(singleCandidateOutboundAllowed({ type: 'advance' }, 'auto_if_valid'), false);
   assert.equal(singleCandidateOutboundAllowed({ type: 'human_confirm' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'interactive'), true,
+    '裸 confirm wire（REQ-CG-02 SC 准入表）只对 interactive 放行');
+  assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'auto_if_valid'), false);
   assert.equal(singleCandidateOutboundAllowed({ type: 'start_generation' }, 'auto_if_valid'), true);
   assert.equal(singleCandidateOutboundAllowed({ type: 'review_decision_response' }, 'interactive'), false,
     'legacy SC 决策族依旧不允许出站');
@@ -193,7 +196,7 @@ test('campaign_stage3_advance_waits_for_durable_confirmed', () => {
   // Confirmed 回读前，advance 动作不得发送。
   const { controller } = newController({ actions: parseHumanScript('confirm;advance') });
   const confirmSend = controller.onGateWaiting();
-  assert.equal(confirmSend.message.decision, 'confirm');
+  assert.equal(confirmSend.message.type, 'confirm');
   assert.equal(controller.onConfirmedDurable({ providerStartLedger: stage3ProviderStartLedgerFixture() }).decision, null,
     'confirm 尚未被 human_gate_closed 消费时不应推进到 advance');
   controller.onInbound(stage3GateClosed('confirm'));
@@ -332,7 +335,7 @@ test('campaign_stage3_multi_turn_flow_survives_reconnect_fault_transcript', () =
   const replay = restarted.onDurableState({ replayedCommandIds: [rederived] });
   assert.deepEqual(replay.consumed, [{ actionIndex: 0, kind: 'human_gate_feedback', via: 'durable_replay' }]);
   const afterReconnect = restarted.onInbound(stage3TurnCompleted('turn-1'));
-  assert.equal(afterReconnect.outbound.message.decision, 'confirm', '回合终态后门回到 Waiting，才发下一脚本动作');
+  assert.equal(afterReconnect.outbound.message.type, 'confirm', '回合终态后门回到 Waiting，才发下一脚本动作');
   restarted.onInbound(stage3GateClosed('confirm'));
   const fields = restarted.resultFields();
   assert.equal(fields.human_gate_turns[0].turn_id, null);

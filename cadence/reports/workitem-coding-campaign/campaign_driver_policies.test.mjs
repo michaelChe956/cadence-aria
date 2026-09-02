@@ -277,12 +277,15 @@ test('campaign_stage3_legacy_request_change_wire_stays_unchanged', () => {
   assert.equal(typed.type, 'human_gate_feedback');
   assert.notEqual(typed.decision, 'request-change');
 
-  // 出站 allowlist：typed 两命令只对 interactive 放行，legacy 决策族维持拒绝。
+  // 出站 allowlist：typed 命令（feedback/advance/裸 confirm）只对 interactive 放行，legacy 决策族维持拒绝。
   assert.equal(singleCandidateOutboundAllowed({ type: 'human_confirm' }, 'interactive'), true);
   assert.equal(singleCandidateOutboundAllowed({ type: 'human_gate_feedback' }, 'interactive'), true);
   assert.equal(singleCandidateOutboundAllowed({ type: 'advance' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'interactive'), true,
+    'SC typed 流的 confirm 按 REQ-CG-02 准入表编码为裸 typed 消息，只对 interactive 放行');
   assert.equal(singleCandidateOutboundAllowed({ type: 'human_gate_feedback' }, 'auto_if_valid'), false);
   assert.equal(singleCandidateOutboundAllowed({ type: 'advance' }, 'auto_if_valid'), false);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'confirm' }, 'auto_if_valid'), false);
   assert.equal(singleCandidateOutboundAllowed({ type: 'review_decision_response' }, 'interactive'), false);
 
   // legacy 门阶段的消费判定不因 stage-3 事件误触发（阶段 2 回归护栏）。
