@@ -4,7 +4,7 @@
   "issue_id": "issue_0001",
   "entity_id": "design_spec_0001",
   "version": 1,
-  "markdown": "# 设计:Hello API\n\n## 设计范围\n\n单文件 HTTP 服务,仅覆盖下述唯一契约;不做任何其他拆分。\n\n## 决策\n\n- DEC-001: server.js 用 node:http 起服务,监听 127.0.0.1:3000。\n\n## 契约\n\n- source id: issue_workitem_0001#api — GET /api/hello → 200 {\"message\": <问候文案>};问候文案读取仓库根目录 `config/hello.json` 的 `message` 字段(该文件由需求方后续提供;文件缺失或无该字段时回退为 \"hello\");内部错误 500 {\"error\":\"internal\"}。\n\n## 验证\n\n- node --test 单测:起服务请求 /api/hello,断言状态码与 body;只此一个测试。\n",
+  "markdown": "# 设计:Hello API\n\n## 设计范围\n\n单文件 HTTP 服务,仅覆盖下述唯一契约;不做任何其他拆分。\n\n## 决策\n\n- DEC-001: server.js 用 node:http 起服务,监听 127.0.0.1:3000。\n\n## 契约\n\n- source id: issue_workitem_0001#api — GET /api/hello → 200 {\"message\": <问候文案>};问候文案必须读取仓库根目录 `config/hello.json` 的 `message` 字段(必需输入;该文件由需求方后续提供,当前仓库不存在,设计未定义其缺失时的行为);内部错误 500 {\"error\":\"internal\"}。\n\n## 验证\n\n- node --test 单测:起服务请求 /api/hello,断言状态码与 body;只此一个测试。\n",
   "provider_run_refs": [],
   "review_refs": [],
   "confirmed_by": "campaign-fixture",

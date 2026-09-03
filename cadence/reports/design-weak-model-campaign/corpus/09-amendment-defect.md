@@ -4,7 +4,7 @@
 
 ## 需求
 
-- REQ-001: GET /api/hello 返回 {"message":"hello"};问候文案可配置(读取 config/hello.json)。
+- REQ-001: GET /api/hello 返回 {"message":"hello"};问候文案必须读取 config/hello.json(由需求方后续提供,当前仓库不存在)。
 - REQ-002: 仅用 Node 内置 node:http;不引入任何第三方依赖、不新增数据库/认证/外部服务/前端页面。
 
 ## 验收标准
