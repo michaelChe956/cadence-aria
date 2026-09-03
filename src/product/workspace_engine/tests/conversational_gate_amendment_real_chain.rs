@@ -439,6 +439,9 @@ async fn group_amendment_reachable_from_real_approval_chain() {
 /// 原门并预留一个 turn（预算 budget→budget-1，turn 置 Running）。
 /// review_rounds=0 走无 reviewer 的本地 synthetic Pass Evaluate 路由；
 /// review_rounds>=1 走重启评审分支（reviewer=ClaudeCode）。
+/// 额外返回 (coding store, 暂停的 group attempt id) 供轮 3 用例操纵
+/// PlanAmendmentContext / attempt 状态（损坏、应用窗口模拟）。
+#[allow(clippy::type_complexity)]
 async fn amendment_revision_chain_prefix(
     tag: &str,
     budget: u32,
@@ -449,6 +452,8 @@ async fn amendment_revision_chain_prefix(
     WorkspaceEngine,
     String, /* plan_session_id */
     String, /* running turn_id */
+    CodingAttemptStore,
+    String, /* paused group attempt id */
 ) {
     let (root, lifecycle, plan_id, mut approval_engine) = real_approval_fixture(budget).await;
     let (event_tx, _event_rx) = mpsc::channel(32);
@@ -461,7 +466,7 @@ async fn amendment_revision_chain_prefix(
         .await
         .expect("real approval chain must confirm");
     assert_eq!(close, HumanGateCloseOutcome::Confirmed);
-    seed_awaiting_plan_amendment(
+    let (store, paused_attempt_id, _child_session_id) = seed_awaiting_plan_amendment(
         &root,
         &lifecycle,
         &mut approval_engine,
@@ -517,7 +522,15 @@ async fn amendment_revision_chain_prefix(
     engine
         .mark_human_gate_turn_running(&turn.turn_id)
         .expect("mark running");
-    (root, lifecycle, engine, plan_session_id, turn.turn_id)
+    (
+        root,
+        lifecycle,
+        engine,
+        plan_session_id,
+        turn.turn_id,
+        store,
+        paused_attempt_id,
+    )
 }
 
 fn real_chain_candidate_markdown() -> &'static str {
@@ -532,7 +545,7 @@ fn real_chain_candidate_markdown() -> &'static str {
 #[tokio::test]
 async fn amendment_revision_rebuild_without_reviewer_continues_gate_budget() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
-    let (_root, lifecycle, mut engine, plan_session_id, turn_id) =
+    let (_root, lifecycle, mut engine, plan_session_id, turn_id, _store, _attempt_id) =
         amendment_revision_chain_prefix("amendment_rebuild_no_reviewer", 2, 0).await;
 
     let result = engine
@@ -577,7 +590,7 @@ async fn amendment_revision_rebuild_without_reviewer_continues_gate_budget() {
 #[tokio::test]
 async fn amendment_revision_reviewer_pass_rebuild_continues_gate_budget() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
-    let (_root, lifecycle, mut engine, plan_session_id, turn_id) =
+    let (_root, lifecycle, mut engine, plan_session_id, turn_id, _store, _attempt_id) =
         amendment_revision_chain_prefix("amendment_rebuild_reviewer", 2, 1).await;
 
     let result = engine
@@ -796,7 +809,7 @@ async fn forged_reopen_signature_rebuild_uses_reset_formula() {
 #[tokio::test]
 async fn amendment_reopen_signature_missing_snapshot_fails_closed() {
     let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
-    let (_root, lifecycle, mut engine, plan_session_id, _turn_id) =
+    let (_root, lifecycle, mut engine, plan_session_id, _turn_id, _store, _attempt_id) =
         amendment_revision_chain_prefix("amendment_missing_snapshot", 2, 0).await;
 
     // 破坏性剪除 durable 快照（模拟损坏/外部删改）：判别所需的 durable 事实仍在
@@ -845,5 +858,266 @@ async fn amendment_reopen_signature_missing_snapshot_fails_closed() {
                 .message
                 .contains("human_gate_amendment_snapshot_missing")),
         "fail-closed 必须以诊断显式报错，不得静默回退"
+    );
+    // I-1 round3（F-C）：fail-closed 诊断必须写回 durable record（重读可见），
+    // 不得仅存内存——进程重启后诊断无从复原。
+    assert!(
+        routed.policy_diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("human_gate_amendment_snapshot_missing")),
+        "F-C: fail-closed 诊断必须 durable 可见（重读 record），不得仅存内存"
+    );
+}
+
+/// I-1 round3 F-A 辅助：把 durable PlanAmendmentContext 文件写坏（非法 JSON），
+/// 模拟复审指出的「context 文件损坏/目录读失败/coding store 瞬时 I/O 错误」——
+/// 判别所需的 durable 事实无法读取/校验。
+fn corrupt_open_plan_amendment_context(
+    store: &CodingAttemptStore,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) {
+    let attempt = store
+        .get_attempt(project_id, issue_id, attempt_id)
+        .expect("paused attempt");
+    let context = store
+        .find_plan_amendment_context_by_finding(&attempt, TRIGGER_FINDING_ID)
+        .expect("list contexts")
+        .expect("open context present");
+    let context_path = store
+        .plan_amendment_contexts_root(project_id, issue_id, attempt_id)
+        .join(format!("{}.json", context.id));
+    std::fs::write(&context_path, "{ corrupted context payload (not json)")
+        .expect("corrupt the durable plan amendment context");
+}
+
+/// I-1 round3 F-B 辅助：按 `apply_plan_amendment_from_journal` 的落盘顺序
+/// （amendment.rs：先 context Open→Applying，后 attempt→ApplyingPlanAmendment）
+/// 把真 amendment 链推进到应用窗口的稳态：context=Applying 且 attempt 已离开
+/// AwaitingPlanAmendment——probe 在此窗口不放行，判别也不得按 amendment 门接续。
+fn advance_amendment_into_applying_window(
+    store: &CodingAttemptStore,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) {
+    let attempt = store
+        .get_attempt(project_id, issue_id, attempt_id)
+        .expect("paused attempt");
+    let context = store
+        .find_plan_amendment_context_by_finding(&attempt, TRIGGER_FINDING_ID)
+        .expect("list contexts")
+        .expect("open context present");
+    store
+        .transition_plan_amendment_context_to_applying(&attempt, &context.id)
+        .expect("context Open→Applying (apply 链顺序第 1 步)");
+    store
+        .update_attempt_status(
+            project_id,
+            issue_id,
+            attempt_id,
+            CodingAttemptStatus::ApplyingPlanAmendment,
+        )
+        .expect("attempt → ApplyingPlanAmendment (apply 链顺序第 2 步)");
+}
+
+fn late_pass_review_verdict() -> crate::web::workspace_ws_types::ReviewVerdict {
+    crate::web::workspace_ws_types::ReviewVerdict {
+        verdict: crate::web::workspace_ws_types::ReviewVerdictType::Pass,
+        comments: "review pass".to_string(),
+        summary: "review pass".to_string(),
+        findings: Vec::new(),
+        review_gate: crate::web::workspace_ws_types::ReviewGate::UserConfirmAllowed,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+/// I-1 round3 回归（F-A·重建路径）：真 amendment 门重开在场的会话，其判别所需
+/// durable 事实（PlanAmendmentContext）无法读取/校验（文件损坏/权限/瞬时 I/O）
+/// 时，Evaluate 重建 MUST 以持久化失败 fail-closed 终止（AbortFatal
+/// {PersistenceFailure}），不得把「无法读取」当作「无 amendment 事实」走进普通
+/// 门重置公式——那会凭空恢复已耗预算。轮 2 代码下该路径走重置重建（本用例红）。
+#[tokio::test]
+async fn amendment_context_read_failure_fails_closed_on_rebuild() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine, plan_session_id, _turn_id, store, attempt_id) =
+        amendment_revision_chain_prefix("amendment_ctx_read_fail_rebuild", 2, 0).await;
+    let project_id = engine.session().project_id.clone();
+    let issue_id = engine.session().issue_id.clone();
+    corrupt_open_plan_amendment_context(&store, &project_id, &issue_id, &attempt_id);
+
+    engine
+        .route_single_candidate_evaluate_without_reviewer()
+        .await;
+
+    let routed = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("durable session");
+    assert_eq!(
+        routed.status,
+        WorkspaceSessionStatus::Failed,
+        "F-A: 判别读失败必须 fail-closed 终止，不得静默重置重建"
+    );
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed),
+        "F-A: 不得以重置公式写回 Approval（不得把无法校验当「无 amendment 事实」）"
+    );
+    assert!(
+        routed.human_gate_snapshot.is_none(),
+        "F-A: fail-closed 不得落任何重建快照"
+    );
+    assert_eq!(
+        engine.session().single_candidate_phase,
+        Some(SingleCandidatePhase::Failed),
+        "F-A: AbortFatal 后内存会话必须进 Failed"
+    );
+    assert!(
+        engine
+            .session()
+            .policy_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "persistence_failure"),
+        "F-A: 判别读失败必须以 persistence_failure 诊断显式报错"
+    );
+    // I-1 round3（F-C）：fail-closed 诊断必须写回 durable record（重读可见）。
+    assert!(
+        routed
+            .policy_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "persistence_failure"),
+        "F-C: fail-closed 诊断必须 durable 可见（重读 record），不得仅存内存"
+    );
+}
+
+/// I-1 round3 回归（F-A·守卫路径）：重开中 amendment 门会话的判别 durable 事实
+/// 无法读取/校验时，迟到的 review verdict 也不得被静默丢弃后当作可继续会话，
+/// 更不得放行进重置公式——无法校验 = 持久化失败，MUST 显式 fail-closed 终止
+/// （status=Failed + durable 诊断）。轮 2 代码下该路径静默丢弃、会话保持
+/// WaitingForHuman（本用例红）。
+#[tokio::test]
+async fn amendment_context_read_failure_fails_closed_on_late_verdict() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine, plan_session_id, _turn_id, store, attempt_id) =
+        amendment_revision_chain_prefix("amendment_ctx_read_fail_verdict", 2, 1).await;
+    let project_id = engine.session().project_id.clone();
+    let issue_id = engine.session().issue_id.clone();
+    corrupt_open_plan_amendment_context(&store, &project_id, &issue_id, &attempt_id);
+
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "review".to_string(),
+                None,
+            ),
+            late_pass_review_verdict(),
+        )
+        .await;
+
+    assert!(
+        engine.latest_review_verdict.is_none(),
+        "F-A: 无法读取/校验判别事实时不得放行迟到 verdict 进路由"
+    );
+    let routed = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("durable session");
+    assert_eq!(
+        routed.status,
+        WorkspaceSessionStatus::Failed,
+        "F-A: 无法校验 = 持久化失败，必须显式 fail-closed 终止，不得静默丢弃保持 WaitingForHuman"
+    );
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed),
+        "F-A: 守卫侧 fail-closed 不得写回 Approval"
+    );
+    assert!(
+        routed.human_gate_snapshot.is_none(),
+        "F-A: fail-closed 不得落任何重建快照"
+    );
+    assert_eq!(
+        engine.session().single_candidate_phase,
+        Some(SingleCandidatePhase::Failed),
+        "F-A: 守卫侧 fail-closed 后内存会话必须进 Failed"
+    );
+    assert!(
+        routed
+            .policy_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "persistence_failure"
+                && diagnostic.field.as_deref() == Some("plan_amendment_context")),
+        "F-C: 守卫侧 fail-closed 诊断必须 durable 可见且可定位到判别读失败"
+    );
+}
+
+/// I-1 round3 回归（F-B·对称性）：判别必须复用 probe 放行重开的同一完整谓词
+/// （Open/Applying context **且** group attempt 处于 AwaitingPlanAmendment 并绑定
+/// 本 plan session entity）。context 先行 Open→Applying 而 attempt 已离开
+/// AwaitingPlanAmendment 的应用窗口内（amendment.rs 落盘顺序），probe 不放行，
+/// 判别同样不得按 amendment 门：(a) 迟到 verdict 必须被终态守卫丢弃；
+/// (b) Evaluate 重建必须走普通门重置公式，不得接续快照预算。轮 2 判别只看
+/// context 状态，两条均被绕过（本用例红）。
+#[tokio::test]
+async fn amendment_applying_window_not_discriminated_as_amendment_gate() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine, plan_session_id, _turn_id, store, attempt_id) =
+        amendment_revision_chain_prefix("amendment_applying_window", 2, 1).await;
+    let project_id = engine.session().project_id.clone();
+    let issue_id = engine.session().issue_id.clone();
+    advance_amendment_into_applying_window(&store, &project_id, &issue_id, &attempt_id);
+
+    // (a) 迟到 verdict：应用窗口内不得按 amendment 门绕过终态守卫
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "review".to_string(),
+                None,
+            ),
+            late_pass_review_verdict(),
+        )
+        .await;
+    assert!(
+        engine.latest_review_verdict.is_none(),
+        "F-B: 应用窗口（context=Applying 且 attempt 已离开 AwaitingPlanAmendment）判别不得按 amendment 门绕过终态守卫"
+    );
+    let after_verdict = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("durable session");
+    assert_eq!(
+        after_verdict.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed),
+        "F-B: 迟到 verdict 被丢弃，不得重路由进 Approval"
+    );
+    assert_eq!(
+        after_verdict.status,
+        WorkspaceSessionStatus::WaitingForHuman
+    );
+    let snapshot = after_verdict
+        .human_gate_snapshot
+        .as_ref()
+        .expect("snapshot retained");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 1,
+        "F-B: 不得经接续分支改写快照"
+    );
+
+    // (b) Evaluate 重建：不得按 amendment 接续，必须走普通门重置公式
+    engine
+        .route_single_candidate_evaluate_without_reviewer()
+        .await;
+    let routed = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("routed session");
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval),
+        "F-B: 应用窗口按普通门语义路由进 Approval"
+    );
+    let rebuilt = routed.human_gate_snapshot.as_ref().expect("gate snapshot");
+    assert_eq!(
+        rebuilt.manual_repairs_remaining, 3,
+        "F-B: 应用窗口不得按 amendment 接续（不得继承 1），按普通门重置公式 3"
     );
 }

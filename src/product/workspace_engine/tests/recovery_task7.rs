@@ -1,4 +1,4 @@
-use crate::product::lifecycle_store::workspace::PolicyRoutePersist;
+use crate::product::lifecycle_store::PolicyRoutePersist;
 
 fn recovery_store() -> (tempfile::TempDir, LifecycleStore, Arc<CheckpointStore>) {
     let tmp = tempfile::tempdir().expect("temporary product root");

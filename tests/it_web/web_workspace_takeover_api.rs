@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::lifecycle_store::workspace::PolicyRoutePersist;
+use cadence_aria::product::lifecycle_store::PolicyRoutePersist;
 use cadence_aria::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
 };

@@ -1,7 +1,7 @@
 use chrono::Utc;
 
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::{CodingAttemptStatus, PlanAmendmentContext};
+use crate::product::coding_models::PlanAmendmentContext;
 use crate::product::models::{
     HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
     WorkspaceSessionStatus, WorkspaceType,
@@ -110,35 +110,22 @@ impl super::WorkspaceEngine {
             return Ok(None);
         }
         let coding_store = CodingAttemptStore::new(store.app_paths());
-        // 无 Open/Applying PlanAmendmentContext 时保持既有 stage 拒绝路径
-        // (结构化 WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID),不上抛泛型 Err;否则
-        // ws 层会把 7.2 之前结构化 Rejected 的同类输入映射成泛型 Error。
-        let Some(context) = coding_store
-            .find_open_plan_amendment_context_for_plan_session(
+        // I-1 round3（F-B）：与 workspace decision routing 的 amendment 门判别
+        // 复用同一完整谓词（find_awaiting_plan_amendment_context_for_plan_session）：
+        // Open/Applying context + group attempt AwaitingPlanAmendment + group
+        // identity。无命中（含 attempt 已离开 AwaitingPlanAmendment 的应用窗口）
+        // 保持既有 stage 拒绝路径（结构化 WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID），
+        // 不上抛泛型 Err；否则 ws 层会把 7.2 之前结构化 Rejected 的同类输入映射
+        // 成泛型 Error。
+        let context = coding_store
+            .find_awaiting_plan_amendment_context_for_plan_session(
                 &record.project_id,
                 &record.issue_id,
                 &record.entity_id,
                 &record.id,
             )
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
-        };
-        let attempt = coding_store
-            .get_attempt(
-                &record.project_id,
-                &record.issue_id,
-                &context.group_attempt_id,
-            )
             .map_err(|error| error.to_string())?;
-        if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment
-            || attempt.work_item_group_id.as_deref() != Some(record.entity_id.as_str())
-        {
-            return Err(
-                "group attempt is not awaiting plan amendment for this plan session".to_string(),
-            );
-        }
-        Ok(Some(context))
+        Ok(context)
     }
 
     pub(crate) fn build_sc_manual_revision_prompt_for_turn(

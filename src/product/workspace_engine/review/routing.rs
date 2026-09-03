@@ -3,7 +3,7 @@ mod routing_scope;
 use super::feedback::format_review_feedback;
 use super::policy_routing::RoutingAction;
 use super::*;
-use crate::product::lifecycle_store::workspace::PolicyRoutePersist;
+use crate::product::lifecycle_store::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
     ClassificationError, ClassifiedFinding, EvaluationDecision, FatalReason, FindingClass,
     FindingFingerprint, HumanReason, PlanOutcome, PolicyDiagnostic, ReviewCycleState,
@@ -18,11 +18,14 @@ impl WorkspaceEngine {
         verdict: ReviewVerdict,
     ) {
         // 终态会话丢弃迟到评审 verdict；但重开中的 amendment 门（REQ-GCE-03
-        // 场景二：durable 重开签名 + 指向本 session 的 Open/Applying
-        // PlanAmendmentContext，见 durable_reopened_amendment_record）不是已
-        // 完结会话，其重启评审的 Pass 必须继续走 policy route 重建 Approval 门
-        // （I-1）；不得被本守卫当作已完结会话丢弃。伪造的
-        // Completed+WaitingForHuman 三元组（无 amendment context）仍被丢弃。
+        // 场景二：durable 重开签名 + probe 放行重开的同一完整谓词命中，见
+        // durable_reopened_amendment_record）不是已完结会话，其重启评审的 Pass
+        // 必须继续走 policy route 重建 Approval 门（I-1）；不得被本守卫当作已
+        // 完结会话丢弃。伪造的 Completed+WaitingForHuman 三元组（无 amendment
+        // context）仍被丢弃。I-1 round3（F-A）：判别三态——明确无 amendment
+        // 事实 → 丢弃（普通门语义）；判别命中 → 放行；无法读取/校验判别所需
+        // durable 事实 → 持久化失败 fail-closed 终止（不得静默丢弃，更不得放行
+        // 进重置公式）。
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
             && matches!(
                 self.session.single_candidate_phase,
@@ -31,9 +34,23 @@ impl WorkspaceEngine {
                         | crate::product::models::SingleCandidatePhase::Failed
                 )
             )
-            && !self.is_reopened_amendment_gate()
         {
-            return;
+            match self.is_reopened_amendment_gate() {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    self.finish_policy_failure(
+                        FatalReason::PersistenceFailure,
+                        vec![PolicyDiagnostic {
+                            code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                            message: error.to_string(),
+                            field: Some("plan_amendment_context".to_owned()),
+                        }],
+                    )
+                    .await;
+                    return;
+                }
+            }
         }
         let node_id = self
             .active_node_id
@@ -1051,37 +1068,6 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Completed,
             })
             .await;
-    }
-
-    pub(super) async fn finish_policy_failure(
-        &mut self,
-        reason: FatalReason,
-        diagnostics: Vec<PolicyDiagnostic>,
-    ) {
-        let message = diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| reason.to_string());
-        let _ = self
-            .event_tx
-            .send(EngineEvent::Error {
-                message: message.clone(),
-            })
-            .await;
-        if let Some(node_id) = self.active_node_id.clone() {
-            self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(message))
-                .await;
-        }
-        self.session.session_status = WorkspaceSessionStatus::Failed;
-        self.transition_stage(WorkspaceStage::Completed).await;
-        if let Some(store) = &self.lifecycle_store
-            && let Ok(record) = store.update_workspace_session_status(
-                &self.session.session_id,
-                WorkspaceSessionStatus::Failed,
-            )
-        {
-            self.session.session_status = record.status;
-        }
     }
 }
 

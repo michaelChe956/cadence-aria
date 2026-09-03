@@ -1,7 +1,7 @@
 use chrono::Utc;
 
 use crate::product::coding_models::{
-    CodingExecutionAttempt, PlanAmendmentContext, PlanAmendmentContextStatus,
+    CodingAttemptStatus, CodingExecutionAttempt, PlanAmendmentContext, PlanAmendmentContextStatus,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -203,6 +203,46 @@ impl super::CodingAttemptStore {
             });
         }
         Ok(found)
+    }
+
+    /// Locate the open amendment gate host context for an original plan session
+    /// AND verify the full probe predicate used by
+    /// `probe_amendment_gate_context` (REQ-GCE-03): the context's group attempt
+    /// must still be `AwaitingPlanAmendment` and bound to this plan session's
+    /// work item group (`work_item_group_id == plan_id`). Workspace decision
+    /// routing (the reopened-amendment-gate discrimination behind budget
+    /// continuation and the terminal review guard) MUST reuse this exact
+    /// predicate (I-1 round3 F-B): checking only the Open/Applying context
+    /// status keeps discriminating an amendment gate during the
+    /// context-Applying/attempt-left-Awaiting window of
+    /// `apply_plan_amendment_from_journal`'s write order, where the probe
+    /// refuses to reopen and late verdicts would bypass the terminal guard.
+    /// `Ok(None)` covers every definite non-amendment fact (no context, or the
+    /// attempt no longer awaiting); read/verify failures stay `Err` so callers
+    /// can fail closed instead of guessing (I-1 round3 F-A).
+    pub fn find_awaiting_plan_amendment_context_for_plan_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        plan_session_id: &str,
+    ) -> Result<Option<PlanAmendmentContext>, ProductStoreError> {
+        let Some(context) = self.find_open_plan_amendment_context_for_plan_session(
+            project_id,
+            issue_id,
+            plan_id,
+            plan_session_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        let attempt = self.get_attempt(project_id, issue_id, &context.group_attempt_id)?;
+        if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment
+            || attempt.work_item_group_id.as_deref() != Some(plan_id)
+        {
+            return Ok(None);
+        }
+        Ok(Some(context))
     }
 
     pub(crate) fn transition_plan_amendment_context_to_applying(
