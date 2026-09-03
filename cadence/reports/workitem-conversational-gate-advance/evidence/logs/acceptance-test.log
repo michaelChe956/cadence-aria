@@ -1,0 +1,4 @@
+# acceptance-test :: node --test cadence/reports/workitem-conversational-gate-advance/acceptance_report.test.mjs :: run 2026-09-03 (task 8.5, GREEN run)
+ℹ tests 8
+ℹ pass 8
+ℹ fail 0

@@ -1,0 +1,4 @@
+# check :: command recorded in commands.manifest.json :: run 2026-09-03 (task 8.5 worker re-run, fresh worktree session)
+---- full output (exit 0, empty besides) ----
+   Compiling cadence-aria v0.0.9 (/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.70s
