@@ -1,0 +1,26 @@
+{
+  "run_id": "stage35:pretrial:codex:rep2",
+  "provider": "codex",
+  "rep": 2,
+  "rerun_of": "stage35:pretrial:codex:rep1",
+  "fixture_set": "minimal",
+  "script": "request-change:请在契约定义中补充错误响应的示例;confirm",
+  "attempt_id": "workspace_session_0113",
+  "same_attempt_throughout": true,
+  "gate_turns": 0,
+  "budget_deductions": [],
+  "advance": null,
+  "provider_ledger_delta_after_advance": null,
+  "failure_class": "workspace_error",
+  "output_defects": [
+    "provider Plan markdown 被 SC compile fail-closed 拒绝:missing_section:20(Tasks 条目缺 requirement_refs)与 missing_section:45(Traceability 缺 requirement_id)——与 rep1 同族",
+    "provider 输出 sha256=401b23e3fedb59d369633d8333047fa785082750cd176dfeb3a99bffcd9ff7cb(len=1578)"
+  ],
+  "elapsed_sec": 79.8,
+  "verdict": "fail",
+  "verdict_reason": "session_status=open(非终态),completed=false;SC compile missing_section:20/:45;未到人工门;codex 两连败定性系统性",
+  "source_refs": {
+    "result_json": "/tmp/aria-stage35-20260903/pretrial/codex/rep2/result.json",
+    "ws_jsonl": "/tmp/aria-stage35-20260903/pretrial/codex/rep2/ws.jsonl"
+  }
+}

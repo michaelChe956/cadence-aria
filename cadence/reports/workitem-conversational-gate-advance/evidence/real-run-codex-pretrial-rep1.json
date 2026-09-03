@@ -1,0 +1,25 @@
+{
+  "run_id": "stage35:pretrial:codex:rep1",
+  "provider": "codex",
+  "rep": 1,
+  "fixture_set": "minimal",
+  "script": "request-change:请在契约定义中补充错误响应的示例;confirm",
+  "attempt_id": "workspace_session_0112",
+  "same_attempt_throughout": true,
+  "gate_turns": 0,
+  "budget_deductions": [],
+  "advance": null,
+  "provider_ledger_delta_after_advance": null,
+  "failure_class": "workspace_error",
+  "output_defects": [
+    "provider Plan markdown 被 SC compile fail-closed 拒绝:missing_section:52(Traceability 缺 requirement_id,输出止于 source_id 行)",
+    "provider 输出 sha256=324a2db12a2650616280a47d3a1d617fe2883eed3d8a97a4fbb581565c464f11(len=1811)"
+  ],
+  "elapsed_sec": 290.6,
+  "verdict": "fail",
+  "verdict_reason": "session_status=open(非终态),completed=false;SC compile missing_section:52;未到人工门(gate_turns=0),预算无观察",
+  "source_refs": {
+    "result_json": "/tmp/aria-stage35-20260903/pretrial/codex/rep1/result.json",
+    "ws_jsonl": "/tmp/aria-stage35-20260903/pretrial/codex/rep1/ws.jsonl"
+  }
+}
