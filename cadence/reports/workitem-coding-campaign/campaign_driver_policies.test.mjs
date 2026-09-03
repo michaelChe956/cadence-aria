@@ -11,6 +11,8 @@ import {
   applyResultTiming,
   confirmedCountForPlanStatus,
   collectUsageByRole,
+  corpusSelectionFromEnv,
+  fixtureSetFromEnv,
   generationModeSelectionForNode,
   legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
@@ -925,6 +927,47 @@ test('dry-run 忽略 ARIA_DATA_ROOT，固定报告当前 worktree 的 .aria 且�
   assert.equal(output.aria_data_root, path.join(repoRoot, '.aria'));
   assert.equal(output.no_http_or_websocket_requests, true);
   assert.equal(output.prepare_options.run_policy, 'auto_if_valid');
+});
+
+test('fixture set 映射默认与显式', () => {
+  assert.deepEqual(fixtureSetFromEnv({}), { corpus: '07-fullstack-levels.md', set: 'levels' });
+  assert.deepEqual(fixtureSetFromEnv({ ARIA_FIXTURE_SET: 'minimal' }), { corpus: '08-minimal-hello-api.md', set: 'minimal' });
+  assert.deepEqual(fixtureSetFromEnv({ ARIA_FIXTURE_SET: 'defect' }), { corpus: '09-amendment-defect.md', set: 'defect' });
+});
+
+test('fixture set 未知值与未知语料均 fail-closed', () => {
+  assert.throws(() => fixtureSetFromEnv({ ARIA_FIXTURE_SET: 'bogus' }), /ARIA_FIXTURE_SET/);
+  assert.throws(() => fixtureSetFromEnv({ ARIA_ISSUE_CORPUS_FILE: '07-fullstack-levels.md', ARIA_FIXTURE_SET: 'minimal' }), /ARIA_/);
+});
+
+test('corpusSelectionFromEnv 与 fixtureSetFromEnv 同构，显式语料仅在与套映射一致时放行', () => {
+  for (const env of [{}, { ARIA_FIXTURE_SET: 'minimal' }, { ARIA_FIXTURE_SET: 'defect' }]) {
+    assert.deepEqual(corpusSelectionFromEnv(env), fixtureSetFromEnv(env));
+  }
+  assert.deepEqual(
+    corpusSelectionFromEnv({ ARIA_FIXTURE_SET: 'minimal', ARIA_ISSUE_CORPUS_FILE: '08-minimal-hello-api.md' }),
+    { corpus: '08-minimal-hello-api.md', set: 'minimal' },
+  );
+  assert.throws(
+    () => corpusSelectionFromEnv({ ARIA_ISSUE_CORPUS_FILE: '06-multi-constraint.md' }),
+    /ARIA_/,
+  );
+});
+
+test('dry-run 对未知 fixture set fail-closed（非零退出且错误信息含 ARIA_）', () => {
+  const driver = path.join(CAMPAIGN_DIR, 'workitem_run_campaign.mjs');
+  const repoRoot = path.resolve(CAMPAIGN_DIR, '../../..');
+  const run = spawnSync(
+    process.execPath,
+    [driver, 'codex', '1', '/tmp/aria-phase2-policy-test', '--dry-run'],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, ARIA_FIXTURE_SET: 'bogus' },
+    },
+  );
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /ARIA_FIXTURE_SET/);
 });
 
 test('coding driver 只消费 Confirmed handoff，不读取 WorkItem SingleCandidate 协议也不发送其旧决策', () => {

@@ -11,15 +11,39 @@ import { fileURLToPath } from 'node:url';
 
 const CAMPAIGN_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(CAMPAIGN_DIR, '../../..');
-const FIXTURES_DIR = path.join(CAMPAIGN_DIR, 'fixtures');
-const DESCRIPTION_FILE = path.join(
-  REPO_ROOT,
-  'cadence/reports/design-weak-model-campaign/corpus/07-fullstack-levels.md',
-);
-const DESCRIPTION_LEDGER = path.join(
-  REPO_ROOT,
-  'cadence/reports/design-weak-model-campaign/corpus/digests.txt',
-);
+const CORPUS_DIR = path.join(REPO_ROOT, 'cadence/reports/design-weak-model-campaign/corpus');
+// 语料与 fixture 套的合法映射钉死；新增组合必须同时补齐 corpus 文件与 fixtures/<set>/。
+const FIXTURE_SETS = {
+  levels: { corpus: '07-fullstack-levels.md', fixturesSubdir: '' },
+  minimal: { corpus: '08-minimal-hello-api.md', fixturesSubdir: 'minimal' },
+  defect: { corpus: '09-amendment-defect.md', fixturesSubdir: 'defect' },
+};
+
+// 纯函数：从 env 解析合法映射对 {corpus, set}；未识别值或非法配对一律 fail-closed。
+function corpusSelectionFromEnv(env = process.env) {
+  const requestedSet = env.ARIA_FIXTURE_SET?.trim() || 'levels';
+  const entry = FIXTURE_SETS[requestedSet];
+  if (!entry) {
+    throw new Error(`ARIA_FIXTURE_SET 不受支持: ${requestedSet}（可选值: ${Object.keys(FIXTURE_SETS).join('|')}）`);
+  }
+  // ARIA_ISSUE_CORPUS_FILE 不再是独立覆盖旁路：仅在与所选套的映射语料一致时放行。
+  const explicitCorpus = env.ARIA_ISSUE_CORPUS_FILE?.trim() || null;
+  if (explicitCorpus !== null && explicitCorpus !== entry.corpus) {
+    throw new Error(
+      `ARIA_ISSUE_CORPUS_FILE=${explicitCorpus} 与 ARIA_FIXTURE_SET=${requestedSet} 映射语料 ${entry.corpus} 不匹配，拒绝执行`,
+    );
+  }
+  return { corpus: entry.corpus, set: requestedSet };
+}
+
+function fixtureSetFromEnv(env = process.env) {
+  return corpusSelectionFromEnv(env);
+}
+
+const FIXTURE_SELECTION = fixtureSetFromEnv(process.env);
+const FIXTURES_DIR = path.join(CAMPAIGN_DIR, 'fixtures', FIXTURE_SETS[FIXTURE_SELECTION.set].fixturesSubdir);
+const DESCRIPTION_FILE = path.join(CORPUS_DIR, FIXTURE_SELECTION.corpus);
+const DESCRIPTION_LEDGER = path.join(CORPUS_DIR, 'digests.txt');
 const PROVIDERS = new Set(['claude_code', 'kimi_code', 'pi', 'codex']);
 const FEEDBACK = '请根据评审意见修订';
 // 阶段 1：策略层接在 legacy 路径上，flow_kind 期望为 legacy；阶段 2 切 single_candidate。
@@ -149,10 +173,11 @@ function validateFixtures() {
 }
 
 function loadDescription() {
+  const corpusName = FIXTURE_SELECTION.corpus;
   const content = fs.readFileSync(DESCRIPTION_FILE, 'utf8');
   const ledger = readLedger(DESCRIPTION_LEDGER);
-  const expected = ledger.get('07-fullstack-levels.md');
-  if (!expected) throw new Error('案例语料 ledger 缺少 07-fullstack-levels.md');
+  const expected = ledger.get(corpusName);
+  if (!expected) throw new Error(`案例语料 ledger 缺少 ${corpusName}`);
   const digest = sha256(content);
   if (digest !== expected) {
     throw new Error(`案例语料 digest 不匹配: expected=${expected}; actual=${digest}`);
@@ -2746,6 +2771,8 @@ async function main() {
       hard_timeout_ms: HARD_LIMIT_MS,
       fixture_digests: fixtureDigests,
       description_digest: description.digest,
+      fixture_set: FIXTURE_SELECTION.set,
+      issue_corpus: FIXTURE_SELECTION.corpus,
       prepare_options: options.existingSessionId
         ? null
         : prepareOptionsForProvider(options.provider, options.runPolicy),
@@ -2776,7 +2803,9 @@ export {
   campaignCommandId,
   collectUsageByRole,
   confirmedCountForPlanStatus,
+  corpusSelectionFromEnv,
   createStage3GateController,
+  fixtureSetFromEnv,
   generationModeSelectionForNode,
   legacySingleCandidateDecisionMessage,
   hasMustFixFindings,
