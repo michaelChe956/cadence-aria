@@ -18,6 +18,12 @@ const HARD_LIMIT_MS = Number(
 );
 const BASE = (process.env.ARIA_BASE_URL ?? 'http://127.0.0.1:4317').replace(/\/$/, '');
 const WS_BASE = (process.env.ARIA_WS_BASE_URL ?? BASE.replace(/^http/, 'ws')).replace(/\/$/, '');
+// durable 数据根（对齐 workitem_run_campaign.mjs 的 ARIA_ROOT=REPO_ROOT/.aria）：
+// Finding 2 修复的 human-gate turn 记录回读对账从该根拼 .aria/projects/<p>/issues/<i>/
+// workspace-sessions/<s>/human-gate-turns/*.json。
+const CAMPAIGN_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(CAMPAIGN_DIR, '../../..');
+const ARIA_ROOT = path.join(REPO_ROOT, '.aria');
 const ACTIVE_STATUSES = new Set([
   'created',
   'running',
@@ -359,6 +365,74 @@ function amendmentGateTurnOutcome({ actions, cursor, turnStatus }) {
   throw new Error(`amendmentGateTurnOutcome 仅接受 completed/failed turn，实际为 ${String(turnStatus)}`);
 }
 
+// —— Finding 2 修复：durable human-gate turn 记录回读（模式对齐 workitem_run_campaign.mjs
+// 的 stage3DurableReplayState）——服务端对 Replayed 一律回 human_gate_turn_open，不区分
+// turn 是否已在断线窗口内完结（workspace_ws_handler/decisions.rs Replayed 分支）；driver
+// 若只置 turnStatus='open' 等待 turn_completed 将永久停摆。缺目录/坏文件一律按无记录处理，
+// 绝不抛出阻断恢复。
+function amendmentDurableGateTurns({ ariaRoot, projectId, issueId, sessionId }) {
+  if (![ariaRoot, projectId, issueId, sessionId].every((part) => typeof part === 'string' && part.trim())) {
+    return [];
+  }
+  const directory = path.join(
+    ariaRoot, 'projects', projectId, 'issues', issueId, 'workspace-sessions', sessionId, 'human-gate-turns',
+  );
+  const turns = [];
+  let names;
+  try {
+    names = fs.readdirSync(directory);
+  } catch {
+    return []; // 目录不存在（尚无 turn 记录）是正常形态。
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const turn = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
+      if (turn?.command_id) {
+        turns.push({
+          command_id: turn.command_id,
+          turn_id: turn.turn_id ?? null,
+          status: turn.status ?? null,
+          attempt_no: turn.attempt_no ?? null,
+          budget_reserved: turn.budget_reserved ?? null,
+          result_artifact_ref: turn.result_artifact_ref ?? null,
+          failure_class: turn.failure_class ?? null,
+        });
+      }
+    } catch {
+      // 坏文件按无记录处理。
+    }
+  }
+  turns.sort((left, right) => String(left.command_id).localeCompare(String(right.command_id)));
+  return turns;
+}
+
+// 回读对账判定：按 command_id 匹配 inFlight。terminal（completed/failed）→ 直接用
+// durable 结果推进；reserved/running → turn 仍活着，照常等 WS 事件；command 命中但
+// turn_id 不一致 → conflict，durable 记录不可信，保守回退等待 WS 事件（不 fail-closed，
+// 维持修复前行为）。turn 记录的 attempt_no/budget_reserved 随结果返回供审计。
+function amendmentReplayedTurnReconciliation({ commandId, turnId, turns }) {
+  if (typeof commandId !== 'string' || !commandId.trim()) return { kind: 'no_record' };
+  const matched = (Array.isArray(turns) ? turns : []).filter((turn) => turn?.command_id === commandId);
+  if (!matched.length) return { kind: 'no_record' };
+  const mismatched = matched.find((turn) => turn.turn_id && turnId && turn.turn_id !== turnId);
+  if (mismatched) {
+    return { kind: 'conflict', observed_turn_id: turnId ?? null, record_turn_id: mismatched.turn_id ?? null };
+  }
+  const terminal = matched.find((turn) => turn.status === 'completed' || turn.status === 'failed');
+  if (terminal) {
+    return {
+      kind: 'terminal',
+      turn_id: terminal.turn_id ?? null,
+      status: terminal.status,
+      source: 'durable_turn_record',
+      result_artifact_ref: terminal.result_artifact_ref ?? null,
+      failure_class: terminal.failure_class ?? null,
+    };
+  }
+  return { kind: 'open_live', turn_id: matched[0].turn_id ?? null };
+}
+
 // 线② 确认计划：仅 child stage=human_confirm 且游标落在 confirm 时发送；amendment id
 // 双源（child 快照 amendment/request 与 coding 侧发现）均缺则 fail-closed；coding 侧已收到
 // 该 amendment 的 plan_amendment_updated 时不再发送。
@@ -477,7 +551,14 @@ function amendmentResumeJudgment({ expectedAttemptId, manifest, snapshot }) {
 
 // —— amendment 运行时：三条 WS 线的连接/重连/重发 wiring（决策全部委托上方纯函数）——
 // hooks 由 runCampaign 提供：{ fail, log, noteUsage, elapsedSec }。
-function createAmendmentRuntime({ attemptId, actions, hooks }) {
+// projectId/issueId 供 Finding 2 的 durable turn 回读对账拼路径；deps 仅测试注入
+// （WebSocketCtor/wsBase/ariaRoot），生产路径用全局 WebSocket/WS_BASE/ARIA_ROOT。
+function createAmendmentRuntime({ attemptId, actions, hooks, projectId = null, issueId = null, deps = {} }) {
+  const {
+    WebSocketCtor = WebSocket,
+    wsBase = WS_BASE,
+    ariaRoot = ARIA_ROOT,
+  } = deps;
   const RECONNECT_LIMIT = 40;
   const RECONNECT_DELAY_MS = 1_000;
   let cursor = 0;
@@ -489,6 +570,9 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
   let closed = false;
   let parentSocket = null;
   let childSocket = null;
+  // child socket 只在 onopen 后才可发送（真实 WebSocket 在 CONNECTING 态 send 会抛
+  // InvalidStateError）；游标推进驱动的 confirm 若落在连接窗口内，交给 onopen 补发。
+  let childSocketReady = false;
   let parentReconnects = 0;
   let childReconnects = 0;
   let childStage = null;
@@ -559,6 +643,54 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
     cursor = outcome.cursor;
     hooks.log({ event: 'amendment_turn_finished', status: message.type, turn_id: previous.turnId, next_cursor: cursor });
     driveGate();
+    // Finding 1 修复：游标推进可能把 confirm 动作落位，而 child 线的 human_confirm 快照
+    // 可能早已到达（两条 socket 间无顺序保证）→ 必须在此用缓存状态重求值 child 确认
+    // 计划并补发，否则 confirm 永不发送，只能烧到硬超时。
+    driveChildConfirm();
+  };
+
+  // Finding 2 修复：父线重连/首发收到 turn_open 后，对 inFlight 做 durable turn 记录
+  // 回读对账——服务端对 Replayed 一律回 turn_open 不区分 turn 是否已 Completed；
+  // 若回读发现该 command 的 turn 已 terminal，直接用其结果推进，不等不会再来的 WS 事件。
+  // 进程重启后首发同亦然：command_id 确定性复用命中 durable 查重，逐轮对账自愈。
+  const reconcileGateTurnFromDurable = () => {
+    if (closed || !inFlight) return;
+    const turns = amendmentDurableGateTurns({
+      ariaRoot,
+      projectId,
+      issueId,
+      sessionId: discovery?.parent_session_id ?? null,
+    });
+    const verdict = amendmentReplayedTurnReconciliation({ commandId: inFlight.commandId, turnId: inFlight.turnId, turns });
+    if (verdict.kind === 'terminal') {
+      hooks.log({
+        event: 'amendment_turn_reconciled_from_durable',
+        command_id: inFlight.commandId,
+        turn_id: verdict.turn_id,
+        status: verdict.status,
+        result_artifact_ref: verdict.result_artifact_ref,
+        failure_class: verdict.failure_class,
+      });
+      turnStatus = verdict.status;
+      applyTurnOutcome(
+        amendmentGateTurnOutcome({ actions, cursor, turnStatus }),
+        {
+          type: verdict.status === 'completed' ? 'human_gate_turn_completed' : 'human_gate_turn_failed',
+          turn_id: verdict.turn_id,
+          failure_class: verdict.failure_class,
+          message: 'durable human-gate turn 记录回读对账（断线窗口内已完结）',
+        },
+      );
+      return;
+    }
+    if (verdict.kind === 'conflict') {
+      hooks.log({
+        event: 'amendment_turn_record_conflict',
+        command_id: inFlight.commandId,
+        observed_turn_id: verdict.observed_turn_id,
+        record_turn_id: verdict.record_turn_id,
+      });
+    }
   };
 
   const handleParentInbound = (message) => {
@@ -572,6 +704,9 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
           turn_id: inFlight.turnId,
           remaining_budget: message.remaining_budget ?? null,
         });
+        // Finding 2：turn_open 不区分 TurnOpened/Replayed、也不区分 turn 是否已在断线
+        // 窗口内完结——回读 durable 记录对账，terminal 则直接推进。
+        reconcileGateTurnFromDurable();
       }
       return;
     }
@@ -597,7 +732,7 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
 
   const connectParent = () => {
     if (closed || !discovery?.parent_session_id) return;
-    const socket = new WebSocket(workspaceSessionWsUrl({ wsBase: WS_BASE, sessionId: discovery.parent_session_id }));
+    const socket = new WebSocketCtor(workspaceSessionWsUrl({ wsBase, sessionId: discovery.parent_session_id }));
     parentSocket = socket;
     socket.onopen = () => {
       if (closed || parentSocket !== socket) return;
@@ -631,27 +766,35 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
   };
 
   // —— 线②：child repair session WS（session_link.child_session_id）——
+  // Finding 1 修复：child 确认计划的重驱动入口——child session_state 到达与游标推进
+  // （applyTurnOutcome）两条路径都汇到此处，用缓存的 childStage/childAmendmentId 重
+  // 求值；连接未就绪时不发送，由 onopen 补发。
+  const driveChildConfirm = () => {
+    if (closed || !childSocket || !childSocketReady) return;
+    const plan = amendmentChildConfirmPlan({
+      actions,
+      cursor,
+      childStage,
+      amendmentId: resolveAmendmentId(),
+      codingEventAmendmentIds,
+    });
+    if (plan.kind === 'send') {
+      cursor = plan.consume_cursor + 1;
+      confirmSentFor = plan.amendment_id;
+      confirmSentAtSec = hooks.elapsedSec();
+      sendOn(childSocket, 'amendment_child', amendmentConfirmMessage({ amendmentId: plan.amendment_id }));
+    } else if (plan.kind === 'fail') {
+      hooks.fail(plan.failureClass, `child 确认无法执行: ${json({ child_stage: childStage, amendment_id: resolveAmendmentId() })}`);
+    }
+  };
+
   const handleChildInbound = (message) => {
     if (message.type === 'session_state') {
       if (typeof message.stage === 'string') childStage = message.stage;
       const repair = message.plan_repair ?? null;
       const fromChild = repair?.amendment?.id ?? repair?.request?.amendment_id ?? null;
       if (fromChild) childAmendmentId = fromChild;
-      const plan = amendmentChildConfirmPlan({
-        actions,
-        cursor,
-        childStage,
-        amendmentId: resolveAmendmentId(),
-        codingEventAmendmentIds,
-      });
-      if (plan.kind === 'send') {
-        cursor = plan.consume_cursor + 1;
-        confirmSentFor = plan.amendment_id;
-        confirmSentAtSec = hooks.elapsedSec();
-        sendOn(childSocket, 'amendment_child', amendmentConfirmMessage({ amendmentId: plan.amendment_id }));
-      } else if (plan.kind === 'fail') {
-        hooks.fail(plan.failureClass, `child 确认无法执行: ${json({ child_stage: childStage, amendment_id: resolveAmendmentId() })}`);
-      }
+      driveChildConfirm();
       return;
     }
     if (message.type === 'protocol_error') {
@@ -661,10 +804,11 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
 
   const connectChild = () => {
     if (closed || !discovery?.child_session_id) return;
-    const socket = new WebSocket(workspaceSessionWsUrl({ wsBase: WS_BASE, sessionId: discovery.child_session_id }));
+    const socket = new WebSocketCtor(workspaceSessionWsUrl({ wsBase, sessionId: discovery.child_session_id }));
     childSocket = socket;
     socket.onopen = () => {
       if (closed || childSocket !== socket) return;
+      childSocketReady = true;
       hooks.log({ event: 'amendment_child_ws_open', session_id: discovery.child_session_id });
       socket.send(JSON.stringify({ type: 'hello', session_id: discovery.child_session_id, last_seen_node_id: null }));
       // 断线重连重发：confirm 已发但 coding 侧未见 durable 事件 → 同 amendment_id 重发（投递重试）。
@@ -678,6 +822,10 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
         sendOn(socket, 'amendment_child', amendmentConfirmMessage({ amendmentId: reconnectPlan.amendment_id }));
         hooks.log({ event: 'amendment_confirm_resent', amendment_id: reconnectPlan.amendment_id, reason: 'reconnect_delivery_retry' });
       }
+      // Finding 1：游标已落在 confirm 而 confirm 尚未发出（如 child 快照先于 gate turn
+      // 完结到达、或对账推进落在连接窗口内）→ 连接就绪即补发（此时 cursor 已消费则
+      // 计划返回 confirm_already_consumed，不会与上面的重发叠加双发）。
+      driveChildConfirm();
     };
     socket.onmessage = (event) => {
       if (closed || childSocket !== socket) return;
@@ -694,6 +842,7 @@ function createAmendmentRuntime({ attemptId, actions, hooks }) {
       if (closed || childSocket !== socket) return;
       hooks.log({ event: 'amendment_child_ws_close', code: event?.code, reason: event?.reason });
       childSocket = null;
+      childSocketReady = false;
       if (childReconnects >= RECONNECT_LIMIT) {
         hooks.fail('amendment_child_ws_reconnect_exhausted', `child repair session WS 重连超过 ${RECONNECT_LIMIT} 次`);
         return;
@@ -1021,6 +1170,8 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
       amendment = createAmendmentRuntime({
         attemptId,
         actions: amendmentActions,
+        projectId: handoff.project_id,
+        issueId: handoff.issue_id,
         hooks: {
           fail: (failureClass, error) => fail(failureClass, error),
           log: (entry) => writeLog(entry),
@@ -1228,15 +1379,18 @@ export {
   amendmentConfirmMessage,
   amendmentDiscoveryComplete,
   amendmentDiscoveryFromMessage,
+  amendmentDurableGateTurns,
   amendmentFeedbackCommandId,
   amendmentGateFeedbackMessage,
   amendmentGateFeedbackPlan,
   amendmentGateTurnOutcome,
   amendmentManifestFromUpdatedEvent,
   amendmentNoteUpdatedEvent,
+  amendmentReplayedTurnReconciliation,
   amendmentResumeJudgment,
   amendmentScriptFromEnv,
   codingControlMessagePlan,
+  createAmendmentRuntime,
   outputTimestamp,
   preflightFailureOutDir,
   workspaceSessionWsUrl,
