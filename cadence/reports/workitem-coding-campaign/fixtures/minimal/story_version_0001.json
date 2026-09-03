@@ -1,0 +1,12 @@
+{
+  "id": "story_version_0001",
+  "project_id": "project_0001",
+  "issue_id": "issue_0001",
+  "entity_id": "story_spec_0001",
+  "version": 1,
+  "markdown": "# 需求:Hello API\n\nsource id: issue_workitem_0001#api\n\n## 用户故事\n\n- 为 naruto H5 游戏(空仓库骨架)提供一个最小后端问候接口,供联调冒烟使用。\n\n## 需求\n\n- REQ-001: GET /api/hello 返回 {\"message\":\"hello\"}。\n- REQ-002: 仅用 Node 内置 node:http;不引入任何第三方依赖、不新增数据库/认证/外部服务/前端页面。\n\n## 验收标准\n\n- AC-001: GET /api/hello 返回 200 且 body 恰为 {\"message\":\"hello\"}。\n",
+  "provider_run_refs": [],
+  "review_refs": [],
+  "confirmed_by": "campaign-fixture",
+  "created_at": "2026-09-03T00:00:00Z"
+}

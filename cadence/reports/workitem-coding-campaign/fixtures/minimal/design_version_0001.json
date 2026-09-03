@@ -1,0 +1,12 @@
+{
+  "id": "design_version_0001",
+  "project_id": "project_0001",
+  "issue_id": "issue_0001",
+  "entity_id": "design_spec_0001",
+  "version": 1,
+  "markdown": "# 设计:Hello API\n\n## 设计范围\n\n单文件 HTTP 服务,仅覆盖下述唯一契约;不做任何其他拆分。\n\n## 决策\n\n- DEC-001: server.js 用 node:http 起服务,监听 127.0.0.1:3000。\n\n## 契约\n\n- source id: issue_workitem_0001#api — GET /api/hello → 200 {\"message\":\"hello\"};内部错误 500 {\"error\":\"internal\"}。\n\n## 验证\n\n- node --test 单测:起服务请求 /api/hello,断言状态码与 body;只此一个测试。\n",
+  "provider_run_refs": [],
+  "review_refs": [],
+  "confirmed_by": "campaign-fixture",
+  "created_at": "2026-09-03T00:00:00Z"
+}
