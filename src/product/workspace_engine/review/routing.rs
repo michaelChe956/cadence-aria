@@ -18,9 +18,11 @@ impl WorkspaceEngine {
         verdict: ReviewVerdict,
     ) {
         // 终态会话丢弃迟到评审 verdict；但重开中的 amendment 门（REQ-GCE-03
-        // 场景二）durable phase 仍为 Completed、会话状态已回到 WaitingForHuman，
-        // 其重启评审的 Pass 必须继续走 policy route 重建 Approval 门（I-1），
-        // 不得被本守卫当作已完结会话丢弃。
+        // 场景二：durable 重开签名 + 指向本 session 的 Open/Applying
+        // PlanAmendmentContext，见 durable_reopened_amendment_record）不是已
+        // 完结会话，其重启评审的 Pass 必须继续走 policy route 重建 Approval 门
+        // （I-1）；不得被本守卫当作已完结会话丢弃。伪造的
+        // Completed+WaitingForHuman 三元组（无 amendment context）仍被丢弃。
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
             && matches!(
                 self.session.single_candidate_phase,

@@ -632,3 +632,218 @@ async fn amendment_revision_reviewer_pass_rebuild_continues_gate_budget() {
     );
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
 }
+
+/// I-1 round2 伪造场景共用前缀：真批准链（budget=2，即 Confirmed + phase
+/// Completed，且保留快照 remaining=2）之后**不注入任何 amendment 上下文**，
+/// 直接经通用 `update_workspace_session_status` 把会话写成 WaitingForHuman——
+/// 复现「重开三元组可伪造」攻击面（该通用写入与 `enter_human_confirm`、
+/// `provider_workspace_runner` 同源，均不校验 phase、不清快照）。返回按
+/// `review_rounds` 配置好的 amendment 判别目标 engine。
+async fn forged_reopen_signature_prefix(
+    tag: &str,
+    review_rounds: u32,
+) -> (
+    tempfile::TempDir,
+    LifecycleStore,
+    WorkspaceEngine,
+    String, /* plan_session_id */
+) {
+    let (root, lifecycle, _plan_id, mut approval_engine) = real_approval_fixture(2).await;
+    let (event_tx, _event_rx) = mpsc::channel(32);
+    approval_engine.event_tx = event_tx;
+    let plan_session_id = approval_engine.session().session_id.clone();
+    let close = approval_engine
+        .handle_human_gate_termination(
+            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
+        )
+        .await
+        .expect("real approval chain must confirm");
+    assert_eq!(close, HumanGateCloseOutcome::Confirmed);
+    let mut record = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("approved record");
+    assert_eq!(record.status, WorkspaceSessionStatus::Confirmed);
+    assert_eq!(
+        record.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed)
+    );
+    assert_eq!(
+        record
+            .human_gate_snapshot
+            .as_ref()
+            .expect("retained snapshot")
+            .manual_repairs_remaining,
+        2
+    );
+    // 伪造：通用状态写入 WaitingForHuman，不经过 compare_and_reopen_amendment_gate，
+    // 也不存在任何 PlanAmendmentContext。
+    lifecycle
+        .update_workspace_session_status(&plan_session_id, WorkspaceSessionStatus::WaitingForHuman)
+        .expect("forge waiting_for_human via the generic status write");
+    record = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("forged record");
+    record.reviewer_provider = ProviderName::ClaudeCode;
+    record.review_rounds = review_rounds;
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist reviewer config");
+    let (feedback_tx, _feedback_rx) = mpsc::channel(8);
+    let mut session = WorkspaceSession::from_record(record);
+    session.artifact = Some(ArtifactPayload::Markdown {
+        markdown: real_chain_candidate_markdown().to_string(),
+        diff: None,
+    });
+    let engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(
+            root.path().join(format!("{tag}-checkpoints")),
+        )),
+        lifecycle.clone(),
+        feedback_tx,
+        session,
+    );
+    (root, lifecycle, engine, plan_session_id)
+}
+
+/// I-1 round2 回归（伪造场景·终态守卫）：普通 SC 会话被通用状态写入伪造成
+/// Completed+WaitingForHuman 三元组（无任何 amendment context）时，迟到的评审
+/// verdict 仍 MUST 被终态守卫丢弃——不得因三元组巧合命中 amendment 判别而绕过
+/// 守卫处理 verdict 并重路由。
+#[tokio::test]
+async fn forged_reopen_signature_without_amendment_context_keeps_terminal_guard() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine, plan_session_id) =
+        forged_reopen_signature_prefix("forged_guard", 1).await;
+
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "review".to_string(),
+                None,
+            ),
+            crate::web::workspace_ws_types::ReviewVerdict {
+                verdict: crate::web::workspace_ws_types::ReviewVerdictType::Pass,
+                comments: "review pass".to_string(),
+                summary: "review pass".to_string(),
+                findings: Vec::new(),
+                review_gate: crate::web::workspace_ws_types::ReviewGate::UserConfirmAllowed,
+                work_item_plan_review: None,
+                structured_output_diagnostic: None,
+            },
+        )
+        .await;
+
+    assert!(
+        engine.latest_review_verdict.is_none(),
+        "伪造三元组不得绕过终态守卫——迟到 verdict 必须被原样丢弃"
+    );
+    let routed = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("durable session");
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed),
+        "伪造场景不得重路由（不得进入 Approval 重建）"
+    );
+    assert_eq!(routed.status, WorkspaceSessionStatus::WaitingForHuman);
+    let snapshot = routed
+        .human_gate_snapshot
+        .as_ref()
+        .expect("generic write retains the snapshot");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 2,
+        "伪造场景不得经 amendment 继承分支改写旧快照"
+    );
+}
+
+/// I-1 round2 回归（伪造场景·不继承）：伪造三元组（无 amendment context）命中
+/// Evaluate 重建时，快照预算 MUST 走普通门重置公式（默认 3 − run_history 计数），
+/// 不得继承被伪造会话遗留的旧快照预算（remaining=2）。
+#[tokio::test]
+async fn forged_reopen_signature_rebuild_uses_reset_formula() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine, plan_session_id) =
+        forged_reopen_signature_prefix("forged_reset", 0).await;
+
+    engine
+        .route_single_candidate_evaluate_without_reviewer()
+        .await;
+
+    let routed = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("routed session");
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval),
+        "伪造场景仍按普通门语义路由进 Approval"
+    );
+    let snapshot = routed.human_gate_snapshot.as_ref().expect("gate snapshot");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 3,
+        "伪造场景必须走普通门重置公式（默认 3 − 计数 = 3），不得继承旧快照的 2"
+    );
+}
+
+/// I-1 round2 回归（fail-closed）：amendment 判别命中（durable 重开签名 + Open
+/// PlanAmendmentContext 在场）但原快照缺失时，Approval 重建 MUST fail-closed
+/// 报错（AbortFatal{PersistenceFailure}），不得回退普通重置公式重建。
+#[tokio::test]
+async fn amendment_reopen_signature_missing_snapshot_fails_closed() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine, plan_session_id, _turn_id) =
+        amendment_revision_chain_prefix("amendment_missing_snapshot", 2, 0).await;
+
+    // 破坏性剪除 durable 快照（模拟损坏/外部删改）：判别所需的 durable 事实仍在
+    // （WaitingForHuman + phase Completed + Open context），但快照缺席。
+    let mut stripped = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("reopened record");
+    stripped.human_gate_snapshot = None;
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&stripped.project_id, &stripped.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", stripped.id)),
+        &stripped,
+    )
+    .expect("strip durable snapshot");
+
+    engine
+        .route_single_candidate_evaluate_without_reviewer()
+        .await;
+
+    let routed = lifecycle
+        .get_workspace_session(&plan_session_id)
+        .expect("durable session");
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed),
+        "fail-closed：不得以重置公式写回 Approval"
+    );
+    assert!(
+        routed.human_gate_snapshot.is_none(),
+        "fail-closed：不得落任何重建快照"
+    );
+    assert_eq!(
+        engine.session().single_candidate_phase,
+        Some(SingleCandidatePhase::Failed),
+        "fail-closed： AbortFatal 后会话必须进 Failed"
+    );
+    assert!(
+        engine
+            .session()
+            .policy_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message
+                .contains("human_gate_amendment_snapshot_missing")),
+        "fail-closed 必须以诊断显式报错，不得静默回退"
+    );
+}

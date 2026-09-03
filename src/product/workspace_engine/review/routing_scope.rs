@@ -423,7 +423,9 @@ impl WorkspaceEngine {
             && matches!(action, RoutingAction::ContinueToCompleted)
         {
             status = WorkspaceSessionStatus::WaitingForHuman;
-            gate = Some(self.single_candidate_approval_gate(history));
+            // I-1 round2：amendment 判别命中而快照缺席时在此报 Err，
+            // 由调用方按 AbortFatal{PersistenceFailure} fail-closed，不落盘。
+            gate = Some(self.single_candidate_approval_gate(history)?);
         }
         let scope = self.policy_scope_for_action(
             invocation,
@@ -459,13 +461,33 @@ impl WorkspaceEngine {
         action: &RoutingAction,
         history: RunHistory,
     ) {
-        let (mut status, mut gate, diagnostics) = policy_route_record_values(action);
+        let (mut status, mut gate, mut diagnostics) = policy_route_record_values(action);
+        let mut fail_closed = false;
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
             && self.session.run_policy == RunPolicy::Interactive
             && matches!(action, RoutingAction::ContinueToCompleted)
         {
-            status = WorkspaceSessionStatus::WaitingForHuman;
-            gate = Some(self.single_candidate_approval_gate(&history));
+            match self.single_candidate_approval_gate(&history) {
+                Ok(rebuilt) => {
+                    status = WorkspaceSessionStatus::WaitingForHuman;
+                    gate = Some(rebuilt);
+                }
+                Err(error) => {
+                    // I-1 round2 fail-closed：与 persist 失败同构——按
+                    // AbortFatal{PersistenceFailure} 落内存（phase→Failed），
+                    // 不得以重置公式绕过（本分支仅在 store/expected 缺席的
+                    // 降级内存路径可达；持久化引擎由 persist_policy_route 的
+                    // Err 分支先行拦截）。
+                    diagnostics = vec![PolicyDiagnostic {
+                        code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                        message: error.to_string(),
+                        field: Some("human_gate_snapshot".to_owned()),
+                    }];
+                    status = WorkspaceSessionStatus::Failed;
+                    gate = None;
+                    fail_closed = true;
+                }
+            }
         }
         self.session.run_history = history;
         self.session.review_invocation_scope =
@@ -474,7 +496,11 @@ impl WorkspaceEngine {
         self.session.policy_diagnostics = diagnostics;
         self.session.session_status = status;
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
-            self.session.single_candidate_phase = self.single_candidate_phase_for_action(action);
+            self.session.single_candidate_phase = if fail_closed {
+                Some(crate::product::models::SingleCandidatePhase::Failed)
+            } else {
+                self.single_candidate_phase_for_action(action)
+            };
         }
     }
 
@@ -496,29 +522,37 @@ impl WorkspaceEngine {
         self.session.single_candidate_phase = record.single_candidate_phase.clone();
     }
 
-    pub(super) fn single_candidate_approval_gate(&self, history: &RunHistory) -> HumanGateSnapshot {
-        // I-1（REQ-CG-02 amendment 分叉）：普通 SC 修订门重建 = 重置为
-        // 「默认预算 − run_history 计数」（与初始 author Evaluate-pass 同构，
+    pub(super) fn single_candidate_approval_gate(
+        &self,
+        history: &RunHistory,
+    ) -> Result<HumanGateSnapshot, ProductStoreError> {
+        // I-1（REQ-CG-02 amendment 分叉，round2 判别加固）：普通 SC 修订门重建 =
+        // 重置为「默认预算 − run_history 计数」（与初始 author Evaluate-pass 同构，
         // campaign 用例锚定）；而 amendment 门（attempt AwaitingPlanAmendment 期间
-        // 重开的原门，重开特征 = durable phase 仍为 Completed）重建时 MUST 接续
-        // 现有 human_gate_snapshot 的 manual_repairs_remaining——typed amendment
-        // turn 只扣快照、不递增 run_history 计数，重置公式会凭空恢复已耗预算。
-        let manual_repairs_remaining = if self.is_reopened_amendment_gate() {
-            self.session
+        // 重开的原门）重建时 MUST 接续现有 human_gate_snapshot 的
+        // manual_repairs_remaining——typed amendment turn 只扣快照、不递增
+        // run_history 计数，重置公式会凭空恢复已耗预算。判别不再只信
+        // SC+Completed+WaitingForHuman 三元组（通用状态写入可伪造），必须命中
+        // durable amendment 事实（见 durable_reopened_amendment_record）；判别
+        // 命中而快照缺席时 fail-closed 报错，不得回退重置公式。
+        let manual_repairs_remaining = match self.durable_reopened_amendment_record() {
+            Some(record) => record
                 .human_gate_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.manual_repairs_remaining)
-                .unwrap_or_else(|| {
-                    RunBudgets::default()
-                        .max_manual_repairs
-                        .saturating_sub(history.manual_repairs_used)
-                })
-        } else {
-            RunBudgets::default()
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "human_gate_amendment_snapshot_missing",
+                    reason: format!(
+                        "reopened amendment gate {} has no retained human_gate_snapshot; \
+                         refusing to rebuild the approval gate with the reset formula",
+                        record.id
+                    ),
+                })?,
+            None => RunBudgets::default()
                 .max_manual_repairs
-                .saturating_sub(history.manual_repairs_used)
+                .saturating_sub(history.manual_repairs_used),
         };
-        HumanGateSnapshot {
+        Ok(HumanGateSnapshot {
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
             attempts_used: history
@@ -529,18 +563,63 @@ impl WorkspaceEngine {
             // 仍用其既有 trigger 以避免新增决策协议。
             trigger: HumanReason::NativeHumanRequired,
             resumable: true,
-        }
+        })
     }
 
-    /// 重开中的 amendment 门特征：SingleCandidate 会话已过首次批准（durable
-    /// phase Completed），但会话状态又回到 WaitingForHuman。唯一合法来源是
-    /// `compare_and_reopen_amendment_gate`（REQ-GCE-03 场景二）——首次审批门
-    /// 在此时点 phase 只会是 Evaluate/Approval，不会误命中。
+    /// durable amendment 重开证据：重开签名（SC + durable phase Completed +
+    /// durable WaitingForHuman）**叠加**指向本 session 的 Open/Applying
+    /// `PlanAmendmentContext`。三元组本身并非 `compare_and_reopen_amendment_gate`
+    /// 唯一产物——通用 `update_workspace_session_status`（含 `enter_human_confirm`
+    /// 与 `provider_workspace_runner` 同源调用）可直接对非 amendment 会话写
+    /// WaitingForHuman 而保留 phase 与快照，因此判别必须绑定 durable amendment
+    /// 事实：该 context 只能由 `open_plan_amendment_context` 在完整 lineage 校验
+    /// （attempt AwaitingPlanAmendment + linked plan repair snapshot + canonical
+    /// parent session）后创建，通用 HTTP/内部路径无法伪造；这也是
+    /// `probe_amendment_gate_context` 放行重开所用的同一谓词，重开授权与重建
+    /// 接续对称。store 读失败按「无 amendment 事实」处理（保守方向：普通门
+    /// 语义）。
+    fn durable_reopened_amendment_record(&self) -> Option<WorkspaceSessionRecord> {
+        // 廉价前置过滤：内存三元组不匹配时无需落盘。两处调用点
+        // （complete_review 守卫、single_candidate_approval_gate）求值前均有
+        // durable refresh，不会用到陈旧值；即便携带陈旧值，下方 durable 记录
+        // 校验仍是权威判据。
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Completed)
+            || self.session.session_status != WorkspaceSessionStatus::WaitingForHuman
+        {
+            return None;
+        }
+        let store = self.lifecycle_store.as_ref()?;
+        let record = store.get_workspace_session(&self.session.session_id).ok()?;
+        if record.workspace_type != crate::product::models::WorkspaceType::WorkItemPlan
+            || record.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || record.status != WorkspaceSessionStatus::WaitingForHuman
+            || record.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Completed)
+        {
+            return None;
+        }
+        let coding_store =
+            crate::product::coding_attempt_store::CodingAttemptStore::new(store.app_paths());
+        coding_store
+            .find_open_plan_amendment_context_for_plan_session(
+                &record.project_id,
+                &record.issue_id,
+                &record.entity_id,
+                &record.id,
+            )
+            .ok()
+            .flatten()?;
+        Some(record)
+    }
+
+    /// 重开中的 amendment 门判别：内存三元组前置过滤 + durable amendment 事实
+    /// 绑定（见 `durable_reopened_amendment_record`）。首次审批门在重建时点
+    /// phase 只会在 Evaluate/Approval；伪造三元组（无 Open/Applying
+    /// PlanAmendmentContext）不会命中。
     pub(super) fn is_reopened_amendment_gate(&self) -> bool {
-        self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
-            && self.session.single_candidate_phase
-                == Some(crate::product::models::SingleCandidatePhase::Completed)
-            && self.session.session_status == WorkspaceSessionStatus::WaitingForHuman
+        self.durable_reopened_amendment_record().is_some()
     }
 
     pub(super) fn single_candidate_phase_for_action(
