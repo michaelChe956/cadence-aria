@@ -1,0 +1,155 @@
+{
+  "stage": "phase1_workitem_defect_to_advance",
+  "task": "5.3/8 amendment real run (plan A)",
+  "fixture_set": "defect",
+  "corpus": "09-amendment-defect.md",
+  "runs": [
+    {
+      "rep": 1,
+      "verdict": "fail",
+      "failure_class": "workspace_error",
+      "error": "compile markdown source failed: missing_section:50:结构化 section 缺少必需字段。",
+      "elapsed_sec": 115.717,
+      "started_at": "2026-09-03T10:42:31.288Z",
+      "finished_at": "2026-09-03T10:44:27.005Z",
+      "classification": "provider markdown compile failure (server-side compile of provider output: missing_section:50); non-environment, workspace_error attempt 1 of <=2",
+      "workspace_session_id": "workspace_session_0126",
+      "issue_id": "issue_0110"
+    },
+    {
+      "rep": 2,
+      "verdict": "pass",
+      "failure_class": null,
+      "elapsed_sec": 293.828,
+      "started_at": "2026-09-03T10:48:51.314Z",
+      "finished_at": "2026-09-03T10:53:45.144Z",
+      "issue_id": "issue_0111",
+      "plan_id": "issue_work_item_plan_0001",
+      "workspace_session_id": "workspace_session_0127",
+      "completed": true,
+      "session_status": "confirmed",
+      "confirmed_count": 1,
+      "provider_start_count": 2,
+      "human_script_executed": [
+        {
+          "sequence": 1,
+          "stage": "human_confirm",
+          "message_type": "human_gate_feedback",
+          "sentAt": "2026-09-03T10:53:16.148Z"
+        },
+        {
+          "sequence": 2,
+          "stage": "human_confirm",
+          "message_type": "confirm",
+          "sentAt": "2026-09-03T10:53:44.204Z"
+        }
+      ],
+      "advance_actions": [
+        {
+          "action_index": 2,
+          "command_id": "cmd-advance-2-04ed51f56a",
+          "decision": "send",
+          "status": "completed",
+          "attempt_id": "coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+          "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0111"
+        }
+      ],
+      "stage_durations_sec": {
+        "0:prepare_context": 0.027,
+        "1:running": 209.232,
+        "2:cross_review": 0.035,
+        "3:prepare_context": 54.928,
+        "4:human_confirm": 28.878,
+        "5:running": 0.044,
+        "6:completed": 0.075
+      },
+      "run_history": {
+        "repairs_used": 0,
+        "manual_repairs_used": 0,
+        "transitions_used": 1,
+        "initial_review_count": 1,
+        "verification_review_count": 0,
+        "review_cycles": {
+          "review:timeline_node_003": {
+            "repairs_used": 0,
+            "initial_count": 1,
+            "verification_count": 0
+          }
+        }
+      }
+    }
+  ],
+  "phase1_verdict": "pass (rep2; rep1 failed provider-compile workspace_error, retry 1 of <=2 used)",
+  "advance_record_durable": {
+    "id": "advance_cmd-advance-2-04ed51f56a",
+    "command_id": "cmd-advance-2-04ed51f56a",
+    "project_id": "project_0001",
+    "issue_id": "issue_0111",
+    "plan_id": "issue_work_item_plan_0001",
+    "plan_revision_id": "plan_revision_9a1355e69e3cca6d3db57370",
+    "attempt_id": "coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+    "status": "ready",
+    "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0111",
+    "error": null,
+    "created_at": "2026-09-03T10:53:45.112679316+00:00",
+    "updated_at": "2026-09-03T10:53:45.143174678+00:00"
+  },
+  "issue_shared_worktree": {
+    "id": "issue_shared_worktree_project_0001_issue_0111",
+    "branch_name": "aria/issues/issue_0111",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0111",
+    "status": "running",
+    "current_active_work_item_id": "WI-001",
+    "current_lock_owner_id": "coding_attempt_0e1328ed63964f2396e0ed12888e3ea4"
+  },
+  "group_attempt_snapshot_readback": {
+    "method": "independent HTTP GET (driver auto-readback hit internal TypeError 'elapsedMs is not a function' at ws.jsonl tail; non-fatal by design, handoff still written)",
+    "url": "http://127.0.0.1:4317/api/projects/project_0001/issues/issue_0111/coding-attempts/coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+    "attempt_id": "coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+    "attempt_status": "created",
+    "attempt_stage": "prepare_context",
+    "attempt_scope": "work_item_group",
+    "units": [
+      {
+        "logical_work_item_id": "WI-001",
+        "unit_id": "coding_unit_0001",
+        "status": "running"
+      }
+    ],
+    "group_coding_progress": [
+      {
+        "logical_work_item_id": "WI-001",
+        "unit_id": "coding_unit_0001",
+        "status": "running",
+        "stage": "prepare_context",
+        "current_commit": null,
+        "final_commit": null,
+        "code_review": null,
+        "handoff_revision_id": null,
+        "failure_or_blocked_reason": null,
+        "plan_revision_id": "plan_revision_9a1355e69e3cca6d3db57370"
+      }
+    ],
+    "group_progress": {
+      "total": 1,
+      "pending": 0,
+      "active": 1,
+      "completed": 0,
+      "failed_or_blocked": 0
+    },
+    "role_runs_empty": true,
+    "pending_gates_empty": true,
+    "readiness_summary": "coding attempt created+bound to plan_revision_9a1355e69e3cca6d3db57370, provider not started (role_runs empty), advance record durable status=ready"
+  },
+  "handoff": {
+    "path": "/tmp/aria-stage35-20260903/amendment/codex/rep2/handoff.json",
+    "sha256": "1b3bfed9c964430dfec49f0e50c82d8825db437544c6938a689a77ad1ec03628",
+    "plan_confirmation_status": "confirmed"
+  },
+  "known_risk_product_store_conflict": "did not materialize (confirm accepted at 10:53:44Z, gate closed, advance completed; no CAS conflict retries needed)",
+  "driver_internal_bug": {
+    "where": "workitem_run_campaign.mjs stage3 group snapshot readback IIFE (ws.jsonl event stage3_group_snapshot_readback_failed)",
+    "error": "elapsedMs is not a function",
+    "impact": "evidence-only; advance/handoff/finish unaffected"
+  }
+}

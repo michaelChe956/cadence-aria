@@ -1,0 +1,65 @@
+{
+  "stage": "phase2_coding_first_test_and_amendment_chain",
+  "task": "5.3/8 amendment real run (plan A)",
+  "handoff": "/tmp/aria-stage35-20260903/amendment/codex/rep2/handoff.json",
+  "handoff_source": "phase1 rep2 (rep1 failed provider-compile; task text named rep1 path but successful advance run is rep2)",
+  "criterion_A": {
+    "verdict": "NOT satisfied",
+    "reason": "coding attempt attach failed at preflight: create group coding attempt returned HTTP 400 before any WS connect/provider start; no permission/choice/stage events exist in coding segment",
+    "required_evidence_missing": [
+      "attempt_id (null in both runs)",
+      "coding stage timeline (empty)",
+      "permission/choice counts (0)"
+    ]
+  },
+  "criterion_B": {
+    "verdict": "not triggered (amendment_not_triggered)",
+    "reason": "coding segment never started, so BlockedByPlanDefect/plan_repair_required/三 WS 线 never reachable; B is best-effort and independent of A's failure"
+  },
+  "runs": [
+    {
+      "dir": "/tmp/aria-stage35-20260903/amendment/coding-codex-preflight-failed-20260903110158785",
+      "started_at": "2026-09-03T11:01:58.786Z",
+      "finished_at": "2026-09-03T11:01:58.848Z",
+      "elapsed_sec": 0.064,
+      "failure_class": "setup_or_preflight_error",
+      "error": "create group coding attempt HTTP 400: existing group coding attempt is only partially initialized or inconsistent",
+      "attempt_id": null,
+      "ws_connected": false,
+      "provider_started": false,
+      "permission_approvals": 0,
+      "choices": 0,
+      "stage_timeline": []
+    },
+    {
+      "dir": "/tmp/aria-stage35-20260903/amendment-retry2/coding-codex-preflight-failed-20260903111457905",
+      "started_at": "2026-09-03T11:14:57.906Z",
+      "finished_at": "2026-09-03T11:14:57.962Z",
+      "elapsed_sec": 0.057,
+      "failure_class": "setup_or_preflight_error",
+      "error": "create group coding attempt HTTP 400: existing group coding attempt is only partially initialized or inconsistent",
+      "attempt_id": null,
+      "ws_connected": false,
+      "provider_started": false,
+      "permission_approvals": 0,
+      "choices": 0,
+      "stage_timeline": []
+    }
+  ],
+  "failure_class": "setup_or_preflight_error (x2, deterministic, identical)",
+  "rerun_discipline": "non-environment failureClass limit 2 reached; both failed identically in <0.1s with zero provider involvement",
+  "root_cause": {
+    "deterministic": true,
+    "summary": "server create-group-coding-attempt endpoint cannot adopt an advance-created (sc_advance) attempt",
+    "chain": [
+      "coding_run_campaign.mjs always POSTs /work-item-plans/{plan}/coding-attempts to obtain the attempt (no attach/resume alternative)",
+      "handler src/web/handlers/coding/group.rs create_group_coding_attempt -> coding_store.prepare_group_initialization (admission_kind=LegacyGroup, worktree_path=None)",
+      "existing journal from advance (src/product/workspace_engine/advance.rs:493) was created with admission_kind=ScAdvance and worktree_path=Some(...)",
+      "journal_matches_request (src/product/coding_attempt_store/group_initialization.rs:684) full-equality check fails on admission_kind and worktree_path",
+      "-> incomplete_group_attempt('initialization journal identity differs from the authoritative request') -> 400 coding_group_attempt_incomplete"
+    ],
+    "impact": "documented two-stage handoff (workitem driver advance -> coding driver) is broken at the seam; coding driver has no API path to attach to an sc_advance attempt (plan A amendment 轮 blocked)"
+  },
+  "server_health_after": "ok (checked after both failures)",
+  "repro": "curl -s -X POST http://127.0.0.1:4317/api/projects/project_0001/issues/issue_0111/work-item-plans/issue_work_item_plan_0001/coding-attempts -H 'content-type: application/json' -d '{}' -> {code: coding_group_attempt_incomplete}"
+}
