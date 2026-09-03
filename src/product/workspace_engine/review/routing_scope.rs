@@ -497,20 +497,50 @@ impl WorkspaceEngine {
     }
 
     pub(super) fn single_candidate_approval_gate(&self, history: &RunHistory) -> HumanGateSnapshot {
+        // I-1（REQ-CG-02 amendment 分叉）：普通 SC 修订门重建 = 重置为
+        // 「默认预算 − run_history 计数」（与初始 author Evaluate-pass 同构，
+        // campaign 用例锚定）；而 amendment 门（attempt AwaitingPlanAmendment 期间
+        // 重开的原门，重开特征 = durable phase 仍为 Completed）重建时 MUST 接续
+        // 现有 human_gate_snapshot 的 manual_repairs_remaining——typed amendment
+        // turn 只扣快照、不递增 run_history 计数，重置公式会凭空恢复已耗预算。
+        let manual_repairs_remaining = if self.is_reopened_amendment_gate() {
+            self.session
+                .human_gate_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.manual_repairs_remaining)
+                .unwrap_or_else(|| {
+                    RunBudgets::default()
+                        .max_manual_repairs
+                        .saturating_sub(history.manual_repairs_used)
+                })
+        } else {
+            RunBudgets::default()
+                .max_manual_repairs
+                .saturating_sub(history.manual_repairs_used)
+        };
         HumanGateSnapshot {
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
             attempts_used: history
                 .repairs_used
                 .saturating_add(history.manual_repairs_used),
-            manual_repairs_remaining: RunBudgets::default()
-                .max_manual_repairs
-                .saturating_sub(history.manual_repairs_used),
+            manual_repairs_remaining,
             // 阶段 1 的 gate schema 是唯一的人工审批快照载体；有效候选无 finding，
             // 仍用其既有 trigger 以避免新增决策协议。
             trigger: HumanReason::NativeHumanRequired,
             resumable: true,
         }
+    }
+
+    /// 重开中的 amendment 门特征：SingleCandidate 会话已过首次批准（durable
+    /// phase Completed），但会话状态又回到 WaitingForHuman。唯一合法来源是
+    /// `compare_and_reopen_amendment_gate`（REQ-GCE-03 场景二）——首次审批门
+    /// 在此时点 phase 只会是 Evaluate/Approval，不会误命中。
+    pub(super) fn is_reopened_amendment_gate(&self) -> bool {
+        self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.single_candidate_phase
+                == Some(crate::product::models::SingleCandidatePhase::Completed)
+            && self.session.session_status == WorkspaceSessionStatus::WaitingForHuman
     }
 
     pub(super) fn single_candidate_phase_for_action(

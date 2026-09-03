@@ -645,7 +645,7 @@ fn evaluate_gate_revision_fixture(
 /// rep4 fixture 的 WI-003 提供了 `contract.levels-integration` 却没有消费者;
 /// 批准链 canonical 校验(`unconsumed_required_handoff`,Error 级)会拒绝原文。
 /// 逐行剔除该 provided 行(其余逐字保留),与 campaign 基座候选同构。
-fn handoff_clean_rep4() -> String {
+pub(crate) fn handoff_clean_rep4() -> String {
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
@@ -656,7 +656,7 @@ fn handoff_clean_rep4() -> String {
     )
 }
 
-fn handoff_clean_rep4_v2() -> String {
+pub(crate) fn handoff_clean_rep4_v2() -> String {
     handoff_clean_rep4().replace("Backend levels API", "Backend levels API round-2")
 }
 

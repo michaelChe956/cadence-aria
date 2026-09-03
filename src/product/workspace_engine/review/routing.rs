@@ -17,6 +17,10 @@ impl WorkspaceEngine {
         completion: ProviderCompletion,
         verdict: ReviewVerdict,
     ) {
+        // 终态会话丢弃迟到评审 verdict；但重开中的 amendment 门（REQ-GCE-03
+        // 场景二）durable phase 仍为 Completed、会话状态已回到 WaitingForHuman，
+        // 其重启评审的 Pass 必须继续走 policy route 重建 Approval 门（I-1），
+        // 不得被本守卫当作已完结会话丢弃。
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
             && matches!(
                 self.session.single_candidate_phase,
@@ -25,6 +29,7 @@ impl WorkspaceEngine {
                         | crate::product::models::SingleCandidatePhase::Failed
                 )
             )
+            && !self.is_reopened_amendment_gate()
         {
             return;
         }
