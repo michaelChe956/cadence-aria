@@ -34,6 +34,7 @@ import {
   reviewRepairAction,
   reviewCycleId,
   prepareOptionsForProvider,
+  prepareOptionsForSet,
   resultTemplate,
   sessionStateProtocol,
   skipOptionalFindingsOption,
@@ -815,6 +816,48 @@ test('prepare request serializes the auto policy using the server snake_case fie
   );
 });
 
+test('prepareOptionsForSet 按 fixture set 联动：levels 默认保持全栈形态不变', () => {
+  assert.deepEqual(
+    prepareOptionsForSet('levels'),
+    {
+      story_spec_ids: ['story_spec_0001'],
+      design_spec_ids: ['design_spec_0001'],
+      author_provider: null,
+      reviewer_provider: null,
+      review_rounds: 1,
+      superpowers_enabled: true,
+      openspec_enabled: true,
+      run_policy: 'auto_if_valid',
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    },
+  );
+});
+
+test('prepareOptionsForSet minimal/defect 为单契约后端工作项关闭拆分与集成测试', () => {
+  const minimal = prepareOptionsForSet('minimal');
+  const defect = prepareOptionsForSet('defect');
+  for (const options of [minimal, defect]) {
+    assert.equal(options.force_frontend_backend_split, false);
+    assert.equal(options.include_integration_tests, false);
+    assert.equal(options.include_e2e_tests, false);
+  }
+  // 除联动三开关外，其余字段必须与 levels 逐字一致。
+  const levels = prepareOptionsForSet('levels');
+  for (const options of [minimal, defect]) {
+    for (const [key, value] of Object.entries(levels)) {
+      if (key === 'force_frontend_backend_split' || key === 'include_integration_tests') continue;
+      assert.deepEqual(options[key], value, `字段 ${key} 必须与 levels 一致`);
+    }
+  }
+});
+
+test('prepareOptionsForSet 对未知 fixture set fail-closed', () => {
+  assert.throws(() => prepareOptionsForSet('bogus'), /不支持的 fixture set/);
+});
+
 test('SingleCandidate 的 result 模板承载确认数、持续时间、完整去重账本与旧决策审计', () => {
   const result = resultTemplate('codex', 1, '/tmp/out', {}, 'digest', 'auto_if_valid');
 
@@ -968,6 +1011,28 @@ test('dry-run 对未知 fixture set fail-closed（非零退出且错误信息含
   );
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /ARIA_FIXTURE_SET/);
+});
+
+test('dry-run 的 prepare_options 反映选中 fixture set 的联动值（minimal 关闭拆分与集成测试）', () => {
+  const driver = path.join(CAMPAIGN_DIR, 'workitem_run_campaign.mjs');
+  const repoRoot = path.resolve(CAMPAIGN_DIR, '../../..');
+  for (const set of ['minimal', 'defect']) {
+    const run = spawnSync(
+      process.execPath,
+      [driver, 'codex', '1', '/tmp/aria-phase2-policy-test', '--dry-run'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: { ...process.env, ARIA_FIXTURE_SET: set },
+      },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    const output = JSON.parse(run.stdout);
+    assert.equal(output.fixture_set, set);
+    assert.equal(output.prepare_options.force_frontend_backend_split, false);
+    assert.equal(output.prepare_options.include_integration_tests, false);
+    assert.equal(output.prepare_options.include_e2e_tests, false);
+  }
 });
 
 test('coding driver 只消费 Confirmed handoff，不读取 WorkItem SingleCandidate 协议也不发送其旧决策', () => {
