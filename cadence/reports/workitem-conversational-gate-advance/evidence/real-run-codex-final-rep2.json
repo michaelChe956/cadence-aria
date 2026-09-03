@@ -1,0 +1,101 @@
+{
+  "provider": "codex",
+  "repetition": 2,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-stage35-20260903/final/codex/rep2",
+  "startedAt": "2026-09-03T15:42:56.776Z",
+  "finishedAt": "2026-09-03T15:43:53.973Z",
+  "elapsedSec": 57.196,
+  "issue_id": "issue_0116",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0133",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": false,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": false,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "06c21f688275c4adeba56ae625089ff5fa9061d62c8197c31f1bbfe2f1d4e8db",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "40070cbb35dcdcb906a6660d77bd037b80674910c587fee9f3c8b9c93abb37f6"
+  },
+  "description_digest": "aacd469fe7efc8bedc3653b737967dc55aaf57097a23b5ccf1f60085d5b20204",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.664,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.692,
+      "source": "session_state"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [],
+  "validator_findings": [],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "compile markdown source failed: missing_section:1:文档必须包含固定一级标题。; missing_section:1:文档必须至少包含一个 Work Item。",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [],
+  "human_gate_turns": [],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 57196,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.028,
+    "1:running": 56.504
+  },
+  "evidence_note": {
+    "supervisor_ruling": "rep2 复跑一次(2026-09-03 裁决A);rep2 再败即停",
+    "empty_delivery_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 (SHA-256 of empty string)",
+    "durable_source": "issue_0116/work-item-plan-sources/issue_work_item_plan_0001/source_revision/source-e3b0c44298fc1c14.json",
+    "session_terminal": "open + single_candidate_phase=failed"
+  }
+}
