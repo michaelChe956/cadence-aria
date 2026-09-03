@@ -11,6 +11,7 @@ use crate::product::coding_attempt_store::{
     AuthoritativeGroupPlanBinding, CodingGroupInitializationPhase,
 };
 use crate::product::coding_models::AttemptTargetSnapshot;
+use crate::product::coding_models::CodingAdmissionKind;
 use crate::product::issue_store::IssueStore;
 use crate::product::logical_codebase::{
     LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
@@ -82,10 +83,20 @@ pub async fn create_group_coding_attempt(
     // 已存在 journal 是本次初始化的权威重放输入：快照在 Prepared 时已冻结，
     // 不能重新 capture（captured_at 会变化）。仍由 journal_matches_request 对此值作
     // 全等校验，确保后续持久化的 attempt 与 journal 一致。
+    // 准入身份同理：journal 可能由 sc_advance 入口创建（admission_kind=ScAdvance、
+    // worktree_path=Some(...)），create 端点必须按 journal 冻结值重放收养，而非拿
+    // 新建请求的 LegacyGroup/None 硬对；无 journal 时保持既有新建语义不变。
     let target_snapshot = match pending_journal.as_ref() {
         Some(journal) => journal.attempt.target_snapshot.clone(),
         None => group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?,
     };
+    let replay_admission_kind = pending_journal
+        .as_ref()
+        .map(|journal| journal.attempt.admission_kind)
+        .unwrap_or(CodingAdmissionKind::LegacyGroup);
+    let replay_worktree_path = pending_journal
+        .as_ref()
+        .and_then(|journal| journal.attempt.worktree_path.clone());
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
     let shared_worktree_path = repository
@@ -112,7 +123,7 @@ pub async fn create_group_coding_attempt(
         current_work_item_id: current_unit.logical_work_item_id.clone(),
         base_branch: base_branch.clone(),
         branch_name: branch_name.clone(),
-        worktree_path: None,
+        worktree_path: replay_worktree_path,
         provider_config_snapshot,
         target_snapshot,
         max_auto_rework: 2,
@@ -131,10 +142,11 @@ pub async fn create_group_coding_attempt(
         .await
         .map_err(product_store_api_error)?;
     let mut journal = coding_store
-        .prepare_group_initialization(
+        .prepare_group_initialization_with_admission(
             &initialization_input,
             &authoritative.plan_revision_id,
             &authoritative.units,
+            replay_admission_kind,
         )
         .map_err(group_initialization_api_error)?;
     maybe_interrupt_group_initialization(
