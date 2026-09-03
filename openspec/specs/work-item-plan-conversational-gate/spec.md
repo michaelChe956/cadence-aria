@@ -106,3 +106,17 @@
 
 - **WHEN** 用户对 `stopped_needs_human` 的 auto session 经现有接管端点发起接管操作
 - **THEN** 系统创建新 interactive session，继承原门快照与剩余预算进入对话式人工门，可发送 `human_gate_feedback`；原 session 事件前缀不变，接管会话的人工预算等于快照剩余值；重复接管返回同一 child
+
+### Requirement: 修订门重开快照保留（REQ-CG-07）
+
+SC 计划批准的 durable Confirmed 终态 SHALL 保留 human gate snapshot 与最近一次 Markdown 候选文本作为修订门重开与预算接续的唯一来源；系统 SHALL NOT 在批准落库时清除该快照。
+
+#### Scenario: 批准后快照在场供修订门重开
+
+- **WHEN** 单候选计划经 approve→compile 落入 Confirmed+Completed 终态
+- **THEN** durable session 记录仍保留 human gate snapshot，后续 amendment 反馈可经 CAS 重开同一门并从同一快照接续预算
+
+#### Scenario: 修订基线回落到最近 Markdown 制品
+
+- **WHEN** 修订回合构建 prompt 时当前 artifact 版本无 markdown（如已被投影版本覆盖）
+- **THEN** 系统 SHALL 回落取最近一个 Markdown artifact version（批准时的计划文本）作为修订基线；版本列表完全无 Markdown 时按候选缺失拒绝

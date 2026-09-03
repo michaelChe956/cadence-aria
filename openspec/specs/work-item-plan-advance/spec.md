@@ -57,3 +57,17 @@
 
 - **WHEN** legacy plan 经既有入口进入 group coding
 - **THEN** 其行为与本 change 前完全一致：不经过 advance、不适用 REQ-GCE-01 依赖门、session `flow_kind` 保持原值不变
+
+### Requirement: SC 编译源草稿落盘（REQ-ADV-04）
+
+SC 初始计划编译 SHALL 在任何 work item revision 可见之前，将编译输入中的 accepted draft records 持久化到草稿库，使 advance 的权威绑定解析可溯源；恢复重放 SHALL 幂等（同 draft_id 同内容覆盖写）。
+
+#### Scenario: 真实链 SC confirm 后 advance 可解析溯源
+
+- **WHEN** 单候选计划经真实批准链 Confirmed 后客户端调用 advance
+- **THEN** 权威绑定解析从草稿库命中每个 work item revision 的 source draft，group initialization 通过，不因溯源缺失拒绝
+
+#### Scenario: 编译恢复重放幂等
+
+- **WHEN** SC 编译在提交段崩溃后经恢复重放
+- **THEN** 草稿库中每个 draft record 恰一份且与首次落盘字节一致，无重复无冲突

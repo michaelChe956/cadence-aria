@@ -73,3 +73,12 @@ group coding workspace 是 coding 的唯一观察面；系统 SHALL 提供每个
 
 - **WHEN** 客户端读取 SC-linked group workspace 的数据面（既有 group attempt/unit API）
 - **THEN** 每个 `logical_work_item_id` 可读到 unit 状态/当前 stage、当前与最终 commit、code review 结果、handoff 结果、失败或阻塞原因、plan revision binding，以及 group 聚合进度；数据均来自 group attempt/unit 派生，SC per-WI session 不出现在来源链中
+
+### Requirement: 修订出版中窗崩溃恢复（REQ-GCE-05）
+
+修订出版过程在任一 checkpoint 崩溃后，同 command 的重新确认 SHALL 从既有出版 journal 重放恢复（校验 confirmation 与 manifest 一致），不因重建身份不匹配而 fail-closed；既有 journal 与本次冲突时 SHALL 以显式冲突拒绝。
+
+#### Scenario: 中窗崩溃后重确认恢复出版
+
+- **WHEN** 修订出版在 work item revision 已发布、plan revision 未发布的中间窗口崩溃，客户端重启后重发同一确认命令
+- **THEN** 系统发现既有出版 journal 即按重放分支校验并继续完成出版，group attempt 保持同一身份恢复
