@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import * as codingDriverModule from './coding_run_campaign.mjs';
 import {
   amendmentChildConfirmPlan,
   amendmentChildReconnectPlan,
@@ -618,4 +619,375 @@ test('dry-run 回归：未设 ARIA_AMENDMENT_SCRIPT 时 amendment 关闭、不�
   );
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /ARIA_AMENDMENT_SCRIPT/u);
+});
+
+// —— ⑨ liveness 修复轮(Finding 1/2)：跨 socket 竞态与断线窗口内 turn 已完结 ——
+// 新符号经命名空间解构获取：修复落地前为 undefined，红测只落在新增场景用例上，
+// 既有 21 用例不受命名导入错误牵连。
+const {
+  amendmentDurableGateTurns,
+  amendmentReplayedTurnReconciliation,
+  createAmendmentRuntime,
+} = codingDriverModule;
+
+// 假 workspace WS：只记录出站消息，由测试按序触发 onopen/onmessage。
+function fakeWorkspaceSocketFactory(bucket) {
+  return class FakeWorkspaceSocket {
+    constructor(url) {
+      this.url = url;
+      this.sent = [];
+      this.onopen = null;
+      this.onmessage = null;
+      this.onclose = null;
+      bucket.push(this);
+    }
+
+    send(raw) {
+      this.sent.push(JSON.parse(raw));
+    }
+
+    close() {}
+
+    fireOpen() {
+      this.onopen?.();
+    }
+
+    fireMessage(message) {
+      this.onmessage?.({ data: JSON.stringify(message) });
+    }
+  };
+}
+
+function amendmentRuntimeHarness({ actions, ariaRoot, attemptId = 'attempt_0001' }) {
+  const sockets = [];
+  const hooks = {
+    failures: [],
+    logs: [],
+    fail(failureClass, error) {
+      hooks.failures.push({ failureClass, error: String(error?.message ?? error) });
+    },
+    log(entry) {
+      hooks.logs.push(entry);
+    },
+    noteUsage() {},
+    elapsedSec: () => 0,
+  };
+  const runtime = createAmendmentRuntime({
+    attemptId,
+    actions,
+    projectId: 'project_0001',
+    issueId: 'issue_0001',
+    hooks,
+    deps: {
+      WebSocketCtor: fakeWorkspaceSocketFactory(sockets),
+      wsBase: 'ws://driver-test',
+      ariaRoot,
+    },
+  });
+  const socketOf = (sessionId) => sockets.find(
+    (socket) => socket.url === `ws://driver-test/api/workspace-sessions/${sessionId}/ws`,
+  );
+  return { runtime, hooks, sockets, socketOf };
+}
+
+function planRepairRequiredWire({ parentSessionId = 'session_plan_0001', childSessionId = 'session_child_0001' } = {}) {
+  return {
+    type: 'plan_repair_required',
+    request: { id: 'repair_0001', amendment_id: null },
+    session_link: {
+      id: 'link_0001',
+      relation: 'plan_repair',
+      parent_session_id: parentSessionId,
+      child_session_id: childSessionId,
+      trigger: {
+        attempt_id: 'attempt_0001',
+        unit_run_id: 'run_0001',
+        review_id: null,
+        finding_id: 'finding_0001',
+        repair_request_id: 'repair_0001',
+        amendment_id: '',
+        fingerprint: 'fp',
+        base_plan_revision_id: 'rev_0001',
+      },
+      return_context: {
+        original_attempt_id: 'attempt_0001',
+        original_unit_run_id: 'run_0001',
+        timeline_anchor_id: 'node_0001',
+        original_route: '/workbench/projects/project_0001/issues/issue_0001/coding/attempt_0001',
+      },
+      created_at: '2026-09-03T00:00:00.000Z',
+    },
+  };
+}
+
+function childHumanConfirmState() {
+  return {
+    type: 'session_state',
+    stage: 'human_confirm',
+    plan_repair: {
+      request: { id: 'repair_0001', amendment_id: 'plan_amendment_0001' },
+      amendment: { id: 'plan_amendment_0001' },
+    },
+  };
+}
+
+const SINGLE_ROUND_ACTIONS = [
+  { decision: 'request-change', description: '移除对 config/hello.json 的依赖,问候文案固定为 hello' },
+  { decision: 'confirm', description: null },
+];
+
+function writeDurableTurn({ ariaRoot, turn }) {
+  const directory = path.join(
+    ariaRoot, 'projects', 'project_0001', 'issues', 'issue_0001',
+    'workspace-sessions', turn.session_id, 'human-gate-turns',
+  );
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, `${turn.turn_id}.json`), JSON.stringify(turn), 'utf8');
+}
+
+function durableTurnOf({ attemptId, actionIndex, turnId, status, failureClass = null }) {
+  return {
+    turn_id: turnId,
+    session_id: 'session_plan_0001',
+    command_id: amendmentFeedbackCommandId({ attemptId, actionIndex }),
+    feedback_text: '移除对 config/hello.json 的依赖,问候文案固定为 hello',
+    status,
+    attempt_no: 1,
+    budget_reserved: 1,
+    source_hash: 'a'.repeat(64),
+    result_artifact_ref: status === 'completed' ? 'artifact:rev_0002' : null,
+    failure_class: failureClass,
+    created_at: '2026-09-03T00:00:00.000Z',
+    updated_at: '2026-09-03T00:01:00.000Z',
+  };
+}
+
+test('Finding 1：child human_confirm 快照先于父线 turn 完结到达时，turn 完结后必须补发 confirm（不得停摆到硬超时）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-amendment-liveness1-'));
+  const { runtime, hooks, socketOf } = amendmentRuntimeHarness({
+    actions: SINGLE_ROUND_ACTIONS,
+    ariaRoot: path.join(tmp, 'aria'),
+  });
+  runtime.onCodingControl(planRepairRequiredWire());
+  const parent = socketOf('session_plan_0001');
+  const child = socketOf('session_child_0001');
+  const commandId = amendmentFeedbackCommandId({ attemptId: 'attempt_0001', actionIndex: 0 });
+
+  parent.fireOpen();
+  assert.ok(
+    parent.sent.some((message) => message.type === 'human_gate_feedback' && message.command_id === commandId),
+    '首发即发出游标 0 的 typed feedback（确定性 command_id）',
+  );
+  child.fireOpen();
+
+  // 竞态：child 的 human_confirm 快照先到——此时游标仍在 request-change，只能 wait（gate_turn_pending）。
+  child.fireMessage(childHumanConfirmState());
+  assert.equal(
+    child.sent.some((message) => message.type === 'confirm_plan_amendment'),
+    false,
+    '游标未落位前不得提前 confirm',
+  );
+
+  // 随后父线 turn 完结：游标推进到 confirm——之后没有任何新的 child session_state 再到达。
+  parent.fireMessage({ type: 'human_gate_turn_open', command_id: commandId, turn_id: 'turn_0001', remaining_budget: 1 });
+  parent.fireMessage({ type: 'human_gate_turn_completed', turn_id: 'turn_0001', artifact_ref: 'artifact:rev_0002' });
+
+  assert.deepEqual(hooks.failures, []);
+  assert.ok(
+    child.sent.some((message) => message.type === 'confirm_plan_amendment' && message.amendment_id === 'plan_amendment_0001'),
+    'turn 完结推进游标后必须用缓存的 childStage/childAmendmentId 重求值 child 确认计划并补发 confirm',
+  );
+  runtime.close();
+});
+
+test('Finding 2：replayed turn_open 撞上断线窗口内已 terminal 的 durable turn → 回读对账直接推进，不等不会再来的 turn_completed', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-amendment-liveness2-'));
+  const ariaRoot = path.join(tmp, 'aria');
+  const commandId = amendmentFeedbackCommandId({ attemptId: 'attempt_0001', actionIndex: 0 });
+  writeDurableTurn({ ariaRoot, turn: durableTurnOf({ attemptId: 'attempt_0001', actionIndex: 0, turnId: 'turn_0001', status: 'completed' }) });
+
+  const { runtime, hooks, socketOf } = amendmentRuntimeHarness({ actions: SINGLE_ROUND_ACTIONS, ariaRoot });
+  runtime.onCodingControl(planRepairRequiredWire());
+  const parent = socketOf('session_plan_0001');
+  const child = socketOf('session_child_0001');
+
+  child.fireOpen();
+  child.fireMessage(childHumanConfirmState());
+  parent.fireOpen();
+  assert.ok(
+    parent.sent.some((message) => message.type === 'human_gate_feedback' && message.command_id === commandId),
+    '确定性 command_id 重发/首发（进程重启后同值命中服务端 durable 查重）',
+  );
+
+  // 服务端对 Replayed 一律回 human_gate_turn_open，不区分 turn 是否已 Completed；
+  // turn_completed 不会再来了——不回读 durable 记录就会永久等待。
+  parent.fireMessage({ type: 'human_gate_turn_open', command_id: commandId, turn_id: 'turn_0001', remaining_budget: 0 });
+
+  assert.deepEqual(hooks.failures, []);
+  assert.ok(
+    child.sent.some((message) => message.type === 'confirm_plan_amendment' && message.amendment_id === 'plan_amendment_0001'),
+    '必须凭 durable terminal 记录推进游标并发出 confirm，而不是等待不会到来的 turn_completed',
+  );
+  assert.ok(
+    hooks.logs.some((entry) => entry.event === 'amendment_turn_reconciled_from_durable'),
+    '对账推进必须留下 amendment_turn_reconciled_from_durable 审计日志',
+  );
+  runtime.close();
+});
+
+test('Finding 2 守恒：durable 记录非 terminal（running）时回读不推进，仍由 WS turn_completed 正常结算', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-amendment-liveness3-'));
+  const ariaRoot = path.join(tmp, 'aria');
+  const commandId = amendmentFeedbackCommandId({ attemptId: 'attempt_0001', actionIndex: 0 });
+  writeDurableTurn({ ariaRoot, turn: durableTurnOf({ attemptId: 'attempt_0001', actionIndex: 0, turnId: 'turn_0001', status: 'running' }) });
+
+  const { runtime, hooks, socketOf } = amendmentRuntimeHarness({ actions: SINGLE_ROUND_ACTIONS, ariaRoot });
+  runtime.onCodingControl(planRepairRequiredWire());
+  const parent = socketOf('session_plan_0001');
+  const child = socketOf('session_child_0001');
+  child.fireOpen();
+  child.fireMessage(childHumanConfirmState());
+  parent.fireOpen();
+
+  parent.fireMessage({ type: 'human_gate_turn_open', command_id: commandId, turn_id: 'turn_0001', remaining_budget: 1 });
+  assert.equal(
+    child.sent.some((message) => message.type === 'confirm_plan_amendment'),
+    false,
+    'turn 仍在跑（durable status=running）：不得提前推进',
+  );
+
+  parent.fireMessage({ type: 'human_gate_turn_completed', turn_id: 'turn_0001', artifact_ref: 'artifact:rev_0002' });
+  assert.deepEqual(hooks.failures, []);
+  assert.ok(
+    child.sent.some((message) => message.type === 'confirm_plan_amendment' && message.amendment_id === 'plan_amendment_0001'),
+    '正常在线流程不受对账逻辑影响：WS turn_completed 到达即推进',
+  );
+  runtime.close();
+});
+
+test('Finding 2 重启自愈：进程重启后 cursor 归零重发，durable terminal 记录逐轮对账直到 confirm 发出', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-amendment-liveness4-'));
+  const ariaRoot = path.join(tmp, 'aria');
+  writeDurableTurn({ ariaRoot, turn: durableTurnOf({ attemptId: 'attempt_0001', actionIndex: 0, turnId: 'turn_0001', status: 'completed' }) });
+  writeDurableTurn({ ariaRoot, turn: durableTurnOf({ attemptId: 'attempt_0001', actionIndex: 1, turnId: 'turn_0002', status: 'completed' }) });
+  const twoRounds = [
+    { decision: 'request-change', description: '第一轮' },
+    { decision: 'request-change', description: '第二轮' },
+    { decision: 'confirm', description: null },
+  ];
+
+  const { runtime, hooks, socketOf } = amendmentRuntimeHarness({ actions: twoRounds, ariaRoot });
+  runtime.onCodingControl(planRepairRequiredWire());
+  const parent = socketOf('session_plan_0001');
+  const child = socketOf('session_child_0001');
+  const commandZero = amendmentFeedbackCommandId({ attemptId: 'attempt_0001', actionIndex: 0 });
+  const commandOne = amendmentFeedbackCommandId({ attemptId: 'attempt_0001', actionIndex: 1 });
+
+  child.fireOpen();
+  child.fireMessage(childHumanConfirmState());
+  parent.fireOpen();
+  assert.ok(parent.sent.some((message) => message.type === 'human_gate_feedback' && message.command_id === commandZero));
+
+  // 第 0 轮 replayed turn_open → durable terminal → 推进并立即续发第 1 轮（无需任何 WS 完结事件）。
+  parent.fireMessage({ type: 'human_gate_turn_open', command_id: commandZero, turn_id: 'turn_0001', remaining_budget: 0 });
+  assert.ok(
+    parent.sent.some((message) => message.type === 'human_gate_feedback' && message.command_id === commandOne),
+    '第一轮对账推进后必须立即续发第二轮 typed feedback',
+  );
+
+  // 第 1 轮 replayed turn_open → durable terminal → 推进到 confirm → 补发确认。
+  parent.fireMessage({ type: 'human_gate_turn_open', command_id: commandOne, turn_id: 'turn_0002', remaining_budget: 0 });
+  assert.deepEqual(hooks.failures, []);
+  assert.ok(
+    child.sent.some((message) => message.type === 'confirm_plan_amendment' && message.amendment_id === 'plan_amendment_0001'),
+    '两轮 durable 对账后游标落到 confirm，确认必须发出',
+  );
+  runtime.close();
+});
+
+test('amendmentDurableGateTurns：回读 human-gate-turns/*.json 的 command/turn/status；缺目录/坏文件/参数缺失按无记录处理且绝不抛出', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-amendment-durable-'));
+  const ariaRoot = path.join(tmp, 'aria');
+  // 目录不存在（尚无 turn 记录）→ 空列表。
+  assert.deepEqual(
+    amendmentDurableGateTurns({ ariaRoot, projectId: 'p', issueId: 'i', sessionId: 's' }),
+    [],
+  );
+  const directory = path.join(ariaRoot, 'projects', 'p', 'issues', 'i', 'workspace-sessions', 's', 'human-gate-turns');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'turn_0002.json'), JSON.stringify({
+    turn_id: 'turn_0002', session_id: 's', command_id: 'cmd-b', feedback_text: '乙',
+    status: 'failed', attempt_no: 1, budget_reserved: 1, source_hash: '',
+    result_artifact_ref: null, failure_class: 'provider_err', created_at: 't', updated_at: 't',
+  }), 'utf8');
+  fs.writeFileSync(path.join(directory, 'turn_0001.json'), JSON.stringify({
+    turn_id: 'turn_0001', session_id: 's', command_id: 'cmd-a', feedback_text: '甲',
+    status: 'completed', attempt_no: 1, budget_reserved: 1, source_hash: 'b'.repeat(64),
+    result_artifact_ref: 'artifact:rev_0002', failure_class: null, created_at: 't', updated_at: 't',
+  }), 'utf8');
+  fs.writeFileSync(path.join(directory, 'broken.json'), '{oops', 'utf8');
+  fs.writeFileSync(path.join(directory, 'readme.txt'), '不是 json', 'utf8');
+  assert.deepEqual(
+    amendmentDurableGateTurns({ ariaRoot, projectId: 'p', issueId: 'i', sessionId: 's' }),
+    [
+      {
+        command_id: 'cmd-a', turn_id: 'turn_0001', status: 'completed', attempt_no: 1,
+        budget_reserved: 1, result_artifact_ref: 'artifact:rev_0002', failure_class: null,
+      },
+      {
+        command_id: 'cmd-b', turn_id: 'turn_0002', status: 'failed', attempt_no: 1,
+        budget_reserved: 1, result_artifact_ref: null, failure_class: 'provider_err',
+      },
+    ],
+    '按 command_id 排序稳定输出；坏文件与非 .json 一律跳过',
+  );
+  // 参数缺失（生产侧未提供 project/issue/session）→ 空列表，不抛出。
+  assert.deepEqual(amendmentDurableGateTurns({ ariaRoot, projectId: null, issueId: 'i', sessionId: 's' }), []);
+  assert.deepEqual(amendmentDurableGateTurns({}), []);
+});
+
+test('amendmentReplayedTurnReconciliation：no_record / open_live / terminal / conflict 四态判定', () => {
+  const turns = [
+    {
+      command_id: 'cmd-a', turn_id: 'turn_0001', status: 'completed', attempt_no: 1,
+      budget_reserved: 1, result_artifact_ref: 'artifact:rev_0002', failure_class: null,
+    },
+    {
+      command_id: 'cmd-b', turn_id: 'turn_0002', status: 'reserved', attempt_no: 1,
+      budget_reserved: 1, result_artifact_ref: null, failure_class: null,
+    },
+    {
+      command_id: 'cmd-c', turn_id: 'turn_0003', status: 'failed', attempt_no: 2,
+      budget_reserved: 1, result_artifact_ref: null, failure_class: 'timeout',
+    },
+  ];
+  assert.deepEqual(
+    amendmentReplayedTurnReconciliation({ commandId: 'cmd-zz', turnId: 'turn_0009', turns }),
+    { kind: 'no_record' },
+  );
+  assert.deepEqual(
+    amendmentReplayedTurnReconciliation({ commandId: 'cmd-b', turnId: 'turn_0002', turns }),
+    { kind: 'open_live', turn_id: 'turn_0002' },
+    'turn 仍 reserved/running：照常等 WS 事件，不得提前推进',
+  );
+  assert.deepEqual(
+    amendmentReplayedTurnReconciliation({ commandId: 'cmd-a', turnId: 'turn_0001', turns }),
+    {
+      kind: 'terminal', turn_id: 'turn_0001', status: 'completed', source: 'durable_turn_record',
+      result_artifact_ref: 'artifact:rev_0002', failure_class: null,
+    },
+  );
+  assert.deepEqual(
+    amendmentReplayedTurnReconciliation({ commandId: 'cmd-c', turnId: 'turn_0003', turns }),
+    {
+      kind: 'terminal', turn_id: 'turn_0003', status: 'failed', source: 'durable_turn_record',
+      result_artifact_ref: null, failure_class: 'timeout',
+    },
+    'failed 同样是 terminal：按 durable 结果走 amendmentGateTurnOutcome 的失败分支',
+  );
+  assert.deepEqual(
+    amendmentReplayedTurnReconciliation({ commandId: 'cmd-a', turnId: 'turn_0099', turns }),
+    { kind: 'conflict', observed_turn_id: 'turn_0099', record_turn_id: 'turn_0001' },
+    'command 命中但 turn_id 不一致：durable 记录不可信，保守回退等待 WS 事件',
+  );
 });
