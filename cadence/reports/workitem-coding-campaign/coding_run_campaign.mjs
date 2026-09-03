@@ -7,6 +7,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  campaignCommandId,
+  parseHumanScript,
+  stage3OutboundLogEntry,
+} from './workitem_run_campaign.mjs';
+
 const HARD_LIMIT_MS = Number(
   process.env.ARIA_CODING_HARD_TIMEOUT_MS ?? process.env.ARIA_HARD_TIMEOUT_MS ?? 60 * 60_000,
 );
@@ -209,6 +215,616 @@ function readinessIsComplete(message) {
   return readiness?.status === 'complete' && Array.isArray(readiness.diagnostics) && readiness.diagnostics.length === 0;
 }
 
+// —— Task 5.1 amendment 模式（ARIA_AMENDMENT_SCRIPT，8.4a 形态）——
+// wire 依据：cadence/reports/workitem-conversational-gate-advance/evidence/amendment-wire-notes.md
+// 三条 WS 线：① 原 plan session（session_link.parent_session_id）发 human_gate_feedback 过
+// amendment turn；② child repair session（session_link.child_session_id）发
+// confirm_plan_amendment 触发出版；③ coding WS 只收控制事件，resume 一律 durable 回读判定。
+
+// 解析 ARIA_AMENDMENT_SCRIPT（语法复用 parseHumanScript）。未设置返回 null（零行为变化）；
+// 设置后 fail-closed：仅接受 request-change:<文本> 与 confirm，且必须以 request-change 开始、
+// 至少含一条 confirm（出版确认是 resume 的必要环节）。
+function amendmentScriptFromEnv(env = process.env) {
+  const raw = env.ARIA_AMENDMENT_SCRIPT;
+  if (raw === undefined || raw === null) return null;
+  if (String(raw).trim() === '') {
+    throw new Error('ARIA_AMENDMENT_SCRIPT 不能为空（未设置即维持既有 fail-closed 行为；启用需提供 request-change:<文本> 与 confirm 动作）');
+  }
+  const actions = parseHumanScript(raw);
+  for (const [index, action] of actions.entries()) {
+    if (action.decision !== 'request-change' && action.decision !== 'confirm') {
+      throw new Error(`ARIA_AMENDMENT_SCRIPT 第 ${index + 1} 条 ${action.decision} 在 amendment 链无对应动作（仅 request-change:<文本> 与 confirm）`);
+    }
+  }
+  if (!actions.some((action) => action.decision === 'request-change')) {
+    throw new Error('ARIA_AMENDMENT_SCRIPT 至少一条 request-change:<文本>（typed feedback 是修订候选的唯一来源）');
+  }
+  if (actions[0].decision !== 'request-change') {
+    throw new Error('ARIA_AMENDMENT_SCRIPT 第 1 条必须以 request-change 开始（confirm 只能出现在修订轮次之后）');
+  }
+  if (!actions.some((action) => action.decision === 'confirm')) {
+    throw new Error('ARIA_AMENDMENT_SCRIPT 至少一条 confirm（出版确认走 child repair session 的 confirm_plan_amendment）');
+  }
+  return actions;
+}
+
+// coding 控制消息的策略分派：未启用 amendment 模式时保持既有 fail-closed 零变化。
+function codingControlMessagePlan({ amendmentActions }) {
+  if (!amendmentActions) return { kind: 'fail', failureClass: 'unhandled_coding_control_message' };
+  return { kind: 'amendment' };
+}
+
+// 线①：amendment command_id 由 (attemptId, actionIndex) 确定性生成；重连/重复发送/进程重启
+// （同 attempt）都复用同值——服务端以 (session_id, command_id) durable 查重，重发回 Replayed+
+// 同 turn turn_open，不启 provider、预算不重复扣。非空且远小于 256 bytes 上限。
+function amendmentFeedbackCommandId({ attemptId, actionIndex }) {
+  if (typeof attemptId !== 'string' || !attemptId.trim()) {
+    throw new Error('amendmentFeedbackCommandId 要求非空 attemptId');
+  }
+  return campaignCommandId({
+    campaignRunId: `coding-amendment:${attemptId}`,
+    actionIndex,
+    kind: 'human_gate_feedback',
+  });
+}
+
+// 线① wire（逐字对齐 cheat-sheet ①）：{"type":"human_gate_feedback","command_id":C,"feedback":F}。
+function amendmentGateFeedbackMessage({ commandId, feedback }) {
+  if (typeof commandId !== 'string' || !commandId.trim()) {
+    throw new Error('human_gate_feedback 必须携带非空 command_id（服务端校验非空且 ≤256 bytes）');
+  }
+  if (typeof feedback !== 'string' || !feedback) {
+    throw new Error('human_gate_feedback 必须携带非空 feedback 文本');
+  }
+  return { type: 'human_gate_feedback', command_id: commandId, feedback };
+}
+
+// 线② wire（逐字对齐 cheat-sheet ②）：{"type":"confirm_plan_amendment","amendment_id":A}。
+function amendmentConfirmMessage({ amendmentId }) {
+  if (typeof amendmentId !== 'string' || !amendmentId.trim()) {
+    throw new Error('confirm_plan_amendment 必须携带非空 amendment_id');
+  }
+  return { type: 'confirm_plan_amendment', amendment_id: amendmentId };
+}
+
+// workspace session WS 端点（原 plan session 与 child repair session 共用同一路由形态）。
+function workspaceSessionWsUrl({ wsBase, sessionId }) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    throw new Error('workspaceSessionWsUrl 要求非空 sessionId');
+  }
+  return `${String(wsBase).replace(/\/$/, '')}/api/workspace-sessions/${encodeURIComponent(sessionId)}/ws`;
+}
+
+// 发现双源：plan_repair_required.session_link（完整对象，非 URL）与
+// coding_session_state.linked_plan_repair（durable，重连可恢复）都能独立发现同一 repair。
+function amendmentDiscoveryFromMessage(message) {
+  if (!message || typeof message !== 'object') return null;
+  if (message.type === 'plan_repair_required') {
+    const link = message.session_link ?? null;
+    const request = message.request ?? null;
+    return {
+      source: 'plan_repair_required',
+      parent_session_id: link?.parent_session_id ?? null,
+      child_session_id: link?.child_session_id ?? null,
+      amendment_id: request?.amendment_id ?? null,
+      repair_request_id: request?.id ?? null,
+    };
+  }
+  if (message.type === 'coding_session_state') {
+    const linked = message.linked_plan_repair ?? null;
+    if (!linked) return null;
+    return {
+      source: 'coding_session_state',
+      parent_session_id: linked.link?.parent_session_id ?? null,
+      child_session_id: linked.link?.child_session_id ?? null,
+      amendment_id: linked.amendment?.id ?? linked.request?.amendment_id ?? null,
+      repair_request_id: linked.request?.id ?? null,
+    };
+  }
+  return null;
+}
+
+function amendmentDiscoveryComplete(discovery) {
+  return Boolean(discovery)
+    && typeof discovery.parent_session_id === 'string' && discovery.parent_session_id.trim() !== ''
+    && typeof discovery.child_session_id === 'string' && discovery.child_session_id.trim() !== '';
+}
+
+// 线① 发送计划：inFlight 未完结（含断线重连）→ 同 command 重发；否则游标落位的
+// request-change → 新发送；其余（confirm/耗尽）→ 等待。
+function amendmentGateFeedbackPlan({ actions, cursor, inFlight, turnStatus }) {
+  if (inFlight) {
+    return {
+      kind: 'resend',
+      actionIndex: inFlight.actionIndex,
+      commandId: inFlight.commandId,
+      reason: turnStatus === 'open' ? 'turn_open_reconnect' : 'unacked_reconnect',
+    };
+  }
+  const action = actions[cursor];
+  if (action?.decision === 'request-change') {
+    return { kind: 'send', actionIndex: cursor, feedback: action.description };
+  }
+  return { kind: 'wait' };
+}
+
+// turn 完结推进游标；turn 失败仅当下一条仍是 request-change 才续发（不猜测恢复动作）。
+function amendmentGateTurnOutcome({ actions, cursor, turnStatus }) {
+  if (turnStatus === 'completed') return { kind: 'advanced', cursor: cursor + 1 };
+  if (turnStatus === 'failed') {
+    const next = actions[cursor + 1];
+    if (next?.decision === 'request-change') return { kind: 'advanced', cursor: cursor + 1 };
+    return { kind: 'fail', failureClass: 'amendment_turn_failed' };
+  }
+  throw new Error(`amendmentGateTurnOutcome 仅接受 completed/failed turn，实际为 ${String(turnStatus)}`);
+}
+
+// 线② 确认计划：仅 child stage=human_confirm 且游标落在 confirm 时发送；amendment id
+// 双源（child 快照 amendment/request 与 coding 侧发现）均缺则 fail-closed；coding 侧已收到
+// 该 amendment 的 plan_amendment_updated 时不再发送。
+function amendmentChildConfirmPlan({ actions, cursor, childStage, amendmentId, codingEventAmendmentIds }) {
+  if (childStage !== 'human_confirm') return { kind: 'wait', reason: 'child_stage_not_confirmable' };
+  const action = actions[cursor];
+  if (!action) return { kind: 'wait', reason: 'confirm_already_consumed' };
+  if (action.decision !== 'confirm') return { kind: 'wait', reason: 'gate_turn_pending' };
+  if (typeof amendmentId !== 'string' || !amendmentId.trim()) {
+    return { kind: 'fail', failureClass: 'amendment_id_unresolved' };
+  }
+  if (codingEventAmendmentIds.has(amendmentId)) return { kind: 'wait', reason: 'coding_event_received' };
+  return { kind: 'send', amendment_id: amendmentId, consume_cursor: cursor };
+}
+
+// 线② 重连重发：confirm 已发但 coding 侧未见该 amendment 的 durable 事件 → 重发同
+// amendment_id（服务端幂等，且 Pending delivery 需新连接真实写成功才落 Delivered）。
+function amendmentChildReconnectPlan({ childStage, amendmentId, codingEventAmendmentIds, confirmSentFor }) {
+  if (childStage !== 'human_confirm') return { kind: 'wait', reason: 'child_stage_not_confirmable' };
+  const target = amendmentId ?? confirmSentFor ?? null;
+  if (!confirmSentFor || !target) return { kind: 'wait', reason: 'nothing_in_flight' };
+  if (codingEventAmendmentIds.has(confirmSentFor)) return { kind: 'wait', reason: 'coding_event_received' };
+  return { kind: 'resend', amendment_id: target };
+}
+
+// plan_amendment_updated manifest 提取（字段逐字对齐 wire；event_id 为 durable 固定值）。
+function amendmentManifestFromUpdatedEvent(message) {
+  if (typeof message?.event_id !== 'string' || !message.event_id.trim()) {
+    throw new Error('plan_amendment_updated 缺少 event_id（durable event_id 形如 coding_plan_amendment_updated_{attempt}_{amendment}）');
+  }
+  const amendment = message.amendment ?? null;
+  if (typeof amendment?.id !== 'string' || !amendment.id.trim()) {
+    throw new Error('plan_amendment_updated 缺少 amendment.id');
+  }
+  return {
+    id: amendment.id,
+    repair_request_id: amendment.repair_request_id ?? null,
+    previous_plan_revision_id: amendment.previous_plan_revision_id ?? null,
+    new_plan_revision_id: amendment.new_plan_revision_id ?? null,
+    resume_target: amendment.resume_target ?? null,
+  };
+}
+
+// 按 event_id 幂等去重：断线重连后允许重收相同事件，driver 去重、不重发确认。
+function amendmentNoteUpdatedEvent(seenEventIds, message) {
+  const manifest = amendmentManifestFromUpdatedEvent(message);
+  const eventId = message.event_id;
+  const duplicate = seenEventIds.has(eventId);
+  if (!duplicate) seenEventIds.add(eventId);
+  return { duplicate, event_id: eventId, manifest };
+}
+
+// resume_target.mode → durable 判据（reexecute/revalidate/await_handoff，snake_case wire 值）。
+// 未知/缺失模式不进入此表，由判定函数 fail-closed。
+const AMENDMENT_RESUME_MODE_EXPECTATIONS = {
+  reexecute: { attempt_status: 'running', stage: 'coding', unit_status: 'running' },
+  revalidate: { stage: 'code_review', unit_status: 'needs_revalidation' },
+  await_handoff: { unit_status: 'awaiting_amendment' },
+};
+
+// durable resume 判定：绝不凭 plan_amendment_updated 单一事件判成功；必须等
+// coding_session_state/REST snapshot 满足同 attempt + status/stage/unit（按 resume_target.mode）
+// 条件；快照内联 linked_plan_repair 时校验 binding 已指向新 revision。任何身份漂移 fail-closed。
+function amendmentResumeJudgment({ expectedAttemptId, manifest, snapshot }) {
+  if (!manifest || typeof manifest.id !== 'string' || !manifest.id) {
+    return { kind: 'pending', reason: 'amendment_manifest_missing' };
+  }
+  const resumeTarget = manifest.resume_target ?? null;
+  const mode = resumeTarget?.mode ?? null;
+  const expectations = AMENDMENT_RESUME_MODE_EXPECTATIONS[mode];
+  if (!expectations) {
+    return { kind: 'fail', failureClass: 'amendment_resume_target_mode_unknown', mode };
+  }
+  if (!snapshot || typeof snapshot !== 'object') {
+    return { kind: 'pending', reason: 'snapshot_missing' };
+  }
+  if (snapshot.attempt_id !== expectedAttemptId) {
+    return { kind: 'fail', failureClass: 'amendment_resume_attempt_changed', snapshot_attempt_id: snapshot.attempt_id ?? null };
+  }
+  const targetWorkItemId = resumeTarget.logical_work_item_id;
+  const units = Array.isArray(snapshot.units) ? snapshot.units : [];
+  const resumeUnit = units.find((unit) => unit?.logical_work_item_id === targetWorkItemId);
+  if (!resumeUnit) {
+    return { kind: 'pending', reason: 'resume_target_unit_missing' };
+  }
+  const linkedNewRevision = snapshot.linked_plan_repair?.amendment?.new_plan_revision_id ?? null;
+  if (linkedNewRevision && manifest.new_plan_revision_id && linkedNewRevision !== manifest.new_plan_revision_id) {
+    return { kind: 'fail', failureClass: 'amendment_resume_binding_diverged', snapshot_new_plan_revision_id: linkedNewRevision };
+  }
+  const mismatches = [];
+  if (resumeUnit.status !== expectations.unit_status) {
+    mismatches.push(`unit:${resumeUnit.status}!=${expectations.unit_status}`);
+  }
+  if (expectations.stage && snapshot.stage !== expectations.stage) {
+    mismatches.push(`stage:${snapshot.stage}!=${expectations.stage}`);
+  }
+  if (expectations.attempt_status && snapshot.status !== expectations.attempt_status) {
+    mismatches.push(`status:${snapshot.status}!=${expectations.attempt_status}`);
+  }
+  if (mismatches.length) {
+    return { kind: 'pending', reason: 'conditions_not_met', mismatches };
+  }
+  return {
+    kind: 'resumed',
+    evidence: {
+      attempt_id: snapshot.attempt_id,
+      status: snapshot.status,
+      stage: snapshot.stage,
+      unit_status: resumeUnit.status,
+      amendment_id: manifest.id,
+      new_plan_revision_id: manifest.new_plan_revision_id,
+      resume_mode: mode,
+    },
+  };
+}
+
+// —— amendment 运行时：三条 WS 线的连接/重连/重发 wiring（决策全部委托上方纯函数）——
+// hooks 由 runCampaign 提供：{ fail, log, noteUsage, elapsedSec }。
+function createAmendmentRuntime({ attemptId, actions, hooks }) {
+  const RECONNECT_LIMIT = 40;
+  const RECONNECT_DELAY_MS = 1_000;
+  let cursor = 0;
+  let inFlight = null;
+  let turnStatus = null;
+  let discovery = null;
+  const discoverySources = new Set();
+  let linesStarted = false;
+  let closed = false;
+  let parentSocket = null;
+  let childSocket = null;
+  let parentReconnects = 0;
+  let childReconnects = 0;
+  let childStage = null;
+  let childAmendmentId = null;
+  let confirmSentFor = null;
+  let confirmSentAtSec = null;
+  const seenEventIds = new Set();
+  const codingEventAmendmentIds = new Set();
+  const gateTurnAudit = [];
+  let manifest = null;
+  let resumeEvidence = null;
+
+  const mergeDiscovery = (found) => {
+    if (!discovery) {
+      discovery = { parent_session_id: null, child_session_id: null, amendment_id: null, repair_request_id: null };
+    }
+    for (const key of ['parent_session_id', 'child_session_id', 'amendment_id', 'repair_request_id']) {
+      if (!discovery[key] && found[key]) discovery[key] = found[key];
+    }
+    if (found.source) discoverySources.add(found.source);
+  };
+  const resolveAmendmentId = () => childAmendmentId ?? discovery?.amendment_id ?? null;
+
+  const sendOn = (socket, line, message) => {
+    if (closed || !socket) return;
+    const logged = line === 'amendment_parent' ? stage3OutboundLogEntry(message) : message;
+    hooks.log({ direction: 'out', line, message: logged });
+    socket.send(JSON.stringify(message));
+  };
+
+  // —— 线①：原 plan session WS（session_link.parent_session_id）——
+  const driveGate = () => {
+    if (closed || !parentSocket) return;
+    const plan = amendmentGateFeedbackPlan({ actions, cursor, inFlight, turnStatus });
+    if (plan.kind === 'send') {
+      const commandId = amendmentFeedbackCommandId({ attemptId, actionIndex: plan.actionIndex });
+      inFlight = { actionIndex: plan.actionIndex, commandId, turnId: null };
+      gateTurnAudit.push({ actionIndex: plan.actionIndex, command_id: commandId, sentSec: hooks.elapsedSec(), status: 'sent' });
+      sendOn(parentSocket, 'amendment_parent', amendmentGateFeedbackMessage({ commandId, feedback: plan.feedback }));
+    } else if (plan.kind === 'resend') {
+      // 同 command 重发：服务端 durable 查重回 Replayed+同 turn turn_open，不启 provider、预算不重复扣。
+      sendOn(parentSocket, 'amendment_parent', amendmentGateFeedbackMessage({
+        commandId: plan.commandId,
+        feedback: actions[plan.actionIndex].description,
+      }));
+      hooks.log({ event: 'amendment_gate_feedback_resent', command_id: plan.commandId, reason: plan.reason });
+    }
+  };
+
+  const applyTurnOutcome = (outcome, message) => {
+    const previous = inFlight;
+    const audit = gateTurnAudit.find((entry) => entry.actionIndex === previous.actionIndex && entry.status === 'sent');
+    if (audit) {
+      audit.status = turnStatus;
+      audit.turn_id = previous.turnId;
+      audit.finishedSec = hooks.elapsedSec();
+    }
+    inFlight = null;
+    turnStatus = null;
+    if (outcome.kind === 'fail') {
+      hooks.fail(outcome.failureClass, `amendment turn 失败且脚本无下一轮 request-change: ${json({
+        actionIndex: previous.actionIndex,
+        failure_class: message.failure_class ?? null,
+        message: message.message ?? null,
+      })}`);
+      return;
+    }
+    cursor = outcome.cursor;
+    hooks.log({ event: 'amendment_turn_finished', status: message.type, turn_id: previous.turnId, next_cursor: cursor });
+    driveGate();
+  };
+
+  const handleParentInbound = (message) => {
+    if (message.type === 'human_gate_turn_open') {
+      if (inFlight && message.command_id === inFlight.commandId) {
+        turnStatus = 'open';
+        inFlight.turnId = typeof message.turn_id === 'string' ? message.turn_id : null;
+        hooks.log({
+          event: 'amendment_turn_open',
+          command_id: message.command_id,
+          turn_id: inFlight.turnId,
+          remaining_budget: message.remaining_budget ?? null,
+        });
+      }
+      return;
+    }
+    if (message.type === 'human_gate_turn_completed' || message.type === 'human_gate_turn_failed') {
+      if (inFlight && (inFlight.turnId === null || message.turn_id === inFlight.turnId)) {
+        turnStatus = message.type === 'human_gate_turn_completed' ? 'completed' : 'failed';
+        applyTurnOutcome(amendmentGateTurnOutcome({ actions, cursor, turnStatus }), message);
+      }
+      return;
+    }
+    if (message.type === 'human_gate_busy') {
+      hooks.fail('amendment_gate_busy', `amendment 门 busy（存在未完结 turn）: ${json({ command_id: inFlight?.commandId ?? null })}`);
+      return;
+    }
+    if (message.type === 'human_gate_closed') {
+      hooks.fail('amendment_gate_closed', `amendment 门已关闭（coding application 完成后回 Confirmed）而脚本仍有未完成动作: ${json({ cursor })}`);
+      return;
+    }
+    if (message.type === 'protocol_error') {
+      hooks.fail('amendment_protocol_error', `${message.code ?? 'protocol_error'}: ${message.message ?? ''}`);
+    }
+  };
+
+  const connectParent = () => {
+    if (closed || !discovery?.parent_session_id) return;
+    const socket = new WebSocket(workspaceSessionWsUrl({ wsBase: WS_BASE, sessionId: discovery.parent_session_id }));
+    parentSocket = socket;
+    socket.onopen = () => {
+      if (closed || parentSocket !== socket) return;
+      hooks.log({ event: 'amendment_parent_ws_open', session_id: discovery.parent_session_id });
+      socket.send(JSON.stringify({ type: 'hello', session_id: discovery.parent_session_id, last_seen_node_id: null }));
+      driveGate();
+    };
+    socket.onmessage = (event) => {
+      if (closed || parentSocket !== socket) return;
+      try {
+        const message = JSON.parse(event.data);
+        hooks.log({ direction: 'in', line: 'amendment_parent', message });
+        hooks.noteUsage(message, 'amendment_parent');
+        handleParentInbound(message);
+      } catch (error) {
+        hooks.fail('driver_error', error);
+      }
+    };
+    socket.onclose = (event) => {
+      if (closed || parentSocket !== socket) return;
+      hooks.log({ event: 'amendment_parent_ws_close', code: event?.code, reason: event?.reason });
+      parentSocket = null;
+      if (inFlight) turnStatus = null;
+      if (parentReconnects >= RECONNECT_LIMIT) {
+        hooks.fail('amendment_parent_ws_reconnect_exhausted', `原 plan session WS 重连超过 ${RECONNECT_LIMIT} 次`);
+        return;
+      }
+      parentReconnects += 1;
+      setTimeout(() => connectParent(), RECONNECT_DELAY_MS);
+    };
+  };
+
+  // —— 线②：child repair session WS（session_link.child_session_id）——
+  const handleChildInbound = (message) => {
+    if (message.type === 'session_state') {
+      if (typeof message.stage === 'string') childStage = message.stage;
+      const repair = message.plan_repair ?? null;
+      const fromChild = repair?.amendment?.id ?? repair?.request?.amendment_id ?? null;
+      if (fromChild) childAmendmentId = fromChild;
+      const plan = amendmentChildConfirmPlan({
+        actions,
+        cursor,
+        childStage,
+        amendmentId: resolveAmendmentId(),
+        codingEventAmendmentIds,
+      });
+      if (plan.kind === 'send') {
+        cursor = plan.consume_cursor + 1;
+        confirmSentFor = plan.amendment_id;
+        confirmSentAtSec = hooks.elapsedSec();
+        sendOn(childSocket, 'amendment_child', amendmentConfirmMessage({ amendmentId: plan.amendment_id }));
+      } else if (plan.kind === 'fail') {
+        hooks.fail(plan.failureClass, `child 确认无法执行: ${json({ child_stage: childStage, amendment_id: resolveAmendmentId() })}`);
+      }
+      return;
+    }
+    if (message.type === 'protocol_error') {
+      hooks.fail('amendment_confirm_rejected', `${message.code ?? 'protocol_error'}: ${message.message ?? ''}`);
+    }
+  };
+
+  const connectChild = () => {
+    if (closed || !discovery?.child_session_id) return;
+    const socket = new WebSocket(workspaceSessionWsUrl({ wsBase: WS_BASE, sessionId: discovery.child_session_id }));
+    childSocket = socket;
+    socket.onopen = () => {
+      if (closed || childSocket !== socket) return;
+      hooks.log({ event: 'amendment_child_ws_open', session_id: discovery.child_session_id });
+      socket.send(JSON.stringify({ type: 'hello', session_id: discovery.child_session_id, last_seen_node_id: null }));
+      // 断线重连重发：confirm 已发但 coding 侧未见 durable 事件 → 同 amendment_id 重发（投递重试）。
+      const reconnectPlan = amendmentChildReconnectPlan({
+        childStage,
+        amendmentId: resolveAmendmentId(),
+        codingEventAmendmentIds,
+        confirmSentFor,
+      });
+      if (reconnectPlan.kind === 'resend') {
+        sendOn(socket, 'amendment_child', amendmentConfirmMessage({ amendmentId: reconnectPlan.amendment_id }));
+        hooks.log({ event: 'amendment_confirm_resent', amendment_id: reconnectPlan.amendment_id, reason: 'reconnect_delivery_retry' });
+      }
+    };
+    socket.onmessage = (event) => {
+      if (closed || childSocket !== socket) return;
+      try {
+        const message = JSON.parse(event.data);
+        hooks.log({ direction: 'in', line: 'amendment_child', message });
+        hooks.noteUsage(message, 'amendment_child');
+        handleChildInbound(message);
+      } catch (error) {
+        hooks.fail('driver_error', error);
+      }
+    };
+    socket.onclose = (event) => {
+      if (closed || childSocket !== socket) return;
+      hooks.log({ event: 'amendment_child_ws_close', code: event?.code, reason: event?.reason });
+      childSocket = null;
+      if (childReconnects >= RECONNECT_LIMIT) {
+        hooks.fail('amendment_child_ws_reconnect_exhausted', `child repair session WS 重连超过 ${RECONNECT_LIMIT} 次`);
+        return;
+      }
+      childReconnects += 1;
+      setTimeout(() => connectChild(), RECONNECT_DELAY_MS);
+    };
+  };
+
+  const startLines = () => {
+    if (linesStarted || closed) return;
+    linesStarted = true;
+    connectParent();
+    connectChild();
+  };
+
+  return {
+    // 线③入口一：coding WS 控制事件（plan_repair_required / plan_amendment_updated）。
+    onCodingControl(message) {
+      if (closed) return;
+      if (message.type === 'plan_repair_required') {
+        const found = amendmentDiscoveryFromMessage(message);
+        if (!found || !amendmentDiscoveryComplete(found)) {
+          hooks.fail('plan_repair_required_link_missing', `plan_repair_required 缺少可用的 session_link（parent/child session id）: ${json({
+            has_session_link: Boolean(message.session_link),
+            parent_session_id: found?.parent_session_id ?? null,
+            child_session_id: found?.child_session_id ?? null,
+          })}`);
+          return;
+        }
+        mergeDiscovery(found);
+        hooks.log({
+          event: 'amendment_discovered',
+          source: found.source,
+          parent_session_id: found.parent_session_id,
+          child_session_id: found.child_session_id,
+          amendment_id: found.amendment_id,
+        });
+        startLines();
+        return;
+      }
+      if (message.type === 'plan_amendment_updated') {
+        let noted;
+        try {
+          noted = amendmentNoteUpdatedEvent(seenEventIds, message);
+        } catch (error) {
+          hooks.fail('plan_amendment_updated_malformed', error);
+          return;
+        }
+        if (noted.duplicate) {
+          hooks.log({ event: 'amendment_event_deduped', event_id: noted.event_id });
+          return;
+        }
+        manifest = noted.manifest;
+        codingEventAmendmentIds.add(manifest.id);
+        mergeDiscovery({
+          source: 'plan_amendment_updated',
+          parent_session_id: null,
+          child_session_id: null,
+          amendment_id: manifest.id,
+          repair_request_id: manifest.repair_request_id,
+        });
+        hooks.log({
+          event: 'amendment_manifest_recorded',
+          event_id: noted.event_id,
+          amendment_id: manifest.id,
+          new_plan_revision_id: manifest.new_plan_revision_id,
+          resume_target: manifest.resume_target,
+        });
+        // 不凭该事件判 resume：等待 coding_session_state / REST snapshot 的 durable 判据。
+      }
+    },
+    // 线③入口二：durable 快照（coding WS coding_session_state 或 REST snapshot 归一化后）。
+    onCodingState(snapshot) {
+      if (closed) return;
+      const linked = snapshot?.linked_plan_repair ?? null;
+      if (linked) {
+        const found = amendmentDiscoveryFromMessage({ type: 'coding_session_state', linked_plan_repair: linked });
+        if (found) {
+          const wasIncomplete = !amendmentDiscoveryComplete(discovery);
+          mergeDiscovery(found);
+          if (wasIncomplete && amendmentDiscoveryComplete(discovery)) {
+            hooks.log({
+              event: 'amendment_discovered',
+              source: found.source,
+              parent_session_id: discovery.parent_session_id,
+              child_session_id: discovery.child_session_id,
+              amendment_id: discovery.amendment_id,
+            });
+            startLines();
+          }
+        }
+      }
+      if (!manifest) return;
+      const judgment = amendmentResumeJudgment({ expectedAttemptId: attemptId, manifest, snapshot });
+      if (judgment.kind === 'resumed') {
+        if (!resumeEvidence) {
+          resumeEvidence = judgment.evidence;
+          hooks.log({ event: 'amendment_resume_confirmed', ...judgment.evidence });
+        }
+        return;
+      }
+      if (judgment.kind === 'fail') {
+        hooks.fail(judgment.failureClass, `amendment resume 判定失败关闭: ${json(judgment)}`);
+      }
+    },
+    evidence() {
+      return {
+        mode: 'enabled',
+        attempt_id: attemptId,
+        script_actions: actions.length,
+        discovered: discovery ? { ...discovery, sources: [...discoverySources] } : null,
+        gate_turns: gateTurnAudit,
+        confirm: confirmSentFor
+          ? { amendment_id: confirmSentFor, sentSec: confirmSentAtSec, child_ws_reconnects: childReconnects }
+          : null,
+        amendment_event_ids: [...seenEventIds],
+        manifest,
+        resume: resumeEvidence,
+      };
+    },
+    close() {
+      closed = true;
+      try { parentSocket?.close(); } catch { /* 已断开无需处理。 */ }
+      try { childSocket?.close(); } catch { /* 已断开无需处理。 */ }
+      parentSocket = null;
+      childSocket = null;
+    },
+  };
+}
+
 function updateSnapshot(result, message) {
   if (message.branch_name !== undefined) result.worktree.branch_name = message.branch_name ?? null;
   if (message.base_branch !== undefined) result.worktree.base_branch = message.base_branch ?? null;
@@ -221,7 +837,7 @@ function updateSnapshot(result, message) {
   if (message.internal_pr_review) result.review_results.push(message.internal_pr_review);
 }
 
-async function runCampaign({ handoff, outRoot }) {
+async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
   const started = Date.now();
   const elapsedMs = () => Date.now() - started;
   const elapsedSec = () => Number((elapsedMs() / 1_000).toFixed(3));
@@ -253,6 +869,7 @@ async function runCampaign({ handoff, outRoot }) {
     result.usage = summarizeUsage(usage);
     result.finishedAt = now();
     result.elapsedSec = elapsedSec();
+    if (amendment) result.amendment = amendment.evidence();
     fs.writeFileSync(path.join(outDir, 'result.json'), json(result), 'utf8');
     const codingResult = {
       ...handoff,
@@ -270,6 +887,7 @@ async function runCampaign({ handoff, outRoot }) {
     if (hardTimer) clearTimeout(hardTimer);
     if (!result.completed && !result.failureClass) result.failureClass = result.error ? 'driver_error' : 'incomplete';
     writeOutputs();
+    amendment?.close();
     try { ws?.close(); } catch { /* 已断开无需处理。 */ }
     if (log) {
       log.end(() => process.exit(exitCode));
@@ -288,6 +906,8 @@ async function runCampaign({ handoff, outRoot }) {
     }
     finish(exitCode);
   };
+  // amendment 模式（ARIA_AMENDMENT_SCRIPT）：三条 WS 线运行时；未启用时为 null，行为零变化。
+  let amendment = null;
   const send = (message) => {
     if (ended || automationStoppedForGate) return;
     writeLog({ direction: 'out', message });
@@ -364,6 +984,16 @@ async function runCampaign({ handoff, outRoot }) {
         group_final_readiness: snapshot.group_final_readiness,
         pending_gates: snapshot.pending_gates,
       }, 'coding_stage_change_snapshot');
+      // amendment 模式：REST snapshot 是 durable resume 判定的第二回读源（不含 linked_plan_repair）。
+      if (amendment && !ended) {
+        amendment.onCodingState({
+          attempt_id: attempt.attempt_id ?? result.attempt_id,
+          status: attempt.status,
+          stage: attempt.stage,
+          units: Array.isArray(snapshot.units) ? snapshot.units : [],
+          linked_plan_repair: null,
+        });
+      }
     } catch (error) {
       fail('coding_snapshot_refresh_failed', error);
     }
@@ -387,6 +1017,18 @@ async function runCampaign({ handoff, outRoot }) {
     const attemptId = attemptIdOf(attempt);
     if (!attemptId) throw new Error('create coding attempt 响应缺少 attempt_id');
     openOutput(attemptId);
+    if (amendmentActions) {
+      amendment = createAmendmentRuntime({
+        attemptId,
+        actions: amendmentActions,
+        hooks: {
+          fail: (failureClass, error) => fail(failureClass, error),
+          log: (entry) => writeLog(entry),
+          noteUsage: (message, source) => collectUsage(message, usage, source),
+          elapsedSec,
+        },
+      });
+    }
     result.worktree = {
       branch_name: attempt.branch_name ?? null,
       base_branch: attempt.base_branch ?? null,
@@ -429,6 +1071,21 @@ async function runCampaign({ handoff, outRoot }) {
         switch (message.type) {
         case 'coding_session_state':
           maybeDriveState(message, message.type);
+          // amendment 模式：发现双源之二（durable linked_plan_repair）+ 服务端 AmendmentApplyFailed
+          // fail-closed + durable resume 判定（不凭单一事件判成功）。
+          if (amendment && !ended) {
+            if (message.status === 'amendment_apply_failed') {
+              fail('amendment_apply_failed', '服务端 amendment application 失败（AmendmentApplyFailed）');
+            } else {
+              amendment.onCodingState({
+                attempt_id: message.attempt_id ?? result.attempt_id,
+                status: message.status,
+                stage: message.stage,
+                units: Array.isArray(message.units) ? message.units : [],
+                linked_plan_repair: message.linked_plan_repair ?? null,
+              });
+            }
+          }
           break;
         case 'coding_stage_change':
           recordStage(message.stage, message.type);
@@ -490,9 +1147,16 @@ async function runCampaign({ handoff, outRoot }) {
           if (!automationStoppedForGate) fail('protocol_error', `${message.code ?? 'coding_protocol_error'}: ${message.message ?? ''}`);
           break;
         case 'plan_repair_required':
-        case 'plan_amendment_updated':
-          if (!automationStoppedForGate) fail('unhandled_coding_control_message', `Coding campaign 不定义自动策略: ${message.type}`);
+        case 'plan_amendment_updated': {
+          // 未设 ARIA_AMENDMENT_SCRIPT 时保持既有 fail-closed 零变化（回归锚点）。
+          const controlPlan = codingControlMessagePlan({ amendmentActions, messageType: message.type });
+          if (controlPlan.kind === 'fail') {
+            if (!automationStoppedForGate) fail(controlPlan.failureClass, `Coding campaign 不定义自动策略: ${message.type}`);
+            break;
+          }
+          amendment.onCodingControl(message);
           break;
+        }
         default:
           if (!automationStoppedForGate) fail('unknown_ws_message', `未知 Coding WebSocket 消息类型: ${String(message.type)}`);
         }
@@ -523,6 +1187,14 @@ async function main() {
     console.error(`启动校验失败: ${errorText(error)}`);
     process.exit(2);
   }
+  // amendment 脚本启动即校验（含 --dry-run）；未设置时 amendmentActions 为 null，行为零变化。
+  let amendmentActions = null;
+  try {
+    amendmentActions = amendmentScriptFromEnv();
+  } catch (error) {
+    console.error(`启动校验失败: ${errorText(error)}`);
+    process.exit(2);
+  }
   if (options.dryRun) {
     console.log(json({
       dry_run: true,
@@ -535,15 +1207,37 @@ async function main() {
       execution_plan_confirm_required: Boolean(handoff.execution_plan_confirm_required),
       outDir_pattern: path.join(options.outRoot, `coding-${handoff.provider}-<attemptId>`),
       hard_timeout_ms: HARD_LIMIT_MS,
+      amendment_script: {
+        enabled: amendmentActions !== null,
+        actions: amendmentActions ? amendmentActions.length : null,
+      },
       no_http_or_websocket_requests: true,
     }));
     return;
   }
-  await runCampaign({ handoff, outRoot: options.outRoot });
+  await runCampaign({ handoff, outRoot: options.outRoot, amendmentActions });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await main();
 }
 
-export { outputTimestamp, preflightFailureOutDir };
+export {
+  amendmentChildConfirmPlan,
+  amendmentChildReconnectPlan,
+  amendmentConfirmMessage,
+  amendmentDiscoveryComplete,
+  amendmentDiscoveryFromMessage,
+  amendmentFeedbackCommandId,
+  amendmentGateFeedbackMessage,
+  amendmentGateFeedbackPlan,
+  amendmentGateTurnOutcome,
+  amendmentManifestFromUpdatedEvent,
+  amendmentNoteUpdatedEvent,
+  amendmentResumeJudgment,
+  amendmentScriptFromEnv,
+  codingControlMessagePlan,
+  outputTimestamp,
+  preflightFailureOutDir,
+  workspaceSessionWsUrl,
+};
