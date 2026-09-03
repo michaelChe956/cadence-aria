@@ -8,7 +8,7 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 
 ### Requirement: 单候选计划事务（REQ-WSC-01）
 
-系统 SHALL 将 workitem 段对外流程压缩为 prepare → generate → evaluate → approval → completed 五类可见状态，另加吸收态 failed。outline/draft/batch 的逐段确认、逐段 review、生成模式选择 SHALL NOT 暴露为用户可见或可应答的 WS/UI 决策；生成模式（batch/serial）SHALL 由运行时按模型能力与候选规模自行选择。
+系统 SHALL 将 workitem 段对外流程压缩为 prepare → generate → evaluate → approval → completed 五类可见状态，另加吸收态 failed。outline/draft/batch 的逐段确认、逐段 review、生成模式选择 SHALL NOT 暴露为用户可见或可应答的 WS/UI 决策；生成模式（batch/serial）SHALL 由运行时按模型能力与候选规模自行选择。interactive 策略下的人工门 SHALL 升级为对话式多轮协议（typed 反馈回合、SC 专属修订路径、approve→compile→Confirmed 关门链），其回合、预算、幂等与恢复语义以 `work-item-plan-conversational-gate` capability 为唯一来源；`auto_if_valid` 策略语义不变。
 
 #### Scenario: 自动化 campaign 无人工干预到达终态
 
@@ -20,6 +20,15 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 - **WHEN** 候选计划生成需要选择 batch 或 serial 执行策略
 - **THEN** 运行时依据模型能力与候选规模内部选择，不产生 `select_work_item_generation_mode` 类型的对外决策请求
 
+#### Scenario: interactive 门内多轮修订后批准
+
+- **WHEN** 以 `interactive` 策略运行且 reviewer 判定需要人工处理，人工门打开后人在门内连续给出多轮 typed 反馈
+- **THEN** 每轮反馈经 SC 专属修订路径产出通过校验的新候选并回呈；人 approve 后门关闭、确定性 compile 成功后 Plan 进入 durable Confirmed，全程不经过 legacy 逐段确认消息
+
+#### Scenario: Confirmed 后经 advance 进入 coding 就绪
+
+- **WHEN** Plan 已 durable Confirmed 且客户端显式调用 `advance`
+- **THEN** 系统建立该 plan 唯一的 WorkItemGroup coding attempt 并返回 group workspace 入口（ready-only，不启动 coding provider）；advance 语义以 `work-item-plan-advance` capability 为唯一来源
 ### Requirement: markdown 编译器模型（REQ-WSC-02）
 
 系统 SHALL 以 markdown/EARS 文档作为 work item plan 的唯一可编辑源，并提供确定性编译器将其单向编译为顶层 `PlanCandidateIr { source_revision_hash, compiler_version, items: Vec<PlanCandidateItemIr> }`；每个 item SHALL 为 `PlanCandidateItemIr { target_repository_id, contract, verification_plan: WorkItemDraftVerificationPlan, trusted_commands }`。typed IR 的 source revision hash 与 compiler version 仅位于顶层；**publish 前** hash 或版本不匹配时系统 SHALL 拒绝发布并提示重新编译，hash/version 随不可变 publication provenance 落盘。coding 段只消费已发布的 immutable runtime binding，SHALL NOT 在执行期间解析 markdown 或重新解释 compiler version；write_policy 与 trusted commands 等安全边界 SHALL 保持强类型。对 markdown 的人工或模型修改 SHALL 产生新 revision 并触发重新编译。
