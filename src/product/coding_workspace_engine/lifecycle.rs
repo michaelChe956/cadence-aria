@@ -220,7 +220,16 @@ impl CodingWorkspaceEngine {
             self.store
                 .admit_and_transition_attempt_to_executable(project_id, issue_id, attempt_id)?
         };
-        if running.scope == CodingAttemptScope::WorkItemGroup && running.worktree_path.is_some() {
+        // sc_advance 建组时仅登记 worktree_path、不物化目录(延迟物化);
+        // 目录缺失时不得短路直进 Coding,否则 git 在未物化目录 ENOENT。
+        // 回落到下方标准 WorktreePrepare 阶段,由 runner 调用 execute_worktree_prepare
+        // 物化后再进 Coding;已物化路径(legacy group 等)行为不变。
+        if running.scope == CodingAttemptScope::WorkItemGroup
+            && running
+                .worktree_path
+                .as_deref()
+                .is_some_and(std::path::Path::exists)
+        {
             let mut attempt = self.store.update_attempt_stage(
                 project_id,
                 issue_id,
