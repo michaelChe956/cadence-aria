@@ -81,7 +81,9 @@ async fn campaign_stage3_recovery_matrix_turn_reservation_row_alive_and_dead() {
     assert_eq!(recovered_turn.turn_id, turn_a.turn_id, "同 turn_id");
     assert_eq!(recovered_turn.status, HumanGateTurnStatus::Completed);
     assert_eq!(recovered_turn.attempt_no, 1, "attempt_no 对账：恰一次");
-    assert_eq!(harness.budget_remaining(), 1, "预算恰减一次");
+    // 修订完成后 Evaluate policy route 重建 approval 门快照(与初始 author 同构，
+    // 预算从 run_history 重新推导)。
+    assert_eq!(harness.budget_remaining(), 3, "门预算经路由重建");
     assert_eq!(harness.provider_start_keys().len(), 1, "ledger 恰一项");
     // 重开后再同 command：Replay 同一终态 turn，零增量。
     let mut replay_a = matrix_reopened_engine(&harness, "matrix-turn-a-replay");
@@ -96,7 +98,7 @@ async fn campaign_stage3_recovery_matrix_turn_reservation_row_alive_and_dead() {
         &replayed,
         HumanGateCommandOutcome::Replayed { turn } if turn.turn_id == turn_a.turn_id
     ));
-    assert_eq!(harness.budget_remaining(), 1);
+    assert_eq!(harness.budget_remaining(), 3);
     assert_eq!(harness.provider_start_keys().len(), 1);
 
     // —— fault point B：启动 ledger 后 / 完成前 ——

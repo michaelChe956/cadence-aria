@@ -65,7 +65,9 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
     };
     assert_eq!(command_id_2, "cmd-campaign-fb-2");
     assert_ne!(turn_id_2, turn_id_1, "turn IDs 唯一");
-    assert_eq!(remaining_2, 0, "第二个 turn 预算再减一");
+    // 修订完成后 Evaluate policy route 重建 approval 门快照(与初始 author 同构，
+    // 预算从 run_history 重新推导=默认 3)，本轮 reserve 后 remaining=2。
+    assert_eq!(remaining_2, 2, "门预算经路由重建后每 turn 预算减一");
     let completed2 = harness.await_gate_event("human_gate_turn_completed").await;
     let WsOutMessage::HumanGateTurnCompleted {
         artifact_ref: artifact_ref_2,
@@ -109,7 +111,9 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
         ],
         "候选 refs 递进且只保存 ref（durable 列表新→旧，与顺序无关地核对）",
     );
-    assert_eq!(harness.budget_remaining(), 0, "预算恰好扣两次");
+    // 修订完成后 Evaluate policy route 重建 approval 门快照(与初始 author 同构，
+    // 预算从 run_history 重新推导)，终态门预算为重建值而非旧快照的耗尽值。
+    assert_eq!(harness.budget_remaining(), 3, "门预算经两次路由重建");
     let keys = harness.provider_start_keys();
     assert_eq!(keys.len(), 2, "provider ledger 每真实 start 一项");
     assert!(
@@ -149,8 +153,8 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
             turns
                 .iter()
                 .find(|turn| turn.command_id == "cmd-campaign-fb-2"),
-            1,
-            Some(0),
+            3,
+            Some(2),
             vec![keys[1].clone()],
             &harness.turn_bytes(
                 &turns
@@ -508,7 +512,9 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     assert_eq!(recovered_turn.turn_id, turn_a.turn_id, "同 turn_id");
     assert_eq!(recovered_turn.status, HumanGateTurnStatus::Completed);
     assert_eq!(recovered_turn.attempt_no, 1, "不超过上限");
-    assert_eq!(harness.budget_remaining(), 1, "预算恰减一次");
+    // 修订完成后 Evaluate policy route 重建 approval 门快照，预算从 run_history
+    // 重新推导(与初始 author 同构)，不再是旧快照的 reserve 后值。
+    assert_eq!(harness.budget_remaining(), 3, "门预算经路由重建");
     assert_eq!(harness.provider_start_keys().len(), 1, "ledger 恰一项");
 
     // —— fault point B：启动 ledger 后 / 完成前 ——

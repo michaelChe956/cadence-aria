@@ -280,6 +280,11 @@ pub(super) async fn campaign_stage3_fixture(
         .expect("session record");
     record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
     record.run_policy = RunPolicy::Interactive;
+    // 本 harness 面向「门内修订循环」契约：无 reviewer 时修订完成后经本地
+    // synthetic Pass 路由回到 HumanConfirm 门(request-change;request-change;
+    // confirm 脚本无评审步)。带 reviewer 的修订后重启评审分支由 engine 级
+    // conversational_gate_revision 用例锁定(WS 层需真实 reviewer provider 驱动)。
+    record.review_rounds = 0;
     record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(HumanGateSnapshot {

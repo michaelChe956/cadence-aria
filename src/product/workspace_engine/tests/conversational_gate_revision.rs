@@ -230,6 +230,10 @@ fn durable_revision_fixture(
         .get_workspace_session(&engine.session().session_id)
         .expect("durable session");
     record.flow_kind = crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate;
+    // 本 fixture 的主驗主体是「门内修订持久化」契约:无 reviewer 时修订后经本地
+    // synthetic Pass 路由回到 HumanConfirm 门,多轮 feedback 循环可继续。带 reviewer
+    // 的重启评审分支由 evaluate_gate_revision_fixture 系列用例单独锁定。
+    record.review_rounds = 0;
     record.status = crate::product::models::WorkspaceSessionStatus::WaitingForHuman;
     record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
         findings: Vec::new(),
@@ -546,4 +550,371 @@ async fn conversational_gate_revision_result_second_feedback_uses_revised_candid
             .and_then(|artifact| artifact.markdown())
             .is_some_and(|markdown| markdown.contains("Final backend levels API"))
     );
+}
+
+// —— 第 5 死路(B 裁决修复):人工修订完成后必须重走 Evaluate policy route ——
+//
+// 现场(levels matrix codex rep1 / issue_0104 / workspace_session_0120):门开在
+// Evaluate,人工修订 turn 完成后 session 停留 Evaluate,confirm 的
+// `compare_and_save_human_gate_close` 前置(WaitingForHuman+Approval)永久冲突。
+// 修复契约 = 与初始 author(`complete_single_candidate_work_item_plan_author`)
+// 同构:无 reviewer 本地 synthetic Pass 路由进 Approval;有 reviewer 重启评审,
+// 不得让 close 绕过 Approval。
+
+/// 现场同构的 Evaluate 门 fixture:基于 accepted contract drafts 基座(批准链
+/// compile 可真实走通),门候选为 handoff-clean rep4(批准链 canonical 校验
+/// 会拒绝带 unconsumed handoff 的 rep4 原文,与 campaign 基座候选一致)。
+fn evaluate_gate_revision_fixture(
+    session_id: &str,
+    budget: u32,
+    review_rounds: u32,
+) -> (
+    tempfile::TempDir,
+    crate::product::lifecycle_store::LifecycleStore,
+    crate::product::workspace_engine::WorkspaceEngine,
+) {
+    use crate::product::json_store::write_json;
+    use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
+    use std::sync::Arc;
+
+    let (root, lifecycle, _plan_id, mut engine) = crate::product::workspace_engine::tests::
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    crate::product::workspace_engine::tests::single_candidate_recovery::
+        single_candidate_recovery_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+    let gate_refs = crate::product::workspace_engine::tests::single_candidate_recovery::
+        single_candidate_recovery_persist_candidate_artifacts(
+            &lifecycle,
+            &engine,
+            "evaluate-gate",
+            &handoff_clean_rep4(),
+        );
+    crate::product::workspace_engine::tests::single_candidate_recovery::
+        single_candidate_recovery_update_refs(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            gate_refs,
+        );
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("evaluate gate session record");
+    record.review_rounds = review_rounds;
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: budget,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+    });
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist evaluate gate session");
+    let mut session = crate::product::workspace_engine::WorkspaceSession::from_record(record);
+    session.stage = crate::product::workspace_engine::WorkspaceStage::HumanConfirm;
+    session.session_status = WorkspaceSessionStatus::WaitingForHuman;
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: handoff_clean_rep4(),
+        diff: None,
+    });
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let engine = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+        Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            root.path().join(format!("{session_id}-checkpoints")),
+        )),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+    (root, lifecycle, engine)
+}
+
+/// rep4 fixture 的 WI-003 提供了 `contract.levels-integration` 却没有消费者;
+/// 批准链 canonical 校验(`unconsumed_required_handoff`,Error 级)会拒绝原文。
+/// 逐行剔除该 provided 行(其余逐字保留),与 campaign 基座候选同构。
+fn handoff_clean_rep4() -> String {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
+    ))
+    .replace(
+        "- provided_contract_refs: contract.levels-integration",
+        "- provided_contract_refs: []",
+    )
+}
+
+fn handoff_clean_rep4_v2() -> String {
+    handoff_clean_rep4().replace("Backend levels API", "Backend levels API round-2")
+}
+
+#[tokio::test]
+async fn conversational_gate_revision_routes_evaluate_to_approval_then_confirm_succeeds() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("revision_route_confirm", 2, 0);
+    let turn_id = open_running_revision_turn(&mut engine, "revision_route_command").await;
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("valid revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("durable turn");
+    assert_eq!(
+        turn.status,
+        crate::product::models::HumanGateTurnStatus::Completed
+    );
+    assert!(turn.result_artifact_ref.is_some());
+
+    // 核心修复断言:修订后 session 必须经 Evaluate policy route 到 Approval,
+    // 否则 confirm 的 close CAS 前置永远不可达(第 5 死路)。
+    let routed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("routed session");
+    assert_eq!(
+        routed.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval)
+    );
+    assert_eq!(
+        engine.session().stage,
+        crate::product::workspace_engine::WorkspaceStage::HumanConfirm
+    );
+
+    // confirm 不再撞 human_gate_close CAS 冲突,真实批准链落地终态。
+    let outcome = engine
+        .handle_human_gate_termination(
+            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
+        )
+        .await
+        .expect("confirm must close the gate after the Evaluate route");
+    assert_eq!(
+        outcome,
+        crate::product::workspace_engine::HumanGateCloseOutcome::Confirmed
+    );
+    let closed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("closed session");
+    assert_eq!(
+        closed.status,
+        crate::product::models::WorkspaceSessionStatus::Confirmed
+    );
+    assert_eq!(
+        closed.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Completed)
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_revision_with_reviewer_restarts_review_before_approval() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("revision_route_reviewer", 2, 1);
+    let turn_id = open_running_revision_turn(&mut engine, "revision_route_reviewer_command").await;
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("valid revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    // 有 reviewer:修订后必须重启评审(与初始 author 同构),不得直接跳 Approval,
+    // 也不得清掉 reservation(它只在 close 终态清理)。
+    assert_eq!(
+        engine.session().stage,
+        crate::product::workspace_engine::WorkspaceStage::CrossReview,
+        "revision with a reviewer must restart the review before approval"
+    );
+    let after_revision = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session after revision");
+    assert_eq!(
+        after_revision.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert_eq!(
+        after_revision.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Evaluate)
+    );
+    assert!(
+        after_revision.human_gate_reservation.is_some(),
+        "restarting review must not clear the human gate reservation"
+    );
+
+    // reviewer pass 后才进 Approval;随后 confirm 走通批准链。
+    let verdict = crate::web::workspace_ws_types::ReviewVerdict {
+        verdict: crate::web::workspace_ws_types::ReviewVerdictType::Pass,
+        comments: "review pass".to_string(),
+        summary: "review pass".to_string(),
+        findings: Vec::new(),
+        review_gate: crate::web::workspace_ws_types::ReviewGate::UserConfirmAllowed,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    };
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "review".to_string(),
+                None,
+            ),
+            verdict,
+        )
+        .await;
+    let routed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("routed session");
+    assert_eq!(
+        routed.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval)
+    );
+
+    let outcome = engine
+        .handle_human_gate_termination(
+            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
+        )
+        .await
+        .expect("confirm must close the gate after reviewer pass");
+    assert_eq!(
+        outcome,
+        crate::product::workspace_engine::HumanGateCloseOutcome::Confirmed
+    );
+    let closed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("closed session");
+    assert_eq!(
+        closed.status,
+        crate::product::models::WorkspaceSessionStatus::Confirmed
+    );
+    assert_eq!(
+        closed.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Completed)
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_revision_route_cas_conflict_retries_without_clearing_reservation() {
+    let (_root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("revision_route_conflict", 2, 0);
+    // 模拟并发 worker 在 route CAS 前改写 durable 记录:首次持久化冲突必须
+    // reload+重评估后成功,不得误清 reservation,也不得落入假终态。
+    engine.policy_route_before_persist = Some(Box::new(|store, session_id| {
+        store
+            .update_workspace_session_status(
+                session_id,
+                crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+            )
+            .expect("concurrent route update must be durable");
+    }));
+    let turn_id = open_running_revision_turn(&mut engine, "revision_route_conflict_command").await;
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("valid revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    let routed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("routed session");
+    assert_eq!(
+        routed.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+        "a single route CAS conflict must be retried against fresh durable state"
+    );
+    assert_eq!(
+        routed.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert!(
+        routed.human_gate_reservation.is_some(),
+        "route persistence conflict must not clear the reservation"
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_revision_completed_turn_stale_evaluate_reconnect_never_restarts_provider()
+ {
+    let (_root, lifecycle, mut engine) = evaluate_gate_revision_fixture("revision_reconnect", 2, 1);
+    let turn_id = open_running_revision_turn(&mut engine, "revision_reconnect_command").await;
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("valid revision must complete");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    // 现场死锁残留形态:phase=Evaluate + completed turn + reservation。
+    // 重连恢复必须零 provider 重启(completed turn 是终态),session 保持可重试。
+    let record = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("stale durable session");
+    assert_eq!(
+        record.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Evaluate)
+    );
+    assert!(record.human_gate_reservation.is_some());
+    let ledger_len = record.provider_start_ledger.len();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let mut recovered = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            _root.path().join("reconnect-checkpoints"),
+        )),
+        lifecycle.clone(),
+        event_tx,
+        crate::product::workspace_engine::WorkspaceSession::from_record(record),
+    );
+    let actions = recovered
+        .recover_human_gate_turns(false)
+        .expect("recover human gate turns");
+    assert!(
+        actions.is_empty(),
+        "a completed turn must not resume or restart a provider: {actions:?}"
+    );
+    let after = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session after recovery");
+    assert_eq!(
+        after.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+        "stale Evaluate must stay retryable instead of a false terminal"
+    );
+    assert_eq!(
+        after.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Evaluate)
+    );
+    assert_eq!(after.provider_start_ledger.len(), ledger_len);
 }
