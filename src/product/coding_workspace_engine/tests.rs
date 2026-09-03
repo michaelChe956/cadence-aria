@@ -512,7 +512,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
 #[path = "advance_ready_only.rs"]
 mod advance_ready_only;
 #[path = "tests/campaign_stage3_amendment.rs"]
-mod campaign_stage3_amendment;
+pub(crate) mod campaign_stage3_amendment;
 #[path = "tests/campaign_stage3_dependency.rs"]
 mod campaign_stage3_dependency;
 mod code_review_triage;

@@ -58,14 +58,16 @@ fn campaign_revised_candidate() -> String {
     campaign_gate_candidate().replace("Backend levels API", "Backend levels API amend-1")
 }
 
-struct CampaignAmendmentFixture {
+/// 可见性说明：字段/方法 `pub(crate)` 仅供 8.4b 恢复矩阵（web 测试树）以真实
+/// 链路复用同一 fixture，不改变任何构造/断言行为。
+pub(crate) struct CampaignAmendmentFixture {
     _root: TempDir,
-    store: CodingAttemptStore,
-    lifecycle: LifecycleStore,
-    revision_store: WorkItemRevisionStore,
-    attempt: CodingExecutionAttempt,
-    plan: WorkItemPlanLineage,
-    plan_session_id: String,
+    pub(crate) store: CodingAttemptStore,
+    pub(crate) lifecycle: LifecycleStore,
+    pub(crate) revision_store: WorkItemRevisionStore,
+    pub(crate) attempt: CodingExecutionAttempt,
+    pub(crate) plan: WorkItemPlanLineage,
+    pub(crate) plan_session_id: String,
     child_session_id: String,
     request: PlanRepairRequest,
     units: Vec<crate::product::coding_models::CodingExecutionUnit>,
@@ -177,7 +179,7 @@ async fn campaign_confirmed_plan_session(budget: u32) -> (TempDir, LifecycleStor
 /// 真实编译产物上的 group attempt：units/binding 来自编译后的 active plan
 /// revision（wi_a=完成并留 run、wi_b=运行中触发），前置态 seed 通道仅覆盖
 /// unit run 记录（与 7.2 real-chain 测试同一注入手段）。
-async fn campaign_amendment_fixture() -> CampaignAmendmentFixture {
+pub(crate) async fn campaign_amendment_fixture() -> CampaignAmendmentFixture {
     let (root, lifecycle, plan_id, plan_session_id) = campaign_confirmed_plan_session(2).await;
     let app_paths = lifecycle.app_paths();
     let store = CodingAttemptStore::new(app_paths.clone());
@@ -439,14 +441,14 @@ async fn campaign_amendment_fixture() -> CampaignAmendmentFixture {
 }
 
 impl CampaignAmendmentFixture {
-    fn trigger_context(&self) -> crate::product::coding_models::PlanAmendmentContext {
+    pub(crate) fn trigger_context(&self) -> crate::product::coding_models::PlanAmendmentContext {
         self.store
             .find_plan_amendment_context_by_finding(&self.attempt, CAMPAIGN_FINDING_ID)
             .expect("context lookup")
             .expect("plan amendment context after reconcile")
     }
 
-    fn durable_attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
+    pub(crate) fn durable_attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
         self.store
             .get_attempt(
                 &self.attempt.project_id,
@@ -458,7 +460,7 @@ impl CampaignAmendmentFixture {
 
     /// 原 plan session 上的 feedback 引擎（每次调用从 durable 记录重建，
     /// 模拟 WS 断开重连后的新 worker）。
-    fn plan_session_engine(&self, checkpoints: &str) -> WorkspaceEngine {
+    pub(crate) fn plan_session_engine(&self, checkpoints: &str) -> WorkspaceEngine {
         let record = self
             .lifecycle
             .get_workspace_session(&self.plan_session_id)
@@ -480,7 +482,7 @@ impl CampaignAmendmentFixture {
 
 /// 用真实 compiler/validator 产出修订候选：feedback turn + fake revision。
 /// 返回 durable turn id（断线重开后的对账锚点）。
-async fn open_amendment_turn_and_run_fake_revision(
+pub(crate) async fn open_amendment_turn_and_run_fake_revision(
     fixture: &CampaignAmendmentFixture,
     command_id: &str,
 ) -> String {
@@ -524,9 +526,26 @@ async fn open_amendment_turn_and_run_fake_revision(
 /// 真实 prepare/publish/approve 链：guidance-only 修订（图校验保持合法的
 /// 契约增量）→ `PlanRepairEngine` 出版 amendment → child session
 /// AwaitingConfirmation → `confirm_and_publish_plan_amendment`。
-async fn publish_real_amendment(
+/// 拆为 [`stage_amendment_candidate`]（到 child AwaitingConfirmation 为止，
+/// 返回 prepared/attestation 供 8.4b 恢复矩阵在 confirm 前注入出版
+/// failpoint）与 [`confirm_real_amendment_publication`]（同 command 的
+/// confirm+publish 跳），本函数 = 两者顺序组合（8.4a E2E 原路径不变）。
+pub(crate) async fn publish_real_amendment(
     fixture: &CampaignAmendmentFixture,
 ) -> crate::product::models::PlanAmendmentManifest {
+    let (prepared, _attestation) = stage_amendment_candidate(fixture).await;
+    confirm_real_amendment_publication(fixture, &prepared.manifest.id).await
+}
+
+/// 出版前半程：guidance-only 修订 → prepare → persist → review attestation
+/// → child snapshot 登记 candidate package → `enter_plan_repair_awaiting_confirmation`。
+/// 停在 AwaitingConfirmation：确认命令向未发出，出版尚未开始。
+pub(crate) async fn stage_amendment_candidate(
+    fixture: &CampaignAmendmentFixture,
+) -> (
+    PreparedPlanAmendment,
+    crate::product::models::PlanRepairReviewAttestation,
+) {
     let active_revision_id = fixture
         .revision_store
         .get_plan_lineage("project_0001", "issue_0001", &fixture.plan.id)
@@ -615,8 +634,19 @@ async fn publish_real_amendment(
         ))
         .await
         .expect("enter awaiting confirmation");
+    (prepared, attestation)
+}
+
+/// 出版后半程（同 command = 同一 confirm 入口重发）：从 durable child 记录
+/// 重建引擎后执行 `confirm_and_publish_plan_amendment`。崩溃在出版
+/// failpoint 后，同一入口即恢复（publication journal 重放）。
+pub(crate) async fn confirm_real_amendment_publication(
+    fixture: &CampaignAmendmentFixture,
+    amendment_id: &str,
+) -> crate::product::models::PlanAmendmentManifest {
+    let mut child_engine = fixture.child_engine();
     child_engine
-        .confirm_and_publish_plan_amendment(&prepared.manifest.id, "workspace_user")
+        .confirm_and_publish_plan_amendment(amendment_id, "workspace_user")
         .await
         .expect("approve via amendment publication journal")
 }
@@ -693,7 +723,7 @@ fn campaign_awaiting_package(
 }
 
 impl CampaignAmendmentFixture {
-    fn child_engine(&self) -> WorkspaceEngine {
+    pub(crate) fn child_engine(&self) -> WorkspaceEngine {
         let record = self
             .lifecycle
             .get_workspace_session(&self.child_session_id)
@@ -709,7 +739,7 @@ impl CampaignAmendmentFixture {
         )
     }
 
-    fn coding_engine(&self) -> CodingWorkspaceEngine {
+    pub(crate) fn coding_engine(&self) -> CodingWorkspaceEngine {
         let (event_tx, mut socket_event_rx) = mpsc::channel(64);
         // 模拟真实 coding ws：socket 写成功后回执 delivery ack（应用链最后一跳）。
         tokio::spawn(async move {

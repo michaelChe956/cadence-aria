@@ -30,7 +30,7 @@ use tokio::time::{Duration, timeout};
 /// binding 解析直接从 durable 草稿库溯源 source draft——本 harness **不
 /// seed 任何草稿**,与生产完全一致。历史 seed 形态保留在
 /// [`confirmed_campaign_harness_with_seeded_source_drafts`] 作对照。
-async fn confirmed_campaign_harness() -> CampaignStage3Harness {
+pub(super) async fn confirmed_campaign_harness() -> CampaignStage3Harness {
     let harness = campaign_stage3_fixture(2, Vec::new()).await;
     harness.send(WsInMessage::Confirm).await;
     loop {
@@ -420,7 +420,7 @@ async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start(
 }
 
 impl CampaignStage3Harness {
-    fn record_plan_id(&self) -> String {
+    pub(super) fn record_plan_id(&self) -> String {
         self.session_record_blocking().entity_id.clone()
     }
 }
@@ -668,7 +668,7 @@ async fn campaign_stage3_advance_failed_or_aborted_returns_original_attempt() {
 
 /// 重启 worker:从 durable record 重建全新 engine(stage Completed),
 /// 经真实 ws 分发发送消息(与 harness 引擎实例完全隔离)。
-async fn send_via_restarted_worker(
+pub(super) async fn send_via_restarted_worker(
     harness: &CampaignStage3Harness,
     message: WsInMessage,
 ) -> mpsc::Receiver<OutboundControl> {
@@ -712,7 +712,7 @@ async fn send_via_restarted_worker(
     outbound_rx
 }
 
-async fn next_restarted_outbound(
+pub(super) async fn next_restarted_outbound(
     rx: &mut mpsc::Receiver<OutboundControl>,
     kind: &str,
 ) -> WsOutMessage {

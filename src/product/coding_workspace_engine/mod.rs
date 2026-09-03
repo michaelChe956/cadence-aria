@@ -236,4 +236,4 @@ pub(crate) use types::*;
 pub(crate) use ws_event_mapper::*;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

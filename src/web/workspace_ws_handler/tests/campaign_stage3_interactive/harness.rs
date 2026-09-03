@@ -24,7 +24,7 @@ const REP4_CANDIDATE: &str = include_str!(concat!(
     "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
 ));
 
-fn campaign_candidate_v2() -> String {
+pub(super) fn campaign_candidate_v2() -> String {
     campaign_candidate_base().replace("Backend levels API", "Backend levels API round-2")
 }
 
@@ -37,7 +37,7 @@ fn campaign_candidate_v3() -> String {
 /// canonical 校验（`unconsumed_required_handoff`，Error 级）会拒绝它。
 /// campaign 批准链的脚本化候选必须 handoff-clean：逐行剔除该 provided 行
 /// （其余逐字保留），使修订后 re-approve 能走通完整 compile→confirm 链。
-fn campaign_candidate_base() -> String {
+pub(super) fn campaign_candidate_base() -> String {
     REP4_CANDIDATE.replace(
         "- provided_contract_refs: contract.levels-integration",
         "- provided_contract_refs: []",
@@ -477,7 +477,7 @@ impl CampaignStage3Harness {
         std::fs::read(&path).expect("turn bytes")
     }
 
-    fn provider_start_keys(&self) -> Vec<String> {
+    pub(super) fn provider_start_keys(&self) -> Vec<String> {
         self.session_record_blocking()
             .provider_start_ledger
             .iter()
@@ -485,7 +485,7 @@ impl CampaignStage3Harness {
             .collect()
     }
 
-    fn budget_remaining(&self) -> u32 {
+    pub(super) fn budget_remaining(&self) -> u32 {
         self.session_record_blocking()
             .human_gate_snapshot
             .as_ref()
