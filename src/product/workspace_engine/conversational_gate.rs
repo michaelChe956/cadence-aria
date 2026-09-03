@@ -510,6 +510,20 @@ impl super::WorkspaceEngine {
         {
             self.session.artifact = Some(current_version.payload.clone());
         }
+        // 人工修订与初始 author 同构：候选落盘后必须重走 Evaluate policy route。
+        // 缺失这一步时 session 停留 Evaluate，confirm 的 `compare_and_save_human_gate_close`
+        // 前置(WaitingForHuman+Approval)永久冲突，门死锁。无 reviewer 走本地
+        // synthetic Pass 路由进 Approval；有 reviewer 重启评审，不让 close 绕过 Approval。
+        if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
+            self.route_single_candidate_evaluate_without_reviewer()
+                .await;
+        } else {
+            self.start_review().await;
+            if self.session.stage == super::WorkspaceStage::CrossReview {
+                self.request_provider_run(super::ProviderRunKind::ReviewOnly)
+                    .await;
+            }
+        }
         Ok(ScManualRevisionResult::Accepted {
             artifact_ref: artifact_id,
         })
