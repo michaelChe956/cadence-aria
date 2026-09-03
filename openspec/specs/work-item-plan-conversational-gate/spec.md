@@ -22,7 +22,7 @@
 
 ### Requirement: 单飞与预算纪律（REQ-CG-02）
 
-同一人工门同时 SHALL 至多存在一个非终态 turn；已有 in-flight turn 时收到新反馈或 approve/abandon SHALL 均返回 `gate_busy`，不隐式排队、不关门；终止决定仅在 turn 进入终态后处理。`manual_repairs_remaining` SHALL 在 turn durable 预留时扣减；修订失败（provider 错误、校验拒绝、超时）SHALL NOT 退还已扣预算。**普通 SC 修订门**内的人工修订 turn 成功完成并经 Evaluate policy route 重建门快照时，快照预算 SHALL 重置为默认值（与初始 author Evaluate-pass 同构；2026-09-03 专项测量轮实测记录并补句）；门未重建（修订失败/门未重开）时预算 SHALL 保持既有值。**amendment 人工门**（REQ-GCE-03 场景二重开的原门）的修订 turn 成功后，无论无 reviewer 的本地 Evaluate 路由还是有 reviewer 的 review-pass 路由重建 Approval 快照，快照预算 SHALL 接续重开时原 `human_gate_snapshot` 的 `manual_repairs_remaining`（typed turn 只扣快照、不递增 run_history 计数，重建不得凭空恢复已耗预算）。amendment 门的接续/守卫判别 SHALL 绑定 durable amendment 事实（指向本 plan session 的 Open/Applying `PlanAmendmentContext`，即重开授权所用的同一谓词），仅凭会话状态三元组（SingleCandidate + phase Completed + WaitingForHuman）SHALL NOT 判定为 amendment 门——该三元组可由通用状态写入伪造；判别命中而原快照缺席时 SHALL fail-closed 终止（AbortFatal{PersistenceFailure}），SHALL NOT 回退普通重置公式重建。amendment 接续语义与普通门重建重置语义存在家族分叉，已登记 defer 待统一裁决。provider 传输层瞬断 SHALL 在同一逻辑 `turn_id` 下以 `attempt_no` 递增内部重试，复用原 provider-start ledger 语义，SHALL NOT 创建新 turn。
+同一人工门同时 SHALL 至多存在一个非终态 turn；已有 in-flight turn 时收到新反馈或 approve/abandon SHALL 均返回 `gate_busy`，不隐式排队、不关门；终止决定仅在 turn 进入终态后处理。`manual_repairs_remaining` SHALL 在 turn durable 预留时扣减；修订失败（provider 错误、校验拒绝、超时）SHALL NOT 退还已扣预算。**普通 SC 修订门**内的人工修订 turn 成功完成并经 Evaluate policy route 重建门快照时，快照预算 SHALL 重置为默认值（与初始 author Evaluate-pass 同构；2026-09-03 专项测量轮实测记录并补句）；门未重建（修订失败/门未重开）时预算 SHALL 保持既有值。**amendment 人工门**（REQ-GCE-03 场景二重开的原门）的修订 turn 成功后，无论无 reviewer 的本地 Evaluate 路由还是有 reviewer 的 review-pass 路由重建 Approval 快照，快照预算 SHALL 接续重开时原 `human_gate_snapshot` 的 `manual_repairs_remaining`（typed turn 只扣快照、不递增 run_history 计数，重建不得凭空恢复已耗预算）。amendment 门的接续/守卫判别 SHALL 绑定 durable amendment 事实，且 MUST 复用重开授权（`probe_amendment_gate_context`）所用的同一完整谓词——指向本 plan session 的 Open/Applying `PlanAmendmentContext`，**且**其 group attempt 处于 AwaitingPlanAmendment 并绑定本 plan session 的 entity；仅凭会话状态三元组（SingleCandidate + phase Completed + WaitingForHuman）SHALL NOT 判定为 amendment 门——该三元组可由通用状态写入伪造；group attempt 已离开 AwaitingPlanAmendment 的应用窗口（context 先行 Open→Applying 而 attempt 状态已同步/未同步的窗口内）SHALL NOT 判定为 amendment 门——迟到 verdict 照常被终态评审守卫丢弃，重建走普通门重置语义。判别为三态：「明确无 amendment 事实」（记录可读且签名不符 / 无 context / attempt 不在 AwaitingPlanAmendment）走普通门语义；判别命中而原快照缺席时 SHALL fail-closed 终止（AbortFatal{PersistenceFailure}）；判别所需 durable 事实无法读取/校验（session record 或 context 文件损坏、目录读失败、瞬态 I/O 错误）时 SHALL 同样以持久化失败 fail-closed 终止（AbortFatal{PersistenceFailure}），SHALL NOT 被当作「无 amendment 事实」进入普通门重置公式——否则真 amendment 链在存储瞬断时会被凭空恢复预算。fail-closed 终止的 policy diagnostics SHALL 写回 durable session record（与 policy route 落盘机制一致），仅内存诊断不足。判别命中时 SHALL NOT 回退普通重置公式重建。amendment 接续语义与普通门重建重置语义存在家族分叉，已登记 defer 待统一裁决。provider 传输层瞬断 SHALL 在同一逻辑 `turn_id` 下以 `attempt_no` 递增内部重试，复用原 provider-start ledger 语义，SHALL NOT 创建新 turn。
 
 **SC 门消息面边界**：SC interactive 与 amendment 门 SHALL 仅接受 `human_gate_feedback`、`Confirm`（approve）与 `Terminate`（abandon）；legacy session 保持现有 `HumanConfirmDecision::RequestChange` 行为不变；收到错误消息类型时系统 SHALL 返回 stage-specific protocol error 且零副作用；旧枚举在 REQ-WSC-07 退役门满足前 SHALL NOT 删除。
 
@@ -93,6 +93,16 @@
 
 - **WHEN** durable 重开签名与 Open/Applying `PlanAmendmentContext` 均在场，但原 `human_gate_snapshot` 缺席（损坏/外部删改）时触发 Approval 重建
 - **THEN** 系统以 AbortFatal{PersistenceFailure} 报错终止（含 `human_gate_amendment_snapshot_missing` 诊断），不落任何重建快照，不回退普通重置公式
+
+#### Scenario: 判别 durable 读失败 fail-closed 不进重置公式
+
+- **WHEN** 真 amendment 门重开在场的会话，其判别所需 durable 事实（session record 或 `PlanAmendmentContext` 文件）损坏/不可读（权限、目录读失败、瞬态 I/O）时触发 Evaluate 重建或迟到 review verdict 到达
+- **THEN** 系统以 AbortFatal{PersistenceFailure} 显式 fail-closed 终止（含 `persistence_failure` 诊断），不把「无法读取」当作「无 amendment 事实」走普通门重置公式凭空恢复预算，也不静默丢弃 verdict 保持门开启；诊断写回 durable session record
+
+#### Scenario: 应用窗口不判 amendment 门
+
+- **WHEN** `PlanAmendmentContext` 已先行 Open→Applying 而 group attempt 已离开 AwaitingPlanAmendment（应用窗口内）时，迟到 review verdict 或 Evaluate 重建到达该 Completed+WaitingForHuman 会话
+- **THEN** 终态评审守卫照常丢弃该 verdict（不重路由）；Evaluate 重建走普通门重置公式，不接续快照预算——判别与 probe 放行重开的完整谓词同源
 
 ### Requirement: 门与回合的 durable 恢复（REQ-CG-05）
 
