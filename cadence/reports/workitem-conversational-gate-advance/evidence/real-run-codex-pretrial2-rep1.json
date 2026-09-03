@@ -1,0 +1,43 @@
+{
+  "run_id": "stage35:pretrial2:codex:rep1",
+  "provider": "codex",
+  "rep": 1,
+  "fixture_set": "minimal",
+  "script": "request-change:请在契约定义中补充错误响应的示例;confirm",
+  "issue_id": "issue_0102",
+  "plan_id": "issue_work_item_plan_0001",
+  "attempt_id": "workspace_session_0116",
+  "same_attempt_throughout": true,
+  "gate_turns": 1,
+  "budget_deductions": [
+    {
+      "turn_id": "human_gate_turn_7ffa68e2-a18f-428f-a92d-07151b3f41a8",
+      "turn_open_remaining_budget": 2,
+      "budget_reserved": 1,
+      "durable_turn_file": ".aria/projects/project_0001/issues/issue_0102/workspace-sessions/workspace_session_0116/human-gate-turns/human_gate_turn_7ffa68e2-a18f-428f-a92d-07151b3f41a8.json"
+    }
+  ],
+  "advance": null,
+  "provider_ledger_delta_after_advance": null,
+  "failure_class": null,
+  "output_defects": [],
+  "feedback_incorporated": true,
+  "confirm_chain": {
+    "human_gate_closed": "decision=confirm stage=completed",
+    "durable_session_readback": "session_status=confirmed (trigger=stage_completed)",
+    "handoff_json": "written, plan_confirmation_status=confirmed",
+    "durable_session_final_status": "confirmed",
+    "post_confirm_handoff_workspace": "workspace_session_0117 (work_item, status=open) created after confirm as expected handoff"
+  },
+  "elapsed_sec": 1507.6,
+  "verdict": "pass",
+  "verdict_reason": "flow=single_candidate/run_policy=interactive;全程单一 session workspace_session_0116;gate_turns=1(human_gate_turn_open→human_gate_turn_completed 成对,artifact_ref=artifact_version_002);预算逐 turn 恰扣一次(turn_open remaining_budget=2,durable budget_reserved=1);confirm 后 Confirmed(human_gate_closed decision=confirm + durable readback confirmed + handoff.json plan_confirmation_status=confirmed);request-change 反馈已落盘(v1 无错误响应→v2 含错误响应示例);failure_class=null;completed=true",
+  "source_refs": {
+    "result_json": "/tmp/aria-stage35-20260903/pretrial2/codex/rep1/result.json",
+    "ws_jsonl": "/tmp/aria-stage35-20260903/pretrial2/codex/rep1/ws.jsonl",
+    "handoff_json": "/tmp/aria-stage35-20260903/pretrial2/codex/rep1/handoff.json",
+    "durable_session": ".aria/projects/project_0001/issues/issue_0102/workspace-sessions/workspace_session_0116.json",
+    "durable_turn": ".aria/projects/project_0001/issues/issue_0102/workspace-sessions/workspace_session_0116/human-gate-turns/human_gate_turn_7ffa68e2-a18f-428f-a92d-07151b3f41a8.json",
+    "run_log": "/tmp/aria-stage35-20260903/pretrial2-codex-rep1.log"
+  }
+}
