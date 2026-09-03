@@ -1,0 +1,41 @@
+{
+  "run_id": "stage35:matrix:pi:rep2",
+  "provider": "pi",
+  "rep": 2,
+  "fixture_set": "levels",
+  "script": "request-change:请在契约定义中补充错误响应的示例;request-change:请补充联调验证步骤的输入输出示例;confirm;advance",
+  "issue_id": "issue_0107",
+  "plan_id": "issue_work_item_plan_0001",
+  "attempt_id": "workspace_session_0123",
+  "same_attempt_throughout": true,
+  "gate_turns": 0,
+  "budget_deductions": [],
+  "advance": {
+    "requested": false,
+    "completed": false,
+    "ready_readback": null,
+    "provider_ledger_delta": null
+  },
+  "provider_ledger_delta_after_advance": null,
+  "failure_class": "workspace_error",
+  "output_defects": [
+    "首稿 work-item-plan markdown 编译失败(253 条):unknown_structured_key×251 + missing_section×2(文档必须包含固定一级标题/至少一个 Work Item)——首稿使用中文 section 标题形态(# 工作项计划/## 工作项 WI-001/### 身份信息 等),未按 schema 固定英文标题书写,compiler 全量拒收;流式输出共 11884 字符,结构本身完整但标题语言错误"
+  ],
+  "feedback_incorporated": null,
+  "confirm_chain": {
+    "human_gate_closed": null,
+    "durable_session_readback": "未达人工门(start_generation 后 provider 09:47:43→09:58:10Z 运行完成,compile 即失败)",
+    "handoff_json": "absent (run 未达 Confirmed)",
+    "durable_session_final_status": "open (compile 失败,无 artifact 落盘)"
+  },
+  "elapsed_sec": 627.7,
+  "verdict": "fail",
+  "verdict_reason": "判定①-④均未达:首稿阶段 compiler 拒收(中文 section 标题形态,unknown_structured_key×251),gate_turns=0,无 artifact;failure_class=workspace_error(非环境类);本跑为 rep1 hard_timeout 的 §9 方差复跑,结果撞不同 failureClass——pi 两跑呈现两种独立缺陷形态(自动循环超时 / 首稿标题语言错误),与预试验 v1 轮 pi 驱动污染属不同问题",
+  "source_refs": {
+    "result_json": "/tmp/aria-stage35-20260903/matrix/pi/rep2/result.json",
+    "ws_jsonl": "/tmp/aria-stage35-20260903/matrix/pi/rep2/ws.jsonl",
+    "durable_session": ".aria/projects/project_0001/issues/issue_0107/workspace-sessions/workspace_session_0123.json",
+    "run_log": "/tmp/aria-stage35-20260903/matrix-pi-rep2.log"
+  },
+  "rerun_of": "stage35:matrix:pi:rep1"
+}
