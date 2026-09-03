@@ -1,6 +1,6 @@
 # 专项测量轮报告(2026-09-03 v1,路线图 3.5)
 
-> 一句话:**核心目标达成——对话门在真实 AI provider 上完整走通(codex/pi 双 Confirmed,8.2「8 次真实跑 0 次到门」历史闭环)**;「工作项太重」疑点修正为「provider 输出合规性为主变量、语料重量为放大器」;顺带修了 3 个产品缺陷、挖出 2 个 defer 缺口、喂饱了 3.7 UI 设计输入。
+> 一句话:**对话式人工门主路径已由 codex/pi 真实跑通(双 Confirmed,8.2「8 次真实跑 0 次到门」闭环);coding 段判据 A 与 amendment 完整链仍 defer(真实 coding provider 未启动)**;「工作项太重」疑点修正为「provider 输出合规性为主变量、语料重量为放大器」;本轮另修 3 个产品缺陷、挖出 2 个 defer 缺口、产出 3.7 UI 设计输入。(终审 I-2 修正:原文「核心目标达成/完整走通」过度宣称,2026-09-03)
 
 ## 1. 目标达成度(v6.0 §2.2 判据对照)
 
@@ -16,7 +16,7 @@
 | 条件项 4(coding_run 未测区) | ⚠️ 结论更新:场景不冗余不退役;真实首测 defer(接缝修后 3a/3b 连锁,编码链主战场=阶段 4) | coding-first v1/v2 |
 | 条件项 5(环境清理) | ✅ 进程/临时检出/远程分支全清(38GB+) | 台账 §1 |
 
-## 2. 全部真实跑台账(21 跑:15 有效+4 无效判废+2 coding 链另账)
+## 2. 全部真实跑台账(23 次 run:15 有效 plan 级+4 无效判废+4 coding 链另账;run 数非 episode 数,终审 I-3 修正)
 
 | 阶段 | provider×rep | 结果 | failureClass | elapsed | 归因 |
 |---|---|---|---|---|---|
@@ -29,7 +29,7 @@
 | | pi rep2 | fail | workspace_error | 627.7s | 中文 section 标题 253 错 |
 | kimi 终局 | rep1/rep2 | fail | workspace_error | 1027.9/151.1s | 前导语替代交付/零输出空交付 |
 | amendment 阶段 1(defect) | rep1/rep2 | fail/**pass(advance Ready)** | workspace_error/— | —/293.8s | provider/— |
-| amendment 阶段 2(coding 另账) | v1×2/v2×2 | fail | 400×2→protocol_error+hard_timeout | 0.06s→30min | **接缝(已修 1e7a7247,3/3 验证)→3a(已修 17c7eccc)→3b(defer)** |
+| amendment 阶段 2(coding 另账) | v1 2 次+v2 2 次=4 次 run | 全 fail | 400×2→protocol_error+hard_timeout | 0.06s→30min | **接缝(已修 1e7a7247,3/3 验证)→3a(已修 17c7eccc)→3b(defer)** |
 | 矩阵 r2(levels,修复后) | codex×2/pi×1 | fail | workspace_error×2/hard_timeout | 253-313s/1800s | invalid_id/duplicate_id/循环不收敛(provider);死路修复零复发但未到 confirm(零行使) |
 | 终局(defect) | codex rep1/rep2 | fail | workspace_error | 54.8/57.2s | **零输出空交付×2(codex 新子形态,CLI 漂移嫌疑证据不足)** |
 

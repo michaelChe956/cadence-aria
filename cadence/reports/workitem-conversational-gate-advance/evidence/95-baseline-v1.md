@@ -21,12 +21,12 @@
 | 重语料(levels)+interactive | 7 | 0 | **0%** | matrix1:codex 死路(产品,已修)❌/codex 首稿 27 错❌/pi 循环超时❌/pi 中文标题❌;matrix2:codex invalid_id❌/codex duplicate_id❌/pi 循环超时❌ |
 | 重语料(levels)+auto_if_valid(kimi 终局) | 2 | 0 | 0% | 前导语替代交付❌/零输出空交付❌ |
 
-### 2.2 按 provider(codex 9/pi 3/kimi 2,仅本轮)
+### 2.2 按 provider(codex 9/pi 4/kimi 2=15,仅本轮有效 plan 级;终审 I-3 修正:原表 pi 漏计 matrix2 rep1)
 
-| provider | 跑次 | pass | 主失败形态 |
-|---|---|---|---|
+| provider | 跑次 | pass | 通过率 | 主失败形态 |
+|---|---|---|---|---|
 | codex | 9 | 1(11%) | 首稿结构缺字段/重复·非法 ID/零输出空交付(新子形态)/死路(已修) |
-| pi | 3 | 1(33%) | 修订循环不收敛×2 |
+| pi | 4 | 1(25%) | 修订循环不收敛×2/中文 section 标题×1 |
 | kimi | 2 | 0 | 前导语替代交付/零输出空交付 |
 
 ### 2.3 历史对照(阶段 2,levels+auto_if_valid,无人工门;/tmp/aria-phase2-results,27 份 result)
