@@ -13,10 +13,25 @@ const CAMPAIGN_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(CAMPAIGN_DIR, '../../..');
 const CORPUS_DIR = path.join(REPO_ROOT, 'cadence/reports/design-weak-model-campaign/corpus');
 // 语料与 fixture 套的合法映射钉死；新增组合必须同时补齐 corpus 文件与 fixtures/<set>/。
+// prepareFlags：levels 全栈工作项保持拆分+集成测试；minimal/defect 是单契约后端工作项，
+// 二者必须关闭，否则 Final Compile 的 strict validator 会报
+// frontend_backend_split_required / integration_work_item_required，污染最小工作项测量。
 const FIXTURE_SETS = {
-  levels: { corpus: '07-fullstack-levels.md', fixturesSubdir: '' },
-  minimal: { corpus: '08-minimal-hello-api.md', fixturesSubdir: 'minimal' },
-  defect: { corpus: '09-amendment-defect.md', fixturesSubdir: 'defect' },
+  levels: {
+    corpus: '07-fullstack-levels.md',
+    fixturesSubdir: '',
+    prepareFlags: { force_frontend_backend_split: true, include_integration_tests: true },
+  },
+  minimal: {
+    corpus: '08-minimal-hello-api.md',
+    fixturesSubdir: 'minimal',
+    prepareFlags: { force_frontend_backend_split: false, include_integration_tests: false },
+  },
+  defect: {
+    corpus: '09-amendment-defect.md',
+    fixturesSubdir: 'defect',
+    prepareFlags: { force_frontend_backend_split: false, include_integration_tests: false },
+  },
 };
 
 // 纯函数：从 env 解析合法映射对 {corpus, set}；未识别值或非法配对一律 fail-closed。
@@ -75,22 +90,31 @@ const AUTHOR_CONFIRM_NODE_TYPES = new Set([
   'work_item_plan_compile_recovery',
   'work_item_plan_context_blocker',
 ]);
-const PREPARE_OPTIONS = {
-  story_spec_ids: ['story_spec_0001'],
-  design_spec_ids: ['design_spec_0001'],
-  author_provider: null,
-  reviewer_provider: null,
-  review_rounds: 1,
-  // 与 provider_workspace_config 的 UI 默认值一致，显式写入以固定采样条件。
-  superpowers_enabled: true,
-  openspec_enabled: true,
-  // PrepareWorkItemPlanRequest 使用 snake_case serde 名称；campaign 只接受单候选协议。
-  run_policy: CONFIGURED_RUN_POLICY,
-  include_integration_tests: true,
-  include_e2e_tests: false,
-  force_frontend_backend_split: true,
-  require_execution_plan_confirm: false,
-};
+// 纯函数：按 fixture set 解析 prepare options 基线；除联动三开关外字段与字段序逐字保持，
+// 保证 levels 输出字节不变。未知 set fail-closed。
+function prepareOptionsForSet(set) {
+  const entry = FIXTURE_SETS[set];
+  if (!entry) {
+    throw new Error(`不支持的 fixture set: ${set}（可选值: ${Object.keys(FIXTURE_SETS).join('|')}）`);
+  }
+  return {
+    story_spec_ids: ['story_spec_0001'],
+    design_spec_ids: ['design_spec_0001'],
+    author_provider: null,
+    reviewer_provider: null,
+    review_rounds: 1,
+    // 与 provider_workspace_config 的 UI 默认值一致，显式写入以固定采样条件。
+    superpowers_enabled: true,
+    openspec_enabled: true,
+    // PrepareWorkItemPlanRequest 使用 snake_case serde 名称；campaign 只接受单候选协议。
+    run_policy: CONFIGURED_RUN_POLICY,
+    include_integration_tests: entry.prepareFlags.include_integration_tests,
+    include_e2e_tests: false,
+    force_frontend_backend_split: entry.prepareFlags.force_frontend_backend_split,
+    require_execution_plan_confirm: false,
+  };
+}
+const PREPARE_OPTIONS = prepareOptionsForSet(FIXTURE_SELECTION.set);
 
 function usageAndExit(message, code = 2) {
   console.error(`${message}\nUsage: node workitem_run_campaign.mjs <provider:claude_code|kimi_code|pi|codex> <rep:positive integer> <outRoot> [--dry-run]`);
@@ -2826,6 +2850,7 @@ export {
   stage3TypedFlowActive,
   providerRolesForSelection,
   prepareOptionsForProvider,
+  prepareOptionsForSet,
   resultTemplate,
   reviewCompleteAction,
   reviewCycleId,
