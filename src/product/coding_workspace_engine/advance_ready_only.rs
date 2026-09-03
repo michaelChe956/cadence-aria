@@ -154,6 +154,85 @@ async fn legacy_group_start_remains_unchanged() {
     );
 }
 
+#[tokio::test]
+async fn sc_advance_unmaterialized_worktree_falls_back_to_worktree_prepare() {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    super::init_test_git_repo(&repo);
+    let base_branch = super::git_stdout(&repo, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    // 复现 sc_advance 延迟物化:worktree_path 已置位但目录不存在。
+    let worktree_path = repo
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001");
+    assert!(
+        !worktree_path.exists(),
+        "fixture must keep worktree unmaterialized"
+    );
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch,
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree_path.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    super::seed_group_attempt_fixture(&store, &attempt, true, false);
+    let attempt = mark_sc_advance(&store, &attempt);
+    AdvanceStore::new(store.paths())
+        .put_record(&ready_record(&attempt.id, AdvanceStatus::Ready))
+        .expect("ready advance record");
+
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let started = engine
+        .start_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect("unmaterialized SC advance must fall back to WorktreePrepare");
+    assert_eq!(started.status, CodingAttemptStatus::Running);
+    assert_eq!(started.stage, CodingExecutionStage::WorktreePrepare);
+    assert!(
+        !worktree_path.exists(),
+        "start_attempt only stages WorktreePrepare; materialization belongs to execute_worktree_prepare"
+    );
+
+    let prepared = engine
+        .execute_worktree_prepare(&started, &repo)
+        .await
+        .expect("materialize SC advance worktree");
+    assert!(worktree_path.exists(), "worktree must be materialized");
+    assert_eq!(
+        prepared.worktree_path.as_deref(),
+        Some(worktree_path.as_path())
+    );
+
+    let coding = engine
+        .start_attempt(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .await
+        .expect("materialized SC advance starts coding");
+    assert_eq!(coding.stage, CodingExecutionStage::Coding);
+    assert!(
+        coding.head_commit.is_some(),
+        "head commit backfilled after materialization"
+    );
+}
+
 #[test]
 fn advance_returns_existing_status_for_each_attempt_state() {
     let root = tempdir().expect("root");
