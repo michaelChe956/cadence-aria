@@ -680,6 +680,7 @@ async fn codex_provider_empty_turn_output_retries_once_and_completes() {
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
+            | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
@@ -741,6 +742,7 @@ async fn codex_provider_empty_turn_output_fails_with_provider_empty_output_after
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
+            | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
