@@ -9,6 +9,7 @@ import {
   activeNodeTypeForActiveNode,
   authorConfirmAction,
   applyResultTiming,
+  choiceRequestSelection,
   confirmedCountForPlanStatus,
   collectUsageByRole,
   corpusSelectionFromEnv,
@@ -936,6 +937,93 @@ test('SingleCandidate 只接受规定终态，并对旧决策请求记录协议�
     assert.deepEqual(legacySingleCandidateDecisionMessage(message), message);
   }
   assert.equal(legacySingleCandidateDecisionMessage({ type: 'review_complete' }), null);
+});
+
+test('choice_request skip 偏好应答：含跳过/继续选项时优先选择，不再把 choice_request 记为单候选协议回归', () => {
+  const message = {
+    type: 'choice_request',
+    id: 'choice-skip-preference',
+    prompt: '取证命令存在风险，如何处理？',
+    options: [
+      { id: 'run', label: '执行命令', description: null },
+      { id: 'skip', label: '跳过', description: '跳过该命令' },
+      { id: 'abort', label: '中止', description: null },
+    ],
+  };
+  const selection = choiceRequestSelection(message);
+  assert.deepEqual(selection.ids, ['skip']);
+  assert.equal(selection.strategy, 'skip_preference');
+  // rep2 折戟形态：SC author 收到 choice_request 不得 fail-closed，应答通道须放行。
+  assert.equal(legacySingleCandidateDecisionMessage(message), null);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'choice_response' }, 'interactive'), true);
+  assert.equal(singleCandidateOutboundAllowed({ type: 'choice_response' }, 'auto_if_valid'), true);
+  // 决策族其余合同零改动：旧决策消息仍拒绝自动应答、决策应答仍拒绝出站。
+  assert.deepEqual(
+    legacySingleCandidateDecisionMessage({ type: 'provider_select_request' }),
+    { type: 'provider_select_request' },
+  );
+  assert.deepEqual(
+    legacySingleCandidateDecisionMessage({ type: 'review_decision_required' }),
+    { type: 'review_decision_required' },
+  );
+  assert.equal(singleCandidateOutboundAllowed({ type: 'review_decision_response' }, 'interactive'), false);
+});
+
+test('choice_request 无跳过/继续选项时选首项（rep2 现场 Yes/No 形态）', () => {
+  const message = {
+    type: 'choice_request',
+    id: 'choice-dangerous-command',
+    prompt: '⚠️ Dangerous command:\n\n  node --test; rm -rf /tmp/witest\n\nAllow?',
+    options: [
+      { id: 'Yes', label: 'Yes', description: null },
+      { id: 'No', label: 'No', description: null },
+    ],
+    allow_free_text: true,
+    questions: [{
+      id: 'default',
+      prompt: 'Allow?',
+      options: [
+        { id: 'Yes', label: 'Yes', description: null },
+        { id: 'No', label: 'No', description: null },
+      ],
+    }],
+  };
+  const selection = choiceRequestSelection(message);
+  assert.deepEqual(selection.ids, ['Yes']);
+  assert.equal(selection.strategy, 'first_option');
+  assert.deepEqual(selection.answers, [{
+    question_id: 'default',
+    selected_option_ids: ['Yes'],
+    free_text: null,
+  }]);
+});
+
+test('choice_request 应答审计记录所选选项与原因（选了什么/为什么）', () => {
+  const withSkip = choiceRequestSelection({
+    type: 'choice_request',
+    id: 'choice-audit-skip',
+    options: [
+      { id: 'opt-run', label: 'Run', description: null },
+      { id: 'opt-continue', label: '继续', description: 'continue anyway' },
+    ],
+  });
+  assert.deepEqual(withSkip.ids, ['opt-continue']);
+  assert.equal(withSkip.selected_label, '继续');
+  assert.equal(withSkip.strategy, 'skip_preference');
+  assert.match(withSkip.reason, /继续|skip/);
+
+  const withoutSkip = choiceRequestSelection({
+    type: 'choice_request',
+    id: 'choice-audit-first',
+    options: [
+      { id: 'Yes', label: 'Yes', description: null },
+      { id: 'No', label: 'No', description: null },
+    ],
+  });
+  assert.deepEqual(withoutSkip.ids, ['Yes']);
+  assert.equal(withoutSkip.selected_label, 'Yes');
+  assert.equal(withoutSkip.strategy, 'first_option');
+  assert.match(withoutSkip.reason, /首项|first/);
 });
 
 test('Confirmed lifecycle plan 仅在验证确认后将每案 confirmed_count 写为 1，并记录真实 duration_ms', () => {

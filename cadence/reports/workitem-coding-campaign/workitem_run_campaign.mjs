@@ -1193,9 +1193,12 @@ function singleCandidateOutboundAllowed(message, runPolicy = CONFIGURED_RUN_POLI
   // 阶段 3：interactive 下增加 typed human_gate_feedback/advance/裸 confirm（REQ-CG-02 SC 准入表）；
   // legacy SC 决策族依旧拒绝。hello/pong 是连接层心跳，不承载任何决策，初连与
   // 8.2c 重连一律放行（重连时 flow_kind 已知，不能把 hello 误判为决策出站）。
+  // choice_response 是服务端主动 choice_request 的应答通道（非决策，skip 偏好选项），
+  // 不放行会让 SC author 在取证询问处折戟（rep2 形态）。
   return message?.type === 'start_generation'
     || message?.type === 'hello'
     || message?.type === 'pong'
+    || message?.type === 'choice_response'
     || (
     runPolicy === 'interactive'
     && ['human_confirm', 'human_gate_feedback', 'advance', 'confirm'].includes(message?.type)
@@ -1347,22 +1350,40 @@ function findExistingSessionMetadata(sessionId) {
   return matches[0];
 }
 
-function firstChoice(message) {
+// choice_request 选项策略：选项标签/说明含「跳过/继续/忽略」或 skip/continue 者优先
+// （保持 SC author 自动化不中断，rep2 现场由「拒答即停」改为应答）；无则选首项。
+// 审计字段 strategy/selected_label/reason 记录选了什么、为什么。
+const SKIP_PREFERENCE_PATTERN = /跳过|继续|忽略|skip|continue/i;
+
+function skipPreferenceOption(options) {
+  return (Array.isArray(options) ? options : []).find((option) => (
+    SKIP_PREFERENCE_PATTERN.test(`${option?.label ?? ''}${option?.description ?? ''}`)
+  )) ?? null;
+}
+
+function choiceRequestSelection(message) {
   const options = Array.isArray(message.options) ? message.options : [];
-  const blocker = /工具|权限|阻塞|tool|permission|block|gate/i.test(
-    `${message.prompt ?? ''}${JSON.stringify(message.questions ?? [])}`,
-  );
-  const skipOrContinue = blocker
-    ? options.find((option) => /跳过|继续|忽略|skip|continue/i.test(`${option.label ?? ''}${option.description ?? ''}`))
-    : null;
-  const selected = skipOrContinue ?? options[0] ?? null;
-  const answers = (message.questions ?? []).map((question) => ({
-    question_id: question.question_id ?? question.id,
-    selected_option_ids: question.options?.[0]?.id ? [question.options[0].id] : [],
-    free_text: null,
-  }));
+  const preferred = skipPreferenceOption(options);
+  const selected = preferred ?? options[0] ?? null;
+  const answers = (message.questions ?? []).map((question) => {
+    const questionOptions = Array.isArray(question.options) ? question.options : [];
+    const questionSelected = skipPreferenceOption(questionOptions) ?? questionOptions[0] ?? null;
+    return {
+      question_id: question.question_id ?? question.id,
+      selected_option_ids: questionSelected?.id ? [questionSelected.id] : [],
+      free_text: null,
+    };
+  });
   const ids = selected?.id ? [selected.id] : answers.flatMap((answer) => answer.selected_option_ids);
-  return { ids, answers, strategy: skipOrContinue ? 'blocker_skip_or_continue' : 'first_option' };
+  return {
+    ids,
+    answers,
+    strategy: preferred ? 'skip_preference' : 'first_option',
+    selected_label: selected?.label ?? null,
+    reason: preferred
+      ? `选项含跳过/继续偏好关键词，选择「${preferred.label ?? preferred.id}」保持流程继续`
+      : '无跳过/继续偏好选项，选首项保持流程继续',
+  };
 }
 
 function skipOptionalFindingsOption(options) {
@@ -1460,7 +1481,6 @@ function legacySingleCandidateDecisionMessage(message, runPolicy = CONFIGURED_RU
   if (interactiveHumanGate) return null;
   if (new Set([
     'provider_select_request',
-    'choice_request',
     'review_decision_required',
   ]).has(message.type)) return message;
   if (message.type === 'stage_change' && new Set([
@@ -2564,12 +2584,19 @@ async function runCampaign({
             send({ type: 'permission_response', id: message.id, approved: true, reason: null });
             break;
           case 'choice_request': {
-            const choice = firstChoice(message);
+            const choice = choiceRequestSelection(message);
             if (!choice.ids.length) {
               fail('choice_without_options', `choice_request ${message.id ?? '<missing>'} 没有可选项`);
               break;
             }
-            result.choices.push({ id: message.id, elapsedSec: elapsedSec(), selected_option_ids: choice.ids, strategy: choice.strategy });
+            result.choices.push({
+              id: message.id,
+              elapsedSec: elapsedSec(),
+              selected_option_ids: choice.ids,
+              strategy: choice.strategy,
+              selected_label: choice.selected_label,
+              reason: choice.reason,
+            });
             send({ type: 'choice_response', id: message.id, selected_option_ids: choice.ids, free_text: null, answers: choice.answers });
             break;
           }
@@ -2967,6 +2994,7 @@ export {
   applyResultTiming,
   authorConfirmAction,
   campaignCommandId,
+  choiceRequestSelection,
   collectUsageByRole,
   confirmedCountForPlanStatus,
   corpusSelectionFromEnv,
