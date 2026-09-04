@@ -294,7 +294,9 @@ impl super::WorkspaceEngine {
             );
             self.emit_execution_event(
                 crate::cross_cutting::streaming_provider::ProviderExecutionEvent {
-                    event_id: format!("human_gate_revision_heading_normalized_{node_id}"),
+                    event_id: format!(
+                        "human_gate_revision_heading_normalized_{node_id}_{turn_id}"
+                    ),
                     kind: crate::cross_cutting::streaming_provider::ProviderExecutionEventKind::Provider,
                     status: crate::cross_cutting::streaming_provider::ProviderExecutionEventStatus::Completed,
                     title: "人工修订结构标题确定性归一化".to_string(),

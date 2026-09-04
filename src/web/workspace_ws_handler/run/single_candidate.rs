@@ -42,6 +42,21 @@ fn prepare_author_delivery_for_compile(
 ///
 /// Provider 完整输出直接进入 source revision 与 compiler；内部 selector 只在编译成功后
 /// 基于 IR item 数和 provider profile 记录诊断，不触碰 legacy outline/draft/batch 链路。
+/// SingleCandidate author 归一化审计事件的稳定 event_id。
+///
+/// execution event 按 event_id upsert:同一 AuthorRun 节点被重驱(中断恢复、
+/// 重试)时若 event_id 只含 node_id,后一次归一化会覆盖前一次的审计记录。
+/// 以 provider 原文内容摘要为去重键(与修订链 report id 的 `source_hash[..16]`
+/// 模式一致):不同尝试内容各留一条审计,同内容重放保持同 ID 幂等去重。
+fn author_heading_normalized_event_id(node_id: &str, raw_output: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(raw_output.as_bytes()));
+    format!(
+        "single_candidate_heading_normalized_{node_id}_{}",
+        &digest[..16]
+    )
+}
+
 pub(crate) async fn run_single_candidate_author(
     engine: &mut WorkspaceEngine,
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
@@ -219,7 +234,7 @@ pub(crate) async fn run_single_candidate_author(
         engine
             .emit_execution_event(
                 ProviderExecutionEvent {
-                    event_id: format!("single_candidate_heading_normalized_{node_id}"),
+                    event_id: author_heading_normalized_event_id(&node_id, &full_output),
                     kind: ProviderExecutionEventKind::Provider,
                     status: ProviderExecutionEventStatus::Completed,
                     title: "SingleCandidate 结构标题确定性归一化".to_string(),
@@ -407,5 +422,26 @@ mod tests {
         assert_eq!(delivery.normalized_heading_lines, 2);
         assert!(delivery.source.contains("### 溯源清单\n"));
         assert!(compile_item_count(&delivery.source).is_err());
+    }
+
+    #[test]
+    fn author_heading_normalized_event_id_keeps_attempt_history_on_same_node() {
+        // 同一 AuthorRun 节点被重驱(中断恢复/重试)时,两次不同尝试的归一化
+        // 审计不得共用 event_id——execution event 按 event_id upsert,共用会让
+        // 后一次覆盖前一次,丢审计历史。
+        let node_id = "timeline_node_001";
+        let first = super::author_heading_normalized_event_id(node_id, "attempt one output");
+        let second = super::author_heading_normalized_event_id(node_id, "attempt two output");
+
+        assert_ne!(
+            first, second,
+            "同节点不同尝试共用 event_id 会让 upsert 覆盖审计历史"
+        );
+        assert_eq!(
+            first,
+            super::author_heading_normalized_event_id(node_id, "attempt one output"),
+            "同内容重放必须保持 event_id 稳定以幂等去重"
+        );
+        assert!(first.starts_with("single_candidate_heading_normalized_timeline_node_001"));
     }
 }

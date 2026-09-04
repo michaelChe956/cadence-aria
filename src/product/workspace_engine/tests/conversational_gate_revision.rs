@@ -1012,6 +1012,82 @@ async fn conversational_gate_revision_result_accepts_field_chinese_heading_trans
 }
 
 #[tokio::test]
+async fn conversational_gate_revision_heading_normalized_audit_events_coexist_across_turns() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("revision_audit_coexist", 2);
+    // 归一化审计事件按 event_id upsert 进 active 节点的 node detail。
+    // 挂一个人工确认节点,模拟同一 human-confirm 节点上的多轮修订:
+    // 两轮 turn 各自发生标题归一化时,必须各留一条审计记录而非互相覆盖。
+    let node_id = engine
+        .create_timeline_node(crate::product::workspace_engine::TimelineNodeDraft {
+            node_type: crate::web::workspace_ws_types::TimelineNodeType::HumanConfirm,
+            agent: Some(crate::product::models::ProviderName::ClaudeCode),
+            stage: crate::product::workspace_engine::WorkspaceStage::HumanConfirm,
+            round: None,
+            title: "人工确认".to_string(),
+            summary: None,
+            status: crate::web::workspace_ws_types::TimelineNodeStatus::Active,
+        })
+        .await;
+
+    let first_turn = open_running_revision_turn(&mut engine, "revision_audit_round_one").await;
+    engine.active_node_id = Some(node_id.clone());
+    engine
+        .run_sc_manual_revision_turn(
+            &first_turn,
+            format!(
+                "provider preamble\n{}",
+                with_field_chinese_heading_translations(REP4_FIXTURE)
+            ),
+        )
+        .await
+        .expect("first zh-heading revision should succeed");
+
+    let second_outcome = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "revision_audit_round_two".to_string(),
+            feedback: "再次修订标题".to_string(),
+        })
+        .await
+        .expect("second feedback");
+    let second_turn = match second_outcome {
+        HumanGateCommandOutcome::TurnOpened { turn, .. } => turn.turn_id,
+        other => panic!("expected second turn, got {other:?}"),
+    };
+    engine
+        .mark_human_gate_turn_running(&second_turn)
+        .expect("second turn running");
+    let second_content = with_field_chinese_heading_translations(REP4_FIXTURE)
+        .replace("Backend levels API", "Backend levels API v2");
+    engine.active_node_id = Some(node_id.clone());
+    engine
+        .run_sc_manual_revision_turn(&second_turn, format!("provider preamble\n{second_content}"))
+        .await
+        .expect("second zh-heading revision should succeed");
+
+    let detail = lifecycle
+        .load_node_detail(engine.session().session_id.as_str(), &node_id)
+        .expect("load human-confirm node detail");
+    let audit_ids: Vec<String> = detail
+        .execution_events
+        .iter()
+        .filter_map(|event| event["event_id"].as_str())
+        .filter(|event_id| event_id.starts_with("human_gate_revision_heading_normalized_"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        audit_ids.len(),
+        2,
+        "同一 human-confirm 节点两轮归一化必须各留一条审计记录,实际: {audit_ids:?}"
+    );
+    assert!(audit_ids.contains(&format!(
+        "human_gate_revision_heading_normalized_{node_id}_{first_turn}"
+    )));
+    assert!(audit_ids.contains(&format!(
+        "human_gate_revision_heading_normalized_{node_id}_{second_turn}"
+    )));
+}
+
+#[tokio::test]
 async fn conversational_gate_revision_result_rejects_unknown_chinese_heading() {
     let (_root, _lifecycle, mut engine) =
         durable_revision_fixture("revision_zh_unknown_heading", 2);
