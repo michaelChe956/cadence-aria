@@ -5,10 +5,12 @@
 // 三条 WS 线：① 原 plan session `human_gate_feedback`；② child repair session
 // `confirm_plan_amendment`；③ coding WS 只收控制事件，resume 判定一律 durable 回读。
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -991,3 +993,358 @@ test('amendmentReplayedTurnReconciliation：no_record / open_live / terminal / c
     'command 命中但 turn_id 不一致：durable 记录不可信，保守回退等待 WS 事件',
   );
 });
+
+// —— ⑩ 终局小修：stage_gate（5s 自动放行门）识别，不停机 ——
+// 现场证据（/tmp/aria-stage35-p1val/coding-pi-coding_attempt_716f.../ws.jsonl）：
+// 07:53:35 coding_gate_required{kind:stage_gate,gate_id:coding_stage_gate_0001} 被当未知门
+// 停机（automationStoppedForGate）；5s 窗口内 coding_session_state.pending_gates 也携带同款
+// 门（coding_stage_gate_0002）；服务器 5 秒自动放行照常推进（74 工具事件 + 提交 + 评审过）；
+// 08:05:37 stage=final_confirm+waiting_for_human+readiness complete 到达时 driver 已停机，
+// final_confirm 分支永不触发 → 1800s 硬超时。
+// 新符号按本文件惯例经命名空间解构获取：修复落地前为 undefined，红测只落在新场景用例上。
+const { isAutoReleasedStageGate, pendingGatesPartition } = codingDriverModule;
+
+test('stage_gate 识别纯函数：kind=stage_gate 或 gate_id 前缀 coding_stage_gate_ 判为 5s 自动放行门；其余 fail-closed 判否', () => {
+  assert.equal(isAutoReleasedStageGate({ kind: 'stage_gate', gate_id: 'coding_stage_gate_0001', title: 'Coding Stage Gate' }), true);
+  assert.equal(
+    isAutoReleasedStageGate({ gate_id: 'coding_stage_gate_0002', kind: 'human_gate', title: 'CodeReview Stage Gate' }),
+    true,
+    'gate_id 前缀兜底：现场 0002 为 code review 前置门',
+  );
+  assert.equal(isAutoReleasedStageGate({ kind: 'human_confirm', gate_id: 'gate_0001' }), false);
+  assert.equal(isAutoReleasedStageGate({ gate_id: 'gate_mystery_0001', kind: 'mystery_gate' }), false);
+  assert.equal(isAutoReleasedStageGate(null), false);
+  assert.equal(isAutoReleasedStageGate(undefined), false);
+  assert.equal(isAutoReleasedStageGate('stage_gate'), false);
+  assert.equal(isAutoReleasedStageGate({}), false);
+  assert.deepEqual(
+    pendingGatesPartition([{ kind: 'stage_gate', gate_id: 'coding_stage_gate_0001' }, { kind: 'mystery_gate', gate_id: 'gate_x' }]),
+    {
+      stageGates: [{ kind: 'stage_gate', gate_id: 'coding_stage_gate_0001' }],
+      unknownGates: [{ kind: 'mystery_gate', gate_id: 'gate_x' }],
+    },
+    'pending_gates 必须拆分：stage_gate 豁免，其余门保持未知门语义',
+  );
+  assert.deepEqual(pendingGatesPartition(undefined), { stageGates: [], unknownGates: [] });
+  assert.deepEqual(pendingGatesPartition('not-array'), { stageGates: [], unknownGates: [] });
+  assert.deepEqual(pendingGatesPartition([]), { stageGates: [], unknownGates: [] });
+});
+
+// 极简 fake ARIA：回环 + 临时端口（不触 4317）。HTTP 覆盖 lifecycle 回读与 coding-attempt
+// 创建两条路由；WS 用裸 socket 完成 RFC6455 握手与文本帧编解码，按序回放脚本消息并
+// 捕获 driver 出站消息，供驱动级断言使用。
+const WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+function encodeWsTextFrame(payload) {
+  const body = Buffer.from(payload, 'utf8');
+  const header = [0x81];
+  if (body.length < 126) {
+    header.push(body.length);
+  } else if (body.length < 65_536) {
+    header.push(126, body.length >> 8, body.length & 0xff);
+  } else {
+    header.push(127);
+    for (let shift = 56; shift >= 0; shift -= 8) {
+      header.push(Number((BigInt(body.length) >> BigInt(shift)) & 0xffn));
+    }
+  }
+  return Buffer.concat([Buffer.from(header), body]);
+}
+
+function decodeWsFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+  while (offset + 2 <= buffer.length) {
+    const opcode = buffer[offset] & 0x0f;
+    const masked = (buffer[offset + 1] & 0x80) !== 0;
+    let length = buffer[offset + 1] & 0x7f;
+    let cursor = offset + 2;
+    if (length === 126) {
+      if (cursor + 2 > buffer.length) break;
+      length = buffer.readUInt16BE(cursor);
+      cursor += 2;
+    } else if (length === 127) {
+      if (cursor + 8 > buffer.length) break;
+      length = Number(buffer.readBigUInt64BE(cursor));
+      cursor += 8;
+    }
+    let maskKey = null;
+    if (masked) {
+      if (cursor + 4 > buffer.length) break;
+      maskKey = buffer.subarray(cursor, cursor + 4);
+      cursor += 4;
+    }
+    if (cursor + length > buffer.length) break;
+    const payload = Buffer.from(buffer.subarray(cursor, cursor + length));
+    if (masked) {
+      for (let index = 0; index < payload.length; index += 1) payload[index] ^= maskKey[index % 4];
+    }
+    frames.push({ opcode, payload });
+    offset = cursor + length;
+  }
+  return { frames, rest: buffer.subarray(offset) };
+}
+
+function startFakeAriaServer() {
+  const handoff = {
+    project_id: 'project_0001',
+    issue_id: 'issue_0001',
+    plan_id: 'plan_0001',
+    repository_id: 'repository_0001',
+    provider: 'pi',
+    work_item_ids: ['work_item_0001'],
+  };
+  const state = { peers: [], inbound: [], listeners: [] };
+  const httpServer = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'GET' && url.pathname === `/api/issues/${handoff.issue_id}/lifecycle`) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        work_item_plans: [{ id: handoff.plan_id, status: 'Confirmed', work_item_ids: handoff.work_item_ids }],
+        work_items: handoff.work_item_ids.map((id) => ({ work_item_id: id })),
+      }));
+      return;
+    }
+    if (
+      req.method === 'POST'
+      && url.pathname === `/api/projects/${handoff.project_id}/issues/${handoff.issue_id}/work-item-plans/${handoff.plan_id}/coding-attempts`
+    ) {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ attempt_id: 'attempt_0001', branch_name: 'feat/stage-gate-probe' }));
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ message: `fake aria 未实现路由: ${req.method} ${url.pathname}` }));
+  });
+  httpServer.on('upgrade', (req, socket) => {
+    const accept = createHash('sha1')
+      .update(`${req.headers['sec-websocket-key']}${WEBSOCKET_GUID}`)
+      .digest('base64');
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+        + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    socket.setNoDelay(true);
+    const peer = {
+      send: (message) => {
+        if (!socket.destroyed) socket.write(encodeWsTextFrame(JSON.stringify(message)));
+      },
+      close: () => socket.destroy(),
+    };
+    state.peers.push(peer);
+    let buffer = Buffer.alloc(0);
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const { frames, rest } = decodeWsFrames(buffer);
+      buffer = rest;
+      for (const frame of frames) {
+        if (frame.opcode === 0x8) { socket.destroy(); return; }
+        if (frame.opcode === 0x9) { socket.write(Buffer.from([0x8a, 0x00])); continue; }
+        if (frame.opcode !== 0x1) continue;
+        const message = JSON.parse(frame.payload.toString('utf8'));
+        state.inbound.push(message);
+        for (const listener of [...state.listeners]) listener(message);
+      }
+    });
+    socket.on('error', () => { /* driver 退出时直接销毁连接即可。 */ });
+  });
+  return new Promise((resolve) => {
+    httpServer.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: httpServer.address().port,
+        handoff,
+        peers: state.peers,
+        inbound: () => state.inbound,
+        waitForOutbound: (predicate, label, timeoutMs = 10_000) => new Promise((resolveWait, rejectWait) => {
+          const existing = state.inbound.find(predicate);
+          if (existing) { resolveWait(existing); return; }
+          const listener = (message) => {
+            if (!predicate(message)) return;
+            clearTimeout(timer);
+            state.listeners = state.listeners.filter((entry) => entry !== listener);
+            resolveWait(message);
+          };
+          const timer = setTimeout(() => {
+            state.listeners = state.listeners.filter((entry) => entry !== listener);
+            rejectWait(new Error(`等待 driver 出站消息超时: ${label}; 已收到 ${JSON.stringify(state.inbound.map((m) => m.type))}`));
+          }, timeoutMs);
+          state.listeners.push(listener);
+        }),
+        close: () => {
+          for (const peer of state.peers) peer.close();
+          httpServer.close();
+        },
+      });
+    });
+  });
+}
+
+function waitForPeer(server, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const poll = () => {
+      const peer = server.peers.at(-1);
+      if (peer) { resolve(peer); return; }
+      if (Date.now() - startedAt > timeoutMs) { reject(new Error('等待 driver WS 连接超时')); return; }
+      setTimeout(poll, 20);
+    };
+    poll();
+  });
+}
+
+function runDriverAgainstFakeAria({ server, extraEnv = {} }) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aria-stage-gate-driver-'));
+  const handoffPath = path.join(tmp, 'handoff.json');
+  fs.writeFileSync(handoffPath, JSON.stringify(server.handoff), 'utf8');
+  const outRoot = path.join(tmp, 'out');
+  const child = spawn(process.execPath, [path.join(CAMPAIGN_DIR, 'coding_run_campaign.mjs'), handoffPath, outRoot], {
+    env: {
+      ...process.env,
+      ARIA_BASE_URL: `http://127.0.0.1:${server.port}`,
+      ARIA_WS_BASE_URL: `ws://127.0.0.1:${server.port}`,
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return {
+    outRoot,
+    waitForExit: () => new Promise((resolveExit, rejectExit) => {
+      const timer = setTimeout(() => rejectExit(new Error('driver 子进程未在 30s 内退出')), 30_000);
+      child.once('exit', (code, signal) => { clearTimeout(timer); resolveExit({ code, signal }); });
+      child.once('error', rejectExit);
+    }),
+    stderr: () => stderr,
+    stdout: () => stdout,
+    kill: () => { child.kill('SIGKILL'); },
+  };
+}
+
+function readDriverOutputs(outRoot) {
+  const attemptDir = path.join(outRoot, fs.readdirSync(outRoot)[0]);
+  const wsLog = fs.readFileSync(path.join(attemptDir, 'ws.jsonl'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line));
+  const result = JSON.parse(fs.readFileSync(path.join(attemptDir, 'result.json'), 'utf8'));
+  const outboundTypes = wsLog.filter((entry) => entry.direction === 'out').map((entry) => entry.message.type);
+  return { attemptDir, wsLog, result, outboundTypes };
+}
+
+const STAGE_GATE_WIRE = {
+  gate_id: 'coding_stage_gate_0001',
+  kind: 'stage_gate',
+  title: 'Coding Stage Gate',
+  stage: 'coding',
+  expires_at: '2026-09-04T07:53:40.434739688+00:00',
+  available_actions: [
+    { action_id: 'confirm_stage', label: '立即开始', action_type: 'confirm_stage' },
+    { action_id: 'abort', label: '中止 Attempt', action_type: 'abort' },
+  ],
+};
+
+const FINAL_CONFIRM_READY_STATE = {
+  type: 'coding_session_state',
+  attempt_id: 'attempt_0001',
+  stage: 'final_confirm',
+  status: 'waiting_for_human',
+  pending_gates: [],
+  group_final_readiness: { attempt_id: 'attempt_0001', status: 'complete', units: [], diagnostics: [] },
+};
+
+test('收到 stage_gate 门后 automation 不停机：记审计（gate_id/title），后续 final_confirm+waiting+readiness complete 仍发出 final_confirm', async () => {
+  const server = await startFakeAriaServer();
+  const run = runDriverAgainstFakeAria({ server });
+  try {
+    const peer = await waitForPeer(server);
+    // 现场序列回放：gate_required 门 → 5s 窗口内 session_state 携带同款 pending 门 → 自动放行清空。
+    peer.send({ type: 'coding_gate_required', gate: STAGE_GATE_WIRE });
+    peer.send({ type: 'coding_session_state', attempt_id: 'attempt_0001', stage: 'coding', status: 'running', pending_gates: [STAGE_GATE_WIRE] });
+    peer.send({ type: 'coding_session_state', attempt_id: 'attempt_0001', stage: 'coding', status: 'running', pending_gates: [] });
+    peer.send(FINAL_CONFIRM_READY_STATE);
+    await server.waitForOutbound((message) => message.type === 'final_confirm', 'final_confirm');
+    peer.send({ type: 'coding_session_state', attempt_id: 'attempt_0001', stage: 'final_confirm', status: 'completed', pending_gates: [] });
+    const exit = await run.waitForExit();
+    assert.equal(exit.code, 0, run.stderr());
+    const { wsLog, result, outboundTypes } = readDriverOutputs(run.outRoot);
+    const observed = wsLog.filter((entry) => entry.event === 'stage_gate_observed');
+    assert.equal(observed.length, 1, '同 gate_id 在 gate_required 与 pending_gates 重复出现只审计一次');
+    assert.equal(observed[0].gate_id, 'coding_stage_gate_0001');
+    assert.equal(observed[0].title, 'Coding Stage Gate');
+    assert.equal(
+      wsLog.some((entry) => entry.event === 'automation_stopped_for_unknown_gate'),
+      false,
+      'stage_gate 不得触发未知门停机',
+    );
+    assert.equal(result.completed, true);
+    assert.equal(result.failureClass, null);
+    assert.ok(
+      result.gates.some((gate) => gate.action === 'stage_gate_observed_wait_auto_release' && gate.gate_id === 'coding_stage_gate_0001'),
+      'result.gates 必须落审计条目',
+    );
+    assert.equal(outboundTypes.filter((type) => type === 'final_confirm').length, 1, 'final_confirm 恰好发出一次');
+  } finally {
+    run.kill();
+    server.close();
+  }
+}, { timeout: 45_000 });
+
+test('未知 kind 的 coding_gate_required 照旧 fail-closed 停机：不发 final_confirm，硬超时归因 unknown_gate_timeout', async () => {
+  const server = await startFakeAriaServer();
+  const run = runDriverAgainstFakeAria({ server, extraEnv: { ARIA_CODING_HARD_TIMEOUT_MS: '6000' } });
+  try {
+    const peer = await waitForPeer(server);
+    peer.send({ type: 'coding_gate_required', gate: { gate_id: 'gate_mystery_0001', kind: 'mystery_gate', title: '未知门' } });
+    peer.send(FINAL_CONFIRM_READY_STATE);
+    const exit = await run.waitForExit();
+    assert.equal(exit.code, 1);
+    const { wsLog, result, outboundTypes } = readDriverOutputs(run.outRoot);
+    assert.ok(
+      wsLog.some((entry) => entry.event === 'automation_stopped_for_unknown_gate' && entry.gate?.gate_id === 'gate_mystery_0001'),
+      '未知门必须照旧停机审计',
+    );
+    assert.equal(wsLog.some((entry) => entry.event === 'stage_gate_observed'), false);
+    assert.equal(result.failureClass, 'unknown_gate_timeout');
+    assert.equal(result.completed, false);
+    assert.ok(!outboundTypes.includes('final_confirm'), '停机后绝不再发任何驱动消息');
+  } finally {
+    run.kill();
+    server.close();
+  }
+}, { timeout: 45_000 });
+
+test('pending_gates 携带非 stage_gate 的未知门仍 fail-closed 停机（仅 stage_gate 被豁免）', async () => {
+  const server = await startFakeAriaServer();
+  const run = runDriverAgainstFakeAria({ server, extraEnv: { ARIA_CODING_HARD_TIMEOUT_MS: '6000' } });
+  try {
+    const peer = await waitForPeer(server);
+    peer.send({
+      type: 'coding_session_state',
+      attempt_id: 'attempt_0001',
+      stage: 'coding',
+      status: 'running',
+      pending_gates: [{ gate_id: 'gate_mystery_0002', kind: 'mystery_gate', title: '未知门' }],
+    });
+    peer.send(FINAL_CONFIRM_READY_STATE);
+    const exit = await run.waitForExit();
+    assert.equal(exit.code, 1);
+    const { wsLog, result, outboundTypes } = readDriverOutputs(run.outRoot);
+    assert.ok(
+      wsLog.some(
+        (entry) => entry.event === 'automation_stopped_for_unknown_gate' && entry.source === 'coding_session_state:pending_gates',
+      ),
+      'pending_gates 中的未知门必须停机',
+    );
+    assert.equal(wsLog.some((entry) => entry.event === 'stage_gate_observed'), false);
+    assert.equal(result.failureClass, 'unknown_gate_timeout');
+    assert.ok(!outboundTypes.includes('final_confirm'));
+  } finally {
+    run.kill();
+    server.close();
+  }
+}, { timeout: 45_000 });

@@ -221,6 +221,32 @@ function readinessIsComplete(message) {
   return readiness?.status === 'complete' && Array.isArray(readiness.diagnostics) && readiness.diagnostics.length === 0;
 }
 
+// —— stage_gate（5s 自动放行门）识别 ——
+// 现场证据（/tmp/aria-stage35-p1val/coding-pi-coding_attempt_716f.../ws.jsonl）：
+// 服务器在 coding / code review 阶段前发 kind=stage_gate 的 coding_gate_required
+// （gate_id 前缀 coding_stage_gate_），且 5s 窗口内的 coding_session_state.pending_gates
+// 也携带同款门；服务器 5 秒后自动放行，流程照常推进到 final_confirm readiness complete。
+// driver 把它当未知门停机（automationStoppedForGate）会哑到硬超时，因此识别为 stage_gate
+// 的门只记审计不停机；其余未知门形态一律照旧 waitForUnknownGate 停机（fail-closed 不变）。
+const STAGE_GATE_ID_PREFIX = 'coding_stage_gate_';
+
+function isAutoReleasedStageGate(gate) {
+  if (!gate || typeof gate !== 'object') return false;
+  if (gate.kind === 'stage_gate') return true;
+  return typeof gate.gate_id === 'string' && gate.gate_id.startsWith(STAGE_GATE_ID_PREFIX);
+}
+
+function pendingGatesPartition(pendingGates) {
+  const gates = Array.isArray(pendingGates) ? pendingGates : [];
+  const stageGates = [];
+  const unknownGates = [];
+  for (const gate of gates) {
+    if (isAutoReleasedStageGate(gate)) stageGates.push(gate);
+    else unknownGates.push(gate);
+  }
+  return { stageGates, unknownGates };
+}
+
 // —— Task 5.1 amendment 模式（ARIA_AMENDMENT_SCRIPT，8.4a 形态）——
 // wire 依据：cadence/reports/workitem-conversational-gate-advance/evidence/amendment-wire-notes.md
 // 三条 WS 线：① 原 plan session（session_link.parent_session_id）发 human_gate_feedback 过
@@ -1076,6 +1102,19 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
     result.gates.push({ elapsedSec: elapsedSec(), source, gate, action: 'no_response_wait_for_hard_timeout' });
     writeLog({ event: 'automation_stopped_for_unknown_gate', source, gate });
   };
+  // stage_gate 审计：同 gate_id 在 gate_required 与 5s 窗口内的 pending_gates 反复出现，
+  // 按 gate_id 幂等去重，只在首次观测时落审计事件（缺 gate_id 时每次都记）。
+  const observedStageGateIds = new Set();
+  const observeStageGate = (gate, source) => {
+    const gateId = typeof gate?.gate_id === 'string' && gate.gate_id ? gate.gate_id : null;
+    if (gateId) {
+      if (observedStageGateIds.has(gateId)) return;
+      observedStageGateIds.add(gateId);
+    }
+    const title = typeof gate?.title === 'string' ? gate.title : null;
+    result.gates.push({ elapsedSec: elapsedSec(), source, gate_id: gateId, title, kind: 'stage_gate', action: 'stage_gate_observed_wait_auto_release' });
+    writeLog({ event: 'stage_gate_observed', source, gate_id: gateId, title, note: '服务器 5s 自动放行门，automation 不停机' });
+  };
   const maybeDriveState = (message, source) => {
     const stage = message.stage;
     const status = message.status;
@@ -1090,10 +1129,12 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
       finish(0);
       return;
     }
-    if (Array.isArray(message.pending_gates) && message.pending_gates.length) {
-      waitForUnknownGate(message.pending_gates, `${source}:pending_gates`);
+    const { unknownGates, stageGates } = pendingGatesPartition(message.pending_gates);
+    if (unknownGates.length) {
+      waitForUnknownGate(unknownGates, `${source}:pending_gates`);
       return;
     }
+    for (const gate of stageGates) observeStageGate(gate, `${source}:pending_gates`);
     if (stage === 'prepare_context' && !initialStartSent) {
       initialStartSent = true;
       send({ type: 'start_coding' });
@@ -1291,9 +1332,15 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
         case 'internal_pr_review_complete':
           if (message.review) result.review_results.push(message.review);
           break;
-        case 'coding_gate_required':
-          waitForUnknownGate(message.gate ?? message, message.type);
+        case 'coding_gate_required': {
+          const gate = message.gate ?? message;
+          if (isAutoReleasedStageGate(gate)) {
+            observeStageGate(gate, message.type);
+          } else {
+            waitForUnknownGate(gate, message.type);
+          }
           break;
+        }
         case 'coding_protocol_error':
           if (!automationStoppedForGate) fail('protocol_error', `${message.code ?? 'coding_protocol_error'}: ${message.message ?? ''}`);
           break;
@@ -1391,7 +1438,9 @@ export {
   amendmentScriptFromEnv,
   codingControlMessagePlan,
   createAmendmentRuntime,
+  isAutoReleasedStageGate,
   outputTimestamp,
+  pendingGatesPartition,
   preflightFailureOutDir,
   workspaceSessionWsUrl,
 };
