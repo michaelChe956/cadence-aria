@@ -5,6 +5,11 @@
 // 重放固定传 admission_kind=LegacyGroup、worktree_path=None,journal_matches_request 的
 // 全等校验必败 → 400 coding_group_attempt_incomplete。以下测试先在 store 层复刻 advance
 // 初始化链(见 workspace_engine::advance::initialize_advance_inner),再以 HTTP 请求验证收养。
+//
+// 接缝修复轮 2(2026-09-04):advance 冻结 plan 会话选定的 provider_config_snapshot
+// (advance_provider_config,如 pi/pi);端点重放却按仓库默认 provider 重算
+// (coding_provider_config_snapshot_for_runtime_binding 尾部回退),plan provider ≠ 仓库
+// 默认时全等必败 → 同一 400。journal 存在时端点必须按 journal.attempt 冻结值重放。
 
 use cadence_aria::product::coding_attempt_store::CodingGroupInitializationJournal;
 use cadence_aria::product::coding_attempt_store::CodingGroupInitializationPhase;
@@ -54,14 +59,19 @@ fn endpoint_replay_provider_snapshot(
 }
 
 /// 按 advance 初始化链(workspace_engine::advance::initialize_advance_inner)播种
-/// sc_advance group 初始化 journal,推进到 stop_after 阶段:
+/// sc_advance group 初始化 journal,推进到 stop_after 阶段：
 /// - AttemptPersisted:attempt 已落盘、共享 worktree 尚未绑定(advance 中断形态)
 /// - Completed:advance 全链完成(campaign 现场:advance record status=ready)
+///
+/// provider_config_snapshot 由调用方给定：advance 侧取 plan 会话冻结值
+/// (advance_provider_config(&session, unit)),默认 provider 场景传
+/// endpoint_replay_provider_snapshot(...) 以保持与首轮修复测试相同的基线。
 #[allow(clippy::too_many_lines)]
 fn seed_advance_group_initialization(
     app_paths: &ProductAppPaths,
     repo_path: &std::path::Path,
     stop_after: CodingGroupInitializationPhase,
+    provider_config_snapshot: ProviderConfigSnapshot,
 ) -> CodingGroupInitializationJournal {
     let coding_store = CodingAttemptStore::new(app_paths.to_owned());
     let lifecycle = LifecycleStore::new(app_paths.to_owned());
@@ -98,7 +108,7 @@ fn seed_advance_group_initialization(
                 .join("aria-issues")
                 .join("issue_0001"),
         ),
-        provider_config_snapshot: endpoint_replay_provider_snapshot(app_paths, &lifecycle),
+        provider_config_snapshot,
         target_snapshot: None,
         max_auto_rework: 2,
     };
@@ -204,6 +214,7 @@ async fn create_group_coding_attempt_adopts_completed_advance_journal() {
         &app_paths,
         repo.path(),
         CodingGroupInitializationPhase::Completed,
+        endpoint_replay_provider_snapshot(&app_paths, &LifecycleStore::new(app_paths.clone())),
     );
     let create_path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
 
@@ -249,6 +260,7 @@ async fn create_group_coding_attempt_adopts_interrupted_advance_journal() {
         &app_paths,
         repo.path(),
         CodingGroupInitializationPhase::AttemptPersisted,
+        endpoint_replay_provider_snapshot(&app_paths, &LifecycleStore::new(app_paths.clone())),
     );
     assert_eq!(
         journal.phase,
@@ -286,4 +298,56 @@ async fn create_group_coding_attempt_adopts_interrupted_advance_journal() {
         Some(journal.attempt.id.as_str()),
         "resumed attempt must own the shared worktree lease"
     );
+}
+
+/// 接缝修复轮 2:plan 会话选定非默认 provider(如 pi)时,advance 冻结的
+/// provider_config_snapshot 与仓库默认重算值必然不同。端点重放必须按 journal
+/// 冻结值收养,而不是重新按 repository 默认 provider 推导(否则
+/// journal_matches_request 全等必败 → 400 coding_group_attempt_incomplete,
+/// 即 pi-rescue campaign 现场:0.054s preflight 失败)。
+#[tokio::test]
+async fn create_group_coding_attempt_replays_frozen_non_default_provider_snapshot() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    // 复刻 advance_provider_config(&plan_session, unit):plan 会话 author/review=pi/pi。
+    let frozen_provider_snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Pi,
+        reviewer: Some(ProviderName::Pi),
+        review_rounds: 1,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+    };
+    let journal = seed_advance_group_initialization(
+        &app_paths,
+        repo.path(),
+        CodingGroupInitializationPhase::Completed,
+        frozen_provider_snapshot.clone(),
+    );
+    assert_eq!(
+        journal.attempt.provider_config_snapshot.author,
+        ProviderName::Pi,
+        "seeded journal must freeze the non-default plan provider"
+    );
+    let create_path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+
+    let (status, body) = request_json(app.clone(), Method::POST, create_path, json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create must replay the journal-frozen provider snapshot: {body}"
+    );
+    assert_eq!(body["attempt_id"], journal.attempt.id);
+
+    // 收养后的 attempt 必须保留 advance 冻结的 pi 快照,而非重算默认。
+    let store = CodingAttemptStore::new(app_paths);
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", &journal.attempt.id)
+        .expect("adopted attempt");
+    assert_eq!(persisted.provider_config_snapshot, frozen_provider_snapshot);
+    assert_eq!(persisted.admission_kind, CodingAdmissionKind::ScAdvance);
 }

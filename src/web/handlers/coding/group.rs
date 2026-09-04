@@ -86,6 +86,11 @@ pub async fn create_group_coding_attempt(
     // 准入身份同理：journal 可能由 sc_advance 入口创建（admission_kind=ScAdvance、
     // worktree_path=Some(...)），create 端点必须按 journal 冻结值重放收养，而非拿
     // 新建请求的 LegacyGroup/None 硬对；无 journal 时保持既有新建语义不变。
+    // provider 快照同理（接缝修复轮 2）：journal 冻结的是 plan 会话选定的 provider
+    // （advance_provider_config(&session, unit)，如 pi），而按仓库默认重算会回退到
+    // repository_default_provider（如 codex），plan provider ≠ 默认时全等必败 →
+    // 400 coding_group_attempt_incomplete。journal 存在时必须按冻结值重放；无 journal
+    // 的新建路径保持既有重算语义不变。
     let target_snapshot = match pending_journal.as_ref() {
         Some(journal) => journal.attempt.target_snapshot.clone(),
         None => group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?,
@@ -104,18 +109,21 @@ pub async fn create_group_coding_attempt(
         .join(".worktrees")
         .join("aria-issues")
         .join(&issue_id);
-    let provider_config_snapshot = coding_provider_config_snapshot_for_runtime_binding(
-        &lifecycle,
-        RuntimeBindingProviderConfigInput {
-            project_id: &project_id,
-            issue_id: &issue_id,
-            plan_id: &plan_id,
-            plan_revision_id: &authoritative.plan_revision_id,
-            unit: current_unit,
-            repository_default_provider: &repository.default_provider_mode,
-        },
-        &*state.provider_availability,
-    )?;
+    let provider_config_snapshot = match pending_journal.as_ref() {
+        Some(journal) => journal.attempt.provider_config_snapshot.clone(),
+        None => coding_provider_config_snapshot_for_runtime_binding(
+            &lifecycle,
+            RuntimeBindingProviderConfigInput {
+                project_id: &project_id,
+                issue_id: &issue_id,
+                plan_id: &plan_id,
+                plan_revision_id: &authoritative.plan_revision_id,
+                unit: current_unit,
+                repository_default_provider: &repository.default_provider_mode,
+            },
+            &*state.provider_availability,
+        )?,
+    };
     let initialization_input = CreateGroupCodingAttemptInput {
         project_id: project_id.clone(),
         issue_id: issue_id.clone(),
