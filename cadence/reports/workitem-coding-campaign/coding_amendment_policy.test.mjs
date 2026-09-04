@@ -1030,6 +1030,16 @@ test('stage_gate 识别纯函数：kind=stage_gate 或 gate_id 前缀 coding_sta
   assert.deepEqual(pendingGatesPartition([]), { stageGates: [], unknownGates: [] });
 });
 
+// 独立锚点：上方正例同时满足 kind=stage_gate 与 gate_id 前缀两判据，删掉 kind 判据仍绿；
+// 本用例 gate_id 无 coding_stage_gate_ 前缀，仅凭 kind=stage_gate 判真，防 kind 判据被误删回退。
+test('kind=stage_gate 判据独立锚点：gate_id 无 coding_stage_gate_ 前缀仍判为 5s 自动放行门', () => {
+  assert.equal(
+    isAutoReleasedStageGate({ kind: 'stage_gate', gate_id: 'gate_no_prefix_0001', title: 'Stage Gate' }),
+    true,
+    'kind=stage_gate 是独立判据，不依赖 gate_id 前缀兜底',
+  );
+});
+
 // 极简 fake ARIA：回环 + 临时端口（不触 4317）。HTTP 覆盖 lifecycle 回读与 coding-attempt
 // 创建两条路由；WS 用裸 socket 完成 RFC6455 握手与文本帧编解码，按序回放脚本消息并
 // 捕获 driver 出站消息，供驱动级断言使用。
@@ -1343,6 +1353,44 @@ test('pending_gates 携带非 stage_gate 的未知门仍 fail-closed 停机（�
     assert.equal(wsLog.some((entry) => entry.event === 'stage_gate_observed'), false);
     assert.equal(result.failureClass, 'unknown_gate_timeout');
     assert.ok(!outboundTypes.includes('final_confirm'));
+  } finally {
+    run.kill();
+    server.close();
+  }
+}, { timeout: 45_000 });
+
+// 混排回归：pending_gates=[stage_gate, 未知门] 同批到达。旧序先检 unknownGates 即停机 return，
+// stageGates 审计循环被跳过 → stage_gate_observed 丢失；正确语义是先对 stageGates 逐个审计，
+// 再对 unknownGates fail-closed 停机（两件事都要发生，顺序不可颠倒）。
+test('pending_gates 混排 [stage_gate, 未知门]：stage_gate 审计照记后仍对未知门 fail-closed 停机', async () => {
+  const server = await startFakeAriaServer();
+  const run = runDriverAgainstFakeAria({ server, extraEnv: { ARIA_CODING_HARD_TIMEOUT_MS: '6000' } });
+  try {
+    const peer = await waitForPeer(server);
+    peer.send({
+      type: 'coding_session_state',
+      attempt_id: 'attempt_0001',
+      stage: 'coding',
+      status: 'running',
+      pending_gates: [STAGE_GATE_WIRE, { gate_id: 'gate_mystery_0003', kind: 'mystery_gate', title: '未知门' }],
+    });
+    peer.send(FINAL_CONFIRM_READY_STATE);
+    const exit = await run.waitForExit();
+    assert.equal(exit.code, 1);
+    const { wsLog, result, outboundTypes } = readDriverOutputs(run.outRoot);
+    const observedIndex = wsLog.findIndex((entry) => entry.event === 'stage_gate_observed');
+    const stoppedIndex = wsLog.findIndex(
+      (entry) => entry.event === 'automation_stopped_for_unknown_gate' && entry.source === 'coding_session_state:pending_gates',
+    );
+    assert.ok(observedIndex >= 0, '混排数组中 stage_gate 的审计不得因未知门停机而丢失');
+    assert.ok(stoppedIndex >= 0, '混排数组中的未知门必须照旧停机');
+    assert.ok(observedIndex < stoppedIndex, '先记 stage_gate 审计，再对未知门停机');
+    assert.ok(
+      result.gates.some((gate) => gate.action === 'stage_gate_observed_wait_auto_release' && gate.gate_id === STAGE_GATE_WIRE.gate_id),
+      'result.gates 必须保留混排数组中 stage_gate 的审计条目',
+    );
+    assert.equal(result.failureClass, 'unknown_gate_timeout');
+    assert.ok(!outboundTypes.includes('final_confirm'), '停机后绝不再发任何驱动消息');
   } finally {
     run.kill();
     server.close();

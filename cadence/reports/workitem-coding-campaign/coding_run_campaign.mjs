@@ -1130,11 +1130,13 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
       return;
     }
     const { unknownGates, stageGates } = pendingGatesPartition(message.pending_gates);
+    // 混排 [stage_gate, 未知门] 同批到达时，必须先记完 stage_gate 审计再对未知门停机，
+    // 否则 unknownGates 先检即 return 会丢失 stage_gate_observed 审计事件。
+    for (const gate of stageGates) observeStageGate(gate, `${source}:pending_gates`);
     if (unknownGates.length) {
       waitForUnknownGate(unknownGates, `${source}:pending_gates`);
       return;
     }
-    for (const gate of stageGates) observeStageGate(gate, `${source}:pending_gates`);
     if (stage === 'prepare_context' && !initialStartSent) {
       initialStartSent = true;
       send({ type: 'start_coding' });
