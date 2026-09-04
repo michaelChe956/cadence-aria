@@ -1079,11 +1079,20 @@ function createStage3GateController({
     // 8.2：confirm 撞上 human_gate_close CAS conflict（修订 turn 后服务端仍在
     // evaluate 复评、门未回到 approval）时，撤销 awaitingAccept，等门真正回到
     // Waiting 再重发同一 confirm；返回是否由本方法消化。
-    noteGateCloseConflict: (errorMessage) => {
+    // 8.5 扩展：阶段错误（INVALID_MESSAGE_FOR_STAGE / “not allowed in stage”）
+    // 同样按「门未回位」消化——confirm 撞上评审周期阶段时不再终态，继续等门回位，
+    // 有界等待由驱动硬超时兜底。
+    noteGateCloseConflict: (errorMessage, errorCode = null) => {
       if (awaitingAccept?.kind !== 'confirm') return false;
-      if (!String(errorMessage ?? '').includes('human_gate_close')) return false;
+      const text = String(errorMessage ?? '');
+      const stageMismatch = errorCode === 'INVALID_MESSAGE_FOR_STAGE'
+        || text.includes('INVALID_MESSAGE_FOR_STAGE')
+        || text.includes('not allowed in stage');
+      if (!text.includes('human_gate_close') && !stageMismatch) return false;
       awaitingAccept = null;
-      recoveryChecks.push({ check: 'confirm_conflict_awaiting_gate' });
+      recoveryChecks.push(stageMismatch && !text.includes('human_gate_close')
+        ? { check: 'confirm_invalid_stage_awaiting_gate' }
+        : { check: 'confirm_conflict_awaiting_gate' });
       return true;
     },
     resultFields: () => ({
@@ -1098,6 +1107,67 @@ function createStage3GateController({
 
 function isHumanGateStage(stage) {
   return stage === 'human_confirm' || stage === 'waiting_for_human';
+}
+
+// 8.5 driver 时序修复：人工门「回位」信号的两种合法入站形态（纯函数）——
+// - stage_change（或 session_state.stage）回到 human_confirm / waiting_for_human；
+// - session_state 的 session_status=waiting_for_human 且 single_candidate_phase=approval。
+// 修订评审周期（cross_review/prepare_context/running）与 stream/review 事件都不是门回位。
+export function stage3GateWaitingSignal(message) {
+  if (!isRecord(message)) return false;
+  if (message.type === 'stage_change') return isHumanGateStage(message.stage);
+  if (message.type === 'session_state') {
+    if (isHumanGateStage(message.stage)) return true;
+    return message.session_status === 'waiting_for_human'
+      && message.single_candidate_phase === 'approval';
+  }
+  return false;
+}
+
+// 8.5 driver 时序修复：turn 终态后下一脚本动作的等门回位队列（纯状态机）。
+// 现场证据 /tmp/aria-stage35-pb/pi/pi/rep1/ws.jsonl：human_gate_turn_completed 后
+// driver 立即外发 confirm，而服务端先进修订评审周期（stage_change cross_review →
+// prepare_context → …）再回人工门 → confirm 撞 INVALID_MESSAGE_FOR_STAGE。
+// 修复语义：turn 终态产出的下一动作先登记等位（holdFromTurnTerminal），门回位
+// 信号（stage3GateWaitingSignal）到达才投递（offerInbound）；等位期间评审周期
+// 事件正常处理、不打断；门不回位则保持有界等待（由驱动硬超时兜底收口）。
+export function createStage3GateHoldQueue() {
+  let pending = null;
+  const validSubmission = (submission) => (
+    isRecord(submission) && isRecord(submission.message) ? submission : null
+  );
+  return {
+    // turn 终态（completed/failed）产出的下一脚本动作登记等位；返回供 driver 落盘的诊断事件。
+    holdFromTurnTerminal: (trigger, submission) => {
+      const candidate = validSubmission(submission);
+      if (!candidate) return null;
+      pending = candidate;
+      return {
+        event: 'stage3_gate_return_wait',
+        trigger: trigger ?? null,
+        actionIndex: candidate.actionIndex ?? null,
+        commandId: candidate.commandId ?? null,
+        source: candidate.source ?? null,
+      };
+    },
+    // 任意入站消息先过本队列：是门回位信号且存在待发动作时返回投递计划，否则 null。
+    offerInbound: (message) => {
+      if (!pending || !stage3GateWaitingSignal(message)) return null;
+      const submission = pending;
+      pending = null;
+      const via = message.type === 'session_state'
+        ? (isHumanGateStage(message.stage) ? 'session_state_stage' : 'session_state_status')
+        : 'stage_change';
+      return { submission, via, stage: message.stage ?? null };
+    },
+    // 阶段错误/CAS 冲突被消化时作废 held 副本（避免与 onGateWaiting 重发路径双发）。
+    dropPending: (trigger = null) => {
+      const dropped = pending;
+      pending = null;
+      return dropped ? { trigger, actionIndex: dropped.actionIndex ?? null } : null;
+    },
+    pendingSubmission: () => (pending ? structuredClone(pending) : null),
+  };
 }
 
 function shouldClearPendingGateNode(
@@ -1648,6 +1718,9 @@ async function runCampaign({
   let stage3ReconnectsRemaining = 3;
   let stage3TakeoverDone = false;
   let stage3SwitchingSession = false;
+  // 8.5：turn 终态后下一脚本动作的等门回位队列与审计（仅 typed flow 使用）。
+  const stage3GateHold = createStage3GateHoldQueue();
+  const stage3GateReturnAudit = { waits: 0, dispatched: 0, stage_errors: 0, pending_action_index: null };
   const ensureStage3Controller = () => {
     if (!stage3TypedFlowActive(result.flow_kind, runPolicy)) return null;
     if (stage3Controller) return stage3Controller;
@@ -1811,6 +1884,47 @@ async function runCampaign({
     if (message.type === 'human_gate_feedback') manualRepairRequestsSent += 1;
     send(message);
     syncStage3Fields();
+  };
+  // 8.5：turn 终态（completed/failed）产出的下一脚本动作只登记等位，不立即外发——
+  // 服务端会先进修订评审周期（stage_change cross_review → prepare_context → …）
+  // 再回人工门；门回位信号（stage3GateWaitingSignal）到达才投递。等位期间评审
+  // 周期事件正常处理不打断；门不回位则保持有界等待（硬超时兜底收口）。
+  const stage3HoldTurnTerminalOutbound = (trigger, submission) => {
+    if (!submission?.message || ended) return;
+    const waitEntry = stage3GateHold.holdFromTurnTerminal(trigger, submission);
+    if (!waitEntry) return;
+    stage3GateReturnAudit.waits += 1;
+    stage3GateReturnAudit.pending_action_index = submission.actionIndex ?? null;
+    result.stage3_gate_return = structuredClone(stage3GateReturnAudit);
+    writeLog(waitEntry);
+    syncStage3Fields();
+  };
+  // 任意入站消息先过等位队列：门回位信号 + 存在待发动作时才投递（幂等，无待发为 no-op）。
+  const stage3OfferInboundGateReturn = (message) => {
+    if (ended || !stage3TypedFlowActive(result.flow_kind, runPolicy)) return;
+    const dispatch = stage3GateHold.offerInbound(message);
+    if (!dispatch) return;
+    stage3GateReturnAudit.dispatched += 1;
+    stage3GateReturnAudit.pending_action_index = null;
+    result.stage3_gate_return = structuredClone(stage3GateReturnAudit);
+    writeLog({
+      event: 'stage3_gate_returned_dispatch',
+      via: dispatch.via,
+      stage: dispatch.stage ?? null,
+      actionIndex: dispatch.submission.actionIndex ?? null,
+      source: dispatch.submission.source ?? null,
+    });
+    deliverStage3Submission(dispatch.submission);
+  };
+  // 8.5：human_gate_close CAS conflict 与 INVALID_MESSAGE_FOR_STAGE 阶段错误都按
+  // 「门未回位」消化：作废 held 副本、撤销 awaitingAccept，等门回位信号重发同一动作。
+  const stage3SwallowGateConflict = (controller, errorMessage, errorCode = null) => {
+    if (!controller?.noteGateCloseConflict(errorMessage, errorCode)) return false;
+    stage3GateHold.dropPending(errorCode ?? 'human_gate_close');
+    stage3GateReturnAudit.stage_errors += 1;
+    stage3GateReturnAudit.pending_action_index = null;
+    result.stage3_gate_return = structuredClone(stage3GateReturnAudit);
+    return true;
   };
   const handleHumanConfirmStage3 = async () => {
     if (activeNodeType === null) return;
@@ -2382,6 +2496,10 @@ async function runCampaign({
             fail('session_state_missing', `自动处理前必须先收到并校验 session_state，实际为 ${String(message.type)}`);
             return;
           }
+          // 8.5：门回位信号（stage_change/session_state → human_confirm 或
+          // waiting_for_human+approval）统一先过等位队列；评审周期事件不是门信号，
+          // 不打断等位。终态/失败分支已在上方提前 return，不会误投递。
+          stage3OfferInboundGateReturn(message);
           const legacyDecision = result.flow_kind === 'single_candidate'
             ? legacySingleCandidateDecisionMessage(message, runPolicy)
             : null;
@@ -2563,7 +2681,15 @@ async function runCampaign({
                 turn_id: message.turn_id ?? null,
               });
             }
-            if (outcome.outbound) deliverStage3Submission(outcome.outbound);
+            if (outcome.outbound) {
+              // 8.5 时序修复：turn 终态产出的下一脚本动作必须等门回位再投递；
+              // 其余来源（当前不存在，防御性保留）维持立即投递。
+              if (message.type === 'human_gate_turn_completed' || message.type === 'human_gate_turn_failed') {
+                stage3HoldTurnTerminalOutbound(message.type, outcome.outbound);
+              } else {
+                deliverStage3Submission(outcome.outbound);
+              }
+            }
             // advance 等待期收尾：rejected 不消费脚本动作，但必须无条件收尾（不悬挂至 hard
             // timeout）；completed 仍要求动作确认消费后才收尾。
             const advanceFinishPlan = stage3AdvanceFinishPlan({
@@ -2641,17 +2767,33 @@ async function runCampaign({
             const conflictController = stage3TypedFlowActive(result.flow_kind, runPolicy)
               ? ensureStage3Controller()
               : null;
-            if (conflictController?.noteGateCloseConflict(message.message)) {
-              writeLog({ event: 'stage3_confirm_conflict_awaiting_gate', error: message.message ?? null });
+            if (conflictController && stage3SwallowGateConflict(conflictController, message.message, message.code)) {
+              writeLog({ event: 'stage3_confirm_conflict_awaiting_gate', error: message.message ?? null, code: message.code ?? null });
               syncStage3Fields();
               break;
             }
             fail('workspace_error', message.message ?? 'workspace error');
             break;
           }
-          case 'protocol_error':
+          case 'protocol_error': {
+            // 8.5：修订评审周期内的阶段错误（INVALID_MESSAGE_FOR_STAGE）不再立即终态——
+            // 按「门未回位」处理：消化后继续等门回位信号重发同一 confirm，有界等待由
+            // 硬超时兜底；其余 protocol_error 维持失败关闭。
+            const stageErrorController = stage3TypedFlowActive(result.flow_kind, runPolicy)
+              ? ensureStage3Controller()
+              : null;
+            if (stageErrorController && stage3SwallowGateConflict(stageErrorController, message.message, message.code)) {
+              writeLog({
+                event: 'stage3_confirm_stage_error_awaiting_gate',
+                code: message.code ?? null,
+                error: message.message ?? null,
+              });
+              syncStage3Fields();
+              break;
+            }
             fail('protocol_error', `${message.code ?? 'protocol_error'}: ${message.message ?? ''}`);
             break;
+          }
           default:
             fail('unknown_ws_message', `未知 workspace WebSocket 消息类型: ${String(message.type)}`);
           }

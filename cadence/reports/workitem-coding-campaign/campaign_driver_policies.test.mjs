@@ -12,6 +12,8 @@ import {
   confirmedCountForPlanStatus,
   collectUsageByRole,
   corpusSelectionFromEnv,
+  createStage3GateController,
+  createStage3GateHoldQueue,
   fixtureSetFromEnv,
   generationModeSelectionForNode,
   legacySingleCandidateDecisionMessage,
@@ -26,6 +28,7 @@ import {
   shouldClearPendingGateNode,
   shouldConsumeHumanAction,
   singleCandidateOutboundAllowed,
+  stage3GateWaitingSignal,
   stage3HumanMessage,
   stage3TypedFlowActive,
   providerRolesForSelection,
@@ -1052,4 +1055,176 @@ test('coding driver 只消费 Confirmed handoff，不读取 WorkItem SingleCandi
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenProtocolField));
   }
+});
+
+// —— 8.5 driver 时序修复：turn 终态后等门回位（human_confirm/approval）再投递下一脚本动作 ——
+// 现场证据 /tmp/aria-stage35-pb/pi/pi/rep1/ws.jsonl：human_gate_turn_completed 后
+// driver 立即外发 confirm，而服务端先进修订评审周期（stage_change cross_review →
+// prepare_context → …）再回人工门 → confirm 撞 INVALID_MESSAGE_FOR_STAGE →
+// protocol_error 终态。以下合成时序用例锁定修复后的策略。
+
+test('stage3 门回位信号只认 human_confirm / waiting_for_human+approval 两种入站形态', () => {
+  // 合法门回位信号
+  assert.equal(stage3GateWaitingSignal({ type: 'stage_change', stage: 'human_confirm' }), true);
+  assert.equal(stage3GateWaitingSignal({ type: 'stage_change', stage: 'waiting_for_human' }), true);
+  assert.equal(
+    stage3GateWaitingSignal({ type: 'session_state', stage: 'human_confirm', session_status: 'open' }),
+    true,
+    'session_state 携带 human gate stage 同样是门回位',
+  );
+  assert.equal(stage3GateWaitingSignal({
+    type: 'session_state',
+    session_status: 'waiting_for_human',
+    single_candidate_phase: 'approval',
+  }), true, 'session_status=waiting_for_human 且 phase=approval 是门回位');
+
+  // 修订评审周期与流事件都不是门回位信号
+  assert.equal(stage3GateWaitingSignal({ type: 'stage_change', stage: 'cross_review' }), false);
+  assert.equal(stage3GateWaitingSignal({ type: 'stage_change', stage: 'prepare_context' }), false);
+  assert.equal(stage3GateWaitingSignal({ type: 'stage_change', stage: 'running' }), false);
+  assert.equal(
+    stage3GateWaitingSignal({ type: 'session_state', session_status: 'waiting_for_human', single_candidate_phase: 'evaluate' }),
+    false,
+    '评审期 phase（evaluate）不是门回位',
+  );
+  assert.equal(
+    stage3GateWaitingSignal({ type: 'session_state', session_status: 'waiting_for_human' }),
+    false,
+    '缺 single_candidate_phase 不猜测为门回位',
+  );
+  assert.equal(stage3GateWaitingSignal({ type: 'stream_chunk', node_id: 'n1', chunk: 'x' }), false);
+  assert.equal(stage3GateWaitingSignal({ type: 'review_complete', verdict: 'needs_human' }), false);
+  assert.equal(stage3GateWaitingSignal({ type: 'human_gate_turn_completed', turn_id: 'turn-1' }), false);
+  assert.equal(stage3GateWaitingSignal(null), false);
+});
+
+test('stage3 turn 终态后下一动作必须等门回位才投递，评审周期事件不打断等位', () => {
+  const controller = createStage3GateController({
+    actions: parseHumanScript('request-change:合成反馈 1 号;confirm'),
+    campaignRunId: 'workitem:codex:rep1:issue_gate_timing_0001',
+    persistCheckpoint: () => {},
+  });
+  const queue = createStage3GateHoldQueue();
+  const delivered = [];
+
+  // 门 Waiting：首轮 request-change 正常外发（不受等位约束）。
+  const first = controller.onGateWaiting();
+  assert.equal(first.message.type, 'human_gate_feedback');
+  delivered.push(first.message);
+  controller.onInbound({ type: 'human_gate_turn_open', command_id: first.commandId, turn_id: 'turn-1', remaining_budget: 1 });
+
+  // turn 完成：控制器契约不变（产出下一动作），但 driver 只登记等位、不外发。
+  const terminal = controller.onInbound({
+    type: 'human_gate_turn_completed',
+    turn_id: 'turn-1',
+    artifact_ref: 'artifact://fixture/candidate-v2',
+  });
+  assert.equal(terminal.outbound.message.type, 'confirm', '控制器契约不变：turn 终态仍产出下一脚本动作');
+  const waitEntry = queue.holdFromTurnTerminal('human_gate_turn_completed', terminal.outbound);
+  assert.equal(waitEntry.event, 'stage3_gate_return_wait');
+  assert.equal(waitEntry.trigger, 'human_gate_turn_completed');
+  assert.equal(waitEntry.actionIndex, 1);
+  assert.equal(waitEntry.source, 'human_script');
+
+  // 等位期间：修订评审周期事件流（cross_review/prepare_context/running、stream、
+  // review_complete、busy）都不是门回位，不得投递、不得打断。
+  const reviewCycle = [
+    { type: 'stage_change', stage: 'cross_review' },
+    { type: 'stage_change', stage: 'prepare_context' },
+    { type: 'stream_chunk', node_id: 'n1', chunk: 'x' },
+    { type: 'stage_change', stage: 'running' },
+    { type: 'review_complete', verdict: 'needs_human', round: 1, findings: [] },
+    { type: 'human_gate_busy', turn_id: 'turn-1' },
+  ];
+  for (const event of reviewCycle) {
+    assert.equal(stage3GateWaitingSignal(event), false, `${event.type}/${String(event.stage ?? '')} 不得识别为门回位`);
+    assert.equal(queue.offerInbound(event), null, '门未回位期间不得投递待发动作');
+  }
+  assert.deepEqual(delivered, [first.message], 'confirm 未外发（门未回位）');
+  assert.equal(queue.pendingSubmission().message.type, 'confirm');
+
+  // 门回位（stage_change human_confirm）→ 此刻才投递 confirm。
+  const dispatch = queue.offerInbound({ type: 'stage_change', stage: 'human_confirm' });
+  assert.equal(dispatch.submission.message.type, 'confirm');
+  assert.equal(dispatch.via, 'stage_change');
+  assert.equal(dispatch.stage, 'human_confirm');
+  delivered.push(dispatch.submission.message);
+  assert.deepEqual(delivered.map((message) => message.type), ['human_gate_feedback', 'confirm']);
+
+  // 投递后链路零回归：gate closed 正常消费 confirm；无待发动作时门信号是 no-op。
+  const closed = controller.onInbound({ type: 'human_gate_closed', decision: 'confirm', stage: 'human_confirm' });
+  assert.deepEqual(closed.consumed, [{ actionIndex: 1, kind: 'confirm', via: 'human_gate_closed' }]);
+  assert.equal(queue.pendingSubmission(), null);
+  assert.equal(queue.offerInbound({ type: 'stage_change', stage: 'human_confirm' }), null, '重复门信号不重复投递');
+});
+
+test('stage3 门未回位时 confirm 保持有界等待不报错；INVALID_MESSAGE_FOR_STAGE 按「门未回位」继续等', () => {
+  const controller = createStage3GateController({
+    actions: parseHumanScript('request-change:合成反馈 1 号;confirm'),
+    campaignRunId: 'workitem:codex:rep1:issue_gate_timing_0002',
+    persistCheckpoint: () => {},
+  });
+  const queue = createStage3GateHoldQueue();
+  const first = controller.onGateWaiting();
+  controller.onInbound({ type: 'human_gate_turn_open', command_id: first.commandId, turn_id: 'turn-1', remaining_budget: 1 });
+  const terminal = controller.onInbound({
+    type: 'human_gate_turn_completed',
+    turn_id: 'turn-1',
+    artifact_ref: 'artifact://fixture/candidate-v2',
+  });
+  queue.holdFromTurnTerminal('human_gate_turn_completed', terminal.outbound);
+
+  // 门迟迟未回位：等位是稳定状态——不抛错、不外发（有界等待由驱动硬超时兜底收口）。
+  assert.doesNotThrow(() => {
+    for (let index = 0; index < 5; index += 1) {
+      assert.equal(queue.offerInbound({ type: 'stage_change', stage: 'prepare_context' }), null);
+      assert.equal(queue.offerInbound({ type: 'stage_change', stage: 'cross_review' }), null);
+    }
+  });
+  assert.equal(queue.pendingSubmission().message.type, 'confirm');
+
+  // 阶段错误不再立即终态：INVALID_MESSAGE_FOR_STAGE 按「门未回位」消化，等门回位重发。
+  const stageError = 'message confirm not allowed in stage prepare_context';
+  assert.equal(controller.noteGateCloseConflict(stageError, 'INVALID_MESSAGE_FOR_STAGE'), true, '阶段错误按门未回位消化');
+  assert.equal(
+    controller.noteGateCloseConflict(stageError, 'INVALID_MESSAGE_FOR_STAGE'),
+    false,
+    '重复通报不再消化',
+  );
+  assert.equal(controller.noteGateCloseConflict('其他错误', null), false, '非阶段/CAS 冲突错误不消化');
+  assert.ok(
+    controller.resultFields().durable_recovery_checks.some((entry) => entry.check === 'confirm_invalid_stage_awaiting_gate'),
+    '阶段错误消化必须落 durable_recovery_checks 审计',
+  );
+
+  // 消化后：held 副本作废（避免与重发路径双发），门回位信号本身不携带待发动作；
+  // 由 onGateWaiting 在门回位时机重发同一 confirm（脚本指针不推进）。
+  assert.deepEqual(queue.dropPending('INVALID_MESSAGE_FOR_STAGE'), {
+    trigger: 'INVALID_MESSAGE_FOR_STAGE',
+    actionIndex: 1,
+  });
+  assert.equal(queue.pendingSubmission(), null);
+  assert.equal(queue.offerInbound({ type: 'stage_change', stage: 'human_confirm' }), null);
+  const resend = controller.onGateWaiting();
+  assert.equal(resend.message.type, 'confirm');
+  assert.equal(resend.actionIndex, 1, '脚本指针仍停在 confirm，重发同一动作');
+  const closed = controller.onInbound({ type: 'human_gate_closed', decision: 'confirm', stage: 'human_confirm' });
+  assert.deepEqual(closed.consumed, [{ actionIndex: 1, kind: 'confirm', via: 'human_gate_closed' }]);
+
+  // 仅凭错误文本（无 code）也要能识别同一形态；human_gate_close 旧形态保持原语义。
+  const textOnly = createStage3GateController({
+    actions: parseHumanScript('request-change:合成反馈 1 号;confirm'),
+    campaignRunId: 'workitem:codex:rep1:issue_gate_timing_0003',
+    persistCheckpoint: () => {},
+  });
+  const textFirst = textOnly.onGateWaiting();
+  textOnly.onInbound({ type: 'human_gate_turn_open', command_id: textFirst.commandId, turn_id: 'turn-1', remaining_budget: 1 });
+  const textTerminal = textOnly.onInbound({ type: 'human_gate_turn_completed', turn_id: 'turn-1', artifact_ref: 'a' });
+  assert.ok(textTerminal.outbound, 'turn 终态产出待发 confirm');
+  assert.equal(
+    textOnly.noteGateCloseConflict('INVALID_MESSAGE_FOR_STAGE: message confirm not allowed in stage prepare_context'),
+    true,
+    '错误文本含阶段错误形态即可消化',
+  );
+  assert.equal(textOnly.noteGateCloseConflict('product_store_conflict: human_gate_close ws_0001'), false, '消化一次后不再消化');
 });
