@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 mod blockers;
 mod full_lowering_validator;
+mod heading_normalization;
 mod publish_freshness;
 mod reviewer_finding_channel_boundary;
 

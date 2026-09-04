@@ -918,3 +918,125 @@ async fn conversational_gate_revision_completed_turn_stale_evaluate_reconnect_ne
     );
     assert_eq!(after.provider_start_ledger.len(), ledger_len);
 }
+
+// —— 确定性结构标题归一化(2026-09-03 现场 pi 两次标题翻译事故)——
+//
+// 现场:pi 随机把结构标题翻成中文(### 身份/### 目标/…)导致 compiler
+// missing_section×N fail-closed。修复契约 = 与前言修剪同层的固定中文→英文
+// 映射表;表外未知标题不猜不改,仍 fail-closed;正文零触碰。
+
+const REP4_FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
+));
+
+/// 把 rep4 的结构标题翻成两份现场事故的中文变体(混合括号注记与裸中文,
+/// 覆盖 pi-full rep1 与矩阵 r1 rep2 两种抖动形态)。
+fn with_field_chinese_heading_translations(markdown: &str) -> String {
+    let mut translated = markdown
+        .lines()
+        .map(|line| match line {
+            "# Work Item Plan" => "# 工作项计划".to_string(),
+            l if l.starts_with("## Work Item WI-") => {
+                format!("## 工作项{}", &l["## Work Item".len()..])
+            }
+            "### Identity" => "### 身份信息".to_string(),
+            "### Goal" => "### 目标 (Goal)".to_string(),
+            "### Non Goals" => "### 非目标".to_string(),
+            "### Dependencies" => "### 依赖关系".to_string(),
+            "### Inputs" => "### 输入".to_string(),
+            "### Outputs" => "### 输出 (Outputs)".to_string(),
+            "### Tasks" => "### 任务".to_string(),
+            "### Write Policy" => "### 编写策略".to_string(),
+            "### Acceptance Criteria" => "### 验收标准".to_string(),
+            "### Verification" => "### 验证".to_string(),
+            "### Handoff Schema" => "### 交接模式 (Handoff Schema)".to_string(),
+            "### Blockers" => "### 阻塞项".to_string(),
+            "### Traceability" => "### 可追溯性".to_string(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if markdown.ends_with('\n') {
+        translated.push('\n');
+    }
+    translated
+}
+
+#[test]
+fn conversational_gate_revision_delivery_normalizes_fixed_chinese_headings() {
+    let translated = with_field_chinese_heading_translations(REP4_FIXTURE);
+
+    let delivery = crate::product::workspace_engine::conversational_gate::prepare_revision_delivery_for_compile(
+        &format!("provider preamble\n{translated}"),
+    );
+
+    // 前言被修剪，结构标题全部归一化，正文行逐字保留。rep4 的 45 个标题行中
+    // `### Notes`/`### Rationale` 属自由文本 section，不在固定映射表内、保持英文。
+    assert_eq!(delivery.normalized_heading_lines, 43);
+    let normalized_lines: Vec<&str> = delivery.source.split('\n').collect();
+    let fixture_lines: Vec<&str> = REP4_FIXTURE.split('\n').collect();
+    assert_eq!(
+        normalized_lines, fixture_lines,
+        "归一化后必须与规范英文原文逐行一致"
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_revision_result_accepts_field_chinese_heading_translations() {
+    let (_root, _lifecycle, mut engine) = durable_revision_fixture("revision_zh_headings", 2);
+    let turn_id = open_running_revision_turn(&mut engine, "revision_zh_command").await;
+    let provider_output = format!(
+        "provider preamble\n{}",
+        with_field_chinese_heading_translations(REP4_FIXTURE)
+    );
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, provider_output)
+        .await
+        .expect("中文标题交付必须经确定性归一化后被接受");
+
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+    // 落盘候选必须已是规范英文标题(正文逐字等于 rep4 原文)。
+    assert!(
+        engine
+            .session()
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown())
+            .is_some_and(|markdown| markdown == REP4_FIXTURE)
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_revision_result_rejects_unknown_chinese_heading() {
+    let (_root, _lifecycle, mut engine) =
+        durable_revision_fixture("revision_zh_unknown_heading", 2);
+    let turn_id = open_running_revision_turn(&mut engine, "revision_zh_unknown_command").await;
+    // 表外中文标题(`溯源清单` 不在固定映射表内)不得被猜测改写。
+    let unknown_translation = with_field_chinese_heading_translations(REP4_FIXTURE)
+        .replace("### 可追溯性", "### 溯源清单");
+    let provider_output = format!("provider preamble\n{unknown_translation}");
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, provider_output)
+        .await
+        .expect("表外标题必须是校验拒绝而非协议错误");
+
+    match result {
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            diagnostics,
+        } => assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("unknown_structured_key")),
+            "未知中文标题必须仍被 fail-closed 拒绝: {diagnostics:?}"
+        ),
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. } => {
+            panic!("expected validation rejection, got accepted")
+        }
+    }
+}

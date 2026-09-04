@@ -23,6 +23,21 @@ fn trim_provider_preamble(source: &str) -> &str {
         .unwrap_or(source)
 }
 
+/// SC author 交付进入 compiler 前的确定性净化（结构标题归一化 + 前言修剪）。
+///
+/// 归一化先于修剪：前言修剪锚定的是规范英文文档标题，provider 输出「前言 +
+/// 中文标题」时必须先把标题归一化才能锚定修剪。归一化只吸收固定词表的
+/// 中文翻译抖动；表外未知标题不改，由 compiler fail-closed。
+fn prepare_author_delivery_for_compile(
+    raw: &str,
+) -> crate::product::work_item_plan_compiler::NormalizedPlanSource {
+    let normalized = crate::product::work_item_plan_compiler::normalize_structural_headings(raw);
+    crate::product::work_item_plan_compiler::NormalizedPlanSource {
+        source: trim_provider_preamble(&normalized.source).to_string(),
+        normalized_heading_lines: normalized.normalized_heading_lines,
+    }
+}
+
 /// SingleCandidate 的单次 markdown author 链路。
 ///
 /// Provider 完整输出直接进入 source revision 与 compiler；内部 selector 只在编译成功后
@@ -192,7 +207,37 @@ pub(crate) async fn run_single_candidate_author(
             return Err(SingleCandidateProviderRunError::AlreadyFinished);
         }
     };
-    let full_output = trim_provider_preamble(&full_output).to_owned();
+    let delivery = prepare_author_delivery_for_compile(&full_output);
+    if delivery.normalized_heading_lines > 0 {
+        tracing::info!(
+            session_id = %engine.session().session_id,
+            node_id = %node_id,
+            diagnostic = crate::product::work_item_plan_compiler::PLAN_HEADING_NORMALIZATION_DIAGNOSTIC,
+            normalized_heading_lines = delivery.normalized_heading_lines,
+            "single-candidate author markdown 结构标题已确定性归一化后再编译"
+        );
+        engine
+            .emit_execution_event(
+                ProviderExecutionEvent {
+                    event_id: format!("single_candidate_heading_normalized_{node_id}"),
+                    kind: ProviderExecutionEventKind::Provider,
+                    status: ProviderExecutionEventStatus::Completed,
+                    title: "SingleCandidate 结构标题确定性归一化".to_string(),
+                    detail: Some(format!(
+                        "normalized {} structural heading lines via the fixed zh→en table before compile",
+                        delivery.normalized_heading_lines
+                    )),
+                    command: None,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                },
+                Some(node_id.clone()),
+                Some(author_provider.clone()),
+            )
+            .await;
+    }
+    let full_output = delivery.source;
     let candidate_item_count = match engine
         .complete_single_candidate_work_item_plan_author(full_output, repository.id)
         .await
@@ -258,7 +303,13 @@ pub(crate) async fn run_single_candidate_author(
 
 #[cfg(test)]
 mod tests {
-    use super::trim_provider_preamble;
+    use super::{prepare_author_delivery_for_compile, trim_provider_preamble};
+    use crate::product::work_item_plan_compiler::WorkItemPlanSourceContext;
+
+    const FIELD_REP1: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_compiler/fixtures/field-pi-zh-headings-rep1.md"
+    ));
 
     #[test]
     fn trims_provider_preamble_before_document_heading() {
@@ -302,5 +353,59 @@ mod tests {
             trim_provider_preamble(source),
             "# Work Item Plan\n## Work Item WI-001: x\n```\n"
         );
+    }
+
+    fn compile_item_count(source: &str) -> Result<usize, String> {
+        crate::product::work_item_plan_compiler::compile_work_item_plan(
+            source,
+            &WorkItemPlanSourceContext {
+                target_repository_id: "repository_0001".to_string(),
+            },
+        )
+        .map(|ir| ir.items.len())
+        .map_err(|diagnostics| {
+            diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    #[test]
+    fn author_delivery_normalizes_field_chinese_headings_and_compiles() {
+        // 现场 pi-full rep1 原件 + 前言:author 链路净化后必须可编译。
+        let raw = format!("provider preamble\n{FIELD_REP1}");
+
+        let delivery = prepare_author_delivery_for_compile(&raw);
+
+        assert_eq!(delivery.normalized_heading_lines, 15);
+        assert!(delivery.source.starts_with("# Work Item Plan\n"));
+        assert_eq!(
+            compile_item_count(&delivery.source).expect("归一化后必须编译通过"),
+            1
+        );
+    }
+
+    #[test]
+    fn author_delivery_leaves_english_source_unchanged() {
+        let source =
+            "# Work Item Plan\n## Work Item WI-001: x\n### Identity\n- schema_version: 1\n";
+
+        let delivery = prepare_author_delivery_for_compile(source);
+
+        assert_eq!(delivery.normalized_heading_lines, 0);
+        assert_eq!(delivery.source, source);
+    }
+
+    #[test]
+    fn author_delivery_keeps_unknown_headings_fail_closed() {
+        // 表外中文标题不改写,仍由 compiler fail-closed 拒绝。
+        let source = "# 工作项计划\n## 工作项 WI-001: x\n### 溯源清单\n";
+
+        let delivery = prepare_author_delivery_for_compile(source);
+
+        assert_eq!(delivery.normalized_heading_lines, 2);
+        assert!(delivery.source.contains("### 溯源清单\n"));
+        assert!(compile_item_count(&delivery.source).is_err());
     }
 }

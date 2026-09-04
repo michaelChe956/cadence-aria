@@ -33,6 +33,8 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 
 系统 SHALL 以 markdown/EARS 文档作为 work item plan 的唯一可编辑源，并提供确定性编译器将其单向编译为顶层 `PlanCandidateIr { source_revision_hash, compiler_version, items: Vec<PlanCandidateItemIr> }`；每个 item SHALL 为 `PlanCandidateItemIr { target_repository_id, contract, verification_plan: WorkItemDraftVerificationPlan, trusted_commands }`。typed IR 的 source revision hash 与 compiler version 仅位于顶层；**publish 前** hash 或版本不匹配时系统 SHALL 拒绝发布并提示重新编译，hash/version 随不可变 publication provenance 落盘。coding 段只消费已发布的 immutable runtime binding，SHALL NOT 在执行期间解析 markdown 或重新解释 compiler version；write_policy 与 trusted commands 等安全边界 SHALL 保持强类型。对 markdown 的人工或模型修改 SHALL 产生新 revision 并触发重新编译。
 
+SC 交付（author 与人工修订两条路径）进入编译前，系统 SHALL 允许对结构标题行（一级文档标题、Work Item 二级标题、三级结构 section 标题）做确定性归一化：以固定中文→英文映射表逐字映射回规范英文，仅覆盖固定词表的已知翻译变体，正文内容零触碰；表外未知标题 SHALL NOT 被猜测改写，SHALL 照旧交给编译器以 fail-closed 拒绝；归一化发生时系统 SHALL 落一条可判定该次交付被救回的诊断/事件。
+
 #### Scenario: markdown 与 IR 漂移被拒绝
 
 - **WHEN** 发布前 typed IR 的 source_revision_hash 与当前 markdown 源不匹配，或 compiler_version 过期
@@ -42,6 +44,11 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 
 - **WHEN** markdown 源不满足 grammar（缺 section、ID 格式错误、EARS 句式非法）
 - **THEN** 编译器返回行号、字段名与一个修复示例；该错误信息可直接作为返修反馈回喂模型
+
+#### Scenario: 固定词表中文结构标题确定性归一化后可编译
+
+- **WHEN** provider 交付的 markdown 把固定词表结构标题翻成已知中文变体（如 `# 工作项计划`、`## 工作项 WI-001: x`、`### 身份`、`### 写入策略 (Write Policy)`），且正文其余部分满足语法
+- **THEN** 系统在编译前把结构标题行逐字归一化为规范英文并编译通过，正文中文逐字保留，并记录一条归一化诊断/事件；表外未知标题（如 `### 溯源清单`）不被猜测改写，仍按既有语法契约 fail-closed 拒绝
 
 ### Requirement: 中央策略层与 typed outcome（REQ-WSC-03）
 
