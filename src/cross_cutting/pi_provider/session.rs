@@ -6,15 +6,19 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_pi_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderCompletion,
-    ProviderEvent, ProviderStatus, ProviderToolCall, ProviderToolResult, StreamingProviderInput,
+    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderStatus, ProviderToolCall, ProviderToolResult,
+    StreamingProviderInput, UsageReportData,
 };
 
 use super::{
     PiSelectRequest, is_pi_terminal, parse_pi_failure, parse_pi_select_request,
-    parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end, parse_pi_tool_start,
+    parse_pi_session_file, parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end,
+    parse_pi_tool_start, parse_pi_usage,
 };
 
 const PI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -45,18 +49,21 @@ fn empty_output_terminal_action(
 }
 
 fn pi_empty_output_error() -> ProviderAdapterError {
-    provider_error(format!(
+    ProviderAdapterError::provider_empty_output(format!(
         "{PI_EMPTY_OUTPUT_ERROR}: Pi agent settled without assistant output after one bounded retry"
     ))
 }
 
 /// 空输出后的有界重试：在同一会话内重发一次 prompt。
+/// 与 Codex 对称，重试前发送一条稳定的 retry ProviderExecutionEvent 审计事件。
 /// 返回 `None` 表示会话被中止；`Some(settled)` 表示重试 prompt 的响应已收到，
 /// `settled` 指示等待响应期间 agent 是否已再次 settle。
+#[allow(clippy::too_many_arguments)]
 async fn retry_pi_prompt_after_empty_output<W>(
     peer: &JsonRpcPeer<W>,
     pending_by_id: &mut PendingResponses,
     event_tx: &mpsc::Sender<ProviderEvent>,
+    working_dir: &std::path::Path,
     full_output: &mut String,
     command_rx: &mut mpsc::Receiver<ProviderCommand>,
     next_id: &mut u64,
@@ -69,6 +76,21 @@ where
         target: "pi_provider",
         "Pi agent settled with empty output; retrying once in-session"
     );
+    send_event(
+        event_tx,
+        ProviderEvent::Execution(ProviderExecutionEvent {
+            event_id: "pi_empty_output_retry".to_string(),
+            kind: ProviderExecutionEventKind::Turn,
+            status: ProviderExecutionEventStatus::Running,
+            title: "Turn empty output retry".to_string(),
+            detail: Some("Pi agent settled with empty output; retrying once".to_string()),
+            command: None,
+            cwd: Some(working_dir.display().to_string()),
+            output: None,
+            exit_code: None,
+        }),
+    )
+    .await?;
     full_output.clear();
     let retry_prompt = send_pi_command(
         peer,
@@ -208,6 +230,17 @@ where
         loop {
             match empty_output_terminal_action(&full_output, &mut empty_output_retry_used) {
                 PiEmptyOutputAction::Complete => {
+                    emit_pi_usage(
+                        &peer,
+                        &mut pending_by_id,
+                        &event_tx,
+                        &mut full_output,
+                        &mut command_rx,
+                        &mut next_id,
+                        &cancel,
+                        UsageReportData::role_text(&input.role),
+                    )
+                    .await;
                     complete_pi_session(
                         &event_tx,
                         full_output,
@@ -223,6 +256,7 @@ where
                         &peer,
                         &mut pending_by_id,
                         &event_tx,
+                        &input.working_dir,
                         &mut full_output,
                         &mut command_rx,
                         &mut next_id,
@@ -285,6 +319,17 @@ where
                             &mut empty_output_retry_used,
                         ) {
                             PiEmptyOutputAction::Complete => {
+                                emit_pi_usage(
+                                    &peer,
+                                    &mut pending_by_id,
+                                    &event_tx,
+                                    &mut full_output,
+                                    &mut command_rx,
+                                    &mut next_id,
+                                    &cancel,
+                                    UsageReportData::role_text(&input.role),
+                                )
+                                .await;
                                 complete_pi_session(
                                     &event_tx,
                                     full_output,
@@ -300,6 +345,7 @@ where
                                     &peer,
                                     &mut pending_by_id,
                                     &event_tx,
+                                    &input.working_dir,
                                     &mut full_output,
                                     &mut command_rx,
                                     &mut next_id,
@@ -598,6 +644,65 @@ async fn handle_pi_event(
         .await?;
     }
     Ok(())
+}
+
+/// 会话结束后刷新一次 get_state，提取累计 token 用量并上报（best-effort）。
+///
+/// pi 没有逐 turn 的 usage 事件，`data.cost` 只能在 get_state 响应中观察；任何失败
+/// （超时/中断/响应缺 cost）都仅记录 warning，不影响会话完成路径。
+#[allow(clippy::too_many_arguments)]
+async fn emit_pi_usage<W>(
+    peer: &JsonRpcPeer<W>,
+    pending_by_id: &mut HashMap<String, oneshot::Sender<Value>>,
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    full_output: &mut String,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    next_id: &mut u64,
+    cancel: &CancellationToken,
+    role: &'static str,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let get_state =
+        match send_pi_command(peer, pending_by_id, next_id, json!({ "type": "get_state" })).await {
+            Ok(get_state) => get_state,
+            Err(error) => {
+                tracing::warn!(target: "pi_provider", %error, "usage get_state send failed");
+                return;
+            }
+        };
+    let response = match await_pi_response(
+        get_state,
+        PiResponseWaitContext {
+            peer,
+            pending_by_id,
+            event_tx,
+            full_output,
+            command_rx,
+            next_id,
+            cancel,
+        },
+    )
+    .await
+    {
+        Ok(PiResponseWait::Response(response, _)) => response,
+        _ => {
+            tracing::warn!(target: "pi_provider", "usage get_state did not complete");
+            return;
+        }
+    };
+    // 优先使用 Pi 协议层 cost；当前版本通常为 null，才读 get_state 明示的
+    // sessionFile 尾部。任何本地读取失败均降级为无 usage，不影响完成路径。
+    let report = parse_pi_usage(&response, role).or_else(|| {
+        parse_pi_session_file(&response).and_then(|session_file| read_pi_usage(&session_file, role))
+    });
+    if let Some(report) = report
+        && send_event(event_tx, ProviderEvent::UsageReport(report))
+            .await
+            .is_err()
+    {
+        tracing::warn!(target: "pi_provider", "usage event receiver closed");
+    }
 }
 
 async fn complete_pi_session(

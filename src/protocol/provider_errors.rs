@@ -11,6 +11,7 @@ pub enum ProviderErrorCode {
     ProviderTimeout,
     ProviderParseError,
     ProviderExecutionFailed,
+    ProviderEmptyOutput,
 }
 
 impl ProviderErrorCode {
@@ -24,6 +25,7 @@ impl ProviderErrorCode {
             ProviderErrorCode::ProviderTimeout => "provider_timeout",
             ProviderErrorCode::ProviderParseError => "provider_parse_error",
             ProviderErrorCode::ProviderExecutionFailed => "provider_execution_failed",
+            ProviderErrorCode::ProviderEmptyOutput => "provider_empty_output",
         }
     }
 }
@@ -49,6 +51,7 @@ pub fn route_provider_error(
         ProviderErrorCode::ProviderUnavailable | ProviderErrorCode::ProviderIncompatibleOutput => {
             ProviderErrorRoute::Gate
         }
+        ProviderErrorCode::ProviderEmptyOutput => ProviderErrorRoute::Gate,
         ProviderErrorCode::ProviderTimeout => {
             if retry_count < max_retries {
                 ProviderErrorRoute::Retry
@@ -80,6 +83,18 @@ mod tests {
         assert_eq!(
             ProviderErrorCode::ProviderUnavailable.as_str(),
             "provider_unavailable"
+        );
+    }
+
+    #[test]
+    fn provider_empty_output_routes_to_gate_with_stable_snake_case_code() {
+        assert_eq!(
+            route_provider_error(&ProviderErrorCode::ProviderEmptyOutput, 0, 3),
+            ProviderErrorRoute::Gate
+        );
+        assert_eq!(
+            ProviderErrorCode::ProviderEmptyOutput.as_str(),
+            "provider_empty_output"
         );
     }
 }

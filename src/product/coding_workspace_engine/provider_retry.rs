@@ -926,6 +926,7 @@ fn classify_adapter_error(error: &ProviderAdapterError) -> ProviderFailureClassi
             non_retryable("provider_execution_failed", false)
         }
         ProviderErrorCode::ProviderParseError => non_retryable("provider_parse_error", false),
+        ProviderErrorCode::ProviderEmptyOutput => non_retryable("provider_empty_output", false),
         ProviderErrorCode::ProviderCommandMissing => {
             non_retryable("provider_command_missing", false)
         }

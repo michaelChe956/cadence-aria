@@ -700,6 +700,51 @@ async fn codex_provider_empty_turn_output_retries_once_and_completes() {
 }
 
 #[tokio::test]
+async fn codex_provider_empty_output_retry_recovers_when_retry_turn_reuses_item_id() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_empty_output_retry_same_item_id_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // 首轮 agentMessage 仅含空白且已被去重集合登记；重试 turn 复用同一 item id 时，
+    // 重试必须先清理去重集合，否则恢复内容会被当作重复 item 丢弃。
+    let completion = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::Completed(completion) => break completion,
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    };
+
+    assert_eq!(
+        completion.full_output, "Recovered via reused item id",
+        "retry turn reusing the streamed item id must not be dropped by the dedup set"
+    );
+}
+
+#[tokio::test]
 async fn codex_provider_empty_turn_output_fails_with_provider_empty_output_after_single_retry() {
     let fixture = executable_fixture(
         "tests/fixtures/provider/codex_app_server_empty_output_twice_fixture.sh",

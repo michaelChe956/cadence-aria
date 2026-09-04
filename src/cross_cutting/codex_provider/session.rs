@@ -7,19 +7,20 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_default_codex_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, ChoiceRequestSource, ProviderCompletion, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput,
+    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput, UsageReportData,
 };
 
 use super::{
     CODEX_DEFAULT_SANDBOX_MODE, CODEX_RESUME_STALL_ERROR, CODEX_RESUME_STALL_TIMEOUT,
     CODEX_RPC_REQUEST_TIMEOUT, emit_request_user_input_protocol_error, is_turn_completed,
-    parse_agent_message_text, parse_approval_request, parse_execution_event, parse_failure,
-    parse_user_input_request, provider_error, send_provider_event, write_approval_response,
-    write_user_input_response,
+    parse_agent_message_text, parse_approval_request, parse_codex_usage, parse_execution_event,
+    parse_failure, parse_user_input_request, provider_error, send_provider_event,
+    write_approval_response, write_user_input_response,
 };
 
 const CODEX_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
@@ -291,7 +292,7 @@ where
         if is_turn_completed(&incoming) {
             if full_output.trim().is_empty() {
                 if empty_output_retry_used {
-                    return Err(provider_error(format!(
+                    return Err(ProviderAdapterError::provider_empty_output(format!(
                         "{CODEX_EMPTY_OUTPUT_ERROR}: Codex turn {turn_id} completed without \
                          agent output after one bounded retry"
                     )));
@@ -322,9 +323,23 @@ where
                 )
                 .await?;
                 full_output.clear();
+                // 重试是新的一轮流式交付：去重集合必须随之清空，否则重试 turn 复用
+                // 已登记 item id 时，恢复内容会被当作重复 item 丢弃。
+                streamed_agent_message_items.clear();
                 turn_id = start_codex_turn(&peer, &turn_thread_id, CODEX_EMPTY_OUTPUT_RETRY_PROMPT)
                     .await?;
                 continue;
+            }
+            // 协议层 usage 优先；当前 Codex 版本不携带时，以 threadId 精确匹配
+            // ~/.codex/sessions 的 rollout 并读取最近 token_count。读取失败不影响 turn。
+            let usage_role = UsageReportData::role_text(&input.role);
+            let report = parse_codex_usage(&incoming, usage_role).or_else(|| {
+                (!turn_thread_id.is_empty())
+                    .then(|| read_default_codex_usage(&turn_thread_id, usage_role))
+                    .flatten()
+            });
+            if let Some(report) = report {
+                send_provider_event(&event_tx, ProviderEvent::UsageReport(report), &cancel).await?;
             }
             send_provider_event(
                 &event_tx,

@@ -82,6 +82,15 @@ async fn session_empty_output_retries_once_and_completes() {
         CancellationToken::new(),
     ));
     let events = drain_events(&mut event_rx).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Execution(execution)
+                if execution.event_id == "pi_empty_output_retry"
+                    && execution.title == "Turn empty output retry"
+        )),
+        "empty-output retry must leave a provider-layer audit event"
+    );
     run.await
         .expect("session task")
         .expect("session complete after retry");
@@ -172,6 +181,15 @@ async fn session_empty_output_fails_with_provider_empty_output_after_single_retr
         CancellationToken::new(),
     ));
     let events = drain_events(&mut event_rx).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Execution(execution)
+                if execution.event_id == "pi_empty_output_retry"
+                    && execution.title == "Turn empty output retry"
+        )),
+        "empty-output retry must leave a provider-layer audit event"
+    );
     let error = run
         .await
         .expect("session task")
@@ -264,6 +282,15 @@ async fn session_settled_while_waiting_empty_output_fails_after_single_retry() {
         CancellationToken::new(),
     ));
     let events = drain_events(&mut event_rx).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Execution(execution)
+                if execution.event_id == "pi_empty_output_retry"
+                    && execution.title == "Turn empty output retry"
+        )),
+        "empty-output retry must leave a provider-layer audit event"
+    );
     let error = run
         .await
         .expect("session task")

@@ -147,6 +147,11 @@ impl ProviderAdapterError {
         )
     }
 
+    /// turn 完成但去空白后输出为空（含一次有界重试后再空）。
+    pub fn provider_empty_output(details: impl Into<String>) -> Self {
+        Self::new(ProviderErrorCode::ProviderEmptyOutput, details)
+    }
+
     fn new(code: ProviderErrorCode, details: impl Into<String>) -> Self {
         Self::with_output(
             code,

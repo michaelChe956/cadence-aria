@@ -398,6 +398,27 @@ fn provider_retry_classifier_fails_closed_for_unrecognized_adapter_execution_fai
 }
 
 #[test]
+fn provider_retry_classifier_maps_structured_empty_output_code_to_stable_reason() {
+    let error =
+        CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError::provider_empty_output(
+            "provider_empty_output: Codex turn turn_1 completed without agent output \
+             after one bounded retry",
+        ));
+    let classification = classify_provider_failure(&error);
+    assert!(!classification.is_retryable());
+    match classification {
+        crate::product::coding_workspace_engine::provider_retry::ProviderFailureClassification::NonRetryable {
+            reason_code,
+            interaction_wait,
+        } => {
+            assert_eq!(reason_code, "provider_empty_output");
+            assert!(!interaction_wait);
+        }
+        other => panic!("expected non-retryable classification, got {other:?}"),
+    }
+}
+
+#[test]
 fn provider_invocation_outcome_keeps_typed_failure_and_interaction_wait() {
     let retry = ProviderInvocationOutcome::from_result(
         Err(CodingWorkspaceEngineError::ProviderAdapter(
