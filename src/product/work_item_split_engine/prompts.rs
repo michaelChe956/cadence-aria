@@ -61,12 +61,15 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 
 /// SingleCandidate markdown author 的质量预算。项目规则内容式注入后上调；
 /// 该预算只覆盖 SC full-author，不改变 legacy draft prompt 的预算。
-/// 🔴 红线（2026-08-31 终审裁决 2b）：当前实测余量仅 66B（18,934/19,000）。
-/// 任何后续 SC author 教学变更必须先将本常量上调至整百级并注明 margin 惯例，
-/// 再添加教学内容；预算调整必须配套更新 prompt bytes 测试与 margin 说明。
+/// 🔴 红线（2026-08-31 终审裁决 2b）：任何后续 SC author 教学变更必须先将本常量
+/// 上调至整百级并注明 margin 惯例，再添加教学内容；预算调整必须配套更新
+/// prompt bytes 测试与 margin 说明。历史上限 19,000（实测 18,934/余 66B）。
+/// 2026-09-03 P1-A 按红线先上调至 20,000（第 7 次提额，先例 14,400→19,000 共 6 次），
+/// 同批追加尾部 [format_clamp] 钳制块与标题正反例 few-shot；实测 19,324/余 676B，
+/// 断言见 prompt_contract::sc_author_prompt_tail_clamps_heading_language_and_raises_budget。
 /// 依据：openspec/changes/archive/2026-08-31-rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 19_000;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 20_000;
 
 pub(crate) const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##/### section 名)、字段 key、ID(WI-*/CT-*/TASK-*/AC-*/REQ-*/CHECK-* 等)、枚举值(require_all/require_any/backend/frontend/integration 等)永远保持 grammar 指定的英文原样,不做翻译;上述语言规则仅约束自由文本值(各 ## 标题的 <title> 部分、statement/description/capabilities 等字段的值)与说明性文字;代码、路径、命令、契约 ID 保持原样。字段行分隔符必须是半角 ASCII:每行写作 `- key: value`(冒号+一个空格均为半角),禁止全角冒号`：`或全角空格;EARS 关键词(WHEN/THE SYSTEM SHALL)、ID 前缀(WI-/CT-/TASK-/AC-/REQ-/CHECK-)与枚举值内的分隔亦为半角;中文仅出现在值的自由文本中。";
 
@@ -298,6 +301,10 @@ fn work_item_plan_real_few_shot() -> Result<String, String> {
         ));
     }
 
+    cases.push_str(
+        "\n标题正反例：❌ `# 工作项计划` / `### 身份` → ✅ `# Work Item Plan` / `### Identity`（内容中文，标题英文逐字）。\n",
+    );
+
     Ok(cases)
 }
 
@@ -338,6 +345,8 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          {grammar}\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
+         [format_clamp]\n\
+         重申：结构标题必须逐字照抄 [markdown_grammar]/[minimum_legal_source] 的英文原文（含 `# Work Item Plan` 与全部 `###` 标题）；仅自由文本值用中文；禁止翻译、改写或加中文括号。\n\
          [output] 现在仅输出完整 markdown source。",
         issue_title = issue.title,
         issue_description = issue.description.as_deref().unwrap_or("无"),

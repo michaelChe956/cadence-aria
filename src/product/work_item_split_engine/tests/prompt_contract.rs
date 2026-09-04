@@ -1013,7 +1013,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        19_000
+        20_000
     );
     assert!(
         prompt.len()
@@ -1070,4 +1070,109 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
     assert!(prompt.contains("不表示其他 section 可以为空"));
     assert!(!prompt.contains("若本 WI 没有任何下游 consumer edge（链路末端"));
     assert!(!prompt.contains("provided_contract_refs 中每项必须被至少一个下游"));
+}
+
+#[test]
+fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &[],
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+                routing_context: &RoutingReferenceContext::Legacy,
+            },
+        )
+        .expect("markdown author prompt");
+
+    let few_shot_pos = prompt
+        .find("[real_finding_few_shot]")
+        .expect("few-shot block marker");
+    let clamp_pos = prompt
+        .find("[format_clamp]")
+        .expect("tail format clamp must appear after few-shot and before [output]");
+    let output_pos = prompt.find("[output]").expect("output directive marker");
+    assert!(
+        few_shot_pos < clamp_pos,
+        "尾部钳制块必须位于 few-shot 之后，补上 lost-in-the-middle 的尾部盲区"
+    );
+    assert!(
+        clamp_pos < output_pos,
+        "尾部钳制块必须是 [output] 之前的最后一段指令"
+    );
+
+    let clamp_block = &prompt[clamp_pos..output_pos];
+    assert!(
+        clamp_block.len() <= 250,
+        "尾部钳制块必须 ≤250 字节，实测 {}: {clamp_block}",
+        clamp_block.len()
+    );
+    for required in [
+        "[markdown_grammar]",
+        "[minimum_legal_source]",
+        "# Work Item Plan",
+        "###",
+    ] {
+        assert!(
+            clamp_block.contains(required),
+            "尾部钳制必须重申英文标题逐字来源 {required}: {clamp_block}"
+        );
+    }
+    assert!(clamp_block.contains("自由文本"));
+    assert!(clamp_block.contains("禁止翻译"));
+
+    let heading_pos = prompt
+        .find("标题正反例")
+        .expect("heading counterexample few-shot must exist in the few-shot region");
+    assert!(
+        few_shot_pos < heading_pos && heading_pos < clamp_pos,
+        "标题正反例必须位于 real_finding_few_shot 区域内"
+    );
+    let heading_example_end = heading_pos
+        + prompt[heading_pos..]
+            .find('\n')
+            .expect("heading few-shot line terminator");
+    let heading_example = &prompt[heading_pos..heading_example_end];
+    assert!(
+        heading_example.len() <= 200,
+        "标题正反例必须 ≤200 字节，实测 {}: {heading_example}",
+        heading_example.len()
+    );
+    for required in [
+        "❌ `# 工作项计划`",
+        "`### 身份`",
+        "✅ `# Work Item Plan`",
+        "`### Identity`",
+        "内容中文",
+        "标题英文逐字",
+    ] {
+        assert!(
+            heading_example.contains(required),
+            "标题正反例必须包含 {required}: {heading_example}"
+        );
+    }
+
+    assert_eq!(
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        20_000,
+        "P1-A 尾部钳制+标题正反例要求预算上调至整百级 20,000"
+    );
+    assert!(
+        prompt.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "fixture prompt 必须低于上调后质量预算，实测 {} bytes",
+        prompt.len()
+    );
+    eprintln!(
+        "P1-A SC author prompt bytes={} margin={}",
+        prompt.len(),
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+            - prompt.len()
+    );
 }

@@ -206,7 +206,7 @@ fn conversational_gate_revision_trim_is_deterministic_and_only_removes_preamble(
 #[test]
 fn conversational_gate_revision_prompt_budget_is_independent_from_author_budget() {
     assert_eq!(
-        WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES, 19_000,
+        WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES, 20_000,
         "SC author red-line budget must remain unchanged"
     );
     assert_eq!(SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES, 32_000);
