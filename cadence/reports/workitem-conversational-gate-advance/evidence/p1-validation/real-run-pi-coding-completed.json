@@ -1,0 +1,58 @@
+{
+  "evidence": "real-run-pi-coding-completed",
+  "scenario": "stage2 重连应答 final_confirm(终局一搏)",
+  "run_command": "ARIA_BASE_URL=http://127.0.0.1:4317 ARIA_AMENDMENT_SCRIPT=...;confirm ARIA_CODING_HARD_TIMEOUT_MS=1800000 timeout 1920 node cadence/reports/workitem-coding-campaign/coding_run_campaign.mjs /tmp/aria-stage35-p1val/pi/rep1/handoff.json /tmp/aria-stage35-p1val-fin",
+  "exit_code": 0,
+  "attempt_adopted_same": true,
+  "attempt_id": "coding_attempt_716f01a1293e4c7d9f210c4388f1b37e",
+  "terminal_state": {
+    "completed": true,
+    "coding_attempt_status": "completed",
+    "failure_class": null,
+    "error": null,
+    "final_session_status": "completed (stage=final_confirm, status=completed)"
+  },
+  "final_confirm": {
+    "adopted_at_attempt_status": "waiting_for_human / stage=final_confirm (coding_attempt_created snapshot 2026-09-04T08:44:49.257Z)",
+    "sent_out_at": "2026-09-04T08:44:49.271Z",
+    "answered_at": "2026-09-04T08:44:49.305002735Z (coding_timeline_node_updated node_id=coding_node_0005 status=completed summary=用户已确认完成)",
+    "latency_ms": 34
+  },
+  "stage_gate_observed_audit": false,
+  "stage_gate_observed_note": "未出现 stage_gate_observed 审计:重连收养时 attempt 已停在 final_confirm(早于 stage_gate 之后),本运行未再穿越任何 stage_gate,无停机、无 stall,属预期不适用而非新形态",
+  "timing": {
+    "startedAt": "2026-09-04T08:44:49.196Z",
+    "finishedAt": "2026-09-04T08:44:49.348Z",
+    "elapsedSec": 0.153,
+    "stageTimeline": [
+      {
+        "stage": "final_confirm",
+        "elapsedSec": 0.076,
+        "source": "coding_session_state"
+      }
+    ]
+  },
+  "worktree_final": {
+    "branch_name": "aria/issues/issue_0121",
+    "base_branch": "main",
+    "head_commit": "d14fc0b185055ff8bf852f8c25e2516ed05dab41",
+    "push_status": "pushed",
+    "head_commit_unchanged_from_prior_run": true
+  },
+  "prior_run_stuck_state": {
+    "attempt_status": "waiting_for_human @ final_confirm (node coding_node_0005 pending since 2026-09-04T08:05:37Z)",
+    "prior_failure_class": "unknown_gate_timeout (旧驱动)",
+    "prior_head_commit": "d14fc0b185055ff8bf852f8c25e2516ed05dab41"
+  },
+  "review": {
+    "round": 1,
+    "verdict": "approve",
+    "review_id": "code_review_0001"
+  },
+  "artifacts": {
+    "run_result": "/tmp/aria-stage35-p1val-fin/coding-pi-coding_attempt_716f01a1293e4c7d9f210c4388f1b37e/result.json",
+    "coding_result": "/tmp/aria-stage35-p1val-fin/coding-pi-coding_attempt_716f01a1293e4c7d9f210c4388f1b37e/coding-result.json",
+    "ws_events": "/tmp/aria-stage35-p1val-fin/coding-pi-coding_attempt_716f01a1293e4c7d9f210c4388f1b37e/ws.jsonl",
+    "stdout_log": "/tmp/aria-stage35-p1val-fin-run.log (0 bytes, script writes artifacts only)"
+  }
+}

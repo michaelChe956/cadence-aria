@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-09-04T08:40:00Z",
+  "task": "P1 验证:pi 全剧本×10 + 首个 pass 接编码段(全流程案例)",
+  "environment": {
+    "worktree": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo",
+    "head": "300ef1b11fad34bebfc36911ce5d848d885d9d6c",
+    "git_clean": true,
+    "aria_health": "ok(未重启)",
+    "fixture_set": "minimal",
+    "issue_corpus": "08-minimal-hello-api.md",
+    "dry_run_exit": 0,
+    "flow_kind": "single_candidate",
+    "run_policy": "interactive",
+    "human_script": "request-change:请在契约定义中补充错误响应的示例;confirm;advance"
+  },
+  "stage1": {
+    "provider": "pi",
+    "runs_attempted": 10,
+    "valid_samples": 10,
+    "voided_environment_failures": 0,
+    "provider_inconclusive": 0,
+    "first_output_pass": 10,
+    "first_output_fail": 0,
+    "fail_form_distribution": {},
+    "first_review_verdicts": { "pass": 10 },
+    "first_review_advisory_findings_range": "0-3(全部 severity=suggestion/class_hint=advisory)",
+    "heading_normalized_rescue_count": 0,
+    "confirmed_count_10_of_10": true,
+    "advance_ready_10_of_10": true,
+    "failure_class_distribution": { "null": 10 },
+    "repairs_used_total": 0,
+    "manual_repairs_used_total": 0,
+    "provider_start_count_per_run": 2,
+    "policy_diagnostics_total": 0,
+    "elapsed_sec_per_rep": {
+      "rep1": 543.5, "rep2": 839.5, "rep3": 472.5, "rep4": 1384.4, "rep5": 427.5,
+      "rep6": 512.3, "rep7": 582.7, "rep8": 577.6, "rep9": 701.7, "rep10": 714.6
+    },
+    "elapsed_sec_total": 6756.1,
+    "elapsed_sec_min": 427.5,
+    "elapsed_sec_max": 1384.4,
+    "issues": ["issue_0121", "issue_0122", "issue_0123", "issue_0124", "issue_0125", "issue_0126", "issue_0127", "issue_0128", "issue_0129", "issue_0130"]
+  },
+  "stage2": {
+    "executed_for_first_pass_rep": 1,
+    "attempt_id": "coding_attempt_716f01a1293e4c7d9f210c4388f1b37e",
+    "criterion_a_create_adoption": true,
+    "criterion_a_materialization": true,
+    "criterion_a_real_coding_drive": true,
+    "criterion_a": true,
+    "final_state": "final_confirm(等待人工最终确认),非 completed",
+    "code_review_verdict": "approve(findings=[])",
+    "failure_class": "unknown_gate_timeout",
+    "error": "未知/不可理解 Coding gate 后等待至硬超时 1800000ms",
+    "elapsed_sec": 1800.1,
+    "real_commit": "d14fc0b feat(api): 仅用 node:http 实现 GET /api/hello 并新增唯一 node --test 冒烟测试",
+    "worktree": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0121",
+    "new_form_gap": "无新形态缺口:stage_gate 未响应为已声明的失败关闭行为;遗留点=final_confirm 的人工最终确认无 gate 消息、driver 无自动响应通道(阶段 2 已知遗留)"
+  },
+  "evidence_files": {
+    "per_rep": "/tmp/aria-stage35-p1val/evidence/val-pi-rep{1..10}.json",
+    "stage2": "/tmp/aria-stage35-p1val/evidence/val-pi-coding-first.json",
+    "summary": "/tmp/aria-stage35-p1val/evidence/val-summary.json",
+    "raw_campaign_output": "/tmp/aria-stage35-p1val/pi/rep{1..10}/ 与 /tmp/aria-stage35-p1val/coding-pi-coding_attempt_716f01a1293e4c7d9f210c4388f1b37e/",
+    "console_logs": "/tmp/aria-stage35-p1val/logs/"
+  }
+}

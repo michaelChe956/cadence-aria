@@ -1,0 +1,114 @@
+{
+  "rep": 7,
+  "provider": "pi",
+  "sample_valid": true,
+  "run_id": {
+    "issue_id": "issue_0127",
+    "plan_id": "issue_work_item_plan_0001",
+    "workspace_session_id": "workspace_session_0151",
+    "coding_attempt_id": "coding_attempt_c35c107894c2491f900ec627f927bedd",
+    "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0127"
+  },
+  "first_output_compiled": "pass",
+  "first_review_verdict": "pass",
+  "first_review_findings": [
+    {
+      "severity": "suggestion",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "category": "completeness",
+      "class_hint": "advisory"
+    }
+  ],
+  "heading_normalized_rescue": false,
+  "heading_normalized_event_ids": [],
+  "gates": {
+    "stage3_gate_return": {
+      "waits": 1,
+      "dispatched": 1,
+      "stage_errors": 0,
+      "pending_action_index": null
+    },
+    "human_gate_turns": [
+      {
+        "action_index": 0,
+        "command_id": "cmd-human_gate_feedback-0-6be41f92c8",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16,
+        "turn_id": "human_gate_turn_61fdbdb2-e813-45dc-b7ce-6f9cdf362a50",
+        "remaining_budget": 2,
+        "status": "completed",
+        "busy_events": 0,
+        "artifact_ref": "artifact_version_002"
+      }
+    ],
+    "humanGateActions_count": 2
+  },
+  "budget": {
+    "hard_timeout_ms": 1800000,
+    "run_history": {
+      "repairs_used": 0,
+      "manual_repairs_used": 0,
+      "transitions_used": 2,
+      "initial_review_count": 2,
+      "verification_review_count": 0,
+      "review_cycles": {
+        "review:timeline_node_003": {
+          "repairs_used": 0,
+          "initial_count": 1,
+          "verification_count": 0
+        },
+        "review:timeline_node_005": {
+          "repairs_used": 0,
+          "initial_count": 1,
+          "verification_count": 0
+        }
+      }
+    },
+    "provider_start_count": 2,
+    "manual_repair_budget": 3
+  },
+  "confirmed": true,
+  "confirmed_count": 1,
+  "advance_ready": true,
+  "advance_actions": [
+    {
+      "action_index": 2,
+      "command_id": "cmd-advance-2-1221182255",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_c35c107894c2491f900ec627f927bedd",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0127"
+    }
+  ],
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "failure_class": null,
+  "error": null,
+  "policy_diagnostics": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 22549,
+      "output_tokens": 579,
+      "cache_read_tokens": 704,
+      "cache_creation_tokens": 0
+    }
+  },
+  "stage_durations_sec": {
+    "0:prepare_context": 0.03,
+    "1:running": 331.635,
+    "2:cross_review": 0.185,
+    "3:prepare_context": 113.463,
+    "4:human_confirm": 40.329,
+    "5:cross_review": 0.2,
+    "6:prepare_context": 95.247,
+    "7:human_confirm": 0.819,
+    "8:running": 0.042,
+    "9:completed": 0.058
+  },
+  "elapsed_sec": 582.675
+}
