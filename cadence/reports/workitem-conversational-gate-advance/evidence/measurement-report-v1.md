@@ -71,3 +71,38 @@
 ## 8. 声明
 
 全程零伪造、零 dry-run 冒充;所有判定 durable 回读;两处 controller 误判(部署/字段名)均由子代理取证纠正并记档;Rulings 全录台账(`.superpowers/sdd/.../progress.md`)。
+
+---
+
+# 终章补录(2026-09-04,PI 根治与完整案例)
+
+> 本报告初版写于 P1 攻坚前;本章补录后续里程碑,证据在 evidence/p1-validation/。
+
+## 1. pi 抽风根治(P1,用户拍板"解决 provider 问题而非绕行")
+
+| 线 | 内容 | commit |
+|---|---|---|
+| A | SC author prompt 尾部 format_clamp+标题正反例+预算 19k→20k | 6fd814c7 |
+| B | SC 编译入口确定性标题归一化(固定映射 32 词条,表外 fail-closed,双路径+审计) | 612ff52e |
+| C | provider 空输出 guard(分类 provider_empty_output+一次有界重试,usage 接线保真) | eaf981ea 等 |
+| D | driver choice skip 偏好应答 | e05a9f1c |
+| 终局 | stage_gate(5s 自动放行门)识别不停机+混排审计无损 | abdddb41/f280ad1d |
+
+审查:批量审+定域复审(terra)全过;过程事故 2 起(误提交 main/共享树竞态)已修复记档。
+
+## 2. 验证与完整案例(历史首次)
+
+- **阶段 1:pi 全剧本 10/10**(零作废;归一化 0 命中=prompt 钳制单独生效,B 为保险)
+- **阶段 2:判据 A 历史首达**→编码 completed:worktree 物化→AI 真实写码(74 工具事件)→提交 d14fc0b(server.js 29 行+test 40 行,测试亲验 1/1)→代码评审过→final_confirm 34ms→**pushed**(分支 aria/issues/issue_0121)
+- 单次干净全流程 ≈22-35 分钟(计划 7-23 分+编码 ~13 分)
+
+## 3. 更新后的结论口径
+
+- 对话门+全链(轻语料):**pi 稳定 10/10**;重语料(levels)未用 P1 版复测(遗留)
+- 其他 provider:**当前视为正确(用户拍板,临时假设)**——claude 零实测;codex/kimi 历史失败形态(空交付×2/前导语污染)已登记,待"所有 API 调用内容开发完成后"统一全量测试(阶段 4 主场)
+- 本轮累计:40+ 真机跑、8 个产品修复、6 个工具升级、完整案例 1 例
+
+## 4. 后续入口
+
+- 3.7 UI/UX 改造(新会话:「UI/UX 改造立项,先 brainstorming」;素材=本报告 §6+amendment-wire-notes+终章数据)
+- 分支合并:用户拍板**暂不合并,全部内容做完后统一 squash**(本分支持续承接后续工作)
