@@ -648,6 +648,132 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
 }
 
 #[tokio::test]
+async fn codex_provider_empty_turn_output_retries_once_and_completes() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_empty_output_retry_success_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut saw_retry_audit = false;
+    let completion = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::Execution(event)
+                if event.kind == ProviderExecutionEventKind::Turn
+                    && event.status == ProviderExecutionEventStatus::Running
+                    && event.title.contains("retry") =>
+            {
+                saw_retry_audit = true;
+            }
+            ProviderEvent::Completed(completion) => break completion,
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    };
+
+    assert!(
+        saw_retry_audit,
+        "empty-output retry should leave a provider-layer audit event"
+    );
+    assert_eq!(completion.full_output, "Retry output recovered");
+}
+
+#[tokio::test]
+async fn codex_provider_empty_turn_output_fails_with_provider_empty_output_after_single_retry() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_empty_output_twice_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut saw_retry_audit = false;
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit terminal failure")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("provider_empty_output"),
+                    "unexpected failure message: {message}"
+                );
+                assert!(
+                    saw_retry_audit,
+                    "empty-output retry should leave a provider-layer audit event"
+                );
+                return;
+            }
+            ProviderEvent::Execution(event)
+                if event.kind == ProviderExecutionEventKind::Turn
+                    && event.status == ProviderExecutionEventStatus::Running
+                    && event.title.contains("retry") =>
+            {
+                saw_retry_audit = true;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
+                panic!("provider completed with empty output: {full_output:?}");
+            }
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_provider_nonempty_turn_output_completes_without_retry() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_nonempty_output_no_retry_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let completion = recv_completion(&mut session.events).await;
+
+    assert_eq!(completion.full_output, "Primary output delivered");
+}
+
+#[tokio::test]
 async fn codex_provider_request_user_input_emits_protocol_error_on_bridge_failure() {
     let fixture =
         executable_fixture("tests/fixtures/provider/codex_app_server_user_input_fixture.sh");

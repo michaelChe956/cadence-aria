@@ -7,21 +7,57 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
-use crate::cross_cutting::local_usage::read_default_codex_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, ChoiceRequestSource, ProviderCompletion, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput, UsageReportData,
+    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput,
 };
 
 use super::{
     CODEX_DEFAULT_SANDBOX_MODE, CODEX_RESUME_STALL_ERROR, CODEX_RESUME_STALL_TIMEOUT,
     CODEX_RPC_REQUEST_TIMEOUT, emit_request_user_input_protocol_error, is_turn_completed,
-    parse_agent_message_text, parse_approval_request, parse_codex_usage, parse_execution_event,
-    parse_failure, parse_user_input_request, provider_error, send_provider_event,
-    write_approval_response, write_user_input_response,
+    parse_agent_message_text, parse_approval_request, parse_execution_event, parse_failure,
+    parse_user_input_request, provider_error, send_provider_event, write_approval_response,
+    write_user_input_response,
 };
+
+const CODEX_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
+const CODEX_EMPTY_OUTPUT_RETRY_PROMPT: &str =
+    "Your previous reply was empty. Please reply again with your complete output.";
+
+async fn start_codex_turn<W>(
+    peer: &JsonRpcPeer<W>,
+    thread_id: &str,
+    prompt: &str,
+) -> Result<String, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let turn_response = peer
+        .request_with_timeout(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "turn/start",
+                "params": {
+                    "threadId": thread_id,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        }
+                    ],
+                },
+            }),
+            CODEX_RPC_REQUEST_TIMEOUT,
+        )
+        .await?;
+    Ok(turn_response
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .unwrap_or("turn")
+        .to_string())
+}
 
 pub(crate) async fn run_codex_session<W>(
     peer: JsonRpcPeer<W>,
@@ -113,29 +149,7 @@ where
     };
     let turn_thread_id = thread_id.clone().unwrap_or_default();
 
-    let turn_response = peer
-        .request_with_timeout(
-            json!({
-                "jsonrpc": "2.0",
-                "method": "turn/start",
-                "params": {
-                    "threadId": turn_thread_id,
-                    "input": [
-                        {
-                            "type": "text",
-                            "text": input.prompt.clone(),
-                        }
-                    ],
-                },
-            }),
-            CODEX_RPC_REQUEST_TIMEOUT,
-        )
-        .await?;
-    let turn_id = turn_response
-        .pointer("/turn/id")
-        .and_then(Value::as_str)
-        .unwrap_or("turn")
-        .to_string();
+    let mut turn_id = start_codex_turn(&peer, &turn_thread_id, &input.prompt).await?;
     send_provider_event(
         &event_tx,
         ProviderEvent::StatusChanged(ProviderStatus::Running),
@@ -161,6 +175,7 @@ where
 
     let mut full_output = String::new();
     let mut streamed_agent_message_items = HashSet::new();
+    let mut empty_output_retry_used = false;
     let timeout_secs = input.timeout_secs.max(1);
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout);
@@ -274,16 +289,42 @@ where
         }
 
         if is_turn_completed(&incoming) {
-            // 协议层 usage 优先；当前 Codex 版本不携带时，以 threadId 精确匹配
-            // ~/.codex/sessions 的 rollout 并读取最近 token_count。读取失败不影响 turn。
-            let usage_role = UsageReportData::role_text(&input.role);
-            let report = parse_codex_usage(&incoming, usage_role).or_else(|| {
-                (!turn_thread_id.is_empty())
-                    .then(|| read_default_codex_usage(&turn_thread_id, usage_role))
-                    .flatten()
-            });
-            if let Some(report) = report {
-                send_provider_event(&event_tx, ProviderEvent::UsageReport(report), &cancel).await?;
+            if full_output.trim().is_empty() {
+                if empty_output_retry_used {
+                    return Err(provider_error(format!(
+                        "{CODEX_EMPTY_OUTPUT_ERROR}: Codex turn {turn_id} completed without \
+                         agent output after one bounded retry"
+                    )));
+                }
+                empty_output_retry_used = true;
+                tracing::warn!(
+                    target: "codex_provider",
+                    thread_id = %turn_thread_id,
+                    turn_id = %turn_id,
+                    "Codex turn completed with empty output; retrying once in-session"
+                );
+                send_provider_event(
+                    &event_tx,
+                    ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: format!("turn_{turn_id}_empty_output_retry"),
+                        kind: ProviderExecutionEventKind::Turn,
+                        status: ProviderExecutionEventStatus::Running,
+                        title: "Turn empty output retry".to_string(),
+                        detail: Some(
+                            "Codex turn completed with empty output; retrying once".to_string(),
+                        ),
+                        command: None,
+                        cwd: Some(input.working_dir.display().to_string()),
+                        output: None,
+                        exit_code: None,
+                    }),
+                    &cancel,
+                )
+                .await?;
+                full_output.clear();
+                turn_id = start_codex_turn(&peer, &turn_thread_id, CODEX_EMPTY_OUTPUT_RETRY_PROMPT)
+                    .await?;
+                continue;
             }
             send_provider_event(
                 &event_tx,

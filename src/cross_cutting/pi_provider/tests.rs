@@ -22,6 +22,8 @@ use crate::protocol::contracts::{AdapterRole, ProviderType};
 use super::session::run_pi_session;
 use super::*;
 
+mod empty_output;
+
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 struct FixtureEnvelope {
     direction: String,
@@ -1057,6 +1059,14 @@ async fn session_resumes_with_existing_session_id() {
             &mut server_writer,
             serde_json::json!({
                 "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+            }),
+        )
+        .await;
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "resumed"}
             }),
         )
         .await;
