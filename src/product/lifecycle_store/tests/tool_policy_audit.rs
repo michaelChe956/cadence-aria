@@ -273,6 +273,108 @@ fn sink_append(
         .expect("seed old run provider_start");
 }
 
+// ---- F3 修复轮 P1-5/P1-6/P2-3：互斥串行、seq 持久化分配与坏文件 fail-closed ----
+
+#[test]
+fn tool_policy_audit_concurrent_appends_and_allocations_are_serialized() {
+    // P1-5：两线程并发 append 同一文件 + 并发分配 seq——进程内互斥包住
+    // 「seq 分配+读尾行+append」全临界区，行 seq 无重复、role_run_seq 分配唯一。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
+    let store = super::LifecycleStore::new(paths.clone());
+    store
+        .append("ws-concurrent", 7, provider_start_event("codex"))
+        .unwrap();
+    let s1 = store.clone();
+    let s2 = store.clone();
+    let a1 = store.clone();
+    let a2 = store.clone();
+    let appender = |sink: super::LifecycleStore| {
+        std::thread::spawn(move || {
+            for _ in 0..25 {
+                sink.append(
+                    "ws-concurrent",
+                    7,
+                    approval_decision_event("file_change", "aria-0"),
+                )
+                .expect("concurrent append");
+            }
+        })
+    };
+    let allocator = |sink: super::LifecycleStore| {
+        std::thread::spawn(move || {
+            let mut allocated = Vec::new();
+            for _ in 0..25 {
+                allocated.push(sink.next_tool_policy_role_run_seq("ws-concurrent").unwrap());
+            }
+            allocated
+        })
+    };
+    let handles_appends = vec![appender(s1), appender(s2)];
+    let handles_alloc = vec![allocator(a1), allocator(a2)];
+    for handle in handles_appends {
+        handle.join().expect("appender thread");
+    }
+    let mut allocated = Vec::new();
+    for handle in handles_alloc {
+        allocated.extend(handle.join().expect("allocator thread"));
+    }
+    // 行 seq：provider_start + 50 条决策，全部唯一且单调（文件内顺序）。
+    let lines = store.read_tool_policy_lines("ws-concurrent", 7).unwrap();
+    assert_eq!(lines.len(), 51);
+    let seqs: Vec<u64> = lines.iter().map(|line| line.seq).collect();
+    let mut unique = seqs.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), seqs.len(), "行 seq 不得重复");
+    assert!(lines.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+    // role_run_seq 分配：50 次全部唯一（marker 持久化高水位）。
+    let mut unique_alloc = allocated.clone();
+    unique_alloc.sort_unstable();
+    unique_alloc.dedup();
+    assert_eq!(unique_alloc.len(), allocated.len(), "role_run_seq 分配不得重复");
+}
+
+#[test]
+fn tool_policy_audit_role_run_seq_allocation_persists_immediately_and_is_not_reused() {
+    // P1-6：seq 分配随 marker 持久化（provider_start 写失败/崩溃后不得复用），
+    // 且跨进程（新 store 实例同根）单调。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
+    let store = super::LifecycleStore::new(paths.clone());
+    assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 0);
+    // 未写任何 provider_start（模拟写失败/崩溃）：再次分配不得复用 0。
+    assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 1);
+    // 跨进程：新实例同根继续单调。
+    let reopened = super::LifecycleStore::new(paths);
+    assert_eq!(reopened.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 2);
+    // 兼容：无 marker 的既有分区按文件 max 推导。
+    store
+        .append("ws-legacy", 5, provider_start_event("codex"))
+        .unwrap();
+    assert_eq!(store.next_tool_policy_role_run_seq("ws-legacy").unwrap(), 6);
+}
+
+#[test]
+fn tool_policy_audit_append_fails_closed_on_corrupted_file() {
+    // P2-3：append 前校验——文件首行不可解析（或任一行坏行）→ 返回错误，
+    // 不得在损坏文件上继续追加。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join(".aria").join("tool-policy-run-audit").join("ws-corrupt");
+    std::fs::create_dir_all(&root).expect("partition dir");
+    std::fs::write(root.join("9.jsonl"), "not-json\n").expect("corrupt fixture");
+    let store = super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        tmp.path().join(".aria"),
+    ));
+    let result = store.append("ws-corrupt", 9, provider_start_event("codex"));
+    assert!(
+        result.is_err(),
+        "append must fail closed on a corrupted partition file"
+    );
+    let raw = std::fs::read_to_string(root.join("9.jsonl")).unwrap();
+    assert_eq!(raw.lines().count(), 1, "损坏文件不得被追加");
+}
+
 #[test]
 fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
     let sink = test_tool_policy_audit_sink();

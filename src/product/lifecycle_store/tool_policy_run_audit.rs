@@ -9,6 +9,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, ProviderStartAudit, StoredProviderStart,
@@ -18,6 +19,19 @@ use crate::cross_cutting::tool_policy_audit::{
 use crate::product::json_store::validate_relative_id;
 
 use super::LifecycleStore;
+
+/// 分区内互斥串行化（P1-5，先例 coding_attempt_store/role_run_event.rs）：包住
+/// 「seq 分配+读尾行+append」全临界区。契约⑥单写者假设，无需跨进程锁。
+static TOOL_POLICY_AUDIT_LOG_MUTEX: Mutex<()> = Mutex::new(());
+
+/// seq 分配高水位 marker 文件名（追加式 JSONL；崩溃安全：读取取最后可解析行）。
+const ROLE_RUN_SEQ_MARKER: &str = "role-run-seq.jsonl";
+
+fn lock_audit_log() -> Result<std::sync::MutexGuard<'static, ()>, ToolPolicyAuditError> {
+    TOOL_POLICY_AUDIT_LOG_MUTEX
+        .lock()
+        .map_err(|error| ToolPolicyAuditError::Io(format!("lock tool policy audit log: {error}")))
+}
 
 fn audit_error(error: std::io::Error) -> ToolPolicyAuditError {
     ToolPolicyAuditError::Io(error.to_string())
@@ -115,27 +129,70 @@ impl LifecycleStore {
         &self,
         workspace_session_id: &str,
     ) -> Result<u64, ToolPolicyAuditError> {
+        // P1-5：与 append 同锁互斥。P1-6：分配即持久化——高水位 marker 追加式
+        // 落盘，provider_start 写失败/崩溃后 seq 不得被复用；跨进程依 marker
+        // 单调。既有无 marker 分区回退按文件 max 推导（兼容）。
+        let _guard = lock_audit_log()?;
         let root = self.tool_policy_audit_workspace_root(workspace_session_id)?;
-        let entries = match std::fs::read_dir(&root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(audit_error(error)),
-        };
-        let mut max: Option<u64> = None;
-        for entry in entries {
-            let entry = entry.map_err(audit_error)?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(stem) = name.strip_suffix(".jsonl") else {
-                continue;
-            };
-            if let Ok(seq) = stem.parse::<u64>()
-                && max.is_none_or(|current| seq > current)
-            {
-                max = Some(seq);
-            }
+        let marker = root.join(ROLE_RUN_SEQ_MARKER);
+        let marker_high = read_role_run_seq_marker(&marker)?;
+        let file_high = scan_max_role_run_seq(&root)?;
+        let next = marker_high.max(file_high).map(|seq| seq + 1).unwrap_or(0);
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent).map_err(audit_error)?;
         }
-        Ok(max.map(|seq| seq + 1).unwrap_or(0))
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&marker)
+            .map_err(audit_error)?;
+        writeln!(file, "{{\"allocated\":{next}}}").map_err(audit_error)?;
+        file.flush().map_err(audit_error)?;
+        Ok(next)
     }
+}
+
+/// marker 高水位（坏行跳过取最大可解析值；缺失→ None）。
+fn read_role_run_seq_marker(marker: &std::path::Path) -> Result<Option<u64>, ToolPolicyAuditError> {
+    let file = match std::fs::File::open(marker) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(audit_error(error)),
+    };
+    let mut high: Option<u64> = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(audit_error)?;
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
+            && let Some(allocated) = value.get("allocated").and_then(|value| value.as_u64())
+            && high.is_none_or(|current| allocated > current)
+        {
+            high = Some(allocated);
+        }
+    }
+    Ok(high)
+}
+
+/// 分区文件 max role_run_seq（非数字 stem 跳过，marker 不参与）。
+fn scan_max_role_run_seq(root: &std::path::Path) -> Result<Option<u64>, ToolPolicyAuditError> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(audit_error(error)),
+    };
+    let mut max: Option<u64> = None;
+    for entry in entries {
+        let entry = entry.map_err(audit_error)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        if let Ok(seq) = stem.parse::<u64>()
+            && max.is_none_or(|current| seq > current)
+        {
+            max = Some(seq);
+        }
+    }
+    Ok(max)
 }
 
 impl ToolPolicyAuditSink for LifecycleStore {
@@ -145,6 +202,8 @@ impl ToolPolicyAuditSink for LifecycleStore {
         role_run_seq: u64,
         mut event: DurableToolPolicyEvent,
     ) -> Result<(), ToolPolicyAuditError> {
+        // P1-5：进程内互斥包住「读尾行+seq 分配+append」全临界区。
+        let _guard = lock_audit_log()?;
         let path = self.tool_policy_audit_file(workspace_session_id, role_run_seq)?;
         // D6 冻结：`workspace_session_id` 进入事件 DTO，且以文件 key 为准（落盘
         // 记录与所在分区位置永远一致，不受调用方填充遗漏影响）。
@@ -155,8 +214,16 @@ impl ToolPolicyAuditSink for LifecycleStore {
             std::fs::create_dir_all(parent).map_err(audit_error)?;
         }
         // append 前读取既有行：provider_start 首行/唯一约束与 seq 单调分配都基于
-        // durable 现状计算。
-        let existing = self.read_tool_policy_lines(workspace_session_id, role_run_seq)?;
+        // durable 现状计算。P2-3：既有文件存在坏行（含首行不可解析）即损坏，
+        // fail-closed 拒绝追加，不得在损坏文件上继续写。
+        let existing_result =
+            self.read_tool_policy_lines_with_warnings(workspace_session_id, role_run_seq)?;
+        if let Some(warning) = existing_result.warnings.first() {
+            return Err(ToolPolicyAuditError::CorruptAuditFile {
+                line_no: warning.line_no,
+            });
+        }
+        let existing = existing_result.events;
         if matches!(event, DurableToolPolicyEvent::ProviderStart(_)) {
             if existing
                 .iter()
@@ -217,6 +284,8 @@ impl LifecycleStore {
         workspace_session_id: &str,
         native_provider_session_id: &str,
     ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
+        // P1-5：与 append 同锁互斥，读到一致的分区快照。
+        let _guard = lock_audit_log()?;
         let root = self.tool_policy_audit_workspace_root(workspace_session_id)?;
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,

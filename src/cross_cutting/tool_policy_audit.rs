@@ -35,6 +35,9 @@ pub enum ToolPolicyAuditError {
     ProviderStartRequired,
     /// 标识符非法（路径逃逸/空串）。
     InvalidIdentifier(String),
+    /// 既有分区文件存在坏行（含首行不可解析）：损坏文件上不得继续追加
+    /// （P2-3 fail-closed）。
+    CorruptAuditFile { line_no: u32 },
     /// 未绑定 (workspace_session_id, role_run_seq) 的 sink 不支持 run-bound 写入。
     UnboundSink,
 }
@@ -58,6 +61,10 @@ impl std::fmt::Display for ToolPolicyAuditError {
             ToolPolicyAuditError::InvalidIdentifier(value) => {
                 write!(f, "tool policy audit: invalid identifier {value:?}")
             }
+            ToolPolicyAuditError::CorruptAuditFile { line_no } => write!(
+                f,
+                "tool policy audit: corrupted audit file (bad line {line_no}); refusing to append"
+            ),
             ToolPolicyAuditError::UnboundSink => {
                 write!(f, "tool policy audit: sink is not bound to a provider run")
             }
