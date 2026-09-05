@@ -1,6 +1,8 @@
 # 2026-09-05 计划文档：F3 角色黑名单实施 `restrict-role-write-tools` v1.0
 
-> v1.0.1（2026-09-05 controller 亲验修订）：Task 0 证据不入 git（.superpowers 为 git-ignored）；测试片段改为真实 API 签名（pi/claude `build_args`、`ensure_request_id`、新增 `codex_launch_params` 抽取）；`json_rpc_peer.rs` 路径纠正；行号锚点校正；语义层 provider 参数定为 `&str`。
+> v1.0.1（2026-09-05 controller 亲验修订）：Task 0 证据不入 git（.superpowers 为 git-ignored）；测试片段改为真实 API 签名（pi `build_args` 扩第三参/claude `build_args` 扩第二参、`ensure_request_id`、新增 `codex_launch_params` 抽取）；`json_rpc_peer.rs` 路径纠正；行号锚点校正；语义层 provider 参数定为 `&str`。
+
+> v1.0.2（2026-09-05 oracle 过审驱动修订，8 findings 全修）：P1 全量构造点迁移（70 处/29 文件补 `tool_policy`/`audit_sink`/`native_session_id` 的 `None`）；P2 request id 改 codex 作用域化 namespace（pi/kimi 数字 id 零变化）；P3 claude 扩第二参勘误；P4 守卫签名统一 `&AdapterRole`；P5 审计 trait/事件 DTO 移中立模块 `cross_cutting/tool_policy_audit.rs`；P6 version probe 按 adapter 映射（pi 复用既有 probe，策略会话才 fail-closed）；P7 `ProviderSession` 增 `native_session_id`+start 返回前握手时序；P8 单一 role-fixture 改逐格矩阵 fixture（Handoff 无 builder，由守卫测试合成 input 覆盖）。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan. Steps use checkbox (`- [ ]`) syntax.
 
@@ -46,7 +48,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
 14. **REQ-ENV-06/08 自发现边界。** provider 原生发现的项目/用户配置（`.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）是用户裁决的受信任通道，不受 Aria bundle 管控；Aria 主动注入的 settings/MCP bundle 仍按既有审计、脱敏和 digest 规则。MCP 可用性不作正向保证。
 15. **命令纪律。** 所有本地命令在当前 worktree 根目录、宿主机 Rust 环境执行；`cargo test` **禁止 `-j` 参数**。定向单测必须用 `cargo test --locked --lib <filter>`；approval_bridge 使用 `cargo test-approval-bridge`。全量门禁严格为：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`、`cargo test --locked`。每个 Task 收尾必须运行对应 targeted 测试与 `openspec validate restrict-role-write-tools --strict`。
 16. **实施停止条件。** Task 0 的三项 CLI 实测任一与契约不符，立即停止本 change 实施并提交证据，不得擅自改名单、沙箱、审批分类或扩大范围。
-17. **证据与 fixture 约定。** `.superpowers/` 为 git-ignored（SDD workspace 磁盘持久），其下证据文件只落盘不 commit，完成后在 `progress.md` 台账登记路径。测试片段中未在生产代码中存在的 helper（`build_test_streaming_input`、`test_tool_policy_audit_sink`、`*_event`、`probe_fixture`、`provider_start_record` 等）均为随实现新建的测试 fixture，签名以各 Task Interfaces 为准；生产函数（`codex_launch_params`、`ensure_request_id` 扩展、`validate_tool_policy_for_role` 等）必须先在 Interfaces 声明再使用。
+17. **证据与 fixture 约定。** `.superpowers/` 为 git-ignored（SDD workspace 磁盘持久），其下证据文件只落盘不 commit，完成后在 `progress.md` 台账登记路径。测试片段中未在生产代码中存在的 helper（`entry_input`、`test_tool_policy_audit_sink`、`*_event`、`probe_fixture`、`provider_start_record` 等）均为随实现新建的测试 fixture，签名以各 Task Interfaces 为准；生产函数（`codex_launch_params`、`ensure_request_id` 扩展、`OutboundIdNamespace`、`validate_tool_policy_for_role` 等）必须先在 Interfaces 声明再使用。
 
 
 ## Task 0 — CLI 实测门禁（OpenSpec task 0.x / REQ-ENV-09）
@@ -114,6 +116,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
 
 - **Files**
   - Create/Modify：`src/cross_cutting/streaming_provider/mod.rs`（`StreamingProviderInput` 附近，新增 `ProviderToolPolicy`、`ToolPolicyIntent`、canonical 片段与 digest 类型）
+  - Modify：全仓 `StreamingProviderInput` 字面量构造点（存量 70 处/29 文件，含 `src/product/repository_store/initializer.rs:111`、`src/product/image_create/prompt_iteration.rs:124`、`src/product/logical_codebase/coordinator_provider_turn.inc.rs:66`、`src/product/logical_codebase/planning_context_resolver.rs:112`、`src/cross_cutting/provider_availability_gate.rs:436` 等；以 `grep -rn 'StreamingProviderInput\s*{' src --include='*.rs'` 生成全量清单，rustc 错误驱动逐一补 `tool_policy: None`）
   - Create/Modify：`src/cross_cutting/pi_provider/mod.rs`、`src/cross_cutting/claude_code_provider/mod.rs`、`src/cross_cutting/codex_provider/session.rs`（translator 与 canonical 参数）
   - Modify：`Cargo.toml`、`Cargo.lock`（仅在现有 sha256 依赖不存在时，以仓库现有依赖方式加入）
   - Test：`src/cross_cutting/streaming_provider/tests.rs` 或对应 provider 单测模块
@@ -141,6 +144,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1`；预期失败信息为 `cannot find ... canonical_tool_policy` 或 digest 断言失败。
   - [ ] 以最小实现加入 `ToolPolicyIntent`、`ProviderToolPolicy`、`CanonicalToolPolicy` 和 translator；pi tokens 必须是 `vec!["--exclude-tools", "edit,write"]`，claude tokens 必须是 `vec!["--disallowedTools", "Edit,Write,NotebookEdit"]`，codex tokens 必须包含 `sandbox=read-only` 与 `approvalPolicy=on-request`，并按 `"tp-v1" + \x1f + provider + \x1f + tokens.join(\x1f) + \x1f + "ap-v1"` 计算 sha256。
+  - [ ] 运行 `cargo check --locked`：rustc 将列出全部未补字段的 `StreamingProviderInput` 构造点（存量 70 处/29 文件）；非策略构造点逐一补 `tool_policy: None`（策略 builder 的 `Some` 注入在 Task 1.2 完成），直至 `cargo check --locked` 零错；不得用 `#[derive(Default)]` 或 `..Default::default()` 掩盖遗漏，也不得只在 D2 builder 文件内修补。
   - [ ] 以 shell 实算向量替换长度断言（禁止手写假 digest）：`printf 'tp-v1\x1fpi\x1f--exclude-tools\x1fedit,write\x1fap-v1' | sha256sum`，把输出 hex 写入测试的精确断言 `assert_eq!(actual.digest, "<实算值>")` 并在测试注释记录实算命令；再运行 `cargo test --locked --lib canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1`；预期通过且 digest 在同一输入下稳定。
   - [ ] 追加物理片段、大小写、token 顺序和 `ap-v1` 漂移测试：改变任一 token 或审批规则版本时 `assert_ne!(old.digest, new.digest)`。
   - [ ] 运行 `cargo fmt --check`；预期通过。
@@ -156,26 +160,29 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Consumes：`ProviderToolPolicy`、`AdapterRole`、各已有 builder 的 provider/session 参数。
   - Produces：每个作者/评审 builder 返回 `StreamingProviderInput { tool_policy: Some(ProviderToolPolicy { intent: DenyFileWriteBuiltins }), .. }`；Executor/Coder 与聚合初始化返回 `tool_policy: None`。
 - **Steps**
-  - [ ] 先写失败参数化测试，复用各 builder 返回的真实 `StreamingProviderInput`；在 workspace_engine 测试模块新建 fixture `pub(crate) fn build_test_streaming_input(role: AdapterRole) -> StreamingProviderInput`（内部分派到真实 builder 工厂，不虚构生产 API；Task 4.1 复用同一 fixture），测试仅调用该 fixture：
+  - [ ] 先写失败表驱动测试，逐格调用真实构造路径（D2 全表），不虚构单一 role-fixture：在 workspace_engine 测试模块新建分派 fixture `fn entry_input(entry: &str) -> StreamingProviderInput`——每个分支调用一个真实 builder（workspace author/revision/review 用 part_31 式 session fixture；coding 用 provider_retry/internal_pr_review/group_review 构造；聚合初始化用 coordinator_provider_turn.inc.rs:57-77 真实构造）；Handoff 无真实 builder，不参与本矩阵，仅由 Task 3.1 守卫测试以合成 input 覆盖：
     ```rust
     #[test]
-    fn streaming_input_builder_applies_role_policy_matrix() {
-        for (role, denied) in [
-            (AdapterRole::Orchestrator, true),
-            (AdapterRole::WorkItemSplitter, true),
-            (AdapterRole::Reviewer, true),
-            (AdapterRole::Executor, false),
-            (AdapterRole::Handoff, false),
+    fn builder_factory_applies_role_policy_matrix_per_entry() {
+        for (entry, role, denied) in [
+            ("sc_author", AdapterRole::Orchestrator, true),
+            ("sc_revision", AdapterRole::Orchestrator, true),
+            ("wip_author", AdapterRole::WorkItemSplitter, true),
+            ("workspace_reviewer", AdapterRole::Reviewer, true),
+            ("coding_coder", AdapterRole::Executor, false),
+            ("coding_reviewer", AdapterRole::Reviewer, true),
+            ("aggregate_turn", AdapterRole::Executor, false),
         ] {
-            let input = build_test_streaming_input(role);
-            assert_eq!(input.tool_policy.is_some(), denied, "role={role:?}");
+            let input = entry_input(entry);
+            assert_eq!(input.role, role, "{entry}");
+            assert_eq!(input.tool_policy.is_some(), denied, "{entry}");
         }
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib streaming_input_builder_applies_role_policy_matrix`；预期失败为 `StreamingProviderInput` 无 `tool_policy` 或作者/评审返回 `None`。
+  - [ ] 运行 `cargo test --locked --lib builder_factory_applies_role_policy_matrix_per_entry`；预期失败为作者/评审 builder 返回 `tool_policy: None`（字段已在 Task 1.1 补齐）。
   - [ ] 最小修改真实锚点 builder：`prompts.rs:219-268,288-348`、`prompts/revision.rs:18-72`、`prompts/review.rs:126-238,241-265,777-948,951-1157`、`prompts/review_repair.rs:6-60`、coding `provider_retry.rs:216-233,373-395`、`internal_pr_review.rs:301-325`、`group_review_orchestrator.rs:929-964`、`coordinator_provider_turn.inc.rs:57-77`；作者/评审设置 `Some(ProviderToolPolicy::deny_file_write_builtins())`，Executor/Coder/聚合初始化设置 `None`。
-  - [ ] 增加 builder 全集断言，逐一调用上述真实 builder，并断言 `role` 与 `tool_policy` 成对一致；对同步 `AdapterInput` 仅保留既有 logical fail-closed，不扩展本 change 的同步例外。
-  - [ ] 运行 `cargo test --locked --lib streaming_input_builder_applies_role_policy_matrix`、`cargo test --locked --lib workspace_engine`；预期角色矩阵与既有 workspace 单测通过。
+  - [ ] 增加 builder 全集断言，逐一调用上述真实 builder（含 review.rs 各分派分支与 serial/batch），并断言 `role` 与 `tool_policy` 成对一致；对同步 `AdapterInput` 仅保留既有 logical fail-closed，不扩展本 change 的同步例外。
+  - [ ] 运行 `cargo test --locked --lib builder_factory_applies_role_policy_matrix_per_entry`、`cargo test --locked --lib workspace_engine`；预期角色矩阵与既有 workspace 单测通过。
   - [ ] 运行 `cargo fmt --check`；预期通过。
   - [ ] 提交实现：`git add src/product/workspace_engine src/product/coding_workspace_engine && git commit -m "feat(restrict-role-write-tools): inject role policy in builders"`。
 
@@ -211,7 +218,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
 
 ### Task 1 收尾
 
-- [ ] 运行 `cargo test --locked --lib canonical_tool_policy`、`cargo test --locked --lib streaming_input_builder_applies_role_policy_matrix`、`cargo test --locked --lib pi_policy_args`；预期全部通过。
+- [ ] 运行 `cargo test --locked --lib canonical_tool_policy`、`cargo test --locked --lib builder_factory_applies_role_policy_matrix_per_entry`、`cargo test --locked --lib pi_policy_args`；预期全部通过。
 - [ ] 运行 `openspec validate restrict-role-write-tools --strict`；预期通过。
 
 ## Task 2 — Claude/Codex 执行点与审批分类（OpenSpec task 2.x / REQ-ENV-09）
@@ -225,7 +232,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Test：`src/cross_cutting/claude_code_provider/tests/args.rs:9-25`
 - **Interfaces**
   - Consumes：`StreamingProviderInput.tool_policy`、`provider_session_id`、现有 `--permission-prompt-tool=stdio`。
-  - Produces：`ClaudeCodeProvider::build_args(&self, resume_provider_session_id: Option<&str>, tool_policy: Option<&ProviderToolPolicy>) -> Vec<String>`（现签名 `mod.rs:82` 为单 policy 前两参，扩第三参；既有调用点与测试同步补 `None`）；策略 input 的 argv 精确增加 `--disallowedTools Edit,Write,NotebookEdit`，fresh/resume 均保留；非策略 input 不增加该片段。
+  - Produces：`ClaudeCodeProvider::build_args(&self, resume_provider_session_id: Option<&str>, tool_policy: Option<&ProviderToolPolicy>) -> Vec<String>`（现签名 `mod.rs:82` 为单参 `build_args(&self, resume_provider_session_id: Option<&str>)`，扩第二参 `tool_policy`；既有调用点与测试同步补 `None`）；策略 input 的 argv 精确增加 `--disallowedTools Edit,Write,NotebookEdit`，fresh/resume 均保留；非策略 input 不增加该片段。
 - **Steps**
   - [ ] 先写失败测试：
     ```rust
@@ -242,8 +249,8 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
         assert!(!fresh.contains(&"--resume".to_string()));
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`；预期先因 `build_args` 无第三参编译失败——扩参并在既有调用点传 `None` 后，转为 argv 缺 denylist 的断言失败。
-  - [ ] 在 Claude `build_args` 对 `Some(DenyFileWriteBuiltins)` 追加冻结片段，保持 stdio permission prompt 与现有 resume 参数；非策略 input（`None`）保持原 argv；既有 `claude_args_*` 测试同步补第三参 `None`。
+  - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`；预期先因 `build_args` 无第二参编译失败——扩参并在既有调用点传 `None` 后，转为 argv 缺 denylist 的断言失败。
+  - [ ] 在 Claude `build_args` 对 `Some(DenyFileWriteBuiltins)` 追加冻结片段，保持 stdio permission prompt 与现有 resume 参数；非策略 input（`None`）保持原 argv；既有 `claude_args_*` 测试同步补第二参 `None`。
   - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`、现有 `claude_args_include_resume_when_provider_session_is_available` 与 `claude_args_always_include_stdio_permission_prompt`（补参后）；预期全部通过。
   - [ ] 提交实现：`git add src/cross_cutting/claude_code_provider && git commit -m "feat(restrict-role-write-tools): enforce claude denylist"`。
 
@@ -256,7 +263,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Consumes：`StreamingProviderInput.tool_policy`、`ProviderPermissionMode`、native resume id。
   - Produces：
     - `pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json::Value`：从 `session.rs:102-150` 既有内联构造抽出的单一来源，`thread/start` 与 `thread/resume` 两路复用；策略 input（`tool_policy.is_some()`）同时给出 `sandbox:"read-only"` 与 `approvalPolicy:"on-request"`，Coder（`None`）保持 `danger-full-access` 与既有 permission mode 映射。
-    - `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）出站分配改为 `aria-<seq>` 字符串；入站（server→client）已有 id 原样透传不转换。
+    - `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`，🔴 共享 `JsonRpcPeer`，pi/kimi/codex 三方在用）增第三参 `namespace: OutboundIdNamespace`（新枚举 `pub(crate) enum OutboundIdNamespace { Numeric, Aria }`）：仅 codex peer 配 `Aria`（出站 `aria-<seq>` 字符串），pi/kimi 默认 `Numeric` 保持数字 id 零变化；已带 id 的 payload 原样透传。
 - **Steps**
   - [ ] 先写失败 Codex launch 测试，在 `src/cross_cutting/codex_provider/tests.rs:149-209` 既有 fixture 基础上新增两个变体（策略/Coder）：
     ```rust
@@ -273,21 +280,24 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib codex_policy_start_and_resume_use_read_only_on_request`；预期先因 `codex_launch_params` 不存在编译失败——抽出该函数（start/resume 两路改为复用）后，转为策略参数断言失败。
   - [ ] 在 `codex_launch_params` 内仅由 `tool_policy.is_some()` 分派 `read-only`/`on-request`；`None` 保持 Coder 的 `danger-full-access` 与现有 permission mode 映射；`thread/start`（session.rs:132）与 `thread/resume`（session.rs:107）两路均改用该函数。
-  - [ ] 先写失败 request-id 测试，基于真实分配点 `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）：
+  - [ ] 🔴 作用域警示：`ensure_request_id` 属共享 `JsonRpcPeer`（pi/kimi/codex 三方在用），不得全局改 `aria-<seq>`——pi/kimi 出站 id 必须保持数字零变化（Global Constraints 12）。先写失败测试，基于真实分配点 `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）新增 namespace 参数：
     ```rust
     #[test]
-    fn codex_request_ids_keep_server_zero_separate_from_client_aria_zero() {
-        let mut outbound = serde_json::json!({"method":"item/commandExecution/requestApproval"});
-        let next_id = std::sync::atomic::AtomicU64::new(0);
-        let assigned = ensure_request_id(&mut outbound, &next_id).unwrap();
+    fn codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric() {
+        let mut codex_out = serde_json::json!({"method":"item/commandExecution/requestApproval"});
+        let next = std::sync::atomic::AtomicU64::new(0);
+        let assigned = ensure_request_id(&mut codex_out, &next, OutboundIdNamespace::Aria).unwrap();
         assert_eq!(assigned, "aria-0");
-        let mut server_style = serde_json::json!({"id":0,"method":"mcpServer/elicitation/request"});
-        let passthrough = ensure_request_id(&mut server_style, &next_id).unwrap();
-        assert_eq!(passthrough, "0"); // 入站已有 id 原样透传，不转字符串
+        let mut default_out = serde_json::json!({"method":"session/new"});
+        let next2 = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(ensure_request_id(&mut default_out, &next2, OutboundIdNamespace::Numeric).unwrap(), "0"); // pi/kimi 路径零变化
+        let mut with_id = serde_json::json!({"id":0,"method":"mcpServer/elicitation/request"});
+        let next3 = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(ensure_request_id(&mut with_id, &next3, OutboundIdNamespace::Aria).unwrap(), "0"); // 已带 id 原样保留（入站消息不经本函数，由读取分发保持原 id）
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib codex_request_ids_keep_server_zero_separate_from_client_aria_zero`；预期失败为出站 id 仍为数字 `0`（类型/值断言均不符）。
-  - [ ] 修改 `ensure_request_id`：无 id 时分配 `format!("aria-{seq}")` 字符串（仅 Aria 出站请求），已有 id（server→client 入站）原样透传；同步修正依赖数字出站 id 的既有断言后，运行两个定向测试及既有 sandbox start/resume 测试，预期通过。
+  - [ ] 运行 `cargo test --locked --lib codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric`；预期先因无 `OutboundIdNamespace` 编译失败。
+  - [ ] 实现：`ensure_request_id` 增 `namespace` 第三参；`Numeric` 分配数字 id（现状），`Aria` 分配 `format!("aria-{seq}")`；已带 id 的 payload 两分支均原样返回；全部既有调用点补 `Numeric`（行为零变化），仅 codex peer 调用处传 `Aria`；运行定向测试+两个 launch 定向测试+既有 sandbox start/resume 测试，预期通过；pi/kimi 数字 id 回归断言在 Task 4.1 补锁。
   - [ ] 提交实现：`git add src/cross_cutting/codex_provider && git commit -m "feat(restrict-role-write-tools): enforce codex policy launch"`。
 
 ### Task 2.3 — Codex 三类审批、未知应答与审计事件载荷
@@ -362,7 +372,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Test：各 provider adapter tests；`src/protocol/contracts.rs:35-40` 的 `AdapterRole` 全枚举守卫测试
 - **Interfaces**
   - Consumes：`StreamingProviderInput.role`、`tool_policy`、`ProviderToolPolicy`。
-  - Produces：`pub fn validate_tool_policy_for_role(role: AdapterRole, policy: Option<&ProviderToolPolicy>) -> Result<(), ToolPolicyGuardError>`；Orchestrator/WorkItemSplitter/Reviewer 缺失、空或非法意图在 spawn 前拒绝；Executor/Handoff 携带策略拒绝。
+  - Produces：`pub fn validate_tool_policy_for_role(role: &AdapterRole, policy: Option<&ProviderToolPolicy>) -> Result<(), ToolPolicyGuardError>`（按引用接 `AdapterRole`，无 `Copy` 派生不隐式复制）；Orchestrator/WorkItemSplitter/Reviewer 缺失、空或非法意图在 spawn 前拒绝；Executor/Handoff 携带策略拒绝。
 - **Steps**
   - [ ] 先写失败表驱动测试，复用现有 `AdapterRole`（`src/protocol/contracts.rs:33-41`）和各 provider 的真实 `StreamingProviderInput` fixture：
     ```rust
@@ -387,14 +397,16 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
 ### Task 3.2 — LifecycleStore tool-policy-run-audit 与四类事件
 
 - **Files**
-  - Create/Modify：`src/product/lifecycle_store/`（新增 `tool_policy_run_audit.rs` 与模块导出，分区 `tool-policy-run-audit/`）
-  - Modify：`src/cross_cutting/streaming_provider/mod.rs`（`ToolPolicyAuditSink` trait 与 `audit_sink: Option<Arc<dyn ToolPolicyAuditSink>>`）
+  - Create：`src/cross_cutting/tool_policy_audit.rs`（中立模块：`ToolPolicyAuditSink` trait+`DurableToolPolicyEvent`+四类事件 DTO 与 schema v1 serde——🔴 不得放 product 层，避免 cross-cutting→product 反向依赖）
+  - Create/Modify：`src/product/lifecycle_store/`（新增 `tool_policy_run_audit.rs` 实现 `ToolPolicyAuditSink` trait，分区 `tool-policy-run-audit/` 落盘）
+  - Modify：`src/cross_cutting/streaming_provider/mod.rs`（`audit_sink: Option<Arc<dyn ToolPolicyAuditSink>>` 字段，引用中立模块 trait）
   - Modify：`src/product/workspace_engine/`、`src/product/coding_workspace_engine/`（engine 构造 sink、分配并持久化 `role_run_seq`、kill 链）
   - Test：`src/product/lifecycle_store/` tests、`src/product/coding_workspace_engine/tests/provider_start_persistence.rs:516-562`、JSONL sequence fixture
 - **Interfaces**
   - Consumes：`workspace_session_id`、engine 分配的 `role_run_seq`、provider/role、canonical digest、最终 argv、sandbox/approval 原文、provider version/dialect、native `provider_session_id`。
   - Produces：
-    - `pub trait ToolPolicyAuditSink: Send + Sync { fn append(&self, workspace_session_id: &str, role_run_seq: u64, event: DurableToolPolicyEvent) -> Result<(), ToolPolicyAuditError>; }`。
+    - `pub trait ToolPolicyAuditSink: Send + Sync { fn append(&self, workspace_session_id: &str, role_run_seq: u64, event: DurableToolPolicyEvent) -> Result<(), ToolPolicyAuditError>; }`（定义于 `src/cross_cutting/tool_policy_audit.rs`；`LifecycleStore` 在 product 层实现该 trait，无跨层反向依赖）。
+    - `ProviderSession` 增 `pub native_session_id: Option<String>`（第三字段，现仅 `events`/`commands`，`mod.rs:383-386`；全仓构造点按 Task 1.1 同法 rustc 驱动补 `None`，非策略路径零变化）；策略会话在 `start` 返回前完成有界握手：codex=await `thread/start` 应答取 thread id（策略路径将握手从后台 `run_codex_session` 提前到 start 内，超时→杀子进程+fail-closed）、pi=id 预生成/传入（既有 `--session-id` 语义）、claude=resume 已知/fresh 等首个 init 事件有界超时；握手成功→写 `provider_start`→返回 `ProviderSession { native_session_id: Some(..), .. }`；握手/写失败按 kill 链处理。
     - `pub enum DurableToolPolicyEvent { ProviderStart(ProviderStartAudit), ApprovalDecision(ApprovalDecisionAudit), ProtocolWarning(ProtocolWarningAudit), SessionTerminated(SessionTerminatedAudit) }`。
     - schema_version=1、append-only JSONL，文件 key=`(workspace_session_id, role_run_seq)`，行 seq 单调递增，`provider_start` 首行且唯一。
 - **Steps**
@@ -429,6 +441,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib tool_policy_audit_reader_skips_bad_line_and_returns_protocol_warning`；预期失败为坏行中止读取或把读取告警写回 durable 分区。
   - [ ] 实现读取端坏行跳过+结果告警；写入失败必须传播错误，不能只记录日志。
+  - [ ] 扩展 `ProviderSession`（`src/cross_cutting/streaming_provider/mod.rs:383-386`）增 `native_session_id: Option<String>`：rustc 错误驱动补全全仓构造点 `None`；三 adapter 策略会话按 Interfaces 定义把有界握手提前到 `start` 返回前（codex 等待 thread/start 应答；claude fresh 等首个 init 事件；pi 预生成传入），非策略/Coder 路径保持现有立即返回行为（`None`）；补握手超时→杀子进程 fail-closed fixture。
   - [ ] 在 engine 构造 `ToolPolicyAuditSink` 并将其以 `StreamingProviderInput.audit_sink` 传给三 adapter；`role_run_seq` 按 provider run 分配并随 run 记录持久化；native session id 握手确认后、start 返回前写 provider_start。
   - [ ] 注入 append 失败 fixture；预期 adapter 在返回前终止子进程，engine 沿既有 provider task kill 链终止会话并将 run 判失败；后续审批事件写失败同样触发既有 kill 链。
   - [ ] 运行 `cargo test --locked --lib tool_policy_audit` 与 `cargo test --locked --lib provider_start_persistence`；预期通过。
@@ -442,7 +455,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Test：各 provider resume tests、version probe tests、digest drift fixtures
 - **Interfaces**
   - Consumes：`resume_provider_session_id`、当前 workspace 的 durable provider_start、canonical digest、CLI version、adapter dialect。
-  - Produces：有界超时 `probe_provider_version() -> Result<String, VersionProbeError>`；adapter dialect 常量；resume 决策 `ResumeDecision::{Resume, RejectSupersedeAndStartNew}`。
+  - Produces：统一错误枚举 `pub enum VersionProbeError { Unavailable, Timeout }` 与按 adapter 的探测函数：pi 复用既有 `probe_pi_version_with_timeout`（`pi_provider/mod.rs:172-190`）映射 `PiVersion::Unknown(ProbeFailure::TimedOut)→Timeout`、其余 `Unknown(_)→Unavailable`（🔴 仅策略会话走该 fail-closed 映射；既有 `ensure_pi_version_compatible` 的 unknown→Ok 旧路径与 Coder/非策略会话零变化）；claude/codex 新增 `probe_claude_version`/`probe_codex_version`（有界超时执行 `<cli> --version`，空输出/命令失败→Unavailable，超时→Timeout，fixture 注入三态输出）；adapter dialect 常量；resume 决策 `pub enum ResumeDecision { Resume, RejectSupersedeAndStartNew }` + `pub fn resume_with_audit_record(stored: Option<ProviderStartAudit>, current: &ProviderStartAudit) -> ResumeDecision`。
 - **Steps**
   - [ ] 先写失败 version probe 测试；调用各 adapter 现有 probe（Pi 已有 `probe_pi_version_with_timeout`，Claude/Codex 新增同名语义函数），用 fixture 明确三态：
     ```rust
@@ -495,7 +508,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```rust
     #[test]
     fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
-        let coder = build_test_streaming_input(AdapterRole::Executor);
+        let coder = entry_input("coding_coder");
         assert_eq!(coder.role, AdapterRole::Executor);
         assert_eq!(coder.tool_policy, None);
         // 聚合初始化同 Executor 档：经 coordinator_provider_turn.inc.rs:57-77 真实构造路径断言（同 Task 1.2 builder 全集断言）
@@ -504,6 +517,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib coder_and_aggregate_executor_keep_existing_full_tool_launch`；预期失败为 Coder 被误注入 denylist 或沙箱被改写。
   - [ ] 增加 file-write negative 与非写 positive 测试：assert denylist 含且仅含 `edit`,`write`（Claude 对应冻结三项），assert MCP、extension、`ask_user` 不在排除集合；Codex 策略 command/fileChange decline，MCP accept；未知方法有协议应答。
+  - [ ] 增加 pi/kimi 出站 request id 保持数字的回归断言（`OutboundIdNamespace::Numeric` 路径，锁定 Task 2.2 作用域约束）；运行 `cargo test --locked --lib json_rpc_peer` 与 `cargo test --locked --lib pi_provider`，预期通过。
   - [ ] 运行 `cargo test --locked --lib approval_bridge`（或 `cargo test-approval-bridge`）；预期既有 commandExecution/Auto/Supervised/timeout/unmatched/abort 通过且 ApprovalBridge API 语义不变。
   - [ ] 增加 kimi Orchestrator/WorkItemSplitter/Reviewer/Executor 角色表断言；运行 `cargo test --locked --lib kimi`；预期既有 client services 决策完全不变，未创建 tool-policy audit 文件。
   - [ ] 增加策略审计隔离断言：策略角色事件只出现在 `tool-policy-run-audit/`，Coder/非策略/kimi 事件只出现在 `execution_event_audit`；运行对应 workspace/coding tests，预期无跨通道记录。
