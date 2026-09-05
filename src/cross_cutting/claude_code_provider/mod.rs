@@ -440,6 +440,20 @@ impl ClaudeCodeProvider {
     }
 }
 
+/// 策略会话失败路径的同步终止（P1-7）：cancel 后有界等待会话任务完成其
+/// kill 链（任务内 start_kill+wait / terminate_aborted_child），保证 start
+/// 返回错误时子进程已终止；child 由任务持有，故以等待任务收尾等价实现
+/// codex/pi 的显式 start_kill+wait。任务卡死时以有界超时兑底（kill 信号
+/// 已发出，极端情况下由 engine 既有 provider kill 链兕底）。
+async fn terminate_claude_policy_session_task(
+    start_cancel: &CancellationToken,
+    session_task: tokio::task::JoinHandle<()>,
+) {
+    start_cancel.cancel();
+    let bound = stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.saturating_mul(3);
+    let _ = tokio::time::timeout(bound, session_task).await;
+}
+
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for ClaudeCodeProvider {
     async fn start(
@@ -621,7 +635,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         // workspace 会话 id（D6 冻结字段）在 input 移入后台任务前捕获，供
         // provider_start 审计落盘使用。
         let workspace_session_id = input.workspace_session_id.clone().unwrap_or_default();
-        tokio::spawn(async move {
+        // P1-7：策略会话失败路径必须同步终止子进程后再返回错误——child 由会话
+        // 任务持有，start 以有界等待任务收尾（任务内 kill+wait）等价实现
+        // 「返回前子进程已终止」（对齐 codex/pi 的显式 start_kill+wait）。
+        let session_task = tokio::spawn(async move {
             let stderr_output = Arc::new(Mutex::new(String::new()));
             let stderr_output_for_task = Arc::clone(&stderr_output);
             let stderr_task = tokio::spawn(async move {
@@ -803,7 +820,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     match tokio::time::timeout(bound, rx).await {
                         Ok(Ok(Ok(session_id))) => session_id,
                         Ok(Ok(Err(message))) => {
-                            start_cancel.cancel();
+                            terminate_claude_policy_session_task(&start_cancel, session_task).await;
                             return Err(ProviderAdapterError::parse_error(
                                 format!("claude policy session: handshake failed: {message}"),
                                 String::new(),
@@ -811,7 +828,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                             ));
                         }
                         Ok(Err(_)) => {
-                            start_cancel.cancel();
+                            terminate_claude_policy_session_task(&start_cancel, session_task).await;
                             return Err(ProviderAdapterError::parse_error(
                                 "claude policy session: handshake channel closed",
                                 String::new(),
@@ -819,7 +836,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                             ));
                         }
                         Err(_) => {
-                            start_cancel.cancel();
+                            terminate_claude_policy_session_task(&start_cancel, session_task).await;
                             return Err(ProviderAdapterError::timeout(
                                 String::new(),
                                 String::new(),
@@ -842,7 +859,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
             });
             if let Err(error) = sink.append_bound(audit_event) {
-                start_cancel.cancel();
+                terminate_claude_policy_session_task(&start_cancel, session_task).await;
                 return Err(ProviderAdapterError::parse_error(
                     format!("claude policy session: provider_start audit append failed: {error}"),
                     String::new(),

@@ -243,3 +243,54 @@ async fn claude_policy_start_append_failure_fails_closed() {
         error.details
     );
 }
+
+/// 登记 PID 并发 init 后存活的 fixture（kill 链断言用：子进程不自行退出）。
+#[cfg(unix)]
+fn pid_registering_init_fixture(marker: &std::path::Path) -> PathBuf {
+    write_fixture(
+        "claude_policy_pid_fixture.sh",
+        &format!(
+            "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo $$ > {}\n    echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-policy-1\"}}'\n    while IFS= read -r line; do :; done\n    exit 0\n  fi\ndone\n",
+            marker.display()
+        ),
+    )
+}
+
+/// P1-7：append 失败时 adapter 必须同步 kill+wait 后再返回错误——start 返回
+/// Err 的瞬间子进程已终止（不等异步 cancel 链）。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_append_failure_kills_child_before_returning() {
+    let marker_dir = tempfile::tempdir().expect("marker dir");
+    let marker = marker_dir.path().join("claude-policy-child.pid");
+    let provider = ClaudeCodeProvider::new(pid_registering_init_fixture(&marker))
+        .with_version_supplier(policy_version_supplier());
+    let sink = RecordingToolPolicyAuditSink::failing_after(0);
+    let Err(error) = provider
+        .start(
+            policy_claude_input(None, Some(sink.clone().bound())),
+            CancellationToken::new(),
+        )
+        .await
+    else {
+        panic!("provider_start append failure must fail the session");
+    };
+    assert!(error.details.contains("provider_start audit append failed"));
+    let pid = std::fs::read_to_string(&marker)
+        .expect("fixture registers its pid")
+        .trim()
+        .parse::<u32>()
+        .expect("pid");
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    assert!(
+        !alive,
+        "claude policy child (pid {pid}) must be terminated before start returns the append-failure error"
+    );
+}
