@@ -292,6 +292,76 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
 }
 
 #[tokio::test]
+async fn codex_unknown_item_gets_decline_and_mixed_unknowns_count_toward_storm() {
+    // I2：未知 `item/*/requestApproval` 必须得到 {"decision":"decline"}
+    // （fixture 字面断言）；未知 item × 未知 elicitation 混合计入同一会话计数，
+    // 第 3 次未知经 ToolPolicyWarning/ToolPolicyTerminated 事件出口可观测。
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_unknown_item_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut warnings: Vec<CodexProtocolWarningEvent> = Vec::new();
+    let mut terminations: Vec<CodexSessionTerminatedEvent> = Vec::new();
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should fail after mixed unknown approval storm")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::ToolPolicyWarning(warning) => warnings.push(warning),
+            ProviderEvent::ToolPolicyTerminated(termination) => terminations.push(termination),
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("unknown_approval_storm"),
+                    "unexpected failure message: {message}"
+                );
+                // 混合计数：未知 item 与未知 elicitation 共享同一 occurrence 序列。
+                let expected_methods = [
+                    "item/unrecognizedForm/requestApproval",
+                    "mcpServer/elicitation/request",
+                    "item/anotherNewKind/requestApproval",
+                ];
+                for (index, method) in expected_methods.iter().enumerate() {
+                    assert_eq!(
+                        warnings[index],
+                        CodexProtocolWarningEvent {
+                            reason_code: "unsupported_approval_kind".to_string(),
+                            method: method.to_string(),
+                            occurrence: index as u32 + 1,
+                        },
+                        "mixed unknown forms must share one occurrence sequence"
+                    );
+                }
+                assert_eq!(warnings.len(), expected_methods.len());
+                assert_eq!(
+                    terminations,
+                    vec![CodexSessionTerminatedEvent {
+                        reason_code: "unknown_approval_storm".to_string(),
+                    }],
+                    "the third mixed unknown must surface ToolPolicyTerminated"
+                );
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_) => {}
+            other => panic!("unexpected terminal event before storm failure: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
     // I1：策略 input 的 thread/resume（与 start 同源）必须在真实 wire 上携带
     // sandbox=read-only + approvalPolicy=on-request（fixture 对缺失任一字面退出）。
