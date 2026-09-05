@@ -4,6 +4,8 @@
 
 > v1.0.2（2026-09-05 oracle 过审驱动修订，8 findings 全修）：P1 全量构造点迁移（70 处/29 文件补 `tool_policy`/`audit_sink`/`native_session_id` 的 `None`）；P2 request id 改 codex 作用域化 namespace（pi/kimi 数字 id 零变化）；P3 claude 扩第二参勘误；P4 守卫签名统一 `&AdapterRole`；P5 审计 trait/事件 DTO 移中立模块 `cross_cutting/tool_policy_audit.rs`；P6 version probe 按 adapter 映射（pi 复用既有 probe，策略会话才 fail-closed）；P7 `ProviderSession` 增 `native_session_id`+start 返回前握手时序；P8 单一 role-fixture 改逐格矩阵 fixture（Handoff 无 builder，由守卫测试合成 input 覆盖）。
 
+> v1.0.3（2026-09-05 oracle 窄复审驱动修订，P2/P5 残留闭环）：P2 补 GC7 同 wire 共存 fixture（server 数字 `id:0`×client `aria-0` 并存互不误配+应答原样回带）+警示引用勘误（GC 7 与 12）+Task 2.2 commit 纳入 `json_rpc_peer.rs`；P5 Task 3.2 commit 纳入新建 `tool_policy_audit.rs`+`cross_cutting/mod.rs` 模块注册。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan. Steps use checkbox (`- [ ]`) syntax.
 
 ## Goal
@@ -280,7 +282,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib codex_policy_start_and_resume_use_read_only_on_request`；预期先因 `codex_launch_params` 不存在编译失败——抽出该函数（start/resume 两路改为复用）后，转为策略参数断言失败。
   - [ ] 在 `codex_launch_params` 内仅由 `tool_policy.is_some()` 分派 `read-only`/`on-request`；`None` 保持 Coder 的 `danger-full-access` 与现有 permission mode 映射；`thread/start`（session.rs:132）与 `thread/resume`（session.rs:107）两路均改用该函数。
-  - [ ] 🔴 作用域警示：`ensure_request_id` 属共享 `JsonRpcPeer`（pi/kimi/codex 三方在用），不得全局改 `aria-<seq>`——pi/kimi 出站 id 必须保持数字零变化（Global Constraints 12）。先写失败测试，基于真实分配点 `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）新增 namespace 参数：
+  - [ ] 🔴 作用域警示：`ensure_request_id` 属共享 `JsonRpcPeer`（pi/kimi/codex 三方在用），不得全局改 `aria-<seq>`——pi/kimi 出站 id 必须保持数字零变化（Global Constraints 7 与 12）。先写失败测试，基于真实分配点 `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）新增 namespace 参数：
     ```rust
     #[test]
     fn codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric() {
@@ -296,9 +298,26 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
         assert_eq!(ensure_request_id(&mut with_id, &next3, OutboundIdNamespace::Aria).unwrap(), "0"); // 已带 id 原样保留（入站消息不经本函数，由读取分发保持原 id）
     }
     ```
+  - [ ] 再补 GC7 同 wire 共存 fixture（codex_provider/tests.rs）：同一会话内 server→client 请求携数字 `id:0`，我方出站请求分得 `aria-0`，两者并存互不误配，且对 server 请求的应答原样回带其 id：
+    ```rust
+    #[test]
+    fn codex_wire_ids_server_zero_and_client_aria_zero_coexist() {
+        let mut outbound = serde_json::json!({"method":"item/commandExecution/requestApproval"});
+        let next = std::sync::atomic::AtomicU64::new(0);
+        let client_id = ensure_request_id(&mut outbound, &next, OutboundIdNamespace::Aria).unwrap();
+        let server_request = serde_json::json!({"id":0,"method":"mcpServer/elicitation/request"});
+        let server_id = server_request["id"].clone();
+        assert_eq!(client_id, "aria-0");
+        assert_eq!(server_id, serde_json::json!(0));
+        assert_ne!(serde_json::Value::from(client_id.clone()), server_id); // 同一 wire 上两类 id 并存且互不误配（GC7）
+        let reply = serde_json::json!({"id": server_id.clone(), "result": {"decision":"decline"}});
+        assert_eq!(reply["id"], server_request["id"]); // 应答原样回带 server 数字 id（响应 writer 用同一 id 构造，见 response.rs:8-25）
+        assert_ne!(reply["id"].to_string(), client_id);
+    }
+    ```
   - [ ] 运行 `cargo test --locked --lib codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric`；预期先因无 `OutboundIdNamespace` 编译失败。
   - [ ] 实现：`ensure_request_id` 增 `namespace` 第三参；`Numeric` 分配数字 id（现状），`Aria` 分配 `format!("aria-{seq}")`；已带 id 的 payload 两分支均原样返回；全部既有调用点补 `Numeric`（行为零变化），仅 codex peer 调用处传 `Aria`；运行定向测试+两个 launch 定向测试+既有 sandbox start/resume 测试，预期通过；pi/kimi 数字 id 回归断言在 Task 4.1 补锁。
-  - [ ] 提交实现：`git add src/cross_cutting/codex_provider && git commit -m "feat(restrict-role-write-tools): enforce codex policy launch"`。
+  - [ ] 提交实现：`git add src/cross_cutting/codex_provider src/cross_cutting/json_rpc_peer.rs && git commit -m "feat(restrict-role-write-tools): enforce codex policy launch"`。
 
 ### Task 2.3 — Codex 三类审批、未知应答与审计事件载荷
 
@@ -397,7 +416,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
 ### Task 3.2 — LifecycleStore tool-policy-run-audit 与四类事件
 
 - **Files**
-  - Create：`src/cross_cutting/tool_policy_audit.rs`（中立模块：`ToolPolicyAuditSink` trait+`DurableToolPolicyEvent`+四类事件 DTO 与 schema v1 serde——🔴 不得放 product 层，避免 cross-cutting→product 反向依赖）
+  - Create：`src/cross_cutting/tool_policy_audit.rs`（中立模块：`ToolPolicyAuditSink` trait+`DurableToolPolicyEvent`+四类事件 DTO 与 schema v1 serde——🔴 不得放 product 层，避免 cross-cutting→product 反向依赖）；同步在 `src/cross_cutting/mod.rs` 注册 `pub mod tool_policy_audit;`
   - Create/Modify：`src/product/lifecycle_store/`（新增 `tool_policy_run_audit.rs` 实现 `ToolPolicyAuditSink` trait，分区 `tool-policy-run-audit/` 落盘）
   - Modify：`src/cross_cutting/streaming_provider/mod.rs`（`audit_sink: Option<Arc<dyn ToolPolicyAuditSink>>` 字段，引用中立模块 trait）
   - Modify：`src/product/workspace_engine/`、`src/product/coding_workspace_engine/`（engine 构造 sink、分配并持久化 `role_run_seq`、kill 链）
@@ -445,7 +464,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - [ ] 在 engine 构造 `ToolPolicyAuditSink` 并将其以 `StreamingProviderInput.audit_sink` 传给三 adapter；`role_run_seq` 按 provider run 分配并随 run 记录持久化；native session id 握手确认后、start 返回前写 provider_start。
   - [ ] 注入 append 失败 fixture；预期 adapter 在返回前终止子进程，engine 沿既有 provider task kill 链终止会话并将 run 判失败；后续审批事件写失败同样触发既有 kill 链。
   - [ ] 运行 `cargo test --locked --lib tool_policy_audit` 与 `cargo test --locked --lib provider_start_persistence`；预期通过。
-  - [ ] 提交实现：`git add src/product/lifecycle_store src/cross_cutting/streaming_provider src/product/workspace_engine src/product/coding_workspace_engine && git commit -m "feat(restrict-role-write-tools): persist durable tool policy audit"`。
+  - [ ] 提交实现：`git add src/cross_cutting/tool_policy_audit.rs src/cross_cutting/mod.rs src/product/lifecycle_store src/cross_cutting/streaming_provider src/product/workspace_engine src/product/coding_workspace_engine && git commit -m "feat(restrict-role-write-tools): persist durable tool policy audit"`。
 
 ### Task 3.3 — version probe、resume 冻结三元组比对
 
