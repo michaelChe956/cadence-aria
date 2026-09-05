@@ -72,7 +72,7 @@ parse 层识别三类+未知:
 - **未知形态确定性应答表(R3 I-R3-3 冻结)**:①elicitation 形态(method=`mcpServer/elicitation/request` 但 `_meta.codex_approval_kind` 缺失/未知)→JSON-RPC error(code=`-32601`,data={"codex_approval_kind":"<原文>","reason":"unsupported_approval_kind"});②item 审批形态(item/*/requestApproval 且不在已知集)→`{"decision":"decline"}`;③同会话连续 ≥3 次未知形态→终止会话(reason_code=`unknown_approval_storm`);每类未知 method 配 fixture 单测。
 - **未知形态 fail-closed 应答规范(R2 I-R2-2 定案)**:elicitation 形态→按其协议回 JSON-RPC error(合法协议动作,不会挂死)+上报事件;approval item 形态→decline 应答;无法确定应答 schema→JSON-RPC error+上报;连续未知形态异常→终止会话(防挂死)。每类未知 method 配 fixture 单测。
 - 决策即时应答无 pending 生命周期,不经 `bridge.request_tool`;**request id 隔离机制(冻结)**:client 侧出站 request id 统一字符串前缀 `aria-<seq>`(typed namespace),server→client 入站 id 保持原生数字;fixture 覆盖 server id `0` 与 client id `aria-0` 共存不冲突。
-- **行为改进声明(R2 I-R2-1 定案)**:所有会话对 MCP/fileChange/未知审批从现状「静默不应答(挂死风险)」改为「协议合法应答+上报」(MCP=accept,其余=拒绝)——显式接受的非零变化,回归测试锁定新行为。
+- **行为改进声明(R2 I-R2-1 定案,R6-01 修订)**:策略会话与全角色的 MCP/fileChange/未知审批从现状「静默不应答(挂死风险)」改为「协议合法应答+上报」,处置逐类与 proposal/spec 逐字一致——MCP=accept+审计(所有会话含 Coder);fileChange=策略会话 decline+审计、**Coder 走 bridge 既有上抛链**(不一律拒);未知=拒绝应答+`protocol_warning`;commandExecution 不属本改进面(策略会话 decline+审计为新增决策,Coder 维持 bridge 既有链)——显式接受的非零变化,回归测试锁定新行为。
 
 ### D6: 冻结记录与 resume 比对(R2 C-R2-2 定案)
 

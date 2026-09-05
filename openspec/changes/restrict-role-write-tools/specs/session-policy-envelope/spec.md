@@ -16,6 +16,11 @@
 - **WHEN** workspace 引擎 author/revision/review 以 legacy 直连启动 provider
 - **THEN** 该启动 SHALL 携带经 builder 工厂设置的角色工具策略（REQ-ENV-09），通过 adapter 守卫，并写入 durable 启动审计；不得以裸输入绕过策略
 
+#### Scenario: coding Coder 直连例外启动
+
+- **WHEN** coding Coder（Executor）以 legacy 直连启动 provider
+- **THEN** 该启动 SHALL 经 engine builder 工厂构造（Executor 禁带工具策略，REQ-ENV-09；携带策略即拒），通过 adapter 双向守卫，并以既有 execution_event_audit 通道接受按角色适用的等价启动审计（非 durable_tool_policy_audit 分区）；不得以裸输入绕过 builder 工厂
+
 ### Requirement: 适配器只接受 validated launch policy（REQ-ENV-02）
 
 系统 SHALL 使逻辑代码库流程的真实 provider adapter 只接受经 `LogicalCodebaseProviderGateway` 构造的 `ValidatedSessionLaunchPolicy` 启动；关闭真实 provider 的无政策 fallback（legacy `run_streaming` 默认 bridge、coding retry `allow_legacy_stream_fallback: true`）与裸 `StreamingProviderInput`/`AdapterInput` 直接启动，逻辑代码库调用固定 `allow_legacy_stream_fallback=false`；Fake/测试路径经 registry 分层或编译期构造限制隔离，不依赖运行时 `if provider != Fake`。**例外（本 change 修订）**：REQ-ENV-01 定义的 legacy 直连入口不受「必须经 gateway 构造 ValidatedSessionLaunchPolicy」约束，但必须满足 REQ-ENV-01 例外条款的（a）（b）（c）三项替代约束；除该例外外，禁止任何裸 input 直启与 legacy fallback。
