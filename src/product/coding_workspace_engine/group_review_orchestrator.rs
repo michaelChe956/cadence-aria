@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -36,7 +37,9 @@ use super::plan_defect_routing::{
 };
 use super::review_parser::{CodeReviewProviderPayload, parse_group_review_payload};
 use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
-use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+use crate::cross_cutting::streaming_provider::{
+    ProviderPermissionMode, StreamingProviderAdapter, StreamingProviderInput,
+};
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
     CasOutcome, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
@@ -56,6 +59,39 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
+
+/// group review shard/reduction（Reviewer）streaming 启动的生产构造函数（D2
+/// 锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
+/// `streaming_input_from_adapter` 派生 `tool_policy`（Reviewer →
+/// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 的 workspace 会话上下文
+/// （group review 每次 execute 均新起会话，resume 恒 `None`）。group review
+/// streaming 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即
+/// 绕过 D2 角色矩阵，矩阵测试将失败。
+pub(crate) fn group_review_streaming_input(
+    reviewer: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        provider_type: provider_type_for_name(reviewer),
+        role: AdapterRole::Reviewer,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_internal_pr_review_json".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = None;
+    (legacy_input, provider_input)
+}
 
 pub(crate) struct GroupReviewOrchestrator<'a> {
     executor: &'a dyn GroupReviewExecutor,
@@ -926,25 +962,21 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
                 self.attempt.id
             ))
         })?;
-        let input = AdapterInput {
-            provider_type: provider_type_for_name(&self.provider_name),
-            role: AdapterRole::Reviewer,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            provider_stream_log_dir: Some(
-                self.engine.attempt_provider_stream_log_dir(&self.attempt),
-            ),
-            prompt: prompt.to_string(),
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_internal_pr_review_json".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let permission_mode = role_permission_mode_for_attempt(
-            &self.engine.store,
-            &self.attempt,
-            CodingProviderRole::InternalReviewer,
-        )
-        .map_err(map_group_review_engine_error)?;
+        // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+        // tool_policy：Reviewer → DenyFileWriteBuiltins）。
+        let (input, provider_input) = group_review_streaming_input(
+            &self.provider_name,
+            prompt.to_string(),
+            &worktree_path,
+            self.engine.attempt_provider_stream_log_dir(&self.attempt),
+            &self.attempt.id,
+            role_permission_mode_for_attempt(
+                &self.engine.store,
+                &self.attempt,
+                CodingProviderRole::InternalReviewer,
+            )
+            .map_err(map_group_review_engine_error)?,
+        );
         // 裁决 A 两阶段:policy 在 prompt 构建前 resolve(shard/reduction prompt 不含
         // 4 协议 routing reference,故此处仅 resolve 并捆绑 validated input)。
         let policy = self
@@ -956,10 +988,6 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
             )
             .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
             .map_err(map_group_review_engine_error)?;
-        let mut provider_input =
-            streaming_input_from_adapter(&input, worktree_path, permission_mode);
-        provider_input.workspace_session_id = Some(self.attempt.id.clone());
-        provider_input.resume_provider_session_id = None;
         let validated_input = policy
             .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
         let (command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);

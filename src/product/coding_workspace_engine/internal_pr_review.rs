@@ -59,6 +59,39 @@ pub(crate) fn internal_review_blocked_gate_reason(
 }
 use crate::product::coding_models::CodingAttemptScope;
 
+/// InternalReviewer（Reviewer）内部 PR 评审 streaming 启动的生产构造函数（D2
+/// 锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
+/// `streaming_input_from_adapter` 派生 `tool_policy`（Reviewer →
+/// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 的 workspace/resume 会话
+/// 上下文。InternalReviewer streaming 入口禁止绕过本函数裸构造
+/// `StreamingProviderInput`——绕过工厂即绕过 D2 角色矩阵，矩阵测试将失败。
+pub(crate) fn internal_pr_review_streaming_input(
+    reviewer: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    resume_provider_session_id: Option<String>,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        provider_type: provider_type_for_name(reviewer),
+        role: AdapterRole::Reviewer,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_internal_pr_review_json".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = resume_provider_session_id;
+    (legacy_input, provider_input)
+}
+
 impl CodingWorkspaceEngine {
     pub async fn build_group_internal_pr_review_prompt_for_test(
         &self,
@@ -298,33 +331,27 @@ impl CodingWorkspaceEngine {
                 ),
             })
             .await;
-        let input = AdapterInput {
-            provider_type: provider_type_for_name(&reviewer),
-            role: AdapterRole::Reviewer,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(&attempt)),
-            prompt,
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_internal_pr_review_json".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &attempt,
-            &CodingProviderRole::InternalReviewer,
+        // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+        // tool_policy：Reviewer → DenyFileWriteBuiltins）。
+        let (input, provider_input) = internal_pr_review_streaming_input(
             &reviewer,
+            prompt,
+            worktree_path,
+            self.attempt_provider_stream_log_dir(&attempt),
+            &attempt.id,
+            self.provider_resume_session_id_for_attempt(
+                &attempt,
+                &CodingProviderRole::InternalReviewer,
+                &reviewer,
+            ),
+            role_permission_mode_for_attempt(
+                &self.store,
+                &attempt,
+                CodingProviderRole::InternalReviewer,
+            )?,
         );
-        let permission_mode = role_permission_mode_for_attempt(
-            &self.store,
-            &attempt,
-            CodingProviderRole::InternalReviewer,
-        )?;
-        let mut provider_input =
-            streaming_input_from_adapter(&input, worktree_path.clone(), permission_mode);
-        provider_input.workspace_session_id = Some(attempt.id.clone());
-        provider_input.resume_provider_session_id = resume_provider_session_id;
         // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
-        // 此处仅捆绑 validated input(同源 clone-then-move)。
+        // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
         let validated_input = policy
             .map(|policy| ValidatedStreamingProviderInput::new(provider_input.clone(), policy));
         let full_output = self

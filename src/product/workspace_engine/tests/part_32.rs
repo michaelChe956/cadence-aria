@@ -673,12 +673,16 @@ fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence()
 /// D2 矩阵分派 fixture：每个 entry 走真实构造路径，不虚构单一 role-fixture。
 /// - workspace author/revision/review：WorkspaceEngine 真实 builder（part_31 式
 ///   session fixture）。
-/// - coding coder/reviewer：`provider_retry.rs:216-233` / `internal_pr_review.rs:301-325`
-///   的真实构造链（`AdapterInput{role}` → `streaming_input_from_adapter`）。
+/// - coding coder/reviewer：`provider_retry.rs`（Coder/CodeReviewer 两锚点）、
+///   `internal_pr_review.rs`、`group_review_orchestrator.rs` 的真实生产构造函数
+///   （文件内具名构造函数，内部经共享工厂 `streaming_input_from_adapter` 派生
+///   tool_policy——绕过工厂即绕过 D2 矩阵，策略断言必须失败）。
 /// - 聚合初始化：`coordinator_provider_turn.inc.rs:57-77` 真实构造（gateway-backed
 ///   driver 的 `streaming_input`）。
 /// - Handoff 无真实 builder，不参与本矩阵（由 Task 3.1 守卫测试以合成 input 覆盖）。
 fn entry_input(entry: &str) -> StreamingProviderInput {
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+
     match entry {
         "sc_author" => {
             let (event_tx, _event_rx) = mpsc::channel(8);
@@ -750,44 +754,69 @@ fn entry_input(entry: &str) -> StreamingProviderInput {
             engine.build_review_input().expect("workspace reviewer input")
         }
         "coding_coder" => {
-            // provider_retry.rs:216-233 真实构造：Coder=Executor，D2 禁带策略。
+            // provider_retry.rs Coder 锚点的真实生产构造函数：Executor，D2 禁带策略。
             let worktree = tempfile::tempdir().expect("coding worktree").keep();
-            let legacy_input = AdapterInput {
-                provider_type: ProviderType::Codex,
-                role: AdapterRole::Executor,
-                worktree_path: Some(worktree.to_string_lossy().to_string()),
-                provider_stream_log_dir: None,
-                prompt: "coding coder prompt".to_string(),
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_markdown".to_string(),
-                timeout: 30,
-                max_retries: 0,
-            };
-            crate::product::coding_workspace_engine::streaming_input_from_adapter(
-                &legacy_input,
-                worktree,
-                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
-            )
+            let (_legacy, input) =
+                crate::product::coding_workspace_engine::coder_retry_cycle_streaming_input(
+                    &ProviderName::Codex,
+                    "coding coder prompt".to_string(),
+                    &worktree,
+                    "provider_stream_log_dir".to_string(),
+                    "attempt_matrix_coder",
+                    None,
+                    ProviderPermissionMode::Auto,
+                );
+            input
         }
         "coding_reviewer" => {
-            // internal_pr_review.rs:301-325 真实构造：InternalReviewer=Reviewer，D2 必带。
+            // internal_pr_review.rs 锚点的真实生产构造函数：InternalReviewer=
+            // Reviewer，D2 必带。
             let worktree = tempfile::tempdir().expect("coding worktree").keep();
-            let legacy_input = AdapterInput {
-                provider_type: ProviderType::Codex,
-                role: AdapterRole::Reviewer,
-                worktree_path: Some(worktree.to_string_lossy().to_string()),
-                provider_stream_log_dir: None,
-                prompt: "coding reviewer prompt".to_string(),
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_internal_pr_review_json".to_string(),
-                timeout: 30,
-                max_retries: 0,
-            };
-            crate::product::coding_workspace_engine::streaming_input_from_adapter(
-                &legacy_input,
-                worktree,
-                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
-            )
+            let (_legacy, input) =
+                crate::product::coding_workspace_engine::internal_pr_review_streaming_input(
+                    &ProviderName::Codex,
+                    "coding reviewer prompt".to_string(),
+                    &worktree,
+                    "provider_stream_log_dir".to_string(),
+                    "attempt_matrix_internal_reviewer",
+                    None,
+                    ProviderPermissionMode::Auto,
+                );
+            input
+        }
+        "coding_code_reviewer" => {
+            // provider_retry.rs CodeReviewer 锚点的真实生产构造函数：Reviewer，
+            // D2 必带（structured output contract 用生产同款构造器）。
+            let worktree = tempfile::tempdir().expect("coding worktree").keep();
+            let (_legacy, input) =
+                crate::product::coding_workspace_engine::code_reviewer_retry_cycle_streaming_input(
+                    &ProviderName::Codex,
+                    "coding code reviewer prompt".to_string(),
+                    &worktree,
+                    "provider_stream_log_dir".to_string(),
+                    "attempt_matrix_code_reviewer",
+                    None,
+                    crate::product::coding_workspace_engine::code_review_structured_output_contract(
+                        "nonce1".to_string(),
+                    ),
+                    ProviderPermissionMode::Auto,
+                );
+            input
+        }
+        "coding_group_reviewer" => {
+            // group_review_orchestrator.rs 锚点的真实生产构造函数：group
+            // review shard/reduction=Reviewer，D2 必带。
+            let worktree = tempfile::tempdir().expect("coding worktree").keep();
+            let (_legacy, input) =
+                crate::product::coding_workspace_engine::group_review_streaming_input(
+                    &ProviderName::Codex,
+                    "coding group review prompt".to_string(),
+                    &worktree,
+                    "provider_stream_log_dir".to_string(),
+                    "attempt_matrix_group_reviewer",
+                    ProviderPermissionMode::Auto,
+                );
+            input
         }
         "aggregate_turn" => {
             // coordinator_provider_turn.inc.rs:57-77 真实构造：聚合初始化 provider turn
@@ -820,6 +849,8 @@ fn builder_factory_applies_role_policy_matrix_per_entry() {
         ("workspace_reviewer", AdapterRole::Reviewer, true),
         ("coding_coder", AdapterRole::Executor, false),
         ("coding_reviewer", AdapterRole::Reviewer, true),
+        ("coding_code_reviewer", AdapterRole::Reviewer, true),
+        ("coding_group_reviewer", AdapterRole::Reviewer, true),
         ("aggregate_turn", AdapterRole::Executor, false),
     ] {
         let input = entry_input(entry);
@@ -1052,8 +1083,70 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
         ));
     }
 
-    // —— coding 工厂全 AdapterRole 矩阵（Executor/Coder=禁带；Reviewer/Orchestrator/
-    // WorkItemSplitter=必带；Handoff=禁带）——
+    // —— coding 四锚点的真实生产构造函数（provider_retry Coder/CodeReviewer、
+    // internal_pr_review、group_review；均经共享工厂派生 tool_policy，绕过工厂
+    // 即绕过 D2 矩阵）——
+    {
+        let worktree = tempfile::tempdir().expect("coding worktree").keep();
+        let (_legacy, input) =
+            crate::product::coding_workspace_engine::coder_retry_cycle_streaming_input(
+                &ProviderName::Codex,
+                "coding coder prompt".to_string(),
+                &worktree,
+                "provider_stream_log_dir".to_string(),
+                "attempt_family_coder",
+                None,
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            );
+        covered.push(("coding_coder_retry".to_string(), input));
+    }
+    {
+        let worktree = tempfile::tempdir().expect("coding worktree").keep();
+        let (_legacy, input) =
+            crate::product::coding_workspace_engine::code_reviewer_retry_cycle_streaming_input(
+                &ProviderName::Codex,
+                "coding code reviewer prompt".to_string(),
+                &worktree,
+                "provider_stream_log_dir".to_string(),
+                "attempt_family_code_reviewer",
+                None,
+                crate::product::coding_workspace_engine::code_review_structured_output_contract(
+                    "nonce1".to_string(),
+                ),
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            );
+        covered.push(("coding_code_reviewer_retry".to_string(), input));
+    }
+    {
+        let worktree = tempfile::tempdir().expect("coding worktree").keep();
+        let (_legacy, input) =
+            crate::product::coding_workspace_engine::internal_pr_review_streaming_input(
+                &ProviderName::Codex,
+                "coding reviewer prompt".to_string(),
+                &worktree,
+                "provider_stream_log_dir".to_string(),
+                "attempt_family_internal_reviewer",
+                None,
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            );
+        covered.push(("coding_internal_pr_review".to_string(), input));
+    }
+    {
+        let worktree = tempfile::tempdir().expect("coding worktree").keep();
+        let (_legacy, input) =
+            crate::product::coding_workspace_engine::group_review_streaming_input(
+                &ProviderName::Codex,
+                "coding group review prompt".to_string(),
+                &worktree,
+                "provider_stream_log_dir".to_string(),
+                "attempt_family_group_reviewer",
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            );
+        covered.push(("coding_group_review".to_string(), input));
+    }
+
+    // —— 共享工厂全 AdapterRole 派生矩阵（工厂级锁定：Orchestrator/
+    // WorkItemSplitter/Handoff 在 coding 无真实锚点，由工厂派生覆盖）——
     for role in [
         AdapterRole::Executor,
         AdapterRole::Reviewer,
@@ -1074,7 +1167,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
             max_retries: 0,
         };
         covered.push((
-            format!("coding_factory_{role:?}"),
+            format!("coding_factory_derives_{role:?}"),
             crate::product::coding_workspace_engine::streaming_input_from_adapter(
                 &legacy_input,
                 worktree,
@@ -1108,15 +1201,31 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
         ("wip_outline_review", AdapterRole::Reviewer, true),
         ("wip_batch_review", AdapterRole::Reviewer, true),
         ("wip_draft_review", AdapterRole::Reviewer, true),
-        ("coding_factory_Executor", AdapterRole::Executor, false),
-        ("coding_factory_Reviewer", AdapterRole::Reviewer, true),
-        ("coding_factory_Orchestrator", AdapterRole::Orchestrator, true),
+        ("coding_coder_retry", AdapterRole::Executor, false),
+        ("coding_code_reviewer_retry", AdapterRole::Reviewer, true),
+        ("coding_internal_pr_review", AdapterRole::Reviewer, true),
+        ("coding_group_review", AdapterRole::Reviewer, true),
+        ("coding_factory_derives_Executor", AdapterRole::Executor, false),
         (
-            "coding_factory_WorkItemSplitter",
+            "coding_factory_derives_Reviewer",
+            AdapterRole::Reviewer,
+            true,
+        ),
+        (
+            "coding_factory_derives_Orchestrator",
+            AdapterRole::Orchestrator,
+            true,
+        ),
+        (
+            "coding_factory_derives_WorkItemSplitter",
             AdapterRole::WorkItemSplitter,
             true,
         ),
-        ("coding_factory_Handoff", AdapterRole::Handoff, false),
+        (
+            "coding_factory_derives_Handoff",
+            AdapterRole::Handoff,
+            false,
+        ),
         ("aggregate_turn", AdapterRole::Executor, false),
     ];
     assert_eq!(

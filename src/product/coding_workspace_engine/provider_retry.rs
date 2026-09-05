@@ -1,5 +1,6 @@
 use super::*;
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
 use crate::product::coding_workspace_engine::group::GroupUnitFailureOutcome;
 use crate::protocol::provider_errors::ProviderErrorCode;
@@ -154,6 +155,75 @@ impl ProviderInvocationOutcome {
     }
 }
 
+/// Coder（Executor）retry-cycle streaming 启动的生产构造函数（D2 锚点）。
+/// 内部构造 legacy `AdapterInput{role: Executor}` 并经共享工厂
+/// `streaming_input_from_adapter` 派生 `tool_policy`（Executor → `None`，D2
+/// 矩阵禁带），再绑定 attempt 的 workspace/resume 会话上下文。Coder streaming
+/// 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即绕过 D2
+/// 角色矩阵，矩阵测试将失败。
+pub(crate) fn coder_retry_cycle_streaming_input(
+    provider_name: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    resume_provider_session_id: Option<String>,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        provider_type: provider_type_for_name(provider_name),
+        role: AdapterRole::Executor,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_markdown".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = resume_provider_session_id;
+    (legacy_input, provider_input)
+}
+
+/// CodeReviewer（Reviewer）retry-cycle streaming 启动的生产构造函数（D2 锚点）。
+/// 内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
+/// `streaming_input_from_adapter` 派生 `tool_policy`（Reviewer →
+/// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 会话上下文与结构化输出
+/// 契约。CodeReviewer streaming 入口禁止绕过本函数裸构造
+/// `StreamingProviderInput`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn code_reviewer_retry_cycle_streaming_input(
+    reviewer: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    resume_provider_session_id: Option<String>,
+    structured_output_contract: StructuredOutputContract,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        provider_type: provider_type_for_name(reviewer),
+        role: AdapterRole::Reviewer,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_code_review_json".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = resume_provider_session_id;
+    provider_input.structured_output_contract = Some(structured_output_contract);
+    (legacy_input, provider_input)
+}
+
 impl CodingWorkspaceEngine {
     pub(crate) async fn run_coder_with_retry_cycle(
         &self,
@@ -213,24 +283,17 @@ impl CodingWorkspaceEngine {
                     ),
                 })
                 .await;
-            let legacy_input = AdapterInput {
-                provider_type: provider_type_for_name(provider_name),
-                role: AdapterRole::Executor,
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
-                prompt: prompt.clone(),
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_markdown".to_string(),
-                timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-                max_retries: 0,
-            };
-            let mut provider_input = streaming_input_from_adapter(
-                &legacy_input,
-                worktree_path.to_path_buf(),
+            // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+            // tool_policy：Executor → None）。
+            let (legacy_input, provider_input) = coder_retry_cycle_streaming_input(
+                provider_name,
+                prompt.clone(),
+                worktree_path,
+                self.attempt_provider_stream_log_dir(attempt),
+                &attempt.id,
+                resume_provider_session_id,
                 permission_mode.clone(),
             );
-            provider_input.workspace_session_id = Some(attempt.id.clone());
-            provider_input.resume_provider_session_id = resume_provider_session_id;
             let invocation_attempt = match self.ensure_provider_retry_cycle_active(attempt) {
                 Ok(current) => current,
                 Err(error) => {
@@ -370,29 +433,22 @@ impl CodingWorkspaceEngine {
                     ),
                 })
                 .await;
-            let legacy_input = AdapterInput {
-                provider_type: provider_type_for_name(reviewer),
-                role: AdapterRole::Reviewer,
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
+            // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+            // tool_policy：Reviewer → DenyFileWriteBuiltins）。
+            let (legacy_input, provider_input) = code_reviewer_retry_cycle_streaming_input(
+                reviewer,
                 prompt,
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_code_review_json".to_string(),
-                timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-                max_retries: 0,
-            };
-            let mut provider_input = streaming_input_from_adapter(
-                &legacy_input,
-                worktree_path.to_path_buf(),
+                worktree_path,
+                self.attempt_provider_stream_log_dir(attempt),
+                &attempt.id,
+                if attempt_no == 1 {
+                    initial_resume_provider_session_id.clone()
+                } else {
+                    None
+                },
+                structured_output_contract,
                 permission_mode.clone(),
             );
-            provider_input.workspace_session_id = Some(attempt.id.clone());
-            provider_input.resume_provider_session_id = if attempt_no == 1 {
-                initial_resume_provider_session_id.clone()
-            } else {
-                None
-            };
-            provider_input.structured_output_contract = Some(structured_output_contract);
             let invocation_attempt = match self.ensure_provider_retry_cycle_active(attempt) {
                 Ok(current) => current,
                 Err(error) => {
