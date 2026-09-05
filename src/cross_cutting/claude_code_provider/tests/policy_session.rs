@@ -351,3 +351,61 @@ async fn claude_policy_append_failure_kills_child_before_returning() {
         "claude policy child (pid {pid}) must be terminated before start returns the append-failure error"
     );
 }
+
+/// 登记 PID 但从不读 stdin 的 fixture：巨大的初始 user 消息超过管道缓冲后，
+// 初始写入阻塞在不可取消 await（stdin write 不 select cancel）——P1-7 round 2
+// 裁决针对的卡死形态。
+#[cfg(unix)]
+fn pid_registering_blind_fixture(marker: &std::path::Path) -> PathBuf {
+    write_fixture(
+        "claude_policy_blind_fixture.sh",
+        &format!(
+            "#!/usr/bin/env bash\necho $$ > {}\nsleep 30\n",
+            marker.display()
+        ),
+    )
+}
+
+/// P1-7 round 2（controller 裁决）：策略路径的「子进程所有权+握手+provider_start
+/// 写入」留在 start() 内——初始写入卡死在不可取消 await 时，start() 返回错误的
+/// 瞬间子进程必须已终止且 exit status 已回收（同步 kill()+wait()，非异步任务
+/// 兑底）。256KiB prompt 超过管道缓冲（64KiB），fixture 不读 stdin → 写入阻塞。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_blocked_initial_write_kills_child_before_returning() {
+    let marker_dir = tempfile::tempdir().expect("marker dir");
+    let marker = marker_dir.path().join("claude-policy-blind-child.pid");
+    let provider = ClaudeCodeProvider::new(pid_registering_blind_fixture(&marker))
+        .with_version_supplier(policy_version_supplier());
+    let sink = RecordingToolPolicyAuditSink::new();
+    let mut input = policy_claude_input(None, Some(sink.clone().bound()));
+    input.prompt = "x".repeat(256 * 1024);
+
+    let Err(error) = provider.start(input, CancellationToken::new()).await else {
+        panic!("blocked initial write must fail the policy session");
+    };
+    assert!(
+        error.details.contains("timed out") || error.details.is_empty(),
+        "unexpected error: {error:?}"
+    );
+
+    let pid = std::fs::read_to_string(&marker)
+        .expect("fixture registers its pid")
+        .trim()
+        .parse::<u32>()
+        .expect("pid");
+    // kill -0 对僵尸（已死未回收）仍返回成功：此处立即失败即证明 start() 已
+    // 同步 wait() 回收 exit status，而非仅发出 kill 信号后交给后台任务。
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    assert!(
+        !alive,
+        "claude policy child (pid {pid}) must be reaped before start returns the blocked-write error"
+    );
+}

@@ -19,6 +19,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderVersionSupplier, RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
     UsageReportData, canonical_tool_policy, validate_tool_policy_for_role,
 };
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::cross_cutting::tool_policy_audit::{
     DurableToolPolicyEvent, ProviderStartAudit, ToolPolicyAuditSink,
 };
@@ -440,18 +441,101 @@ impl ClaudeCodeProvider {
     }
 }
 
-/// 策略会话失败路径的同步终止（P1-7）：cancel 后有界等待会话任务完成其
-/// kill 链（任务内 start_kill+wait / terminate_aborted_child），保证 start
-/// 返回错误时子进程已终止；child 由任务持有，故以等待任务收尾等价实现
-/// codex/pi 的显式 start_kill+wait。任务卡死时以有界超时兑底（kill 信号
-/// 已发出，极端情况下由 engine 既有 provider kill 链兕底）。
-async fn terminate_claude_policy_session_task(
-    start_cancel: &CancellationToken,
-    session_task: tokio::task::JoinHandle<()>,
+/// 会话流收尾（策略与非策略路径共用）：读取 claude 流并处理终态（child
+/// wait/kill 链、stderr 任务回收与终态事件）。
+///
+/// P1-7 round 2（controller 裁决）：策略路径把「子进程所有权+初始写入+握手+
+/// provider_start 写入」留在 `start()` 内完成，成功后才把 child 与续读 reader
+/// 移交本收尾任务；失败路径由 `start()` 直接持有 child 同步 `kill()`+`wait()`
+/// 后返回错误（对齐 codex/pi 先例），本任务不再承担失败窗口的终止责任。
+#[allow(clippy::too_many_arguments)]
+async fn run_claude_session_tail(
+    stdout_reader: impl tokio::io::AsyncRead + Unpin,
+    stdin: Arc<Mutex<ChildStdin>>,
+    bridge: ApprovalBridge,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
+    structured_output_contract: Option<StructuredOutputContract>,
+    usage_role: &'static str,
+    mut child: ManagedProcessChild,
+    stderr_output: Arc<Mutex<String>>,
+    stderr_task: tokio::task::JoinHandle<()>,
 ) {
-    start_cancel.cancel();
-    let bound = stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.saturating_mul(3);
-    let _ = tokio::time::timeout(bound, session_task).await;
+    let result = stream::read_claude_stream(
+        stdout_reader,
+        stdin,
+        bridge,
+        event_tx.clone(),
+        cancel,
+        structured_output_contract,
+        usage_role,
+    )
+    .await;
+    match result {
+        Ok(ClaudeStreamOutcome::Aborted) => {
+            stderr_task.abort();
+            stream::terminate_aborted_child(&mut child).await;
+            let _ = stderr_task.await;
+        }
+        Ok(outcome) => {
+            let status = child.wait().await;
+            let _ = stderr_task.await;
+            if outcome == ClaudeStreamOutcome::EofWithoutResult {
+                let stderr = stderr_output.lock().await.clone();
+                let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "provider".to_string(),
+                        kind: ProviderExecutionEventKind::Provider,
+                        status: ProviderExecutionEventStatus::Failed,
+                        title: "Claude Code provider failed".to_string(),
+                        detail: Some("exited without result".to_string()),
+                        command: None,
+                        cwd: None,
+                        output: if stderr.trim().is_empty() {
+                            None
+                        } else {
+                            Some(stderr.clone())
+                        },
+                        exit_code: None,
+                    }))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Failed {
+                        message: tool::format_exit_failure(status, stderr),
+                    })
+                    .await;
+            }
+        }
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = event_tx
+                .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id: "provider".to_string(),
+                    kind: ProviderExecutionEventKind::Provider,
+                    status: ProviderExecutionEventStatus::Failed,
+                    title: "Claude Code provider failed".to_string(),
+                    detail: Some(error.details.clone()),
+                    command: None,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                }))
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Failed {
+                    message: error.details,
+                })
+                .await;
+            let _ = child.wait().await;
+            let _ = stderr_task.await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -616,14 +700,6 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         } else {
             None
         };
-        let (handshake_tx, handshake_rx) = if policy_context.is_some() && resume_native_id.is_none()
-        {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-        let handshake_tx = handshake_tx;
 
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
@@ -650,14 +726,153 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 .await;
         }
 
-        let start_cancel = cancel.clone();
         // workspace 会话 id（D6 冻结字段）在 input 移入后台任务前捕获，供
         // provider_start 审计落盘使用。
         let workspace_session_id = input.workspace_session_id.clone().unwrap_or_default();
-        // P1-7：策略会话失败路径必须同步终止子进程后再返回错误——child 由会话
-        // 任务持有，start 以有界等待任务收尾（任务内 kill+wait）等价实现
-        // 「返回前子进程已终止」（对齐 codex/pi 的显式 start_kill+wait）。
-        let session_task = tokio::spawn(async move {
+
+        // 策略会话（P1-7 round 2 裁决）：「子进程所有权+初始写入+握手+provider_start
+        // 写入」留在 start() 内有界完成（握手出后台任务的重构即要求本身）；成功后
+        // 才把 child 移交会话收尾任务；任一失败由 start() 直接持有 child 同步
+        // kill()+wait()（exit status 回收）后返回错误（对齐 codex/pi 先例）；
+        // 有界 await 仅作 stderr 任务善后。事件通道随会话未返回而消亡，失败路径
+        // 不再投递死信事件。
+        if let Some((sink, provider_version, tool_policy_digest, role_text)) = policy_context {
+            let stderr_output = Arc::new(Mutex::new(String::new()));
+            let stderr_output_for_task = Arc::clone(&stderr_output);
+            let stderr_task = tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let mut output = stderr_output_for_task.lock().await;
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&line);
+                }
+            });
+
+            // 有界完成「初始写入→Running→握手→provider_start」：初始 stdin 写不可
+            // 取消（不 select cancel，如 task.rs write_json_line 的 write_all），
+            // 以外层超时放弃 future 并走 kill 链。
+            let bound = stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.saturating_mul(3);
+            let outcome = tokio::time::timeout(bound, async {
+                Self::write_initial_messages(&stdin, &input)
+                    .await
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!(
+                                "claude policy session: initial write failed: {}",
+                                error.details
+                            ),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "turn".to_string(),
+                        kind: ProviderExecutionEventKind::Turn,
+                        status: ProviderExecutionEventStatus::Started,
+                        title: "Turn started".to_string(),
+                        detail: None,
+                        command: None,
+                        cwd: Some(input.working_dir.display().to_string()),
+                        output: None,
+                        exit_code: None,
+                    }))
+                    .await;
+                let (reader, native_id) = match resume_native_id.clone() {
+                    // resume 已知：native id 即 resume id，不等 init。
+                    Some(id) => (tokio::io::BufReader::new(stdout), id),
+                    None => {
+                        let (reader, session_id) = stream::wait_for_claude_init(stdout, &cancel)
+                            .await
+                            .map_err(|error| {
+                                ProviderAdapterError::parse_error(
+                                    format!(
+                                        "claude policy session: handshake failed: {}",
+                                        error.details
+                                    ),
+                                    String::new(),
+                                    String::new(),
+                                )
+                            })?;
+                        (reader, session_id)
+                    }
+                };
+                let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                    provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+                    role: role_text.clone(),
+                    workspace_session_id: workspace_session_id.clone(),
+                    provider_session_id: native_id.clone(),
+                    tool_policy_canonical_digest: tool_policy_digest.clone(),
+                    argv: args.clone(),
+                    sandbox: None,
+                    approval_policy: None,
+                    provider_version: provider_version.clone(),
+                    adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
+                });
+                sink.append_bound(audit_event).map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!(
+                            "claude policy session: provider_start audit append failed: {error}"
+                        ),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+                Ok::<_, ProviderAdapterError>((reader, native_id))
+            })
+            .await;
+
+            let (reader, native_id) = match outcome {
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(error)) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    let _ = tokio::time::timeout(bound, stderr_task).await;
+                    return Err(error);
+                }
+                Err(_elapsed) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    let _ = tokio::time::timeout(bound, stderr_task).await;
+                    return Err(ProviderAdapterError::timeout(
+                        String::new(),
+                        String::new(),
+                        stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.as_millis() as u64,
+                    ));
+                }
+            };
+            // 成功：child 与续读 reader 移交会话收尾任务（流读取+终态处理）。
+            let usage_role = UsageReportData::role_text(&input.role);
+            tokio::spawn(async move {
+                run_claude_session_tail(
+                    reader,
+                    stdin,
+                    bridge,
+                    event_tx,
+                    cancel,
+                    structured_output_contract,
+                    usage_role,
+                    child,
+                    stderr_output,
+                    stderr_task,
+                )
+                .await;
+            });
+            return Ok(ProviderSession {
+                native_session_id: Some(native_id),
+                events: event_rx,
+                commands,
+            });
+        }
+
+        // 非策略/Coder 路径：既有行为零变化——初始写入与流读取由会话任务完成，
+        // 失败终止与终态事件沿用任务内 kill 链（child 归任务持有）。
+        tokio::spawn(async move {
             let stderr_output = Arc::new(Mutex::new(String::new()));
             let stderr_output_for_task = Arc::clone(&stderr_output);
             let stderr_task = tokio::spawn(async move {
@@ -720,176 +935,24 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 }))
                 .await;
 
-            // 策略会话有界握手：fresh 等待首个 `system/init` 事件，把原生 session id
-            // 经 oneshot 交回 start（start 负责写 provider_start）；失败同样交回并由
-            // 本任务终止子进程（kill 链）。续接 reader 的缓冲区原样交后续流读取。
-            let stdout_reader = if let Some(handshake_tx) = handshake_tx {
-                match stream::wait_for_claude_init(stdout, &cancel).await {
-                    Ok((reader, session_id)) => {
-                        let _ = handshake_tx.send(Ok(session_id));
-                        reader
-                    }
-                    Err(error) => {
-                        let _ = handshake_tx.send(Err(error.details.clone()));
-                        let _ = child.start_kill();
-                        let _ = child.wait().await;
-                        let _ = event_tx
-                            .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
-                            .await;
-                        let _ = event_tx
-                            .send(ProviderEvent::Failed {
-                                message: error.details.clone(),
-                            })
-                            .await;
-                        let _ = stderr_task.await;
-                        return;
-                    }
-                }
-            } else {
-                tokio::io::BufReader::new(stdout)
-            };
-
-            let result = stream::read_claude_stream(
-                stdout_reader,
+            // 非策略路径：无策略握手，直接续读流；终态处理交共用收尾函数。
+            run_claude_session_tail(
+                tokio::io::BufReader::new(stdout),
                 stdin,
                 bridge,
-                event_tx.clone(),
+                event_tx,
                 cancel,
                 structured_output_contract,
                 UsageReportData::role_text(&input.role),
+                child,
+                stderr_output,
+                stderr_task,
             )
             .await;
-            match result {
-                Ok(ClaudeStreamOutcome::Aborted) => {
-                    stderr_task.abort();
-                    stream::terminate_aborted_child(&mut child).await;
-                    let _ = stderr_task.await;
-                }
-                Ok(outcome) => {
-                    let status = child.wait().await;
-                    let _ = stderr_task.await;
-                    if outcome == ClaudeStreamOutcome::EofWithoutResult {
-                        let stderr = stderr_output.lock().await.clone();
-                        let _ = event_tx
-                            .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
-                            .await;
-                        let _ = event_tx
-                            .send(ProviderEvent::Execution(ProviderExecutionEvent {
-                                event_id: "provider".to_string(),
-                                kind: ProviderExecutionEventKind::Provider,
-                                status: ProviderExecutionEventStatus::Failed,
-                                title: "Claude Code provider failed".to_string(),
-                                detail: Some("exited without result".to_string()),
-                                command: None,
-                                cwd: None,
-                                output: if stderr.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(stderr.clone())
-                                },
-                                exit_code: None,
-                            }))
-                            .await;
-                        let _ = event_tx
-                            .send(ProviderEvent::Failed {
-                                message: tool::format_exit_failure(status, stderr),
-                            })
-                            .await;
-                    }
-                }
-                Err(error) => {
-                    let _ = child.start_kill();
-                    let _ = event_tx
-                        .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
-                        .await;
-                    let _ = event_tx
-                        .send(ProviderEvent::Execution(ProviderExecutionEvent {
-                            event_id: "provider".to_string(),
-                            kind: ProviderExecutionEventKind::Provider,
-                            status: ProviderExecutionEventStatus::Failed,
-                            title: "Claude Code provider failed".to_string(),
-                            detail: Some(error.details.clone()),
-                            command: None,
-                            cwd: None,
-                            output: None,
-                            exit_code: None,
-                        }))
-                        .await;
-                    let _ = event_tx
-                        .send(ProviderEvent::Failed {
-                            message: error.details,
-                        })
-                        .await;
-                    let _ = child.wait().await;
-                    let _ = stderr_task.await;
-                }
-            }
         });
 
-        // 策略会话（Task 3.2）：等待有界握手结果（fresh=init session id；resume 已知
-        // =resume id），成功后、start 返回前写 `provider_start`；握手/写失败沿 cancel
-        // 触发任务内 kill 链终止子进程，并返回错误。
-        let mut native_session_id = None;
-        if let Some((sink, provider_version, tool_policy_digest, role_text)) = policy_context {
-            let native_id = match resume_native_id.clone() {
-                Some(id) => id,
-                None => {
-                    let rx = handshake_rx.expect("fresh policy session has handshake channel");
-                    let bound = stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.saturating_mul(3);
-                    match tokio::time::timeout(bound, rx).await {
-                        Ok(Ok(Ok(session_id))) => session_id,
-                        Ok(Ok(Err(message))) => {
-                            terminate_claude_policy_session_task(&start_cancel, session_task).await;
-                            return Err(ProviderAdapterError::parse_error(
-                                format!("claude policy session: handshake failed: {message}"),
-                                String::new(),
-                                String::new(),
-                            ));
-                        }
-                        Ok(Err(_)) => {
-                            terminate_claude_policy_session_task(&start_cancel, session_task).await;
-                            return Err(ProviderAdapterError::parse_error(
-                                "claude policy session: handshake channel closed",
-                                String::new(),
-                                String::new(),
-                            ));
-                        }
-                        Err(_) => {
-                            terminate_claude_policy_session_task(&start_cancel, session_task).await;
-                            return Err(ProviderAdapterError::timeout(
-                                String::new(),
-                                String::new(),
-                                stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.as_millis() as u64,
-                            ));
-                        }
-                    }
-                }
-            };
-            let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
-                provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
-                role: role_text,
-                workspace_session_id: workspace_session_id.clone(),
-                provider_session_id: native_id.clone(),
-                tool_policy_canonical_digest: tool_policy_digest,
-                argv: args.clone(),
-                sandbox: None,
-                approval_policy: None,
-                provider_version,
-                adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
-            });
-            if let Err(error) = sink.append_bound(audit_event) {
-                terminate_claude_policy_session_task(&start_cancel, session_task).await;
-                return Err(ProviderAdapterError::parse_error(
-                    format!("claude policy session: provider_start audit append failed: {error}"),
-                    String::new(),
-                    String::new(),
-                ));
-            }
-            native_session_id = Some(native_id);
-        }
-
         Ok(ProviderSession {
-            native_session_id,
+            native_session_id: None,
             events: event_rx,
             commands,
         })
