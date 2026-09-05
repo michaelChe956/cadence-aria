@@ -2,22 +2,25 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::json_rpc_peer::{OutboundIdNamespace, ensure_request_id};
 use crate::cross_cutting::streaming_provider::{
-    ChoiceAnswerData, ProviderCommand, ProviderCompletion, ProviderEvent,
-    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderToolPolicy, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceAnswerData, CodexApprovalCategory, CodexApprovalResponse, ProviderCommand,
+    ProviderCompletion, ProviderEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderToolPolicy, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::CodexProvider;
+use super::parse_approval_request;
 use super::parse_codex_usage;
-use super::session::codex_launch_params;
+use super::session::{
+    codex_launch_params, decide_for_policy, decide_unknown, unknown_storm_reason_after,
+};
 
 fn codex_streaming_input_with_policy() -> StreamingProviderInput {
     let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
@@ -159,6 +162,134 @@ async fn codex_provider_carries_structured_completion() {
 }
 
 #[tokio::test]
+async fn codex_generic_elicitation_gets_wire_error_reply_and_storm_terminates_session() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_unknown_elicitation_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should fail after unknown approval storm")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("unknown_approval_storm"),
+                    "unexpected failure message: {message}"
+                );
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_) => {}
+            other => panic!("unexpected terminal event before storm failure: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let input = codex_streaming_input_with_policy();
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::PermissionRequest(_) => {
+                panic!("policy session must answer approvals without bridging")
+            }
+            ProviderEvent::Completed(completion) => {
+                assert_eq!(completion.full_output, "policy approvals done");
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_coder_mcp_approval_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut saw_mcp_audit = false;
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::PermissionRequest(_) => {
+                panic!("MCP elicitation must be auto-accepted, not bridged")
+            }
+            ProviderEvent::Execution(event) if event.title == "MCP tool call approved" => {
+                saw_mcp_audit = true;
+            }
+            ProviderEvent::Completed(completion) => {
+                assert!(saw_mcp_audit, "MCP accept audit event was not emitted");
+                assert_eq!(completion.full_output, "coder mcp approved");
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn codex_resume_uses_existing_thread_without_starting_new_thread() {
     let fixture = executable_fixture("tests/fixtures/provider/codex_app_server_resume_fixture.sh");
     let provider = CodexProvider::new(fixture);
@@ -243,6 +374,59 @@ fn codex_id_namespaces_keep_server_zero_and_client_aria_zero_distinct() {
     });
     assert_eq!(reply["id"], server_request["id"]);
     assert_ne!(reply["id"].to_string(), client_id);
+}
+
+#[test]
+fn codex_parser_distinguishes_mcp_from_generic_elicitation() {
+    let mcp = parse_approval_request(&json!({
+        "method":"mcpServer/elicitation/request", "id":0,
+        "params":{"serverName":"proj_spike","_meta":{"codex_approval_kind":"mcp_tool_call","tool_params":{"text":"hi"}}}
+    }))
+    .unwrap();
+    assert!(matches!(mcp.category, CodexApprovalCategory::McpToolCall));
+    let unknown = parse_approval_request(&json!({
+        "method":"mcpServer/elicitation/request", "id":1,
+        "params":{"serverName":"proj_spike"}
+    }));
+    assert!(
+        unknown.is_none()
+            || matches!(
+                unknown.unwrap().category,
+                CodexApprovalCategory::Unknown { .. }
+            )
+    );
+}
+
+#[test]
+fn codex_policy_session_declines_exec_and_file_change_but_accepts_mcp() {
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::CommandExecution),
+        CodexApprovalResponse::Decline
+    );
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::FileChange),
+        CodexApprovalResponse::Decline
+    );
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::McpToolCall),
+        CodexApprovalResponse::Accept
+    );
+}
+
+#[test]
+fn codex_unknown_approval_has_protocol_reply_and_terminates_on_third() {
+    let first = decide_unknown("mcpServer/elicitation/request", 1);
+    assert_eq!(
+        first,
+        CodexApprovalResponse::ElicitationError {
+            code: -32601,
+            data: serde_json::json!({"codex_approval_kind":"unknown","reason":"unsupported_approval_kind"}),
+        }
+    );
+    assert_eq!(
+        unknown_storm_reason_after(3),
+        Some("unknown_approval_storm")
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -10,17 +10,20 @@ use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::local_usage::read_default_codex_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceRequestData, ChoiceRequestSource, ProviderCompletion, ProviderEvent,
-    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput, UsageReportData,
+    ChoiceRequestData, ChoiceRequestSource, CodexApprovalCategory, CodexApprovalDecisionEvent,
+    CodexApprovalResponse, CodexProtocolWarningEvent, CodexSessionTerminatedEvent,
+    ProviderCompletion, ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderStatus, RiskLevel,
+    StreamingProviderInput, UsageReportData,
 };
 
 use super::{
     CODEX_DEFAULT_SANDBOX_MODE, CODEX_RESUME_STALL_ERROR, CODEX_RESUME_STALL_TIMEOUT,
     CODEX_RPC_REQUEST_TIMEOUT, emit_request_user_input_protocol_error, is_turn_completed,
     parse_agent_message_text, parse_approval_request, parse_codex_usage, parse_execution_event,
-    parse_failure, parse_user_input_request, provider_error, send_provider_event,
-    write_approval_response, write_user_input_response,
+    parse_failure, parse_file_change_summary, parse_user_input_request, provider_error,
+    send_provider_event, write_approval_decision, write_approval_response,
+    write_user_input_response,
 };
 
 const CODEX_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
@@ -61,6 +64,48 @@ pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json:
             "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
         })
     }
+}
+
+/// 策略会话即时审批决策（GC6 冻结）：commandExecution/fileChange 一律拒绝并
+/// 审计；所有会话 MCP 一律 accept 并审计。决策以结构化事件形式暴露
+/// （`CodexApprovalDecisionEvent`，内存出口；durable 接线在 Task 3.2）。
+pub(crate) fn decide_for_policy(category: CodexApprovalCategory) -> CodexApprovalResponse {
+    match category {
+        CodexApprovalCategory::McpToolCall => CodexApprovalResponse::Accept,
+        // 未知形态在 session 层由 decide_unknown 先行处理；此处 fail-closed 拒绝。
+        CodexApprovalCategory::CommandExecution
+        | CodexApprovalCategory::FileChange
+        | CodexApprovalCategory::Unknown { .. } => CodexApprovalResponse::Decline,
+    }
+}
+
+/// 未知审批形态的确定性应答（GC6）：未知 elicitation 返回 JSON-RPC error
+/// `-32601` 并带 data（不静默）；未知 item 返回 `{{"decision":"decline"}}`。
+/// `reason` 不作为分类依据，仅出现在应答 data 的固定枚举 `unsupported_approval_kind`。
+pub(crate) fn decide_unknown(method: &str, occurrence: u32) -> CodexApprovalResponse {
+    tracing::debug!(
+        target: "codex_provider",
+        method,
+        occurrence,
+        "unclassified codex approval form"
+    );
+    if method == "mcpServer/elicitation/request" {
+        CodexApprovalResponse::ElicitationError {
+            code: -32601,
+            data: serde_json::json!({
+                "codex_approval_kind": "unknown",
+                "reason": "unsupported_approval_kind",
+            }),
+        }
+    } else {
+        CodexApprovalResponse::Decline
+    }
+}
+
+/// 同一会话连续未知形态风暴阈值：`>= 3` 次终止并记录
+/// `reason_code=unknown_approval_storm`（GC6）。
+pub(crate) fn unknown_storm_reason_after(occurrence: u32) -> Option<&'static str> {
+    (occurrence >= 3).then_some("unknown_approval_storm")
 }
 
 async fn start_codex_turn<W>(
@@ -202,6 +247,11 @@ where
 
     let mut full_output = String::new();
     let mut streamed_agent_message_items = HashSet::new();
+    // GC6：fileChange 审批的 diff 信息经 item id 关联缓存 item（不读 reason）；
+    // 同一会话连续未知审批形态计数，`>=3` 次终止。
+    let mut file_change_summaries: HashMap<String, String> = HashMap::new();
+    let mut unknown_approval_occurrence: u32 = 0;
+    let tool_policy_session = input.tool_policy.is_some();
     let mut empty_output_retry_used = false;
     let timeout_secs = input.timeout_secs.max(1);
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -256,17 +306,133 @@ where
             continue;
         }
 
-        if let Some(request) = parse_approval_request(&incoming) {
+        // fileChange item 通知进入缓存，供后续 requestApproval 经 item id 关联 diff。
+        if let Some((item_id, summary)) = parse_file_change_summary(&incoming) {
             waiting_for_resume_progress = false;
-            let decision = bridge
-                .request_tool(
-                    &request.tool_name,
-                    &request.description,
-                    RiskLevel::High,
-                    cancel.clone(),
-                )
-                .await?;
-            write_approval_response(&peer, request.rpc_id, decision.approved).await?;
+            file_change_summaries.insert(item_id, summary);
+            continue;
+        }
+
+        if let Some(mut request) = parse_approval_request(&incoming) {
+            waiting_for_resume_progress = false;
+            // GC6：fileChange 描述来自缓存 item（item id 关联），不使用自然语言 reason。
+            if request.category == CodexApprovalCategory::FileChange
+                && let Some(summary) = file_change_summaries.get(&request.request_id)
+            {
+                request.description.clone_from(summary);
+            }
+
+            if let CodexApprovalCategory::Unknown { method } = request.category.clone() {
+                unknown_approval_occurrence += 1;
+                // 结构化 protocol_warning 事件（内存出口；durable 接线在 Task 3.2）
+                let warning = CodexProtocolWarningEvent {
+                    reason_code: "unsupported_approval_kind".to_string(),
+                    method: method.clone(),
+                    occurrence: unknown_approval_occurrence,
+                };
+                tracing::warn!(
+                    target: "codex_provider",
+                    reason_code = %warning.reason_code,
+                    method = %warning.method,
+                    occurrence = warning.occurrence,
+                    "unclassified codex approval form"
+                );
+                let response = decide_unknown(&method, unknown_approval_occurrence);
+                write_approval_decision(&peer, request.rpc_id.clone(), &response).await?;
+                if let Some(reason_code) = unknown_storm_reason_after(unknown_approval_occurrence) {
+                    // 结构化 session_terminated 事件（内存出口；durable 接线在 Task 3.2）
+                    let termination = CodexSessionTerminatedEvent {
+                        reason_code: reason_code.to_string(),
+                    };
+                    tracing::warn!(
+                        target: "codex_provider",
+                        reason_code = %termination.reason_code,
+                        "terminating codex session after unknown approval storm"
+                    );
+                    return Err(provider_error(format!(
+                        "codex session terminated: {reason_code}"
+                    )));
+                }
+                continue;
+            }
+
+            // 已知审批形态打断连续未知计数。
+            unknown_approval_occurrence = 0;
+
+            if tool_policy_session {
+                // 策略会话即时决策：exec/fileChange 拒绝、MCP accept，并产出结构化
+                // approval_decision 事件（内存出口；durable 接线在 Task 3.2）。
+                let response = decide_for_policy(request.category.clone());
+                let decision_event = CodexApprovalDecisionEvent {
+                    request_id: request.request_id.clone(),
+                    category: request.category.audit_text(),
+                    decision: response.audit_text(),
+                };
+                tracing::info!(
+                    target: "codex_provider",
+                    request_id = %decision_event.request_id,
+                    category = decision_event.category,
+                    decision = decision_event.decision,
+                    "codex policy approval decision"
+                );
+                write_approval_decision(&peer, request.rpc_id.clone(), &response).await?;
+                continue;
+            }
+
+            match request.category {
+                CodexApprovalCategory::McpToolCall => {
+                    // Coder 会话 MCP 同样 accept 并审计（既有 execution event 通道）。
+                    let audit_detail = format!(
+                        "{}: {}",
+                        request.server_name.as_deref().unwrap_or("mcp"),
+                        request.description
+                    );
+                    send_provider_event(
+                        &event_tx,
+                        ProviderEvent::Execution(ProviderExecutionEvent {
+                            event_id: format!("mcp_approval_{}", request.request_id),
+                            kind: ProviderExecutionEventKind::Provider,
+                            status: ProviderExecutionEventStatus::Completed,
+                            title: "MCP tool call approved".to_string(),
+                            detail: Some(audit_detail),
+                            command: None,
+                            cwd: None,
+                            output: Some(
+                                serde_json::json!({
+                                    "auto_accepted": true,
+                                    "codex_approval_kind": "mcp_tool_call",
+                                    "request_id": request.request_id,
+                                })
+                                .to_string(),
+                            ),
+                            exit_code: None,
+                        }),
+                        &cancel,
+                    )
+                    .await?;
+                    write_approval_decision(
+                        &peer,
+                        request.rpc_id.clone(),
+                        &CodexApprovalResponse::Accept,
+                    )
+                    .await?;
+                }
+                CodexApprovalCategory::CommandExecution | CodexApprovalCategory::FileChange => {
+                    // Coder 的 exec/fileChange 维持既有 ApprovalBridge 上抛链。
+                    let decision = bridge
+                        .request_tool(
+                            request.tool_name.as_deref().unwrap_or("codex_tool"),
+                            &request.description,
+                            RiskLevel::High,
+                            cancel.clone(),
+                        )
+                        .await?;
+                    write_approval_response(&peer, request.rpc_id, decision.approved).await?;
+                }
+                CodexApprovalCategory::Unknown { .. } => {
+                    unreachable!("unknown approval forms are handled before policy dispatch")
+                }
+            }
             continue;
         }
 

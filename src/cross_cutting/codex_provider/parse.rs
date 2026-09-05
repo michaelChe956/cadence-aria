@@ -1,14 +1,20 @@
 use serde_json::Value;
 
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceQuestionData, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, UsageReportData,
+    ChoiceOptionData, ChoiceQuestionData, CodexApprovalCategory, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, UsageReportData,
 };
 
+/// 分类后的 codex 审批请求（GC6）：rpc_id 原样保留用于应答回带；category 按
+/// method + `_meta.codex_approval_kind` 精确分类；fileChange 的 diff 关联信息
+/// 通过 request_id（item id）在 session 层关联缓存 item，不使用自然语言 reason。
 #[derive(Debug, Clone)]
 pub(crate) struct CodexApprovalRequest {
     pub(crate) rpc_id: Value,
-    pub(crate) tool_name: String,
+    pub(crate) category: CodexApprovalCategory,
+    pub(crate) server_name: Option<String>,
+    pub(crate) tool_name: Option<String>,
+    pub(crate) request_id: String,
     pub(crate) description: String,
 }
 
@@ -193,33 +199,156 @@ pub(crate) fn command_output(item: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-pub(crate) fn parse_approval_request(value: &Value) -> Option<CodexApprovalRequest> {
+/// 缓存 fileChange item 摘要（item id → "path (changeType)"），供
+/// `item/fileChange/requestApproval` 经 item id 关联 diff 信息；不使用自然语言
+/// `reason`。仅接受 `item/started` / `item/completed` 通知中的 fileChange item。
+pub(crate) fn parse_file_change_summary(value: &Value) -> Option<(String, String)> {
     let method = value.get("method")?.as_str()?;
+    if method != "item/started" && method != "item/completed" {
+        return None;
+    }
+    let item = value.pointer("/params/item")?;
+    if item.get("type").and_then(Value::as_str)? != "fileChange" {
+        return None;
+    }
+    let id = item.get("id").and_then(Value::as_str)?.to_string();
+    let path = item
+        .get("path")
+        .or_else(|| item.get("filePath"))
+        .and_then(Value::as_str)
+        .unwrap_or("file");
+    let change_type = item
+        .get("changeType")
+        .or_else(|| item.get("change_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("change");
+    Some((id, format!("{path} ({change_type})")))
+}
+
+/// 按 GC6 冻结规则分类审批请求：method 名 + `_meta.codex_approval_kind` 精确判别，
+/// 自然语言 `reason` 不作为分类依据；未知 elicitation / 未知 item 形态返回
+/// `Unknown { method }`（保留原 method，不得静默不应答）。
+pub(crate) fn parse_approval_request(value: &Value) -> Option<CodexApprovalRequest> {
+    let method = value.get("method")?.as_str()?.to_string();
+    let params = value.get("params").unwrap_or(value);
+    let rpc_id = value.get("id").cloned().unwrap_or(Value::Null);
+
+    let approval_request_id = || {
+        params
+            .get("requestId")
+            .or_else(|| params.get("itemId"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| rpc_id_string(&rpc_id))
+            .unwrap_or_else(|| "codex_approval".to_string())
+    };
+
     if method == "codex/server_request" {
-        let params = value.get("params")?;
-        if params.get("type")?.as_str()? != "command_execution_request_approval" {
+        let server_request = value.get("params")?;
+        if server_request.get("type")?.as_str()? != "command_execution_request_approval" {
             return None;
         }
-        let request_params = params.get("params").unwrap_or(params);
+        let request_params = server_request.get("params").unwrap_or(server_request);
         return Some(CodexApprovalRequest {
             rpc_id: value
                 .get("id")
                 .cloned()
-                .or_else(|| params.get("request_id").cloned())
+                .or_else(|| server_request.get("request_id").cloned())
                 .unwrap_or(Value::Null),
-            tool_name: "command".to_string(),
+            category: CodexApprovalCategory::CommandExecution,
+            server_name: None,
+            tool_name: Some("command".to_string()),
+            request_id: server_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| rpc_id_string(value.get("id").unwrap_or(&Value::Null)))
+                .unwrap_or_else(|| "codex_command".to_string()),
             description: command_description(request_params)
                 .unwrap_or_else(|| "Codex command approval request".to_string()),
         });
     }
 
     if method == "item/commandExecution/requestApproval" {
-        let params = value.get("params").unwrap_or(value);
         return Some(CodexApprovalRequest {
-            rpc_id: value.get("id").cloned().unwrap_or(Value::Null),
-            tool_name: "command".to_string(),
+            rpc_id,
+            category: CodexApprovalCategory::CommandExecution,
+            server_name: None,
+            tool_name: Some("command".to_string()),
+            request_id: params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| rpc_id_string(value.get("id").unwrap_or(&Value::Null)))
+                .unwrap_or_else(|| "codex_command".to_string()),
             description: command_description(params)
                 .unwrap_or_else(|| "Codex command approval request".to_string()),
+        });
+    }
+
+    if method == "item/fileChange/requestApproval" {
+        return Some(CodexApprovalRequest {
+            rpc_id,
+            category: CodexApprovalCategory::FileChange,
+            server_name: None,
+            tool_name: Some("file_change".to_string()),
+            // diff 关联键：item id（session 层用缓存 item 补全描述，不读 reason）
+            request_id: params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| rpc_id_string(value.get("id").unwrap_or(&Value::Null)))
+                .unwrap_or_else(|| "codex_file_change".to_string()),
+            description: "Codex file change approval request".to_string(),
+        });
+    }
+
+    if method == "mcpServer/elicitation/request" {
+        // 仅 `_meta.codex_approval_kind="mcp_tool_call"` 是 MCP（Task 0 实测契约），
+        // 其余（含无 marker）均为未知 elicitation，保留原 method。
+        let kind = value
+            .pointer("/params/_meta/codex_approval_kind")
+            .and_then(Value::as_str);
+        let server_name = params
+            .get("serverName")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let category = if kind == Some("mcp_tool_call") {
+            CodexApprovalCategory::McpToolCall
+        } else {
+            CodexApprovalCategory::Unknown {
+                method: method.clone(),
+            }
+        };
+        let request_id = approval_request_id();
+        let description = format!(
+            "MCP tool call approval via {}",
+            server_name.as_deref().unwrap_or("unknown server")
+        );
+        return Some(CodexApprovalRequest {
+            rpc_id,
+            category,
+            server_name,
+            tool_name: params
+                .get("toolName")
+                .or_else(|| value.pointer("/params/_meta/tool_name"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            request_id,
+            description,
+        });
+    }
+
+    // 未知 `item/*/requestApproval` 形态：返回 decline，保留原 method。
+    if method.starts_with("item/") && method.ends_with("/requestApproval") {
+        let request_id = approval_request_id();
+        return Some(CodexApprovalRequest {
+            rpc_id,
+            category: CodexApprovalCategory::Unknown { method },
+            server_name: None,
+            tool_name: None,
+            request_id,
+            description: "Codex approval request".to_string(),
         });
     }
 

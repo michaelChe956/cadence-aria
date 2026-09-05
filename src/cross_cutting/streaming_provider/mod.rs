@@ -110,6 +110,74 @@ pub struct CanonicalToolPolicy {
     pub digest: String,
 }
 
+/// Codex 审批分类（GC6 冻结）：`item/commandExecution/requestApproval` 是
+/// commandExecution；`item/fileChange/requestApproval` 是 fileChange；
+/// `mcpServer/elicitation/request` 仅在 `_meta.codex_approval_kind="mcp_tool_call"`
+/// 时是 MCP，否则为未知 elicitation；未知 `item/*/requestApproval` 为未知 item。
+/// 自然语言 `reason` 不得作为分类依据；未知形态保留原 method。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexApprovalCategory {
+    McpToolCall,
+    CommandExecution,
+    FileChange,
+    Unknown { method: String },
+}
+
+impl CodexApprovalCategory {
+    /// 审计载荷中的类别文本（结构化事件用）。
+    pub fn audit_text(&self) -> &'static str {
+        match self {
+            CodexApprovalCategory::McpToolCall => "mcp_tool_call",
+            CodexApprovalCategory::CommandExecution => "command_execution",
+            CodexApprovalCategory::FileChange => "file_change",
+            CodexApprovalCategory::Unknown { .. } => "unknown",
+        }
+    }
+}
+
+/// Codex 审批应答协议结果：`Accept`/`Decline` 序列化为 `{"decision":...}`；
+/// `ElicitationError` 序列化为 JSON-RPC error（未知 elicitation = `-32601` + data）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodexApprovalResponse {
+    Accept,
+    Decline,
+    ElicitationError { code: i32, data: serde_json::Value },
+}
+
+impl CodexApprovalResponse {
+    /// 审计载荷中的决策文本（结构化事件用）。
+    pub fn audit_text(&self) -> &'static str {
+        match self {
+            CodexApprovalResponse::Accept => "accept",
+            CodexApprovalResponse::Decline => "decline",
+            CodexApprovalResponse::ElicitationError { .. } => "protocol_error",
+        }
+    }
+}
+
+/// 策略会话审批决策的结构化事件（GC11 canonical `approval_decision` 的内存形态；
+/// durable 落盘接线在后续 task 的 sink 注入，本类型即类型化决策出口）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexApprovalDecisionEvent {
+    pub request_id: String,
+    pub category: &'static str,
+    pub decision: &'static str,
+}
+
+/// 未知审批形态的结构化告警事件（GC11 canonical `protocol_warning` 内存形态）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexProtocolWarningEvent {
+    pub reason_code: String,
+    pub method: String,
+    pub occurrence: u32,
+}
+
+/// 未知审批风暴终止的结构化事件（GC11 canonical `session_terminated` 内存形态）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSessionTerminatedEvent {
+    pub reason_code: String,
+}
+
 /// Tool-policy 翻译/canonical 化错误。未知 provider 名 fail-closed（kimi 不接策略）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolPolicyError {

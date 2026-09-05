@@ -3,7 +3,38 @@ use serde_json::{Map, Value, json};
 use crate::cross_cutting::approval_bridge::ChoiceDecision;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
-use crate::cross_cutting::streaming_provider::ChoiceAnswerData;
+use crate::cross_cutting::streaming_provider::{ChoiceAnswerData, CodexApprovalResponse};
+
+/// 写出结构化审批应答（GC6）：`Accept`/`Decline` → `{"decision":...}`；
+/// `ElicitationError` → JSON-RPC error 对象（code+data）。应答 id 原样复用入站
+/// rpc id（server 数字 id 保持原生，GC7）。
+pub(crate) async fn write_approval_decision<W>(
+    peer: &JsonRpcPeer<W>,
+    rpc_id: Value,
+    response: &CodexApprovalResponse,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let payload = match response {
+        CodexApprovalResponse::Accept => json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": { "decision": "accept" },
+        }),
+        CodexApprovalResponse::Decline => json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": { "decision": "decline" },
+        }),
+        CodexApprovalResponse::ElicitationError { code, data } => json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": { "code": code, "data": data },
+        }),
+    };
+    peer.send(payload).await
+}
 
 pub(crate) async fn write_approval_response<W>(
     peer: &JsonRpcPeer<W>,
