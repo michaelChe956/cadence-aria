@@ -45,7 +45,7 @@ impl WorkspaceEngine {
             nonce,
         );
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: base_input.provider_type.clone(),
             role: AdapterRole::Reviewer,
             prompt,

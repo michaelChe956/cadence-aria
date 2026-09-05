@@ -54,7 +54,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
         }
     }
 
-    fn streaming_input(
+    pub(crate) fn streaming_input(
         &self,
         step: AggregateInitializationStepKind,
         aggregate_root: &std::path::Path,

@@ -511,13 +511,27 @@ pub(crate) fn provider_prompt_event(
     }
 }
 
+/// D2 角色×策略矩阵在 coding 的注入点：Reviewer（CodeReviewer/InternalReviewer/group
+/// review）必带 `DenyFileWriteBuiltins`；Coder/Executor 与 Handoff 禁带（`None`）。
+/// 所有 coding streaming 入口（provider_retry.rs / internal_pr_review.rs /
+/// group_review_orchestrator.rs）都经 `streaming_input_from_adapter` 构造，role 的
+/// 唯一设置点即此处，新角色入口自动继承矩阵，禁止绕过本工厂裸构造直启。
+fn coding_tool_policy_for_role(role: &AdapterRole) -> Option<ProviderToolPolicy> {
+    match role {
+        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
+            Some(ProviderToolPolicy::deny_file_write_builtins())
+        }
+        AdapterRole::Executor | AdapterRole::Handoff => None,
+    }
+}
+
 pub(crate) fn streaming_input_from_adapter(
     input: &AdapterInput,
     working_dir: PathBuf,
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
-        tool_policy: None,
+        tool_policy: coding_tool_policy_for_role(&input.role),
         provider_type: input.provider_type.clone(),
         role: input.role.clone(),
         prompt: input.prompt.clone(),

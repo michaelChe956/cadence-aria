@@ -222,7 +222,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -417,7 +417,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -434,7 +434,9 @@ impl WorkspaceEngine {
         })
     }
 
-    fn build_single_candidate_plan_review_input(&self) -> Result<StreamingProviderInput, String> {
+    pub(crate) fn build_single_candidate_plan_review_input(
+        &self,
+    ) -> Result<StreamingProviderInput, String> {
         let lifecycle = self.lifecycle_store.as_ref().ok_or_else(|| {
             "lifecycle_store unavailable for single-candidate work_item_plan review".to_string()
         })?;
@@ -630,7 +632,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -647,7 +649,7 @@ impl WorkspaceEngine {
         })
     }
 
-    fn build_projection_plan_review_input(
+    pub(crate) fn build_projection_plan_review_input(
         &self,
         projection: &PlanProjectionBundle,
     ) -> Result<StreamingProviderInput, String> {
@@ -761,7 +763,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -936,7 +938,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -1009,7 +1011,7 @@ impl WorkspaceEngine {
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -1146,7 +1148,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,

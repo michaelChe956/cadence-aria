@@ -15,8 +15,8 @@ use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, Prov
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
-    StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderStatus, ProviderToolCall, ProviderToolPolicy,
+    ProviderToolResult, RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::product::coding_attempt_store::{

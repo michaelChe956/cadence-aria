@@ -665,3 +665,467 @@ fn design_prompt_sliding_window_preserves_decision_audit_and_required_evidence()
     assert!(reviewer.contains("完整 Design canonical inputs：不得裁剪。"));
     assert!(reviewer.contains("artifact v1 -> v2 相邻版本差异摘要"));
 }
+
+// ============================================================================
+// F3 restrict-role-write-tools Task 1.2：D2 角色×策略矩阵表驱动断言。
+// ============================================================================
+
+/// D2 矩阵分派 fixture：每个 entry 走真实构造路径，不虚构单一 role-fixture。
+/// - workspace author/revision/review：WorkspaceEngine 真实 builder（part_31 式
+///   session fixture）。
+/// - coding coder/reviewer：`provider_retry.rs:216-233` / `internal_pr_review.rs:301-325`
+///   的真实构造链（`AdapterInput{role}` → `streaming_input_from_adapter`）。
+/// - 聚合初始化：`coordinator_provider_turn.inc.rs:57-77` 真实构造（gateway-backed
+///   driver 的 `streaming_input`）。
+/// - Handoff 无真实 builder，不参与本矩阵（由 Task 3.1 守卫测试以合成 input 覆盖）。
+fn entry_input(entry: &str) -> StreamingProviderInput {
+    match entry {
+        "sc_author" => {
+            let (event_tx, _event_rx) = mpsc::channel(8);
+            let mut session = make_session("sess_matrix_sc_author");
+            session.artifact = Some(artifact_payload(
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+            ));
+            let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+            let engine = WorkspaceEngine::new(
+                Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+                event_tx,
+                session,
+            );
+            engine
+                .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+                .expect("sc author input")
+        }
+        "sc_revision" => {
+            let (event_tx, _event_rx) = mpsc::channel(8);
+            let mut session = make_session("sess_matrix_sc_revision");
+            session.artifact = Some(artifact_payload(
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+            ));
+            let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+            let mut engine = WorkspaceEngine::new(
+                Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+                event_tx,
+                session,
+            );
+            engine.latest_review_verdict = Some(ReviewVerdict {
+                verdict: ReviewVerdictType::Revise,
+                comments: "补充验收标准".to_string(),
+                summary: "需要返修".to_string(),
+                findings: Vec::new(),
+                review_gate: ReviewGate::RequiresRevision,
+                work_item_plan_review: None,
+                structured_output_diagnostic: None,
+            });
+            engine.build_revision_input().expect("sc revision input")
+        }
+        "wip_author" => {
+            let (event_tx, _event_rx) = mpsc::channel(8);
+            let session = make_session("sess_matrix_wip_author");
+            let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+            let engine = WorkspaceEngine::new(
+                Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+                event_tx,
+                session,
+            );
+            engine.build_work_item_plan_streaming_input(
+                ProviderType::ClaudeCode,
+                "work item plan prompt".to_string(),
+                checkpoint_tmp.path().to_string_lossy().to_string(),
+                ProviderName::ClaudeCode,
+            )
+        }
+        "workspace_reviewer" => {
+            let (event_tx, _event_rx) = mpsc::channel(8);
+            let mut session = make_session("sess_matrix_workspace_reviewer");
+            session.artifact = Some(artifact_payload(
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+            ));
+            let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+            let engine = WorkspaceEngine::new(
+                Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+                event_tx,
+                session,
+            );
+            engine.build_review_input().expect("workspace reviewer input")
+        }
+        "coding_coder" => {
+            // provider_retry.rs:216-233 真实构造：Coder=Executor，D2 禁带策略。
+            let worktree = tempfile::tempdir().expect("coding worktree").keep();
+            let legacy_input = AdapterInput {
+                provider_type: ProviderType::Codex,
+                role: AdapterRole::Executor,
+                worktree_path: Some(worktree.to_string_lossy().to_string()),
+                provider_stream_log_dir: None,
+                prompt: "coding coder prompt".to_string(),
+                context_files: Vec::new(),
+                output_schema: "coding_workspace_markdown".to_string(),
+                timeout: 30,
+                max_retries: 0,
+            };
+            crate::product::coding_workspace_engine::streaming_input_from_adapter(
+                &legacy_input,
+                worktree,
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            )
+        }
+        "coding_reviewer" => {
+            // internal_pr_review.rs:301-325 真实构造：InternalReviewer=Reviewer，D2 必带。
+            let worktree = tempfile::tempdir().expect("coding worktree").keep();
+            let legacy_input = AdapterInput {
+                provider_type: ProviderType::Codex,
+                role: AdapterRole::Reviewer,
+                worktree_path: Some(worktree.to_string_lossy().to_string()),
+                provider_stream_log_dir: None,
+                prompt: "coding reviewer prompt".to_string(),
+                context_files: Vec::new(),
+                output_schema: "coding_workspace_internal_pr_review_json".to_string(),
+                timeout: 30,
+                max_retries: 0,
+            };
+            crate::product::coding_workspace_engine::streaming_input_from_adapter(
+                &legacy_input,
+                worktree,
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            )
+        }
+        "aggregate_turn" => {
+            // coordinator_provider_turn.inc.rs:57-77 真实构造：聚合初始化 provider turn
+            // = Executor，需写配置文件，D2 禁带策略（None 是正确值）。
+            let fixture = review_gateway_fixture();
+            let driver =
+                crate::product::logical_codebase::aggregate_initialization_coordinator::GatewayBackedAggregateProviderTurnDriver::claude_code(
+                    fixture.gateway.clone(),
+                    "cap_claude_code_1_4_0",
+                );
+            driver.streaming_input(
+                crate::product::logical_codebase::AggregateInitializationStepKind::RuleAndMcpConfig,
+                &fixture.worktree,
+            )
+        }
+        other => panic!("unknown matrix entry: {other}"),
+    }
+}
+
+#[test]
+fn builder_factory_applies_role_policy_matrix_per_entry() {
+    use crate::cross_cutting::streaming_provider::{
+        ProviderToolPolicy, ToolPolicyIntent as PolicyIntent,
+    };
+
+    for (entry, role, denied) in [
+        ("sc_author", AdapterRole::Orchestrator, true),
+        ("sc_revision", AdapterRole::Orchestrator, true),
+        ("wip_author", AdapterRole::WorkItemSplitter, true),
+        ("workspace_reviewer", AdapterRole::Reviewer, true),
+        ("coding_coder", AdapterRole::Executor, false),
+        ("coding_reviewer", AdapterRole::Reviewer, true),
+        ("aggregate_turn", AdapterRole::Executor, false),
+    ] {
+        let input = entry_input(entry);
+        assert_eq!(input.role, role, "{entry}");
+        assert_eq!(input.tool_policy.is_some(), denied, "{entry}");
+        if denied {
+            // 必带的语义即唯一合法意图 DenyFileWriteBuiltins（黑名单，非 allowlist）。
+            assert!(
+                matches!(
+                    input.tool_policy,
+                    Some(ProviderToolPolicy {
+                        intent: PolicyIntent::DenyFileWriteBuiltins
+                    })
+                ),
+                "{entry} must carry exactly DenyFileWriteBuiltins"
+            );
+        }
+    }
+}
+
+/// 断言 role 与 tool_policy 成对一致（D2：作者/评审必带 DenyFileWriteBuiltins，
+/// Executor/Coder/聚合初始化禁带）。
+fn assert_role_policy_pair(
+    input: &StreamingProviderInput,
+    entry: &str,
+    role: AdapterRole,
+    denied: bool,
+) {
+    assert_eq!(input.role, role, "{entry}");
+    assert_eq!(input.tool_policy.is_some(), denied, "{entry}");
+    if denied {
+        use crate::cross_cutting::streaming_provider::ToolPolicyIntent;
+        assert!(
+            matches!(
+                input.tool_policy,
+                Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                    intent: ToolPolicyIntent::DenyFileWriteBuiltins
+                })
+            ),
+            "{entry} must carry exactly DenyFileWriteBuiltins"
+        );
+    }
+}
+
+/// builder 全集断言：逐一调用 D2 全表真实 builder（含 review 家族各入口、
+/// revision 三变体、WorkItemPlan author 普通/fresh/with-session、review repair、
+/// coding 工厂全 AdapterRole 矩阵与聚合初始化）。
+#[tokio::test]
+async fn workspace_builder_family_pairs_role_with_tool_policy() {
+    let mut covered: Vec<(String, StreamingProviderInput)> = Vec::new();
+
+    // —— SC author / revision 家族（三链共用 builder）——
+    {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_family_sc_author");
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+        ));
+        let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        covered.push((
+            "sc_author".to_string(),
+            engine
+                .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+                .expect("author input"),
+        ));
+    }
+    {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_family_sc_revision");
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+        ));
+        let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+        let mut engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "补充验收标准".to_string(),
+            summary: "需要返修".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        });
+        covered.push((
+            "sc_revision_resume".to_string(),
+            engine.build_revision_input().expect("revision input"),
+        ));
+        covered.push((
+            "sc_revision_without_resume".to_string(),
+            engine
+                .build_revision_input_without_resume()
+                .expect("revision input without resume"),
+        ));
+        covered.push((
+            "sc_revision_with_resume_false".to_string(),
+            engine
+                .build_revision_input_with_resume(false)
+                .expect("revision input with resume false"),
+        ));
+        // SC reviewer（三链共用 review builder）。
+        covered.push((
+            "workspace_reviewer".to_string(),
+            engine.build_review_input().expect("review input"),
+        ));
+        // review repair（结构化输出修复，三链共用）。
+        let base_input = engine.build_review_input().expect("review input");
+        let mut completion = ProviderCompletion::plain(
+            "<ARIA_STRUCTURED_OUTPUT nonce=\"stale_nonce_0001\">partial structured review",
+            None,
+        );
+        completion.readable_output = "partial structured review".to_string();
+        let parse_error =
+            crate::product::workspace_engine::review::ReviewCompletionError::Syntax(
+                crate::cross_cutting::structured_output::StructuredOutputError {
+                    code: crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingEndTag,
+                    message: "missing end tag".to_string(),
+                    expected_nonce: Some("nonce_0001".to_string()),
+                    observed_nonce: None,
+                    recoverable_value: Some(serde_json::json!({
+                        "verdict": "pass",
+                        "summary": "unchanged",
+                        "findings": []
+                    })),
+                },
+            );
+        covered.push((
+            "review_repair".to_string(),
+            engine
+                .build_review_repair_input(&base_input, &completion, &parse_error, None)
+                .expect("repair input"),
+        ));
+    }
+
+    // —— WorkItemPlan author 家族：普通 / fresh（StaleContext 重建）/ with-session。
+    // serial/batch draft（draft_batch/runs.rs）与普通 author 共用同一 builder 链。
+    {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let session = make_session("sess_family_wip_author");
+        let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+        let worktree = checkpoint_tmp.path().to_string_lossy().to_string();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        covered.push((
+            "wip_author_normal".to_string(),
+            engine.build_work_item_plan_streaming_input(
+                ProviderType::ClaudeCode,
+                "plan prompt".to_string(),
+                worktree.clone(),
+                ProviderName::ClaudeCode,
+            ),
+        ));
+        covered.push((
+            "wip_author_fresh".to_string(),
+            engine.build_work_item_plan_streaming_input_fresh(
+                ProviderType::ClaudeCode,
+                "plan prompt".to_string(),
+                worktree.clone(),
+                ProviderName::ClaudeCode,
+            ),
+        ));
+        covered.push((
+            "wip_author_with_session".to_string(),
+            engine.build_work_item_plan_streaming_input_with_session(
+                ProviderType::ClaudeCode,
+                "plan prompt".to_string(),
+                worktree,
+                ProviderName::ClaudeCode,
+                None,
+            ),
+        ));
+    }
+
+    // —— WorkItemPlan review 家族：dispatcher（candidate 分支）/ outline / batch /
+    // draft（single-candidate 与 projection 分派分支在各自既有测试中断言）。
+    {
+        let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_family_wip_review");
+        covered.push((
+            "wip_plan_review_candidate".to_string(),
+            engine
+                .build_work_item_plan_review_input()
+                .expect("plan review input"),
+        ));
+        prepare_work_item_plan_outline_artifact(&mut engine).await;
+        let outline_payload = work_item_plan_outline_artifact();
+        let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } = outline_payload
+        else {
+            panic!("expected outline candidate artifact");
+        };
+        covered.push((
+            "wip_outline_review".to_string(),
+            engine
+                .build_work_item_plan_outline_review_input(&outline_candidate)
+                .expect("outline review input"),
+        ));
+        save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
+        covered.push((
+            "wip_batch_review".to_string(),
+            engine
+                .build_work_item_batch_review_input()
+                .expect("batch review input"),
+        ));
+        save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
+        let draft_payload = work_item_draft_artifact_payload(
+            &plan_id,
+            "outline_a",
+            "draft_a",
+            WorkItemDraftStatus::Draft,
+        );
+        let ArtifactPayload::WorkItemDraftCandidate { draft_candidate } = draft_payload else {
+            panic!("expected draft candidate artifact");
+        };
+        covered.push((
+            "wip_draft_review".to_string(),
+            engine
+                .build_work_item_draft_review_input(&draft_candidate)
+                .expect("draft review input"),
+        ));
+    }
+
+    // —— coding 工厂全 AdapterRole 矩阵（Executor/Coder=禁带；Reviewer/Orchestrator/
+    // WorkItemSplitter=必带；Handoff=禁带）——
+    for role in [
+        AdapterRole::Executor,
+        AdapterRole::Reviewer,
+        AdapterRole::Orchestrator,
+        AdapterRole::WorkItemSplitter,
+        AdapterRole::Handoff,
+    ] {
+        let worktree = tempfile::tempdir().expect("coding worktree").keep();
+        let legacy_input = AdapterInput {
+            provider_type: ProviderType::Codex,
+            role: role.clone(),
+            worktree_path: Some(worktree.to_string_lossy().to_string()),
+            provider_stream_log_dir: None,
+            prompt: "coding factory role matrix".to_string(),
+            context_files: Vec::new(),
+            output_schema: "coding_workspace_markdown".to_string(),
+            timeout: 30,
+            max_retries: 0,
+        };
+        covered.push((
+            format!("coding_factory_{role:?}"),
+            crate::product::coding_workspace_engine::streaming_input_from_adapter(
+                &legacy_input,
+                worktree,
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            ),
+        ));
+    }
+
+    // —— 聚合初始化 provider turn（gateway validated，需写配置文件，禁带）——
+    covered.push(("aggregate_turn".to_string(), entry_input("aggregate_turn")));
+
+    let expected = [
+        ("sc_author", AdapterRole::Orchestrator, true),
+        ("sc_revision_resume", AdapterRole::Orchestrator, true),
+        ("sc_revision_without_resume", AdapterRole::Orchestrator, true),
+        (
+            "sc_revision_with_resume_false",
+            AdapterRole::Orchestrator,
+            true,
+        ),
+        ("workspace_reviewer", AdapterRole::Reviewer, true),
+        ("review_repair", AdapterRole::Reviewer, true),
+        ("wip_author_normal", AdapterRole::WorkItemSplitter, true),
+        ("wip_author_fresh", AdapterRole::WorkItemSplitter, true),
+        (
+            "wip_author_with_session",
+            AdapterRole::WorkItemSplitter,
+            true,
+        ),
+        ("wip_plan_review_candidate", AdapterRole::Reviewer, true),
+        ("wip_outline_review", AdapterRole::Reviewer, true),
+        ("wip_batch_review", AdapterRole::Reviewer, true),
+        ("wip_draft_review", AdapterRole::Reviewer, true),
+        ("coding_factory_Executor", AdapterRole::Executor, false),
+        ("coding_factory_Reviewer", AdapterRole::Reviewer, true),
+        ("coding_factory_Orchestrator", AdapterRole::Orchestrator, true),
+        (
+            "coding_factory_WorkItemSplitter",
+            AdapterRole::WorkItemSplitter,
+            true,
+        ),
+        ("coding_factory_Handoff", AdapterRole::Handoff, false),
+        ("aggregate_turn", AdapterRole::Executor, false),
+    ];
+    assert_eq!(
+        covered.len(),
+        expected.len(),
+        "family coverage must enumerate every D2 builder entry"
+    );
+    for ((entry, input), (expected_entry, role, denied)) in covered.iter().zip(expected.iter()) {
+        assert_eq!(entry, expected_entry, "builder family order drifted");
+        assert_role_policy_pair(input, entry, role.clone(), *denied);
+    }
+}

@@ -571,6 +571,12 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
     let input = engine
         .build_work_item_plan_review_input()
         .expect("single-candidate review input");
+    // F3 restrict-role-write-tools：single-candidate 分派分支也必须带 D2 角色×策略对。
+    assert_eq!(
+        input.role,
+        crate::protocol::contracts::AdapterRole::Reviewer
+    );
+    assert!(input.tool_policy.is_some());
     assert!(input.prompt.contains("wi-a"));
     assert!(
         input

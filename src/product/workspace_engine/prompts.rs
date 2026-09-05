@@ -252,7 +252,7 @@ impl WorkspaceEngine {
         };
 
         Ok(StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
             prompt,
@@ -324,7 +324,7 @@ impl WorkspaceEngine {
         )
     }
 
-    fn build_work_item_plan_streaming_input_with_session(
+    pub(crate) fn build_work_item_plan_streaming_input_with_session(
         &self,
         provider_type: ProviderType,
         prompt: String,
@@ -333,7 +333,7 @@ impl WorkspaceEngine {
         resume_provider_session_id: Option<String>,
     ) -> StreamingProviderInput {
         StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             prompt,

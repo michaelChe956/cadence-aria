@@ -13,8 +13,8 @@ use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
-    StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
+    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolPolicy, ProviderToolResult,
+    RiskLevel, StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputError, StructuredOutputState};
 use crate::product::artifact_extraction::extract_artifact_content;
