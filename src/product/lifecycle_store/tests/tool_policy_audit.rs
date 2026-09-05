@@ -193,3 +193,84 @@ fn tool_policy_audit_line_exposes_event_type_for_every_canonical_event() {
     let line = ToolPolicyAuditLine::from_event(3, session_terminated_event("unknown_approval_storm"));
     assert_eq!(line.event_type_text(), "session_terminated");
 }
+
+// ---- Task 3.3（REQ-ENV-09/GC9）：resume 冻结三元组比对 ----
+
+use crate::cross_cutting::tool_policy_audit::{
+    ResumeDecision, provider_start_record, resume_with_audit_record,
+};
+
+#[test]
+fn resume_rejects_digest_version_or_dialect_drift_and_missing_record() {
+    let stored = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    assert!(matches!(
+        resume_with_audit_record(Some(stored.clone()), &stored),
+        ResumeDecision::Resume
+    ));
+    assert!(matches!(
+        resume_with_audit_record(
+            Some(stored.clone()),
+            &stored.clone().with_digest("sha256:b")
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    assert!(matches!(
+        resume_with_audit_record(
+            Some(stored.clone()),
+            &stored.clone().with_version("provider 1.2.4")
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    assert!(matches!(
+        resume_with_audit_record(
+            Some(stored.clone()),
+            &stored.clone().with_dialect("codex-app-server-rpc-v2")
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    assert!(matches!(
+        resume_with_audit_record(None, &stored),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+}
+
+#[test]
+fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session() {
+    use crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink as _;
+
+    let sink = test_tool_policy_audit_sink();
+    // 两个 run（seq 0/1）持有同一 native id（resume 重试）；最近（seq 1）生效。
+    sink.append(
+        "ws-6",
+        0,
+        DurableToolPolicyEvent::ProviderStart(
+            provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc")
+                .with_native_session_id("thread-shared"),
+        ),
+    )
+    .unwrap();
+    sink.append(
+        "ws-6",
+        1,
+        DurableToolPolicyEvent::ProviderStart(
+            provider_start_record("sha256:a2", "provider 1.2.3", "codex-app-server-rpc")
+                .with_native_session_id("thread-shared"),
+        ),
+    )
+    .unwrap();
+    let found = sink
+        .find_latest_tool_policy_provider_start("ws-6", "thread-shared")
+        .unwrap()
+        .expect("stored provider_start must be found");
+    assert_eq!(found.tool_policy_digest, "sha256:a2");
+
+    // 其它 native id / 其它 workspace：缺失 → None（resume 决策拒绝并新建）。
+    assert!(sink
+        .find_latest_tool_policy_provider_start("ws-6", "thread-other")
+        .unwrap()
+        .is_none());
+    assert!(sink
+        .find_latest_tool_policy_provider_start("ws-7", "thread-shared")
+        .unwrap()
+        .is_none());
+}

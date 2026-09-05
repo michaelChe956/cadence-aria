@@ -23,10 +23,13 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    ProviderVersionSupplier, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderVersionSupplier, StreamingProviderAdapter, StreamingProviderInput, VersionProbeError,
     canonical_tool_policy, validate_tool_policy_for_role,
 };
-use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
+use crate::cross_cutting::tool_policy_audit::{
+    DurableToolPolicyEvent, ProviderStartAudit, ResumeDecision, SessionTerminatedAudit,
+    ToolPolicyAuditSink, resume_with_audit_record,
+};
 
 mod parse;
 mod session;
@@ -53,14 +56,14 @@ const MIN_PI_VERSION: &str = "0.83.0";
 const PI_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ProbeFailure {
+pub(crate) enum ProbeFailure {
     CommandFailed,
     TimedOut,
     Unparseable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PiVersion {
+pub(crate) enum PiVersion {
     Known((u32, u32, u32)),
     Unknown(ProbeFailure),
 }
@@ -202,6 +205,18 @@ async fn probe_pi_version_with_timeout(command: &Path, timeout: Duration) -> PiV
     }
 }
 
+/// 策略会话版本映射（GC9，Task 3.3）：`Known` → 精确字符串；
+/// `Unknown(TimedOut)` → `Timeout`；其余 `Unknown(_)` → `Unavailable`。
+/// 仅策略会话走本 fail-closed 映射；既有 `ensure_pi_version_compatible` 的
+/// unknown→Ok 旧路径与 Coder/非策略会话零变化。
+pub(crate) fn pi_policy_version(version: &PiVersion) -> Result<String, VersionProbeError> {
+    match version {
+        PiVersion::Known((major, minor, patch)) => Ok(format!("pi {major}.{minor}.{patch}")),
+        PiVersion::Unknown(ProbeFailure::TimedOut) => Err(VersionProbeError::Timeout),
+        PiVersion::Unknown(_) => Err(VersionProbeError::Unavailable),
+    }
+}
+
 fn ensure_pi_version_compatible(version: &PiVersion) -> Result<(), ProviderAdapterError> {
     let PiVersion::Known(version) = version else {
         return Ok(());
@@ -225,6 +240,9 @@ fn ensure_pi_version_compatible(version: &PiVersion) -> Result<(), ProviderAdapt
 
 /// pi 的 adapter dialect 常量（GC9 冻结：`pi-rpc`）。resume 冻结三元组的方言位。
 pub const PI_POLICY_DIALECT: &str = "pi-rpc";
+
+/// resume 冻结三元组 drift 时的 superseded 终止审计原因码（Task 3.3）。
+pub(crate) const SUPERSEDED_POLICY_DRIFT: &str = "superseded_policy_drift";
 
 fn tool_policy_session_error(message: impl std::fmt::Display) -> ProviderAdapterError {
     ProviderAdapterError::parse_error(
@@ -309,7 +327,7 @@ impl PiProvider {
 impl StreamingProviderAdapter for PiProvider {
     async fn start(
         &self,
-        input: StreamingProviderInput,
+        mut input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
@@ -321,20 +339,65 @@ impl StreamingProviderAdapter for PiProvider {
         let version = probe_pi_version(&self.command).await;
         ensure_pi_version_compatible(&version)?;
         let extension_path = ensure_ask_extension()?;
-        // 策略会话（Task 3.2）：pi 的有界握手是 id 预生成/传入（既有 `--session-id`
-        // 语义）；fresh 策略会话预生成 uuid 并经 `--session-id` 传入，使 native session
-        // id 在 spawn 前即可知。spawn 后、start 返回前写 `provider_start`；握手/写
-        // 失败终止子进程并 fail-closed。
-        let policy_start = input.tool_policy.as_ref().map(|policy| {
+        // 策略会话（Task 3.2/3.3）：spawn 前解析版本并执行 resume 冻结三元组比对；
+        // pi 的有界握手是 id 预生成/传入（既有 `--session-id` 语义）；fresh 策略
+        // 会话预生成 uuid 并经 `--session-id` 传入，使 native session id 在 spawn 前
+        // 即可知。spawn 后、start 返回前写 `provider_start`；握手/写失败终止子进程
+        // 并 fail-closed。
+        let mut policy_start: Option<(
+            std::sync::Arc<dyn ToolPolicyAuditSink>,
+            String,
+            String,
+            String,
+        )> = None;
+        if let Some(policy) = input.tool_policy.as_ref() {
             let sink = input.audit_sink.clone().ok_or_else(|| {
                 tool_policy_session_error("audit sink is required for policy sessions")
             })?;
-            let supplier = self.version_supplier.clone().ok_or_else(|| {
-                tool_policy_session_error("provider version is unavailable (no supplier)")
-            })?;
-            let provider_version = supplier().map_err(tool_policy_session_error)?;
+            // 版本解析（Task 3.3）：supplier seam 优先；默认走真实 `--version` 探测
+            // （进程内缓存、有界超时），不可得则策略会话启动 fail-closed。
+            let provider_version = match self.version_supplier.clone() {
+                Some(supplier) => supplier().map_err(tool_policy_session_error)?,
+                None => {
+                    let probed =
+                        probe_pi_version_with_timeout(&self.command, PI_VERSION_PROBE_TIMEOUT)
+                            .await;
+                    pi_policy_version(&probed).map_err(tool_policy_session_error)?
+                }
+            };
             let canonical = canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
                 .map_err(|error| tool_policy_session_error(error.to_string()))?;
+            // resume 冻结三元组比对（Task 3.3，spawn 前）：记录缺失或 digest/version/
+            // dialect 任一不一致 → 追加 superseded 终止审计并新建会话（丢弃 resume id）。
+            let resume_id = input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+            if let Some(resume_id) = resume_id.as_ref() {
+                let stored = sink
+                    .find_provider_start(resume_id)
+                    .map_err(tool_policy_session_error)?;
+                let current = ProviderStartAudit {
+                    tool_policy_digest: canonical.digest.clone(),
+                    provider_version: provider_version.clone(),
+                    dialect: PI_POLICY_DIALECT.to_string(),
+                    ..ProviderStartAudit::default()
+                };
+                if matches!(
+                    resume_with_audit_record(stored, &current),
+                    ResumeDecision::RejectSupersedeAndStartNew
+                ) {
+                    sink.append_bound(DurableToolPolicyEvent::SessionTerminated(
+                        SessionTerminatedAudit {
+                            reason_code: SUPERSEDED_POLICY_DRIFT.to_string(),
+                        },
+                    ))
+                    .map_err(tool_policy_session_error)?;
+                    input.resume_provider_session_id = None;
+                }
+            }
             let native_session_id = input
                 .resume_provider_session_id
                 .as_deref()
@@ -342,15 +405,10 @@ impl StreamingProviderAdapter for PiProvider {
                 .filter(|id| !id.is_empty())
                 .map(ToString::to_string)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            Ok::<_, ProviderAdapterError>((
-                sink,
-                provider_version,
-                canonical.digest,
-                native_session_id,
-            ))
-        });
+            policy_start = Some((sink, provider_version, canonical.digest, native_session_id));
+        }
         let resume_session_id = match &policy_start {
-            Some(Ok((_, _, _, native_session_id))) => Some(native_session_id.clone()),
+            Some((_, _, _, native_session_id)) => Some(native_session_id.clone()),
             _ => input
                 .resume_provider_session_id
                 .as_deref()
@@ -403,8 +461,7 @@ impl StreamingProviderAdapter for PiProvider {
         // 策略会话：spawn 后、start 返回前写 `provider_start`（握手=id 已预生成/传入
         // 完成）；append 失败终止子进程并返回错误（engine 沿既有 kill 链判失败）。
         let mut native_session_id = None;
-        if let Some(start) = policy_start {
-            let (sink, provider_version, digest, session_id) = start?;
+        if let Some((sink, provider_version, digest, session_id)) = policy_start {
             let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
                 provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
                 role: crate::cross_cutting::streaming_provider::UsageReportData::role_text(

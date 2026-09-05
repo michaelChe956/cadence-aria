@@ -166,6 +166,28 @@ impl std::error::Error for VersionProbeError {}
 pub type ProviderVersionSupplier =
     std::sync::Arc<dyn Fn() -> Result<String, VersionProbeError> + Send + Sync>;
 
+/// CLI `--version` 探测的进程内缓存（GC9：进程内缓存、有界超时）。按命令路径
+/// 缓存成功结果；失败不缓存（下次启动重试）。supplier seam（测试）优先于缓存。
+pub(crate) async fn cached_cli_version(
+    command: &std::path::Path,
+    probe: impl std::future::Future<Output = Result<String, VersionProbeError>>,
+) -> Result<String, VersionProbeError> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(guard) = cache.lock()
+        && let Some(version) = guard.get(command)
+    {
+        return Ok(version.clone());
+    }
+    let version = probe.await?;
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(command.to_path_buf(), version.clone());
+    }
+    Ok(version)
+}
+
 /// 双向角色×策略守卫：Orchestrator/WorkItemSplitter/Reviewer 必须携带
 /// `DenyFileWriteBuiltins`；Executor/Handoff 必须不携带策略。非法组合在
 /// provider 创建子进程之前拒绝（三 adapter `start` 首步调用）。

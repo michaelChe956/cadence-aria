@@ -20,6 +20,7 @@ use super::parse_codex_usage;
 use super::session::codex_launch_params;
 
 mod approval_policy;
+mod version_probe;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 

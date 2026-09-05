@@ -143,6 +143,25 @@ async fn pi_policy_start_pregenerates_session_id_and_writes_provider_start() {
 #[tokio::test]
 async fn pi_policy_start_reuses_resume_session_id_as_native_id() {
     let sink = RecordingToolPolicyAuditSink::new();
+    // Task 3.3：resume 前置冻结三元组比对——预置一致记录使决策为 Resume。
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::deny_file_write_builtins(),
+    )
+    .expect("canonical policy");
+    sink.with_stored_provider_start(
+        crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+            provider: "pi".to_string(),
+            role: "author".to_string(),
+            tool_policy_digest: canonical.digest,
+            argv: Vec::new(),
+            sandbox: None,
+            approval_policy: None,
+            provider_version: "pi 0.83.0-policy-fixture".to_string(),
+            dialect: PI_POLICY_DIALECT.to_string(),
+            native_session_id: "pi-session-resume-policy".to_string(),
+        },
+    );
     let provider =
         PiProvider::new(plain_policy_pi_fixture()).with_version_supplier(policy_version_supplier());
     let input = policy_pi_input(
@@ -181,8 +200,12 @@ async fn pi_policy_start_without_sink_or_version_fails_closed() {
         error.details
     );
 
-    // 缺 version supplier（3.2 无默认探测）：fail-closed。
-    let provider = PiProvider::new(plain_policy_pi_fixture());
+    // 版本不可得（注入失败 supplier，模拟探测 Unavailable）：fail-closed
+    //（Task 3.3 默认路径为真实 CLI 探测+缓存，此处验证错误传播）。
+    let provider =
+        PiProvider::new(plain_policy_pi_fixture()).with_version_supplier(std::sync::Arc::new(
+            || Err(crate::cross_cutting::streaming_provider::VersionProbeError::Unavailable),
+        ));
     let Err(error) = provider
         .start(
             policy_pi_input(None, Some(RecordingToolPolicyAuditSink::new().bound())),
@@ -193,10 +216,101 @@ async fn pi_policy_start_without_sink_or_version_fails_closed() {
         panic!("policy session without version must fail closed");
     };
     assert!(
-        error.details.contains("version is unavailable"),
+        error.details.contains("provider version unavailable"),
         "unexpected error: {}",
         error.details
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_policy_resume_compares_frozen_triple_and_supersedes_on_drift() {
+    // Task 3.3：匹配存档 → 保留 resume id；digest drift → 追加 superseded 终止
+    // 审计并以预生成新 id 新建会话。
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::deny_file_write_builtins(),
+    )
+    .expect("canonical policy");
+    let base_record =
+        |digest: String| crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+            provider: "pi".to_string(),
+            role: "author".to_string(),
+            tool_policy_digest: digest,
+            argv: Vec::new(),
+            sandbox: None,
+            approval_policy: None,
+            provider_version: "pi 0.83.0-policy-fixture".to_string(),
+            dialect: PI_POLICY_DIALECT.to_string(),
+            native_session_id: "pi-session-resume-policy".to_string(),
+        };
+
+    // 匹配：resume id 保留为 native id，无 superseded 审计。
+    let sink = RecordingToolPolicyAuditSink::new();
+    sink.with_stored_provider_start(base_record(canonical.digest.clone()));
+    let provider =
+        PiProvider::new(plain_policy_pi_fixture()).with_version_supplier(policy_version_supplier());
+    let session = provider
+        .start(
+            policy_pi_input(
+                Some("pi-session-resume-policy".to_string()),
+                Some(sink.clone().bound()),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("matching resume must be preserved");
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("pi-session-resume-policy")
+    );
+    assert!(
+        !sink
+            .events()
+            .iter()
+            .any(|event| event.event_type() == "session_terminated")
+    );
+
+    // drift：digest 不一致 → superseded + 新 id。
+    let sink = RecordingToolPolicyAuditSink::new();
+    sink.with_stored_provider_start(base_record("sha256:drifted".to_string()));
+    let provider =
+        PiProvider::new(plain_policy_pi_fixture()).with_version_supplier(policy_version_supplier());
+    let session = provider
+        .start(
+            policy_pi_input(
+                Some("pi-session-resume-policy".to_string()),
+                Some(sink.clone().bound()),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("drifted resume must start a fresh session");
+    let native_id = session
+        .native_session_id
+        .expect("fresh session carries a pre-generated id");
+    assert_ne!(native_id, "pi-session-resume-policy");
+    let events = sink.events();
+    let superseded_index = events
+        .iter()
+        .position(|event| event.event_type() == "session_terminated")
+        .expect("drifted resume must be marked superseded");
+    assert!(
+        serde_json::to_string(&events[superseded_index])
+            .unwrap()
+            .contains("superseded_policy_drift")
+    );
+    let start_index = events
+        .iter()
+        .position(|event| event.event_type() == "provider_start")
+        .expect("fresh provider_start");
+    assert!(superseded_index < start_index);
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        &events[start_index]
+    else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.native_session_id, native_id);
 }
 
 #[cfg(unix)]

@@ -19,7 +19,9 @@ use crate::cross_cutting::streaming_provider::{
     ProviderVersionSupplier, RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
     UsageReportData, canonical_tool_policy, validate_tool_policy_for_role,
 };
-use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
+use crate::cross_cutting::tool_policy_audit::{
+    DurableToolPolicyEvent, ProviderStartAudit, ToolPolicyAuditSink,
+};
 
 mod ask_user_question;
 mod stream;
@@ -43,6 +45,46 @@ pub fn deny_file_write_builtins_tokens() -> Vec<String> {
         "--disallowedTools".to_string(),
         "Edit,Write,NotebookEdit".to_string(),
     ]
+}
+
+/// claude CLI `--version` 有界探测超时（GC9）。
+pub const CLAUDE_VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// claude CLI `--version` 有界探测（Task 3.3）：成功非空返回精确字符串；
+/// 空输出/命令失败 → `Unavailable`；超时 → `Timeout`。
+pub async fn probe_claude_version(
+    command: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<String, crate::cross_cutting::streaming_provider::VersionProbeError> {
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandRequest, TokioBoundedCommandRunner,
+    };
+    use crate::cross_cutting::streaming_provider::VersionProbeError;
+    use std::collections::BTreeMap;
+    use tokio_util::sync::CancellationToken;
+
+    let request = BoundedCommandRequest {
+        executable: command.to_string_lossy().into_owned(),
+        argv: vec!["--version".to_string()],
+        working_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        timeout,
+        cancellation: CancellationToken::new(),
+        environment: BTreeMap::new(),
+        stdout_limit: 64 * 1024,
+        stderr_limit: 64 * 1024,
+    };
+    match TokioBoundedCommandRunner.run_inherited(request).await {
+        Ok(result) if result.timed_out => Err(VersionProbeError::Timeout),
+        Ok(result) if result.exit_code == Some(0) => {
+            let version = result.stdout.trim();
+            if version.is_empty() {
+                Err(VersionProbeError::Unavailable)
+            } else {
+                Ok(version.to_string())
+            }
+        }
+        Ok(_) | Err(_) => Err(VersionProbeError::Unavailable),
+    }
 }
 #[derive(Debug, Clone)]
 struct ClaudePermissionRequest {
@@ -402,7 +444,7 @@ impl ClaudeCodeProvider {
 impl StreamingProviderAdapter for ClaudeCodeProvider {
     async fn start(
         &self,
-        input: StreamingProviderInput,
+        mut input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
@@ -411,6 +453,101 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
             },
         )?;
+        // 策略上下文（Task 3.2/3.3，spawn 前）：版本解析（supplier seam 优先，默认
+        // 真实 `--version` 探测+进程内缓存，不可得 fail-closed）与 resume 冻结三元组
+        // 比对（记录缺失或 digest/version/dialect 任一不一致 → 追加 superseded 终止
+        // 审计并新建会话）。
+        let mut policy_context: Option<(
+            std::sync::Arc<dyn ToolPolicyAuditSink>,
+            String,
+            String,
+            String,
+        )> = None;
+        if let Some(policy) = input.tool_policy.as_ref() {
+            let sink = input.audit_sink.clone().ok_or_else(|| {
+                ProviderAdapterError::parse_error(
+                    "claude policy session: audit sink is required for policy sessions",
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let provider_version = match self.version_supplier.clone() {
+                Some(supplier) => supplier().map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("claude policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?,
+                None => crate::cross_cutting::streaming_provider::cached_cli_version(
+                    &self.command,
+                    probe_claude_version(&self.command, CLAUDE_VERSION_PROBE_TIMEOUT),
+                )
+                .await
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("claude policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?,
+            };
+            let canonical =
+                canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy).map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("claude policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+            let resume_id = input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+            if let Some(resume_id) = resume_id.as_ref() {
+                let stored = sink.find_provider_start(resume_id).map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("claude policy session: resume lookup failed: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+                let current = ProviderStartAudit {
+                    tool_policy_digest: canonical.digest.clone(),
+                    provider_version: provider_version.clone(),
+                    dialect: CLAUDE_POLICY_DIALECT.to_string(),
+                    ..ProviderStartAudit::default()
+                };
+                if matches!(
+                    crate::cross_cutting::tool_policy_audit::resume_with_audit_record(
+                        stored, &current
+                    ),
+                    crate::cross_cutting::tool_policy_audit::ResumeDecision::RejectSupersedeAndStartNew
+                ) {
+                    sink.append_bound(
+                        crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::SessionTerminated(
+                            crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
+                                reason_code: "superseded_policy_drift".to_string(),
+                            },
+                        ),
+                    )
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!(
+                                "claude policy session: superseded audit append failed: {error}"
+                            ),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                    input.resume_provider_session_id = None;
+                }
+            }
+            let role_text = UsageReportData::role_text(&input.role).to_string();
+            policy_context = Some((sink, provider_version, canonical.digest, role_text));
+        }
         let args = self.build_args(
             input.resume_provider_session_id.as_deref(),
             input.tool_policy.as_ref(),
@@ -435,37 +572,6 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let commands = bridge.command_sender();
         let structured_output_contract = input.structured_output_contract.clone();
 
-        // 策略会话（Task 3.2）：fresh 等待首个 `system/init` 事件有界超时取原生
-        // session id（resume 已知则直接以 resume id 为 native id）；握手成功后、
-        // start 返回前写 `provider_start`。握手/写失败终止子进程并 fail-closed。
-        let policy_handshake = if let Some(policy) = input.tool_policy.as_ref() {
-            let sink = input.audit_sink.clone().ok_or_else(|| {
-                ProviderAdapterError::parse_error(
-                    "claude policy session: audit sink is required for policy sessions",
-                    String::new(),
-                    String::new(),
-                )
-            })?;
-            let supplier = self.version_supplier.clone().ok_or_else(|| {
-                ProviderAdapterError::parse_error(
-                    "claude policy session: provider version is unavailable (no supplier)",
-                    String::new(),
-                    String::new(),
-                )
-            })?;
-            let canonical =
-                canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy).map_err(|error| {
-                    ProviderAdapterError::parse_error(
-                        format!("claude policy session: {error}"),
-                        String::new(),
-                        String::new(),
-                    )
-                })?;
-            let role_text = UsageReportData::role_text(&input.role).to_string();
-            Some((sink, supplier, canonical.digest, role_text))
-        } else {
-            None
-        };
         let resume_native_id = if input.tool_policy.is_some() {
             input
                 .resume_provider_session_id
@@ -476,13 +582,13 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         } else {
             None
         };
-        let (handshake_tx, handshake_rx) =
-            if policy_handshake.is_some() && resume_native_id.is_none() {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                (Some(tx), Some(rx))
-            } else {
-                (None, None)
-            };
+        let (handshake_tx, handshake_rx) = if policy_context.is_some() && resume_native_id.is_none()
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let handshake_tx = handshake_tx;
 
         let _ = event_tx
@@ -672,18 +778,11 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             }
         });
 
-        // 策略会话：等待有界握手结果（fresh=init session id；resume 已知=resume id），
-        // 成功后、start 返回前写 `provider_start`；握手/写失败沿 cancel 触发任务内
-        // kill 链终止子进程，并返回错误。
+        // 策略会话（Task 3.2）：等待有界握手结果（fresh=init session id；resume 已知
+        // =resume id），成功后、start 返回前写 `provider_start`；握手/写失败沿 cancel
+        // 触发任务内 kill 链终止子进程，并返回错误。
         let mut native_session_id = None;
-        if let Some((sink, supplier, tool_policy_digest, role_text)) = policy_handshake {
-            let provider_version = supplier().map_err(|error| {
-                ProviderAdapterError::parse_error(
-                    format!("claude policy session: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?;
+        if let Some((sink, provider_version, tool_policy_digest, role_text)) = policy_context {
             let native_id = match resume_native_id.clone() {
                 Some(id) => id,
                 None => {

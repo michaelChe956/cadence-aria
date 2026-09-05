@@ -22,6 +22,7 @@ mod permissions;
 mod policy_session;
 mod process;
 mod streaming;
+mod version_probe;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 

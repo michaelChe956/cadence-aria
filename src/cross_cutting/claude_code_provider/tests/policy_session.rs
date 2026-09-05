@@ -105,6 +105,25 @@ async fn claude_policy_start_waits_for_init_writes_provider_start_and_returns_na
 #[tokio::test]
 async fn claude_policy_resume_uses_known_native_id_without_waiting_for_init() {
     let sink = RecordingToolPolicyAuditSink::new();
+    // Task 3.3：resume 前置冻结三元组比对——预置一致记录使决策为 Resume。
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        crate::cross_cutting::claude_code_provider::TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::deny_file_write_builtins(),
+    )
+    .expect("canonical policy");
+    sink.with_stored_provider_start(
+        crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+            provider: "claude-code".to_string(),
+            role: "reviewer".to_string(),
+            tool_policy_digest: canonical.digest,
+            argv: Vec::new(),
+            sandbox: None,
+            approval_policy: None,
+            provider_version: "claude 1.0.99-policy-fixture".to_string(),
+            dialect: "claude-stream-json".to_string(),
+            native_session_id: "claude-session-resume-policy".to_string(),
+        },
+    );
     let provider = ClaudeCodeProvider::new(init_then_result_fixture())
         .with_version_supplier(policy_version_supplier());
     let mut session = provider
@@ -152,7 +171,13 @@ async fn claude_policy_start_without_sink_or_version_fails_closed() {
         error.details
     );
 
-    let provider = ClaudeCodeProvider::new(init_then_result_fixture());
+    // 版本不可得（注入失败 supplier，模拟探测 Unavailable）：fail-closed
+    //（Task 3.3 默认路径为真实 CLI 探测+缓存，此处验证错误传播）。
+    let provider = ClaudeCodeProvider::new(init_then_result_fixture()).with_version_supplier(
+        std::sync::Arc::new(|| {
+            Err(crate::cross_cutting::streaming_provider::VersionProbeError::Unavailable)
+        }),
+    );
     let Err(error) = provider
         .start(
             policy_claude_input(None, Some(RecordingToolPolicyAuditSink::new().bound())),
@@ -163,7 +188,7 @@ async fn claude_policy_start_without_sink_or_version_fails_closed() {
         panic!("policy session without version must fail closed");
     };
     assert!(
-        error.details.contains("version is unavailable"),
+        error.details.contains("provider version unavailable"),
         "unexpected error: {}",
         error.details
     );

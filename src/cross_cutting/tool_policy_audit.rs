@@ -112,6 +112,12 @@ impl ProviderStartAudit {
         self
     }
 
+    /// native session id 变体（审计 fixture / resume 检索测试用）。
+    pub fn with_native_session_id(mut self, native_session_id: impl Into<String>) -> Self {
+        self.native_session_id = native_session_id.into();
+        self
+    }
+
     /// resume 冻结三元组（digest, version, dialect）。
     pub fn resume_fingerprint(&self) -> (&str, &str, &str) {
         (
@@ -198,6 +204,48 @@ impl ToolPolicyAuditLine {
     /// 行的事件类型文本。
     pub fn event_type(&self) -> &'static str {
         self.event.event_type()
+    }
+}
+
+/// resume 决策（GC9 冻结）：spawn 前比对 (tool-policy digest, version, dialect)
+/// 三元组；任一不一致或记录缺失 → 拒绝 resume、标记 superseded、新建会话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeDecision {
+    Resume,
+    RejectSupersedeAndStartNew,
+}
+
+/// 审计 fixture：以冻结三元组构造 provider_start 记录（Task 3.3 resume 测试）。
+pub fn provider_start_record(
+    tool_policy_digest: &str,
+    provider_version: &str,
+    dialect: &str,
+) -> ProviderStartAudit {
+    ProviderStartAudit {
+        provider: "codex".to_string(),
+        role: "orchestrator".to_string(),
+        tool_policy_digest: tool_policy_digest.to_string(),
+        argv: Vec::new(),
+        sandbox: Some("read-only".to_string()),
+        approval_policy: Some("on-request".to_string()),
+        provider_version: provider_version.to_string(),
+        dialect: dialect.to_string(),
+        native_session_id: "thread-1".to_string(),
+    }
+}
+
+/// resume 冻结三元组精确比较：stored 缺失或任一不一致 → 拒绝并新建会话。
+/// 注意比较的是 `tool_policy_canonical_digest`，与 gateway aggregate policy digest
+/// 不混用（各自独立计算）。
+pub fn resume_with_audit_record(
+    stored: Option<ProviderStartAudit>,
+    current: &ProviderStartAudit,
+) -> ResumeDecision {
+    match stored {
+        Some(stored) if stored.resume_fingerprint() == current.resume_fingerprint() => {
+            ResumeDecision::Resume
+        }
+        _ => ResumeDecision::RejectSupersedeAndStartNew,
     }
 }
 
@@ -319,10 +367,12 @@ pub(crate) mod test_support {
     use super::*;
     use std::sync::Mutex;
 
-    /// 记录型 sink：按序记录 append_bound 调用；可注入指定次数后的失败。
+    /// 记录型 sink：按序记录 append_bound 调用；可注入指定次数后的失败；
+    /// 可预置 provider_start 审计记录供 resume 检索（Task 3.3）。
     pub struct RecordingToolPolicyAuditSink {
         pub appends: Mutex<Vec<DurableToolPolicyEvent>>,
         pub fail_after: Option<usize>,
+        stored_provider_starts: Mutex<Vec<ProviderStartAudit>>,
     }
 
     impl RecordingToolPolicyAuditSink {
@@ -330,6 +380,7 @@ pub(crate) mod test_support {
             Arc::new(Self {
                 appends: Mutex::new(Vec::new()),
                 fail_after: None,
+                stored_provider_starts: Mutex::new(Vec::new()),
             })
         }
 
@@ -337,7 +388,16 @@ pub(crate) mod test_support {
             Arc::new(Self {
                 appends: Mutex::new(Vec::new()),
                 fail_after: Some(count),
+                stored_provider_starts: Mutex::new(Vec::new()),
             })
+        }
+
+        /// 预置一条 provider_start 审计记录（resume 检索输入）。
+        pub fn with_stored_provider_start(self: &Arc<Self>, record: ProviderStartAudit) {
+            self.stored_provider_starts
+                .lock()
+                .expect("sink lock")
+                .push(record);
         }
 
         pub fn events(&self) -> Vec<DurableToolPolicyEvent> {
@@ -354,6 +414,7 @@ pub(crate) mod test_support {
             Self {
                 appends: Mutex::new(Vec::new()),
                 fail_after: None,
+                stored_provider_starts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -379,6 +440,19 @@ pub(crate) mod test_support {
             }
             appends.push(event);
             Ok(())
+        }
+
+        fn find_provider_start_by_session(
+            &self,
+            _workspace_session_id: &str,
+            native_provider_session_id: &str,
+        ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+            let stored = self.stored_provider_starts.lock().expect("sink lock");
+            Ok(stored
+                .iter()
+                .rev()
+                .find(|record| record.native_session_id == native_provider_session_id)
+                .cloned())
         }
     }
 }

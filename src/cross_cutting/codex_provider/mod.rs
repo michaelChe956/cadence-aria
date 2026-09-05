@@ -68,6 +68,46 @@ impl std::fmt::Debug for CodexProvider {
     }
 }
 
+/// codex CLI `--version` 有界探测超时（GC9）。
+pub const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// codex CLI `--version` 有界探测（Task 3.3）：成功非空返回精确字符串；
+/// 空输出/命令失败 → `Unavailable`；超时 → `Timeout`。
+pub async fn probe_codex_version(
+    command: &std::path::Path,
+    timeout: Duration,
+) -> Result<String, crate::cross_cutting::streaming_provider::VersionProbeError> {
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandRequest, TokioBoundedCommandRunner,
+    };
+    use crate::cross_cutting::streaming_provider::VersionProbeError;
+    use std::collections::BTreeMap;
+    use tokio_util::sync::CancellationToken;
+
+    let request = BoundedCommandRequest {
+        executable: command.to_string_lossy().into_owned(),
+        argv: vec!["--version".to_string()],
+        working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        timeout,
+        cancellation: CancellationToken::new(),
+        environment: BTreeMap::new(),
+        stdout_limit: 64 * 1024,
+        stderr_limit: 64 * 1024,
+    };
+    match TokioBoundedCommandRunner.run_inherited(request).await {
+        Ok(result) if result.timed_out => Err(VersionProbeError::Timeout),
+        Ok(result) if result.exit_code == Some(0) => {
+            let version = result.stdout.trim();
+            if version.is_empty() {
+                Err(VersionProbeError::Unavailable)
+            } else {
+                Ok(version.to_string())
+            }
+        }
+        Ok(_) | Err(_) => Err(VersionProbeError::Unavailable),
+    }
+}
+
 impl CodexProvider {
     pub fn new(command: PathBuf) -> Self {
         Self {
@@ -95,7 +135,7 @@ impl CodexProvider {
 impl StreamingProviderAdapter for CodexProvider {
     async fn start(
         &self,
-        input: StreamingProviderInput,
+        mut input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝
@@ -106,6 +146,99 @@ impl StreamingProviderAdapter for CodexProvider {
                 ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
             },
         )?;
+        // 策略上下文（Task 3.2/3.3，spawn 前）：版本解析（supplier seam 优先，默认
+        // 真实 `--version` 探测+进程内缓存，不可得 fail-closed）与 resume 冻结三元组
+        // 比对（记录缺失或 digest/version/dialect 任一不一致 → 追加 superseded 终止
+        // 审计并新建会话，丢弃 resume id）。
+        let mut policy_context: Option<(
+            std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+            String,
+            String,
+        )> = None;
+        if let Some(policy) = input.tool_policy.as_ref() {
+            let sink = input.audit_sink.clone().ok_or_else(|| {
+                ProviderAdapterError::parse_error(
+                    "codex policy session: audit sink is required for policy sessions",
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let provider_version = match self.version_supplier.clone() {
+                Some(supplier) => supplier().map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("codex policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?,
+                None => crate::cross_cutting::streaming_provider::cached_cli_version(
+                    &self.command,
+                    probe_codex_version(&self.command, CODEX_VERSION_PROBE_TIMEOUT),
+                )
+                .await
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("codex policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?,
+            };
+            let canonical = canonical_tool_policy(session::TOOL_POLICY_PROVIDER_NAME, policy)
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("codex policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+            let resume_id = input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+            if let Some(resume_id) = resume_id.as_ref() {
+                let stored = sink.find_provider_start(resume_id).map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("codex policy session: resume lookup failed: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+                let current = ProviderStartAudit {
+                    tool_policy_digest: canonical.digest.clone(),
+                    provider_version: provider_version.clone(),
+                    dialect: session::CODEX_POLICY_DIALECT.to_string(),
+                    ..ProviderStartAudit::default()
+                };
+                if matches!(
+                    crate::cross_cutting::tool_policy_audit::resume_with_audit_record(
+                        stored, &current
+                    ),
+                    crate::cross_cutting::tool_policy_audit::ResumeDecision::RejectSupersedeAndStartNew
+                ) {
+                    sink.append_bound(
+                        crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::SessionTerminated(
+                            crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
+                                reason_code: "superseded_policy_drift".to_string(),
+                            },
+                        ),
+                    )
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!(
+                                "codex policy session: superseded audit append failed: {error}"
+                            ),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?;
+                    input.resume_provider_session_id = None;
+                }
+            }
+            policy_context = Some((sink, provider_version, canonical.digest));
+        }
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
@@ -128,28 +261,9 @@ impl StreamingProviderAdapter for CodexProvider {
         // 从后台任务前置到 start 内有界完成；成功后、返回前写 `provider_start`，
         // 握手/写失败终止子进程并 fail-closed。非策略/Coder 路径零变化。
         let mut native_session_id = None;
-        let policy_handshake = if let Some(policy) = input.tool_policy.as_ref() {
-            let sink = input.audit_sink.clone().ok_or_else(|| {
-                ProviderAdapterError::parse_error(
-                    "codex policy session: audit sink is required for policy sessions",
-                    String::new(),
-                    String::new(),
-                )
-            })?;
-            let supplier = self.version_supplier.clone().ok_or_else(|| {
-                ProviderAdapterError::parse_error(
-                    "codex policy session: provider version is unavailable (no supplier)",
-                    String::new(),
-                    String::new(),
-                )
-            })?;
-            let provider_version = supplier().map_err(|error| {
-                ProviderAdapterError::parse_error(
-                    format!("codex policy session: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?;
+        let policy_handshake = if let Some((sink, provider_version, tool_policy_digest)) =
+            policy_context
+        {
             let handshake = match session::codex_session_handshake(&peer, &input).await {
                 Ok(handshake) => handshake,
                 Err(error) => {
@@ -167,19 +281,11 @@ impl StreamingProviderAdapter for CodexProvider {
                     String::new(),
                 ));
             };
-            let canonical = canonical_tool_policy(session::TOOL_POLICY_PROVIDER_NAME, policy)
-                .map_err(|error| {
-                    ProviderAdapterError::parse_error(
-                        format!("codex policy session: {error}"),
-                        String::new(),
-                        String::new(),
-                    )
-                })?;
             let launch_params = session::codex_launch_params(&input);
             let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
                 provider: session::TOOL_POLICY_PROVIDER_NAME.to_string(),
                 role: UsageReportData::role_text(&input.role).to_string(),
-                tool_policy_digest: canonical.digest,
+                tool_policy_digest,
                 argv: args.clone(),
                 sandbox: launch_params
                     .get("sandbox")

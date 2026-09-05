@@ -24,6 +24,7 @@ use super::*;
 
 mod empty_output;
 mod policy_session;
+mod version_probe;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 struct FixtureEnvelope {

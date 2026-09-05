@@ -415,11 +415,14 @@ async fn codex_unknown_item_gets_decline_and_mixed_unknowns_count_toward_storm()
 async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
     // I1：策略 input 的 thread/resume（与 start 同源）必须在真实 wire 上携带
     // sandbox=read-only + approvalPolicy=on-request（fixture 对缺失任一字面退出）。
+    // Task 3.3：resume 前置冻结三元组比对——预置与当前 digest/version/dialect 完全
+    // 一致的 provider_start 记录，决策为 Resume（保留 resume id）。
     let fixture =
         executable_fixture("tests/fixtures/provider/codex_app_server_policy_resume_fixture.sh");
     let provider = policy_codex_provider(fixture);
-    let mut input =
-        codex_streaming_input_with_policy(Some(RecordingToolPolicyAuditSink::new().bound()));
+    let sink = RecordingToolPolicyAuditSink::new();
+    sink.with_stored_provider_start(matching_resume_record("codex-thread-resume-policy"));
+    let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
     input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
     let mut session = provider
         .start(input, CancellationToken::new())
@@ -429,6 +432,88 @@ async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
     let completed = recv_completed(&mut session.events).await;
 
     assert_eq!(completed, "policy resume done");
+    // 一致记录：不产生 superseded 终止审计。
+    assert!(
+        !sink
+            .events()
+            .iter()
+            .any(|event| event.event_type() == "session_terminated"),
+        "matching resume record must not be superseded"
+    );
+}
+
+/// 与当前策略会话完全一致的 provider_start 存档记录（Task 3.3 fixture）。
+fn matching_resume_record(
+    native_session_id: &str,
+) -> crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+    let policy = ProviderToolPolicy::deny_file_write_builtins();
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+        &policy,
+    )
+    .expect("canonical policy");
+    crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+        provider: "codex".to_string(),
+        role: "author".to_string(),
+        tool_policy_digest: canonical.digest,
+        argv: Vec::new(),
+        sandbox: Some("read-only".to_string()),
+        approval_policy: Some("on-request".to_string()),
+        provider_version: "codex 0.124.0-policy-fixture".to_string(),
+        dialect: "codex-app-server-rpc".to_string(),
+        native_session_id: native_session_id.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn codex_policy_resume_drift_marks_superseded_and_starts_fresh_thread() {
+    // Task 3.3：digest drift（或记录缺失）→ 拒绝 resume：追加
+    // session_terminated(superseded_policy_drift) 审计、丢弃 resume id 并新建会话
+    // （wire 上是 thread/start 而非 thread/resume）。
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    // 预置 digest 不一致的记录（sha256:drift ≠ 当前 canonical digest）。
+    sink.with_stored_provider_start(
+        matching_resume_record("codex-thread-resume-policy").with_digest("sha256:drift"),
+    );
+    let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // drift 决策：fresh thread/start（该 fixture 走 thread/start 路径）+ native id
+    // 来自新 thread。
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-policy")
+    );
+    let completed = recv_completed(&mut session.events).await;
+    assert_eq!(completed, "policy approvals done");
+
+    let events = sink.events();
+    let superseded = events
+        .iter()
+        .find(|event| event.event_type() == "session_terminated")
+        .expect("drifted resume must be marked superseded");
+    assert!(
+        serde_json::to_string(superseded)
+            .unwrap()
+            .contains("superseded_policy_drift")
+    );
+    // superseded 终止审计先于新会话的 provider_start。
+    let superseded_index = events
+        .iter()
+        .position(|event| event.event_type() == "session_terminated")
+        .unwrap();
+    let start_index = events
+        .iter()
+        .position(|event| event.event_type() == "provider_start")
+        .unwrap();
+    assert!(superseded_index < start_index);
 }
 
 #[tokio::test]
