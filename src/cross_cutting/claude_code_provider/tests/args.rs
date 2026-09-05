@@ -1,14 +1,44 @@
 use std::path::PathBuf;
 
-use crate::cross_cutting::streaming_provider::{ProviderPermissionMode, StreamingProviderAdapter};
+use crate::cross_cutting::streaming_provider::{
+    ProviderPermissionMode, ProviderToolPolicy, StreamingProviderAdapter,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 
 #[test]
+fn claude_policy_args_include_frozen_denylist_with_resume() {
+    let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+    let args = provider.build_args(Some("claude-session-7"), Some(&deny));
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["--disallowedTools", "Edit,Write,NotebookEdit"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["--resume", "claude-session-7"])
+    );
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.as_str() == "--disallowedTools")
+            .count(),
+        1
+    );
+    let fresh = provider.build_args(None, Some(&deny));
+    assert!(
+        fresh
+            .windows(2)
+            .any(|w| w == ["--disallowedTools", "Edit,Write,NotebookEdit"])
+    );
+    assert!(!fresh.contains(&"--resume".to_string()));
+}
+
+#[test]
 fn claude_args_include_resume_when_provider_session_is_available() {
     let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
-    let args = provider.build_args(Some("claude-session-123"));
+    let args = provider.build_args(Some("claude-session-123"), None);
 
     assert!(args.contains(&"--resume".to_string()));
     assert!(args.contains(&"claude-session-123".to_string()));
@@ -18,7 +48,7 @@ fn claude_args_include_resume_when_provider_session_is_available() {
 #[test]
 fn claude_args_do_not_include_resume_without_provider_session() {
     let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
-    let args = provider.build_args(None);
+    let args = provider.build_args(None, None);
 
     assert!(!args.contains(&"--resume".to_string()));
     assert!(!args.contains(&"--continue".to_string()));

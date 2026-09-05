@@ -91,7 +91,14 @@ impl ClaudeCodeProvider {
         Self { command }
     }
 
-    fn build_args(&self, resume_provider_session_id: Option<&str>) -> Vec<String> {
+    /// - Tool policy（REQ-ENV-09）：`Some(DenyFileWriteBuiltins)` 时追加冻结片段
+    /// `--disallowedTools Edit,Write,NotebookEdit`（名单大小写与成员冻结，fresh/resume
+    /// 均保留）；非策略 input（`None`）保持原 argv。
+    fn build_args(
+        &self,
+        resume_provider_session_id: Option<&str>,
+        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
+    ) -> Vec<String> {
         let mut args = vec![
             "-p".to_string(),
             "--verbose".to_string(),
@@ -107,6 +114,14 @@ impl ClaudeCodeProvider {
         {
             args.push("--resume".to_string());
             args.push(session_id.to_string());
+        }
+
+        if let Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+            intent:
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+        }) = tool_policy
+        {
+            args.extend(deny_file_write_builtins_tokens());
         }
 
         args.push("--permission-prompt-tool=stdio".to_string());
@@ -359,7 +374,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let args = self.build_args(input.resume_provider_session_id.as_deref());
+        let args = self.build_args(
+            input.resume_provider_session_id.as_deref(),
+            input.tool_policy.as_ref(),
+        );
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process = ProcessManager::spawn(
