@@ -39,6 +39,7 @@ fn fixture_command(name: &str) -> PathBuf {
 fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::KimiCode,
         role: AdapterRole::Orchestrator,
         prompt: "fixture prompt".to_string(),

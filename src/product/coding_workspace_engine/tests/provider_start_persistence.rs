@@ -89,6 +89,7 @@ impl StreamingProviderAdapter for ModernProviderStartPersistenceFailure {
         let (command_tx, _command_rx) = mpsc::channel(1);
         spawn_modern_output(event_tx, self.output.clone(), cancel, self.probe.clone());
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -143,6 +144,7 @@ impl StreamingProviderAdapter for CompletedInvocationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -171,6 +173,7 @@ impl StreamingProviderAdapter for PartialThenFailedInvocationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -196,6 +199,7 @@ impl StreamingProviderAdapter for ChoiceThenWaitInvocationProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -222,6 +226,7 @@ impl StreamingProviderAdapter for ChoiceThenTextInvocationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -876,4 +881,30 @@ async fn assert_provider_start_persistence_failure(
         !probe.completion_delivered.load(Ordering::SeqCst),
         "{mode} provider completion was consumed after ProviderStart persistence failed"
     );
+}
+
+// ---- Task 3.2（REQ-ENV-09/D7）：coding reviewer 策略会话的 durable sink 接线 ----
+
+#[tokio::test]
+async fn coding_policy_review_input_carries_run_bound_durable_audit_sink() {
+    let fixture = provider_start_persistence_fixture().await;
+    let provider = CapturingProjectionProvider::new(review_plan_defect_output());
+
+    let result = fixture
+        .engine
+        .execute_code_review(&fixture.attempt, &provider)
+        .await;
+
+    // CodeReviewer 是策略角色（D2 矩阵）：engine 必须在 provider 启动前绑定
+    // run-bound durable sink（LifecycleStore `tool-policy-run-audit/` 分区）。
+    let input = provider.input();
+    assert!(
+        input.tool_policy.is_some(),
+        "review input must carry the deny policy"
+    );
+    assert!(
+        input.audit_sink.is_some(),
+        "review policy input must carry the run-bound durable audit sink"
+    );
+    assert!(result.is_ok(), "review flow must not regress: {result:?}");
 }

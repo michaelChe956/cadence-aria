@@ -35,5 +35,6 @@ pub mod runtime_event_log;
 pub mod session_launch;
 pub mod streaming_provider;
 pub mod structured_output;
+pub mod tool_policy_audit;
 pub mod traceability;
 pub mod worktree;

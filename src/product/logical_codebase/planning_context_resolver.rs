@@ -119,6 +119,7 @@ impl ResolvedPlanningContext {
             tool_policy: Some(
                 crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
             ),
+            audit_sink: None,
             provider_type,
             role: crate::protocol::contracts::AdapterRole::Orchestrator,
             prompt,

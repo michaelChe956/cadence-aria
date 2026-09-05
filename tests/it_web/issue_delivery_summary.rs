@@ -634,6 +634,7 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

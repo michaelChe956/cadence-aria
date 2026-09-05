@@ -8,14 +8,30 @@ use crate::cross_cutting::codex_provider::session::{
     decide_for_policy, decide_unknown, unknown_storm_reason_after,
 };
 use crate::cross_cutting::streaming_provider::{
-    CodexProtocolWarningEvent, CodexSessionTerminatedEvent,
+    CodexProtocolWarningEvent, CodexSessionTerminatedEvent, ProviderVersionSupplier,
 };
+use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 
-fn codex_streaming_input_with_policy() -> StreamingProviderInput {
+/// Task 3.2：策略会话需要 durable sink + provider version supplier（fixture 注入，
+/// controller Ruling：3.2 version 用注入字符串，3.3 接线真实 CLI 探测）。
+fn policy_version_supplier() -> ProviderVersionSupplier {
+    std::sync::Arc::new(|| Ok("codex 0.124.0-policy-fixture".to_string()))
+}
+
+fn policy_codex_provider(fixture: std::path::PathBuf) -> CodexProvider {
+    CodexProvider::new(fixture).with_version_supplier(policy_version_supplier())
+}
+
+fn codex_streaming_input_with_policy(
+    audit_sink: Option<
+        std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+    >,
+) -> StreamingProviderInput {
     let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
     // 策略会话 fixture：守卫（Task 3.1）要求策略会话使用策略角色（Reviewer 侧）。
     input.role = AdapterRole::Orchestrator;
     input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
+    input.audit_sink = audit_sink;
     input
 }
 
@@ -25,7 +41,7 @@ fn codex_streaming_input_without_policy() -> StreamingProviderInput {
 
 #[test]
 fn codex_policy_start_and_resume_use_read_only_on_request() {
-    let policy_input = codex_streaming_input_with_policy();
+    let policy_input = codex_streaming_input_with_policy(None);
     let params = codex_launch_params(&policy_input);
     assert_eq!(params["sandbox"], "read-only");
     assert_eq!(params["approvalPolicy"], "on-request");
@@ -234,8 +250,9 @@ async fn codex_generic_elicitation_gets_wire_error_reply_and_storm_terminates_se
 async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
     let fixture =
         executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
-    let provider = CodexProvider::new(fixture);
-    let input = codex_streaming_input_with_policy();
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    let input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
     let mut session = provider
         .start(input, CancellationToken::new())
         .await
@@ -266,6 +283,37 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
                         ("mcp_tool_call", "accept"),
                     ],
                     "policy approval decisions must surface as ToolPolicyDecision events"
+                );
+                // Task 3.2 双路径：durable sink 先写 provider_start，再落盘三条
+                // approval_decision（append 失败会使 start/会话 fail-closed）。
+                let durable = sink.events();
+                assert_eq!(
+                    durable
+                        .iter()
+                        .position(|event| event.event_type() == "provider_start"),
+                    Some(0),
+                    "provider_start must be the first durable event"
+                );
+                let durable_decisions: Vec<(
+                    &String,
+                    &String,
+                )> = durable
+                    .iter()
+                    .filter_map(|event| match event {
+                        crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ApprovalDecision(decision) => {
+                            Some((&decision.category, &decision.decision))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    durable_decisions,
+                    vec![
+                        (&"file_change".to_string(), &"decline".to_string()),
+                        (&"command_execution".to_string(), &"decline".to_string()),
+                        (&"mcp_tool_call".to_string(), &"accept".to_string()),
+                    ],
+                    "durable approval decisions must mirror the wire order"
                 );
                 return;
             }
@@ -369,8 +417,9 @@ async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
     // sandbox=read-only + approvalPolicy=on-request（fixture 对缺失任一字面退出）。
     let fixture =
         executable_fixture("tests/fixtures/provider/codex_app_server_policy_resume_fixture.sh");
-    let provider = CodexProvider::new(fixture);
-    let mut input = codex_streaming_input_with_policy();
+    let provider = policy_codex_provider(fixture);
+    let mut input =
+        codex_streaming_input_with_policy(Some(RecordingToolPolicyAuditSink::new().bound()));
     input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
     let mut session = provider
         .start(input, CancellationToken::new())
@@ -429,6 +478,153 @@ async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
+        }
+    }
+}
+
+// ---- Task 3.2（REQ-ENV-09/D7）：策略会话 start 内有界握手 + provider_start ----
+
+#[tokio::test]
+async fn codex_policy_start_handshake_yields_native_thread_id_and_frozen_start_record() {
+    // 策略握手（initialize→initialized→thread/start）前置到 start 内完成：
+    // native_session_id 即 thread id；provider_start 记录冻结三联动原文与 dialect。
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    let mut session = provider
+        .start(
+            codex_streaming_input_with_policy(Some(sink.clone().bound())),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("codex policy session starts");
+
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-policy"),
+        "policy handshake must surface the native thread id before start returns"
+    );
+
+    let events = sink.events();
+    let start_record = events.first().expect("provider_start written at start");
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        start_record
+    else {
+        panic!("first durable event must be provider_start");
+    };
+    assert_eq!(record.provider, "codex");
+    assert_eq!(record.dialect, "codex-app-server-rpc");
+    assert_eq!(record.provider_version, "codex 0.124.0-policy-fixture");
+    assert_eq!(record.native_session_id, "codex-thread-policy");
+    assert_eq!(record.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
+    assert!(record.argv.contains(&"app-server".to_string()));
+    assert!(!record.tool_policy_digest.is_empty());
+
+    // 会话照常跑完（握手前置不破坏后台循环）。
+    let completed = recv_completed(&mut session.events).await;
+    assert_eq!(completed, "policy approvals done");
+}
+
+#[tokio::test]
+async fn codex_policy_start_without_sink_fails_closed_before_handshake_events() {
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+    let provider = policy_codex_provider(fixture);
+    let Err(error) = provider
+        .start(
+            codex_streaming_input_with_policy(None),
+            CancellationToken::new(),
+        )
+        .await
+    else {
+        panic!("policy session without sink must fail closed");
+    };
+    assert!(
+        error.details.contains("audit sink is required"),
+        "unexpected error: {}",
+        error.details
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_policy_start_append_failure_kills_child_and_fails_closed() {
+    // 注入 provider_start append 失败：adapter 必须在返回前终止子进程（kill 链）。
+    let temp = tempfile::tempdir().expect("tempdir");
+    let marker = temp.path().join("codex-policy.pid");
+    // 握手必须成功（initialize/thread/start 有应答），provider_start append 才会
+    // 触发注入的失败；此后进程挂起等待 kill 链终止。
+    let body = r#"#!/usr/bin/env bash
+echo $$ > __MARKER__
+while IFS= read -r line; do
+  if [[ "$line" == *'"method":"initialize"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-0}\",\"result\":{\"capabilities\":{}}}"
+  elif [[ "$line" == *'"method":"thread/start"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-1}\",\"result\":{\"thread\":{\"id\":\"thread-append-failure\"}}}"
+  fi
+done
+"#
+    .replace("__MARKER__", &marker.display().to_string());
+    let fixture = temp.path().join("codex-policy-append-failure.sh");
+    std::fs::write(&fixture, body).expect("write fixture");
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(&fixture).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fixture, permissions).expect("chmod fixture");
+
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::failing_after(0);
+    let Err(error) = provider
+        .start(
+            codex_streaming_input_with_policy(Some(sink.clone().bound())),
+            CancellationToken::new(),
+        )
+        .await
+    else {
+        panic!("provider_start append failure must fail the session");
+    };
+    assert!(
+        error.details.contains("provider_start audit append failed"),
+        "unexpected error: {}",
+        error.details
+    );
+
+    // kill 链：子进程在返回前被终止（marker 已写则等待退出；未写则登记前已死）。
+    let deadline = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let mut pid: Option<u32> = None;
+    while start.elapsed() < deadline {
+        if let Ok(content) = std::fs::read_to_string(&marker)
+            && let Ok(value) = content.trim().parse::<u32>()
+        {
+            pid = Some(value);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if let Some(pid) = pid {
+        let start = std::time::Instant::now();
+        loop {
+            let alive = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            assert!(
+                start.elapsed() < deadline,
+                "codex policy child (pid {pid}) must be terminated after append failure"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 }

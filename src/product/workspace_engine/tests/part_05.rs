@@ -30,6 +30,7 @@ impl StreamingProviderAdapter for RevisionResumeStallThenSuccessProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -66,6 +67,7 @@ impl StreamingProviderAdapter for RevisionInputRecordingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

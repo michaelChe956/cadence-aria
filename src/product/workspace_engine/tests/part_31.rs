@@ -628,6 +628,7 @@ impl StreamingProviderAdapter for CountingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -764,6 +765,7 @@ impl StreamingProviderAdapter for KimiIncompleteArtifactProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -1039,4 +1041,93 @@ fn author_family_streaming_inputs_pair_orchestrator_with_deny_file_write_policy(
             "{entry}: SC author 入口必带 DenyFileWriteBuiltins"
         );
     }
+}
+
+// ---- Task 3.2（REQ-ENV-09/D7）：author 策略会话的 durable sink 接线 ----
+
+/// 记录 start input 是否携带 run-bound durable sink 的探针 provider。
+struct AuditSinkProbeProvider {
+    saw_audit_sink: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    saw_policy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for AuditSinkProbeProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+    {
+        self.saw_policy.store(input.tool_policy.is_some(), Ordering::SeqCst);
+        self.saw_audit_sink
+            .store(input.audit_sink.is_some(), Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::ProviderEvent::Failed {
+                    message: "audit sink probe done".to_string(),
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
+async fn workspace_author_policy_run_receives_run_bound_durable_audit_sink() {
+    let root = tempfile::tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("create session");
+    let checkpoint_store = Arc::new(CheckpointStore::new(paths.issue_lifecycle_root("p1", "i1")));
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        tx,
+        WorkspaceSession::from_record(record),
+    );
+
+    let saw_audit_sink = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_policy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = AuditSinkProbeProvider {
+        saw_audit_sink: Arc::clone(&saw_audit_sink),
+        saw_policy: Arc::clone(&saw_policy),
+    };
+    engine
+        .handle_user_message(
+            "开始生成".to_string(),
+            Arc::new(probe),
+            empty_provider_commands(),
+        )
+        .await;
+
+    // author 是策略角色（D2 矩阵）：engine 必须为其绑定 run-bound durable sink。
+    assert!(
+        saw_policy.load(Ordering::SeqCst),
+        "author input must carry the deny policy"
+    );
+    assert!(
+        saw_audit_sink.load(Ordering::SeqCst),
+        "author policy input must carry the run-bound durable audit sink"
+    );
 }

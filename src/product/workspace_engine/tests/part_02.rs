@@ -529,6 +529,7 @@ async fn permission_timeout_marks_node_detail_and_returns_to_prepare_context() {
     engine
         .drive_provider_session(ProviderSessionDriveInput {
             session: Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),
@@ -790,6 +791,7 @@ async fn drive_author_completed(
     engine
         .drive_provider_session(ProviderSessionDriveInput {
             session: Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),

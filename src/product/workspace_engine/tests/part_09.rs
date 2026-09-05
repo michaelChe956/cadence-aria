@@ -28,6 +28,7 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
     let output = engine
         .drive_work_item_plan_provider_session_to_output(
             Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),
@@ -98,6 +99,7 @@ async fn drive_work_item_plan_provider_session_hides_structured_output_from_stre
     let output = engine
         .drive_work_item_plan_provider_session_to_output(
             Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),

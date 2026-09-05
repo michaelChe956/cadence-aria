@@ -137,6 +137,35 @@ fn adapter_role_text(role: &AdapterRole) -> &'static str {
     }
 }
 
+/// Provider 版本探测统一错误（GC9，Task 3.3 正式落地；3.2 期间作为注入 supplier
+/// 的错误语义先行）。策略会话遇任一错误直接 fail-closed，Coder/非策略路径零变化。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionProbeError {
+    /// 命令失败或输出为空：版本不可得。
+    Unavailable,
+    /// 有界超时内未取得版本。
+    Timeout,
+}
+
+impl std::fmt::Display for VersionProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VersionProbeError::Unavailable => {
+                write!(f, "provider version unavailable")
+            }
+            VersionProbeError::Timeout => write!(f, "provider version probe timed out"),
+        }
+    }
+}
+
+impl std::error::Error for VersionProbeError {}
+
+/// 策略会话 provider 版本 supplier（controller Ruling：3.2 以注入 supplier/fixture
+/// 字符串实现 `provider_start.version`；3.3 落地真实 CLI `--version` 探测+进程内
+/// 缓存后接线替换默认路径，测试 seam 保留）。
+pub type ProviderVersionSupplier =
+    std::sync::Arc<dyn Fn() -> Result<String, VersionProbeError> + Send + Sync>;
+
 /// 双向角色×策略守卫：Orchestrator/WorkItemSplitter/Reviewer 必须携带
 /// `DenyFileWriteBuiltins`；Executor/Handoff 必须不携带策略。非法组合在
 /// provider 创建子进程之前拒绝（三 adapter `start` 首步调用）。
@@ -332,7 +361,7 @@ pub fn translate_tool_policy(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamingProviderInput {
     pub provider_type: ProviderType,
     pub role: AdapterRole,
@@ -347,9 +376,42 @@ pub struct StreamingProviderInput {
     /// 的作者/评审链）携带 `DenyFileWriteBuiltins`；Executor/Coder、聚合初始化与
     /// 非策略路径必须传 `None`（kimi 零改动，不读此字段）。
     pub tool_policy: Option<ProviderToolPolicy>,
+    /// durable tool-policy 审计 sink（REQ-ENV-09 Task 3.2/D7）。策略会话由 engine
+    /// 按 provider run 绑定 `(workspace_session_id, role_run_seq)` 后注入；缺失时
+    /// 策略会话启动 fail-closed。非策略路径恒为 `None`。
+    pub audit_sink:
+        Option<std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>,
     pub structured_output_contract: Option<StructuredOutputContract>,
     pub env_vars: BTreeMap<String, String>,
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for StreamingProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingProviderInput")
+            .field("provider_type", &self.provider_type)
+            .field("role", &self.role)
+            .field("prompt", &self.prompt)
+            .field("working_dir", &self.working_dir)
+            .field("workspace_session_id", &self.workspace_session_id)
+            .field(
+                "resume_provider_session_id",
+                &self.resume_provider_session_id,
+            )
+            .field("permission_mode", &self.permission_mode)
+            .field("tool_policy", &self.tool_policy)
+            .field(
+                "audit_sink",
+                &self.audit_sink.as_ref().map(|_| "<tool-policy-audit-sink>"),
+            )
+            .field(
+                "structured_output_contract",
+                &self.structured_output_contract,
+            )
+            .field("env_vars", &self.env_vars)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl StreamingProviderInput {
@@ -367,6 +429,7 @@ impl StreamingProviderInput {
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
             tool_policy: None,
+            audit_sink: None,
             structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: 60,
@@ -656,6 +719,10 @@ pub enum ProviderCommand {
 pub struct ProviderSession {
     pub events: mpsc::Receiver<ProviderEvent>,
     pub commands: mpsc::Sender<ProviderCommand>,
+    /// 原生 provider session id（Task 3.2）：策略会话在 `start` 返回前完成有界
+    /// 握手后写入（codex=thread id；claude=init session id/已知 resume id；
+    /// pi=预生成 `--session-id`）。非策略/Coder/kimi 路径恒为 `None`（零变化）。
+    pub native_session_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -705,6 +772,7 @@ pub trait StreamingProviderAdapter: Send + Sync {
         };
         let provider_input = StreamingProviderInput {
             tool_policy,
+            audit_sink: None,
             provider_type: input.provider_type.clone(),
             role: input.role.clone(),
             prompt: input.prompt.clone(),

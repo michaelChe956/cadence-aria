@@ -799,6 +799,7 @@ mod tests {
             .start(
                 StreamingProviderInput {
                     tool_policy: None,
+                    audit_sink: None,
                     provider_type: ProviderType::Codex,
                     role: AdapterRole::Reviewer,
                     prompt: "Workspace 类型: Story Spec\nIssue: E2E\n[user]: 开始生成".to_string(),

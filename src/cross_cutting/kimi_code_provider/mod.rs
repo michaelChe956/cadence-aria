@@ -295,6 +295,7 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

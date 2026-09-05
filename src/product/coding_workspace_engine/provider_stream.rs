@@ -72,6 +72,55 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
+    /// 策略会话审计接线（Task 3.2）：policy present 时为 input 绑定 run-bound
+    /// durable sink 并分配新的 `role_run_seq`；gateway validated input 同步重建。
+    /// 每次 provider run 重新分配（重试 run 独立审计文件），幂等跳过非策略路径。
+    fn attach_tool_policy_audit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        mut input: StreamingProviderInput,
+        mut validated: Option<
+            crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        >,
+    ) -> Result<
+        (
+            StreamingProviderInput,
+            Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
+        ),
+        String,
+    > {
+        if input.tool_policy.is_none() {
+            return Ok((input, validated));
+        }
+        let workspace_session_id = input
+            .workspace_session_id
+            .clone()
+            .unwrap_or_else(|| format!("coding-{}", attempt.id));
+        let store = crate::product::lifecycle_store::LifecycleStore::new(self.store.paths());
+        let role_run_seq = store
+            .next_tool_policy_role_run_seq(&workspace_session_id)
+            .map_err(|error| error.to_string())?;
+        let sink = crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink::new(
+            std::sync::Arc::new(store),
+            workspace_session_id,
+            role_run_seq,
+        )
+        .into_sink();
+        input.audit_sink = Some(sink.clone());
+        if let Some(validated_input) = validated.take() {
+            let (mut inner, launch) = validated_input.into_parts();
+            if inner.audit_sink.is_none() {
+                inner.audit_sink = Some(sink.clone());
+            }
+            validated = Some(
+                crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+                    inner, launch,
+                ),
+            );
+        }
+        Ok((input, validated))
+    }
+
     pub(crate) async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
@@ -146,6 +195,21 @@ impl CodingWorkspaceEngine {
         }
         let active_legacy_input = legacy_input.clone();
         let active_input = input;
+        // Task 3.2（REQ-ENV-09/D7）：策略会话由 engine 构造 durable 审计 sink
+        // （LifecycleStore `tool-policy-run-audit/` 分区）并按 provider run 分配
+        // `role_run_seq`（分配随该 run 的 provider_start 首行落盘持久化）；三
+        // adapter 在 start 返回前完成有界握手并写 provider_start，append 失败沿
+        // 既有 kill 链终止会话、run 判失败。非策略路径零变化。
+        let (active_input, validated_input) =
+            match self.attach_tool_policy_audit(attempt, active_input, validated_input) {
+                Ok(attached) => attached,
+                Err(error) => {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                        "tool_policy_audit_sink_attach_failed: {error}"
+                    )));
+                }
+            };
+
         // Task 11:逻辑代码库真实 provider 启动经 gateway。仅当 `validated_input` 非空
         // 且引擎注入了 gateway 时,启动改为 `gateway.start_streaming`;传统/非逻辑
         // 路径保留直接 `provider.start`。`StreamingProviderInput` 从 `validated_input`
@@ -808,6 +872,11 @@ impl CodingWorkspaceEngine {
         partial_output_observer: Option<Arc<Mutex<String>>>,
     ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let cancel = self.cancellation.child_token();
+        // legacy fallback 仅对未实现 `start` 的 adapter（测试替身）生效；真实
+        // adapter 均实现 `start` 并走上方已接线 durable 审计的现代路径。默认
+        // bridge 按角色矩阵派生策略（GC13「接受双向守卫」），denylist argv 照常
+        // 注入；durable 审计由现代 start 路径承载，本路径保持既有
+        // role-run/execution_event 审计不变。
         let mut stream = tokio::select! {
             biased;
             result = provider.run_streaming(input, cancel.clone()) => result?,

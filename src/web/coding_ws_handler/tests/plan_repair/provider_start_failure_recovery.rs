@@ -135,6 +135,7 @@ impl StreamingProviderAdapter for RecoveryReviewerProvider {
             .expect("queue modern provider completion");
         let (command_tx, _command_rx) = mpsc::channel(2);
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

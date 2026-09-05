@@ -700,6 +700,7 @@ impl StreamingProviderAdapter for RecordingStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -891,6 +892,7 @@ impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

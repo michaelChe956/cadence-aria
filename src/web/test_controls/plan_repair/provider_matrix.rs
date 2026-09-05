@@ -160,6 +160,7 @@ impl StreamingProviderAdapter for MatrixStreamingProvider {
             let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

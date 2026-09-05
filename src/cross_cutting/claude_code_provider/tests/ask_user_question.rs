@@ -673,6 +673,7 @@ done
     let cancel = CancellationToken::new();
 
     let ProviderSession {
+        native_session_id: _,
         mut events,
         commands,
     } = provider

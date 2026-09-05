@@ -454,6 +454,7 @@ impl StreamingProviderAdapter for ImmediateOutputRecordingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -505,6 +506,7 @@ impl StreamingProviderAdapter for SessionRecordingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -713,6 +715,7 @@ async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifa
 
         let drive = engine.drive_provider_session(ProviderSessionDriveInput {
             session: Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),

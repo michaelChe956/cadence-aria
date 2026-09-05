@@ -236,6 +236,7 @@ fn started_provider_session() -> ProviderSession {
     let (_event_tx, event_rx) = mpsc::channel(8);
     let (command_tx, _command_rx) = mpsc::channel(8);
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -264,6 +265,7 @@ impl StreamingProviderAdapter for RebuildRecordingProvider {
             let _ = event_tx;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

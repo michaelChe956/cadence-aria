@@ -233,6 +233,7 @@ fn start_review_fixture_session(
     });
 
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -372,6 +373,7 @@ fn start_permission_fixture_session(
     });
 
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }

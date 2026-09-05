@@ -428,13 +428,18 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             let (_event_tx, events) = mpsc::channel(1);
             let (commands, _command_rx) = mpsc::channel(1);
-            Ok(ProviderSession { events, commands })
+            Ok(ProviderSession {
+                events,
+                commands,
+                native_session_id: None,
+            })
         }
     }
 
     fn streaming_input() -> StreamingProviderInput {
         StreamingProviderInput {
             tool_policy: None,
+            audit_sink: None,
             provider_type: ProviderType::Codex,
             role: AdapterRole::Executor,
             prompt: "probe".to_string(),

@@ -166,7 +166,11 @@ mod tests {
         {
             let (_event_tx, events) = tokio::sync::mpsc::channel(1);
             let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
-            Ok(ProviderSession { events, commands })
+            Ok(ProviderSession {
+                events,
+                commands,
+                native_session_id: None,
+            })
         }
     }
 

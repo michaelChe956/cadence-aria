@@ -132,6 +132,7 @@ impl StreamingProviderAdapter for TransportFailuresThenSuccessProvider {
             let _ = event_tx.send(event).await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -224,6 +225,7 @@ impl StreamingProviderAdapter for RetryBoundaryMutationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -248,6 +250,7 @@ impl StreamingProviderAdapter for PermissionTimeoutProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -270,6 +273,7 @@ impl StreamingProviderAdapter for CancelledProvider {
             std::future::pending::<()>().await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

@@ -259,6 +259,7 @@ fn override_coder_to_claude_code(store: &CodingAttemptStore, attempt: &CodingExe
 fn streaming_input(working_dir: PathBuf, provider_type: ProviderType) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type,
         role: AdapterRole::Executor,
         prompt: "probe".to_string(),
@@ -309,6 +310,7 @@ impl StreamingProviderAdapter for ReviewStreamingAdapter {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

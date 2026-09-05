@@ -28,6 +28,7 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -96,6 +97,7 @@ impl StreamingProviderAdapter for PiHangingStreamingProvider {
             abort_observed.notify_one();
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -161,6 +163,7 @@ impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -234,6 +237,7 @@ impl StreamingProviderAdapter for ChoiceThenCompletingStreamingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -315,6 +319,7 @@ impl StreamingProviderAdapter for SequencedChoiceCompletingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -364,6 +369,7 @@ impl StreamingProviderAdapter for ScriptedStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

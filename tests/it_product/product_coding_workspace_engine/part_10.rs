@@ -44,6 +44,7 @@ impl StreamingProviderAdapter for EventEmittingCodingProvider {
             .expect("send completed");
 
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -92,6 +93,7 @@ impl StreamingProviderAdapter for ControlEventCodingProvider {
             .expect("send completed");
 
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -138,6 +140,7 @@ impl StreamingProviderAdapter for PermissionAwaitingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -193,6 +196,7 @@ impl StreamingProviderAdapter for ChoiceAwaitingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -238,6 +242,7 @@ impl StreamingProviderAdapter for ChoiceThenPermissionProvider {
             .expect("send completed");
 
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -274,6 +279,7 @@ impl StreamingProviderAdapter for EventThenCompletedProvider {
             .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(self.output.clone(), None)))
             .expect("send completed");
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -339,6 +345,7 @@ impl StreamingProviderAdapter for ReviewControlEventProvider {
                 .to_string(), Some("review-session-0001".to_string()))))
             .expect("send completed");
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -362,6 +369,7 @@ impl StreamingProviderAdapter for ReviewPermissionTimeoutProvider {
             })
             .expect("send permission timeout");
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

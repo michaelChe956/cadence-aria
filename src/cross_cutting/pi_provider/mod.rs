@@ -23,8 +23,10 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    StreamingProviderAdapter, StreamingProviderInput, validate_tool_policy_for_role,
+    ProviderVersionSupplier, StreamingProviderAdapter, StreamingProviderInput,
+    canonical_tool_policy, validate_tool_policy_for_role,
 };
+use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 
 mod parse;
 mod session;
@@ -221,14 +223,51 @@ fn ensure_pi_version_compatible(version: &PiVersion) -> Result<(), ProviderAdapt
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+/// pi 的 adapter dialect 常量（GC9 冻结：`pi-rpc`）。resume 冻结三元组的方言位。
+pub const PI_POLICY_DIALECT: &str = "pi-rpc";
+
+fn tool_policy_session_error(message: impl std::fmt::Display) -> ProviderAdapterError {
+    ProviderAdapterError::parse_error(
+        format!("pi policy session: {message}"),
+        String::new(),
+        String::new(),
+    )
+}
+
+#[derive(Clone)]
 pub struct PiProvider {
     command: PathBuf,
+    /// 策略会话 provider 版本 supplier（测试 seam；3.3 接线真实 CLI 探测后保留）。
+    version_supplier: Option<ProviderVersionSupplier>,
+}
+
+impl std::fmt::Debug for PiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PiProvider")
+            .field("command", &self.command)
+            .field(
+                "version_supplier",
+                &self
+                    .version_supplier
+                    .as_ref()
+                    .map(|_| "<provider-version-supplier>"),
+            )
+            .finish()
+    }
 }
 
 impl PiProvider {
     pub fn new(command: PathBuf) -> Self {
-        Self { command }
+        Self {
+            command,
+            version_supplier: None,
+        }
+    }
+
+    /// 注入策略会话 provider 版本 supplier（fixture/测试 seam）。
+    pub fn with_version_supplier(mut self, supplier: ProviderVersionSupplier) -> Self {
+        self.version_supplier = Some(supplier);
+        self
     }
 
     /// Constructs Pi's Auto-only RPC command line.
@@ -282,8 +321,45 @@ impl StreamingProviderAdapter for PiProvider {
         let version = probe_pi_version(&self.command).await;
         ensure_pi_version_compatible(&version)?;
         let extension_path = ensure_ask_extension()?;
+        // 策略会话（Task 3.2）：pi 的有界握手是 id 预生成/传入（既有 `--session-id`
+        // 语义）；fresh 策略会话预生成 uuid 并经 `--session-id` 传入，使 native session
+        // id 在 spawn 前即可知。spawn 后、start 返回前写 `provider_start`；握手/写
+        // 失败终止子进程并 fail-closed。
+        let policy_start = input.tool_policy.as_ref().map(|policy| {
+            let sink = input.audit_sink.clone().ok_or_else(|| {
+                tool_policy_session_error("audit sink is required for policy sessions")
+            })?;
+            let supplier = self.version_supplier.clone().ok_or_else(|| {
+                tool_policy_session_error("provider version is unavailable (no supplier)")
+            })?;
+            let provider_version = supplier().map_err(tool_policy_session_error)?;
+            let canonical = canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
+                .map_err(|error| tool_policy_session_error(error.to_string()))?;
+            let native_session_id = input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            Ok::<_, ProviderAdapterError>((
+                sink,
+                provider_version,
+                canonical.digest,
+                native_session_id,
+            ))
+        });
+        let resume_session_id = match &policy_start {
+            Some(Ok((_, _, _, native_session_id))) => Some(native_session_id.clone()),
+            _ => input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string),
+        };
         let args = self.build_args(
-            input.resume_provider_session_id.as_deref(),
+            resume_session_id.as_deref(),
             &extension_path,
             input.tool_policy.as_ref(),
         );
@@ -323,6 +399,35 @@ impl StreamingProviderAdapter for PiProvider {
                 exit_code: None,
             }))
             .await;
+
+        // 策略会话：spawn 后、start 返回前写 `provider_start`（握手=id 已预生成/传入
+        // 完成）；append 失败终止子进程并返回错误（engine 沿既有 kill 链判失败）。
+        let mut native_session_id = None;
+        if let Some(start) = policy_start {
+            let (sink, provider_version, digest, session_id) = start?;
+            let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+                role: crate::cross_cutting::streaming_provider::UsageReportData::role_text(
+                    &input.role,
+                )
+                .to_string(),
+                tool_policy_digest: digest,
+                argv: args.clone(),
+                sandbox: None,
+                approval_policy: None,
+                provider_version,
+                dialect: PI_POLICY_DIALECT.to_string(),
+                native_session_id: session_id.clone(),
+            });
+            if let Err(error) = sink.append_bound(audit_event) {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(tool_policy_session_error(format!(
+                    "provider_start audit append failed: {error}"
+                )));
+            }
+            native_session_id = Some(session_id);
+        }
 
         tokio::spawn(async move {
             let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
@@ -364,6 +469,7 @@ impl StreamingProviderAdapter for PiProvider {
         });
 
         Ok(ProviderSession {
+            native_session_id,
             events: event_rx,
             commands: command_tx,
         })

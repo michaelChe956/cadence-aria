@@ -16,9 +16,10 @@ use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    RiskLevel, StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
-    validate_tool_policy_for_role,
+    ProviderVersionSupplier, RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
+    UsageReportData, canonical_tool_policy, validate_tool_policy_for_role,
 };
+use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 
 mod ask_user_question;
 mod stream;
@@ -28,6 +29,9 @@ mod tool;
 pub mod tests;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
+
+/// claude 的 adapter dialect 常量（GC9 冻结：`claude-stream-json`）。
+pub const CLAUDE_POLICY_DIALECT: &str = "claude-stream-json";
 
 /// claude 在 tool-policy canonical 序列中的 provider 名（CLI 名常量）。
 pub const TOOL_POLICY_PROVIDER_NAME: &str = "claude-code";
@@ -68,9 +72,26 @@ struct ToolResultBlock {
     is_error: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClaudeCodeProvider {
     command: PathBuf,
+    /// 策略会话 provider 版本 supplier（测试 seam；3.3 接线真实 CLI 探测后保留）。
+    version_supplier: Option<ProviderVersionSupplier>,
+}
+
+impl std::fmt::Debug for ClaudeCodeProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeCodeProvider")
+            .field("command", &self.command)
+            .field(
+                "version_supplier",
+                &self
+                    .version_supplier
+                    .as_ref()
+                    .map(|_| "<provider-version-supplier>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +110,16 @@ fn permission_mode_for_claude(mode: &ProviderPermissionMode) -> &'static str {
 
 impl ClaudeCodeProvider {
     pub fn new(command: PathBuf) -> Self {
-        Self { command }
+        Self {
+            command,
+            version_supplier: None,
+        }
+    }
+
+    /// 注入策略会话 provider 版本 supplier（fixture/测试 seam）。
+    pub fn with_version_supplier(mut self, supplier: ProviderVersionSupplier) -> Self {
+        self.version_supplier = Some(supplier);
+        self
     }
 
     /// - Tool policy（REQ-ENV-09）：`Some(DenyFileWriteBuiltins)` 时追加冻结片段
@@ -405,6 +435,56 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let commands = bridge.command_sender();
         let structured_output_contract = input.structured_output_contract.clone();
 
+        // 策略会话（Task 3.2）：fresh 等待首个 `system/init` 事件有界超时取原生
+        // session id（resume 已知则直接以 resume id 为 native id）；握手成功后、
+        // start 返回前写 `provider_start`。握手/写失败终止子进程并 fail-closed。
+        let policy_handshake = if let Some(policy) = input.tool_policy.as_ref() {
+            let sink = input.audit_sink.clone().ok_or_else(|| {
+                ProviderAdapterError::parse_error(
+                    "claude policy session: audit sink is required for policy sessions",
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let supplier = self.version_supplier.clone().ok_or_else(|| {
+                ProviderAdapterError::parse_error(
+                    "claude policy session: provider version is unavailable (no supplier)",
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let canonical =
+                canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy).map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("claude policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+            let role_text = UsageReportData::role_text(&input.role).to_string();
+            Some((sink, supplier, canonical.digest, role_text))
+        } else {
+            None
+        };
+        let resume_native_id = if input.tool_policy.is_some() {
+            input
+                .resume_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+        } else {
+            None
+        };
+        let (handshake_tx, handshake_rx) =
+            if policy_handshake.is_some() && resume_native_id.is_none() {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
+        let handshake_tx = handshake_tx;
+
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
             .await;
@@ -422,6 +502,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             }))
             .await;
 
+        let start_cancel = cancel.clone();
         tokio::spawn(async move {
             let stderr_output = Arc::new(Mutex::new(String::new()));
             let stderr_output_for_task = Arc::clone(&stderr_output);
@@ -485,8 +566,37 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 }))
                 .await;
 
+            // 策略会话有界握手：fresh 等待首个 `system/init` 事件，把原生 session id
+            // 经 oneshot 交回 start（start 负责写 provider_start）；失败同样交回并由
+            // 本任务终止子进程（kill 链）。续接 reader 的缓冲区原样交后续流读取。
+            let stdout_reader = if let Some(handshake_tx) = handshake_tx {
+                match stream::wait_for_claude_init(stdout, &cancel).await {
+                    Ok((reader, session_id)) => {
+                        let _ = handshake_tx.send(Ok(session_id));
+                        reader
+                    }
+                    Err(error) => {
+                        let _ = handshake_tx.send(Err(error.details.clone()));
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        let _ = event_tx
+                            .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                            .await;
+                        let _ = event_tx
+                            .send(ProviderEvent::Failed {
+                                message: error.details.clone(),
+                            })
+                            .await;
+                        let _ = stderr_task.await;
+                        return;
+                    }
+                }
+            } else {
+                tokio::io::BufReader::new(stdout)
+            };
+
             let result = stream::read_claude_stream(
-                stdout,
+                stdout_reader,
                 stdin,
                 bridge,
                 event_tx.clone(),
@@ -562,7 +672,76 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             }
         });
 
+        // 策略会话：等待有界握手结果（fresh=init session id；resume 已知=resume id），
+        // 成功后、start 返回前写 `provider_start`；握手/写失败沿 cancel 触发任务内
+        // kill 链终止子进程，并返回错误。
+        let mut native_session_id = None;
+        if let Some((sink, supplier, tool_policy_digest, role_text)) = policy_handshake {
+            let provider_version = supplier().map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("claude policy session: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let native_id = match resume_native_id.clone() {
+                Some(id) => id,
+                None => {
+                    let rx = handshake_rx.expect("fresh policy session has handshake channel");
+                    let bound = stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.saturating_mul(3);
+                    match tokio::time::timeout(bound, rx).await {
+                        Ok(Ok(Ok(session_id))) => session_id,
+                        Ok(Ok(Err(message))) => {
+                            start_cancel.cancel();
+                            return Err(ProviderAdapterError::parse_error(
+                                format!("claude policy session: handshake failed: {message}"),
+                                String::new(),
+                                String::new(),
+                            ));
+                        }
+                        Ok(Err(_)) => {
+                            start_cancel.cancel();
+                            return Err(ProviderAdapterError::parse_error(
+                                "claude policy session: handshake channel closed",
+                                String::new(),
+                                String::new(),
+                            ));
+                        }
+                        Err(_) => {
+                            start_cancel.cancel();
+                            return Err(ProviderAdapterError::timeout(
+                                String::new(),
+                                String::new(),
+                                stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.as_millis() as u64,
+                            ));
+                        }
+                    }
+                }
+            };
+            let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+                role: role_text,
+                tool_policy_digest,
+                argv: args.clone(),
+                sandbox: None,
+                approval_policy: None,
+                provider_version,
+                dialect: CLAUDE_POLICY_DIALECT.to_string(),
+                native_session_id: native_id.clone(),
+            });
+            if let Err(error) = sink.append_bound(audit_event) {
+                start_cancel.cancel();
+                return Err(ProviderAdapterError::parse_error(
+                    format!("claude policy session: provider_start audit append failed: {error}"),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            native_session_id = Some(native_id);
+        }
+
         Ok(ProviderSession {
+            native_session_id,
             events: event_rx,
             commands,
         })

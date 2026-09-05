@@ -123,6 +123,7 @@ fn iteration_input(
     );
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type,
         role: AdapterRole::Executor,
         prompt,
@@ -408,6 +409,7 @@ mod tests {
                         let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
                     });
                     Ok(ProviderSession {
+                        native_session_id: None,
                         events: event_rx,
                         commands: command_tx,
                     })

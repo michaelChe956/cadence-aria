@@ -80,6 +80,7 @@ impl StreamingProviderAdapter for CapturingProjectionProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

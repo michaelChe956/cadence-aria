@@ -7,6 +7,7 @@ pub mod paths;
 pub mod plan;
 pub mod review;
 pub mod spec;
+pub mod tool_policy_run_audit;
 pub mod utils;
 pub mod verification;
 pub mod work_item;

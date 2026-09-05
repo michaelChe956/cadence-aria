@@ -11,9 +11,11 @@ use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderSession, ProviderStatus, StreamingProviderAdapter,
-    StreamingProviderInput, validate_tool_policy_for_role,
+    ProviderExecutionEventStatus, ProviderSession, ProviderStatus, ProviderVersionSupplier,
+    StreamingProviderAdapter, StreamingProviderInput, UsageReportData, canonical_tool_policy,
+    validate_tool_policy_for_role,
 };
+use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
 
 mod parse;
 mod response;
@@ -44,14 +46,40 @@ pub(crate) const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 pub(crate) const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexProvider {
     command: PathBuf,
+    /// 策略会话 provider 版本 supplier（测试 seam；3.3 接线真实 CLI 探测后保留）。
+    version_supplier: Option<ProviderVersionSupplier>,
+}
+
+impl std::fmt::Debug for CodexProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexProvider")
+            .field("command", &self.command)
+            .field(
+                "version_supplier",
+                &self
+                    .version_supplier
+                    .as_ref()
+                    .map(|_| "<provider-version-supplier>"),
+            )
+            .finish()
+    }
 }
 
 impl CodexProvider {
     pub fn new(command: PathBuf) -> Self {
-        Self { command }
+        Self {
+            command,
+            version_supplier: None,
+        }
+    }
+
+    /// 注入策略会话 provider 版本 supplier（fixture/测试 seam）。
+    pub fn with_version_supplier(mut self, supplier: ProviderVersionSupplier) -> Self {
+        self.version_supplier = Some(supplier);
+        self
     }
 
     fn build_args(&self) -> Vec<String> {
@@ -96,6 +124,89 @@ impl StreamingProviderAdapter for CodexProvider {
             .with_outbound_id_namespace(OutboundIdNamespace::Aria);
         let stderr = process.stderr;
         let mut child = process.child;
+        // 策略会话（Task 3.2）：握手（initialize/initialized + thread/start|resume）
+        // 从后台任务前置到 start 内有界完成；成功后、返回前写 `provider_start`，
+        // 握手/写失败终止子进程并 fail-closed。非策略/Coder 路径零变化。
+        let mut native_session_id = None;
+        let policy_handshake = if let Some(policy) = input.tool_policy.as_ref() {
+            let sink = input.audit_sink.clone().ok_or_else(|| {
+                ProviderAdapterError::parse_error(
+                    "codex policy session: audit sink is required for policy sessions",
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let supplier = self.version_supplier.clone().ok_or_else(|| {
+                ProviderAdapterError::parse_error(
+                    "codex policy session: provider version is unavailable (no supplier)",
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let provider_version = supplier().map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("codex policy session: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            let handshake = match session::codex_session_handshake(&peer, &input).await {
+                Ok(handshake) => handshake,
+                Err(error) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(error);
+                }
+            };
+            let Some(thread_id) = handshake.thread_id.clone() else {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ProviderAdapterError::parse_error(
+                    "codex policy session: thread/start response missing thread id",
+                    String::new(),
+                    String::new(),
+                ));
+            };
+            let canonical = canonical_tool_policy(session::TOOL_POLICY_PROVIDER_NAME, policy)
+                .map_err(|error| {
+                    ProviderAdapterError::parse_error(
+                        format!("codex policy session: {error}"),
+                        String::new(),
+                        String::new(),
+                    )
+                })?;
+            let launch_params = session::codex_launch_params(&input);
+            let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+                provider: session::TOOL_POLICY_PROVIDER_NAME.to_string(),
+                role: UsageReportData::role_text(&input.role).to_string(),
+                tool_policy_digest: canonical.digest,
+                argv: args.clone(),
+                sandbox: launch_params
+                    .get("sandbox")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                approval_policy: launch_params
+                    .get("approvalPolicy")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                provider_version,
+                dialect: session::CODEX_POLICY_DIALECT.to_string(),
+                native_session_id: thread_id.clone(),
+            });
+            if let Err(error) = sink.append_bound(audit_event) {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ProviderAdapterError::parse_error(
+                    format!("codex policy session: provider_start audit append failed: {error}"),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            native_session_id = Some(thread_id);
+            Some(handshake)
+        } else {
+            None
+        };
         let (event_tx, event_rx) = mpsc::channel(32);
         let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
         let commands = bridge.command_sender();
@@ -130,9 +241,29 @@ impl StreamingProviderAdapter for CodexProvider {
                 }
             });
 
-            let result =
-                session::run_codex_session(peer, bridge, event_tx.clone(), input, cancel.clone())
-                    .await;
+            let result = match policy_handshake {
+                Some(handshake) => {
+                    session::run_codex_session_loop(
+                        peer,
+                        bridge,
+                        event_tx.clone(),
+                        input,
+                        cancel.clone(),
+                        handshake,
+                    )
+                    .await
+                }
+                None => {
+                    session::run_codex_session(
+                        peer,
+                        bridge,
+                        event_tx.clone(),
+                        input,
+                        cancel.clone(),
+                    )
+                    .await
+                }
+            };
             if result.is_err() {
                 let _ = child.start_kill();
             }
@@ -170,6 +301,7 @@ impl StreamingProviderAdapter for CodexProvider {
         });
 
         Ok(ProviderSession {
+            native_session_id,
             events: event_rx,
             commands,
         })

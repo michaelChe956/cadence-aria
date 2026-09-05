@@ -377,6 +377,7 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
         .start(
             StreamingProviderInput {
                 tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "请作为 reviewer 审核当前 Workspace 产物。".to_string(),
@@ -442,6 +443,7 @@ async fn review_fixture_raw_text_preserves_structured_output_failure() {
         .start(
             StreamingProviderInput {
                 tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "review raw completion".to_string(),
@@ -512,6 +514,7 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
         .start(
             StreamingProviderInput {
                 tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "code review".to_string(),
@@ -550,6 +553,7 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
         .start(
             StreamingProviderInput {
                 tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "code review".to_string(),
@@ -617,6 +621,7 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
         .start(
             StreamingProviderInput {
                 tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "review".to_string(),
@@ -642,6 +647,7 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
         .start(
             StreamingProviderInput {
                 tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "code review".to_string(),
@@ -728,6 +734,7 @@ async fn permission_fixture_fake_provider_emits_timeout_when_unanswered() {
 fn streaming_input(session_id: &str) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         prompt: "生成测试产物".to_string(),

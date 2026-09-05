@@ -51,6 +51,7 @@ impl StreamingProviderAdapter for ResumeStallThenFreshSuccessProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -75,6 +76,7 @@ impl StreamingProviderAdapter for AlwaysResumeStallProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

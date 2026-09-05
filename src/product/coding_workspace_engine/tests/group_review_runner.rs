@@ -76,6 +76,7 @@ impl StreamingProviderAdapter for ShardSuccessThenTransportFailureProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -113,6 +114,7 @@ impl StreamingProviderAdapter for ProtocolFailureGroupReviewProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -146,6 +148,7 @@ impl StreamingProviderAdapter for CancelledGroupReviewProvider {
             drop(event_tx);
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -185,6 +188,7 @@ impl StreamingProviderAdapter for GroupReviewRunnerProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

@@ -50,6 +50,7 @@ async fn provider_session_with_output(
             .await;
     });
     Ok(ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     })

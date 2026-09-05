@@ -388,6 +388,7 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -603,6 +604,7 @@ impl StreamingProviderAdapter for QueuedReviewProvider {
             .await
             .unwrap();
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

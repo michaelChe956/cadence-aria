@@ -761,6 +761,7 @@ impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -861,6 +862,7 @@ impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -935,6 +937,7 @@ impl StreamingProviderAdapter for RoleResumeRecordingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

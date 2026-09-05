@@ -125,6 +125,7 @@ impl WorkspaceEngine {
                     attempted: false,
                 }
             });
+        let input = self.attach_tool_policy_audit(input);
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
             session,
@@ -136,6 +137,61 @@ impl WorkspaceEngine {
             revision_resume_fallback: None,
         })
         .await;
+    }
+
+    /// 策略会话审计接线（Task 3.2，REQ-ENV-09/D7）：policy present 时为 input 绑定
+    /// run-bound durable sink（LifecycleStore `tool-policy-run-audit/` 分区）并按
+    /// provider run 分配 `role_run_seq`（分配随该 run 的 provider_start 首行落盘
+    /// 持久化）。每次 provider run 重新分配（重试 run 独立审计文件）。持久 store
+    /// 缺失（内存态 engine）时不接线——真实 adapter 对 policy 会话缺 sink 自身
+    /// fail-closed，fake provider 测试路径不受影响。
+    fn attach_tool_policy_audit(
+        &self,
+        mut input: StreamingProviderInput,
+    ) -> StreamingProviderInput {
+        if input.tool_policy.is_none() || input.audit_sink.is_some() {
+            return input;
+        }
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            tracing::warn!(
+                "policy provider run without a persistent lifecycle store; durable tool-policy audit is not wired"
+            );
+            return input;
+        };
+        let workspace_session_id = input
+            .workspace_session_id
+            .clone()
+            .unwrap_or_else(|| self.session.session_id.clone());
+        let role_run_seq = match store.next_tool_policy_role_run_seq(&workspace_session_id) {
+            Ok(seq) => seq,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "tool-policy role_run_seq allocation failed; leaving audit sink unset"
+                );
+                return input;
+            }
+        };
+        input.audit_sink = Some(
+            crate::cross_cutting::tool_policy_audit::RoleRunBoundAuditSink::new(
+                std::sync::Arc::new(store.clone()),
+                workspace_session_id,
+                role_run_seq,
+            )
+            .into_sink(),
+        );
+        input
+    }
+
+    /// 同 `attach_tool_policy_audit`，但作用于 gateway validated input（内部 input
+    /// 重建后原样保留 launch policy）。
+    fn attach_tool_policy_audit_to_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+    ) -> crate::cross_cutting::session_launch::ValidatedStreamingProviderInput {
+        let (input, launch) = validated.into_parts();
+        let input = self.attach_tool_policy_audit(input);
+        crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(input, launch)
     }
 
     /// Task 11:逻辑代码库 planning 栈入口。与 `handle_author_message_with_prompt_mode`
@@ -158,6 +214,7 @@ impl WorkspaceEngine {
             .logical_provider_gateway
             .clone()
             .expect("logical provider gateway must be injected before driving via gateway");
+        let validated_input = self.attach_tool_policy_audit_to_validated(validated_input);
         let session = gateway
             .start_streaming(validated_input, self.cancel.clone())
             .await
@@ -534,6 +591,7 @@ impl WorkspaceEngine {
                                     )
                                     .await;
                                 }
+                                let retry_input = self.attach_tool_policy_audit(retry_input);
                                 match provider.start(retry_input, self.cancel.clone()).await {
                                     Ok(next_session) => {
                                         session = next_session;
@@ -614,6 +672,7 @@ impl WorkspaceEngine {
                                     )
                                     .await;
                                 }
+                                let retry_input = self.attach_tool_policy_audit(retry_input);
                                 match provider.start(retry_input, self.cancel.clone()).await {
                                     Ok(next_session) => {
                                         session = next_session;

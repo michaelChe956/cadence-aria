@@ -45,6 +45,7 @@ impl StreamingProviderAdapter for DesignArtifactRetryProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -94,6 +95,7 @@ impl StreamingProviderAdapter for ExecutionEventStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -141,6 +143,7 @@ fn tool_event_provider_session(full_output: &str) -> ProviderSession {
         .try_send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.to_string(), None)))
         .expect("send completed");
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -153,6 +156,7 @@ fn text_choice_provider_session(full_output: &str) -> ProviderSession {
         .try_send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.to_string(), Some("provider-author-session-1".to_string()))))
         .expect("send completed");
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -408,6 +412,7 @@ impl StreamingProviderAdapter for ErrorStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -444,6 +449,7 @@ impl StreamingProviderAdapter for EmptyCompletedStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -480,6 +486,7 @@ impl StreamingProviderAdapter for InvalidArtifactStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -676,6 +683,7 @@ fn usage_report_provider_session() -> ProviderSession {
         ))
         .expect("send completed");
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }

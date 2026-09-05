@@ -1190,3 +1190,5 @@ fn validate_confirm_aggregate_spec_ignores_non_story_design_workspace() {
 include!("tests/task9_repo_worktree.rs");
 include!("tests/human_gate_recovery.rs");
 include!("tests/human_gate_snapshot_cleanup.rs");
+// Task 3.2（REQ-ENV-09）：durable tool-policy-run-audit 分区测试。
+include!("tests/tool_policy_audit.rs");

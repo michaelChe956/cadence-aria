@@ -260,6 +260,7 @@ impl StreamingProviderAdapter for PendingStartProvider {
         self.held_event_senders.lock().await.push(event_tx);
         let (command_tx, _command_rx) = mpsc::channel(1);
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

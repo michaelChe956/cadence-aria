@@ -29,6 +29,7 @@ impl StreamingProviderAdapter for GroupReviewOutputProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -62,6 +63,7 @@ impl StreamingProviderAdapter for GroupReviewCancellationProvider {
             drop(event_tx);
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

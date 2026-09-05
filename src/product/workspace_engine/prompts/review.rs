@@ -223,6 +223,7 @@ impl WorkspaceEngine {
         ));
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -418,6 +419,7 @@ impl WorkspaceEngine {
         ));
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -633,6 +635,7 @@ impl WorkspaceEngine {
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -764,6 +767,7 @@ impl WorkspaceEngine {
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -939,6 +943,7 @@ impl WorkspaceEngine {
         ));
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -1012,6 +1017,7 @@ impl WorkspaceEngine {
             .ok_or_else(|| "working directory unavailable".to_string())?;
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -1149,6 +1155,7 @@ impl WorkspaceEngine {
         ));
         Ok(StreamingProviderInput {
             tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,

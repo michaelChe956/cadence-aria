@@ -2,6 +2,15 @@ use super::ClaudeCodeProvider;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 
+/// 策略会话有界握手超时（等待首个 `system/init` 事件）。测试环境缩短以便
+/// fixture 能以挂起脚本验证超时 fail-closed。
+#[cfg(not(test))]
+pub(crate) const CLAUDE_POLICY_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+#[cfg(test)]
+pub(crate) const CLAUDE_POLICY_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
 pub(crate) async fn terminate_aborted_child(child: &mut ManagedProcessChild) {
     child.terminate().await;
 }
@@ -23,15 +32,18 @@ pub(crate) async fn emit_ask_user_question_protocol_error(
         .await;
 }
 
-pub(crate) async fn read_claude_stream(
-    stdout: tokio::process::ChildStdout,
+pub(crate) async fn read_claude_stream<R>(
+    stdout: R,
     stdin: Arc<Mutex<ChildStdin>>,
     bridge: ApprovalBridge,
     event_tx: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
     structured_output_contract: Option<StructuredOutputContract>,
     usage_role: &'static str,
-) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
+) -> Result<ClaudeStreamOutcome, ProviderAdapterError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut lines = BufReader::new(stdout).lines();
     let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
     let mut resolved_ask_user_questions: HashMap<String, ResolvedAskUserQuestion> = HashMap::new();
@@ -378,6 +390,80 @@ pub(crate) async fn read_claude_stream(
         }
     }
 }
+/// 解析 claude stream-json 首个 `system/init` 事件的原生 session id。
+pub(crate) fn parse_claude_init_session_id(value: &Value) -> Option<String> {
+    if value.get("type")?.as_str()? != "system" {
+        return None;
+    }
+    if value.get("subtype")?.as_str()? != "init" {
+        return None;
+    }
+    value.get("session_id")?.as_str().map(ToString::to_string)
+}
+
+/// 策略会话有界握手（Task 3.2）：读取首个 `system/init` 事件取原生 session id，
+/// 超时/EOF/坏 JSON 均为握手失败。返回消耗部分输入后的 reader（缓冲区保留，
+/// 后续交由 `read_claude_stream` 续读）。
+pub(crate) async fn wait_for_claude_init<R>(
+    stdout: R,
+    cancel: &CancellationToken,
+) -> Result<(BufReader<R>, String), ProviderAdapterError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(stdout);
+    let deadline = tokio::time::Instant::now() + CLAUDE_POLICY_HANDSHAKE_TIMEOUT;
+    loop {
+        let mut line = String::new();
+        let read = tokio::select! {
+            _ = cancel.cancelled() => {
+                return Err(ProviderAdapterError::parse_error(
+                    "claude policy handshake cancelled",
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            read = tokio::time::timeout_at(deadline, reader.read_line(&mut line)) => read,
+        };
+        let bytes = read
+            .map_err(|_| {
+                ProviderAdapterError::parse_error(
+                    "claude policy handshake timed out waiting for init event",
+                    String::new(),
+                    String::new(),
+                )
+            })?
+            .map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("claude policy handshake read failed: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+        if bytes == 0 {
+            return Err(ProviderAdapterError::parse_error(
+                "claude stream ended before init event",
+                String::new(),
+                String::new(),
+            ));
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&line).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("invalid Claude init JSON: {error}"),
+                line.clone(),
+                String::new(),
+            )
+        })?;
+        if let Some(session_id) = parse_claude_init_session_id(&value) {
+            return Ok((reader, session_id));
+        }
+        // init 之前的非 init 行：忽略并继续等待（保留在 reader 缓冲内的语义不变）。
+    }
+}
+
 /// 解析 stream-json 终态 result 行的 `usage` 字段。
 ///
 /// Claude Code CLI 的 result 事件（`--output-format stream-json`）附带：

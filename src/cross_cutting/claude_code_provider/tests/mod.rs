@@ -19,6 +19,7 @@ use super::ClaudeCodeProvider;
 mod args;
 mod ask_user_question;
 mod permissions;
+mod policy_session;
 mod process;
 mod streaming;
 
@@ -55,6 +56,7 @@ fn streaming_input(
     // 故测试 helper 用 Executor（Coder/聚合初始化同侧），与生产行为一致。
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type,
         role: AdapterRole::Executor,
         prompt: "Run the fixture provider".to_string(),
@@ -142,9 +144,11 @@ async fn wait_for_process_absent(pid: u32) {
     panic!("process {pid} was not reaped after cancellation");
 }
 fn adapter_input(prompt: &str) -> AdapterInput {
+    // 非策略 legacy 直连 fixture（Task 3.1/3.2）：策略角色经 bridge 会派生策略并
+    // 要求 durable sink；bridge 机制测试使用 Executor 保持非策略路径。
     AdapterInput {
         provider_type: ProviderType::ClaudeCode,
-        role: AdapterRole::Orchestrator,
+        role: AdapterRole::Executor,
         worktree_path: Some(
             std::env::current_dir()
                 .unwrap()

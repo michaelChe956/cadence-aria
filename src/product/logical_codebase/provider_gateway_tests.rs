@@ -471,7 +471,11 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (_event_tx, events) = tokio::sync::mpsc::channel(1);
         let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
-        Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands })
+        Ok(crate::cross_cutting::streaming_provider::ProviderSession {
+            events,
+            commands,
+            native_session_id: None,
+        })
     }
 }
 
@@ -709,6 +713,7 @@ impl GatewayFixture {
         use crate::protocol::contracts::{AdapterRole, ProviderType};
         StreamingProviderInput {
             tool_policy: None,
+            audit_sink: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
             prompt: "probe".to_string(),

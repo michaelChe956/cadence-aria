@@ -148,6 +148,7 @@ impl StreamingProviderAdapter for FullCommandChannelProvider {
             .await
             .unwrap();
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -208,6 +209,7 @@ impl StreamingProviderAdapter for ScriptedProvider {
             available.store(false, Ordering::SeqCst);
         }
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -232,6 +234,7 @@ impl StreamingProviderAdapter for RecordingProvider {
             .await
             .unwrap();
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

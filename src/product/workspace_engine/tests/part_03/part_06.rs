@@ -36,6 +36,7 @@ impl RepairTerminalProvider {
         }
         drop(event_tx);
         ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         }
@@ -112,6 +113,7 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
                     .unwrap();
                 drop(event_tx);
                 Ok(ProviderSession {
+                    native_session_id: None,
                     events: event_rx,
                     commands: command_tx,
                 })
@@ -122,6 +124,7 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
                 let (command_tx, _command_rx) = mpsc::channel(4);
                 self.held_event_senders.lock().unwrap().push(event_tx);
                 Ok(ProviderSession {
+                    native_session_id: None,
                     events: event_rx,
                     commands: command_tx,
                 })

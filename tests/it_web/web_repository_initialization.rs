@@ -191,6 +191,7 @@ impl StreamingProviderAdapter for ScriptedClaude {
                 .expect("interaction event"),
         }
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

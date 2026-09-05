@@ -63,7 +63,11 @@ impl StreamingProviderAdapter for CountingStreamingAdapter {
         self.starts.fetch_add(1, Ordering::SeqCst);
         let (_event_tx, events) = mpsc::channel(1);
         let (commands, _command_rx) = mpsc::channel(1);
-        Ok(ProviderSession { events, commands })
+        Ok(ProviderSession {
+            events,
+            commands,
+            native_session_id: None,
+        })
     }
 }
 
@@ -155,6 +159,7 @@ fn gateway_fixture() -> GatewayFixture {
 fn streaming_input(working_dir: std::path::PathBuf) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::ClaudeCode,
         role: AdapterRole::WorkItemSplitter,
         prompt: "work item plan outline".to_string(),

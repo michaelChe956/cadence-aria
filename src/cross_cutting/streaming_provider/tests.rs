@@ -34,6 +34,7 @@ fn make_input(prompt: &str) -> AdapterInput {
 fn make_provider_input(prompt: &str) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::Orchestrator,
         prompt: prompt.to_string(),
@@ -112,6 +113,7 @@ fn provider_completion_plain_marks_structured_output_not_requested() {
 fn streaming_provider_input_distinguishes_workspace_and_resume_sessions() {
     let input = StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::Orchestrator,
         prompt: "prompt".to_string(),
@@ -305,6 +307,7 @@ async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
     let provider = FakeStreamingProvider;
     let input = StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
         prompt: "你是 Aria 的 Work Item Splitter".to_string(),
@@ -462,6 +465,7 @@ impl StreamingProviderAdapter for ChoiceEmittingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -761,6 +765,7 @@ async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
                       tool_policy: Option<ProviderToolPolicy>| {
         StreamingProviderInput {
             tool_policy,
+            audit_sink: None,
             provider_type,
             role,
             prompt: "guard probe".to_string(),

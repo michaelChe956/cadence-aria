@@ -23,6 +23,7 @@ use super::session::run_pi_session;
 use super::*;
 
 mod empty_output;
+mod policy_session;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 struct FixtureEnvelope {
@@ -354,6 +355,7 @@ fn streaming_input_for_test(resume_id: Option<String>) -> StreamingProviderInput
     // 非策略 legacy 路径 fixture：守卫（Task 3.1）要求非策略会话使用非策略角色。
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::Pi,
         role: AdapterRole::Executor,
         prompt: "fixture prompt".to_string(),

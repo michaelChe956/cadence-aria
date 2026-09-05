@@ -530,7 +530,7 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (_event_tx, events) = tokio::sync::mpsc::channel(1);
             let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
-            Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands })
+            Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands, native_session_id: None })
         }
     }
 

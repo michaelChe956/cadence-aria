@@ -34,6 +34,7 @@ impl StreamingProviderAdapter for NonJsonCodeReviewProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -77,6 +78,7 @@ impl StreamingProviderAdapter for ReviewerDrivenReworkProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

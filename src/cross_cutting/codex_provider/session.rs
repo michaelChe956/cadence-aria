@@ -16,6 +16,10 @@ use crate::cross_cutting::streaming_provider::{
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderStatus, RiskLevel,
     StreamingProviderInput, UsageReportData,
 };
+use crate::cross_cutting::tool_policy_audit::{
+    ApprovalDecisionAudit, DurableToolPolicyEvent, ProtocolWarningAudit, SessionTerminatedAudit,
+    ToolPolicyAuditSink,
+};
 
 use super::{
     CODEX_DEFAULT_SANDBOX_MODE, CODEX_RESUME_STALL_ERROR, CODEX_RESUME_STALL_TIMEOUT,
@@ -77,6 +81,21 @@ pub(crate) fn decide_for_policy(category: CodexApprovalCategory) -> CodexApprova
         | CodexApprovalCategory::FileChange
         | CodexApprovalCategory::Unknown { .. } => CodexApprovalResponse::Decline,
     }
+}
+
+/// 策略事件双路径出口（Task 3.2）：结构化事件先经事件通道送出会话循环（可观测），
+/// 再经 run-bound sink durable 落盘（GC11）；append 失败返回错误，沿既有 kill 链
+/// 终止会话并将 run 判失败。
+fn audit_policy_event(
+    sink: Option<&std::sync::Arc<dyn ToolPolicyAuditSink>>,
+    event: DurableToolPolicyEvent,
+) -> Result<(), ProviderAdapterError> {
+    if let Some(sink) = sink {
+        sink.append_bound(event).map_err(|error| {
+            provider_error(format!("codex policy audit append failed: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 /// 未知审批形态的确定性应答（GC6）：未知 elicitation 返回 JSON-RPC error
@@ -141,6 +160,7 @@ where
         .to_string())
 }
 
+/// 既有会话入口（非策略/直接调用）：自行握手后进入会话循环。
 pub(crate) async fn run_codex_session<W>(
     peer: JsonRpcPeer<W>,
     bridge: ApprovalBridge,
@@ -148,6 +168,31 @@ pub(crate) async fn run_codex_session<W>(
     input: StreamingProviderInput,
     cancel: CancellationToken,
 ) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let handshake = codex_session_handshake(&peer, &input).await?;
+    run_codex_session_loop(peer, bridge, event_tx, input, cancel, handshake).await
+}
+
+/// codex 的 adapter dialect 常量（GC9 冻结：`codex-app-server-rpc`）。
+pub const CODEX_POLICY_DIALECT: &str = "codex-app-server-rpc";
+
+/// 会话握手结果：resume 原生 thread id 语义 + 协商出的 thread id（协议未返回
+/// id 时为 `None`，与非策略历史行为一致；策略路径要求必得 id，否则 fail-closed）。
+#[derive(Debug, Clone)]
+pub(crate) struct CodexSessionHandshake {
+    pub(crate) resume_session_id: Option<String>,
+    pub(crate) thread_id: Option<String>,
+}
+
+/// codex 会话握手：`initialize`/`initialized` + `thread/resume`|`thread/start`，
+/// 由 `run_codex_session`（非策略/直接调用）与 `CodexProvider::start`（策略路径，
+/// 有界前置）共用。启动参数始终经 `codex_launch_params`（三联动冻结）。
+pub(crate) async fn codex_session_handshake<W>(
+    peer: &JsonRpcPeer<W>,
+    input: &StreamingProviderInput,
+) -> Result<CodexSessionHandshake, ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -181,7 +226,7 @@ where
         .map(ToString::to_string);
 
     let thread_id = if let Some(session_id) = resume_session_id.as_deref() {
-        let mut resume_params = codex_launch_params(&input);
+        let mut resume_params = codex_launch_params(input);
         resume_params
             .as_object_mut()
             .expect("codex launch params are a JSON object")
@@ -208,7 +253,7 @@ where
                 json!({
                     "jsonrpc": "2.0",
                     "method": "thread/start",
-                    "params": codex_launch_params(&input),
+                    "params": codex_launch_params(input),
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
             )
@@ -219,6 +264,29 @@ where
             .and_then(Value::as_str)
             .map(ToString::to_string)
     };
+    Ok(CodexSessionHandshake {
+        resume_session_id,
+        thread_id,
+    })
+}
+
+/// 会话循环（握手后）：turn/start + 事件循环。策略路径由 `start` 前置握手后
+/// 直接进入本循环；非策略路径由 `run_codex_session` 自行握手后进入。
+pub(crate) async fn run_codex_session_loop<W>(
+    peer: JsonRpcPeer<W>,
+    bridge: ApprovalBridge,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    input: StreamingProviderInput,
+    cancel: CancellationToken,
+    handshake: CodexSessionHandshake,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let CodexSessionHandshake {
+        resume_session_id,
+        thread_id,
+    } = handshake;
     let turn_thread_id = thread_id.clone().unwrap_or_default();
 
     let mut turn_id = start_codex_turn(&peer, &turn_thread_id, &input.prompt).await?;
@@ -337,6 +405,15 @@ where
                     &cancel,
                 )
                 .await?;
+                // durable 落盘（双路径）：append 失败沿 kill 链终止。
+                audit_policy_event(
+                    input.audit_sink.as_ref(),
+                    DurableToolPolicyEvent::ProtocolWarning(ProtocolWarningAudit {
+                        reason_code: warning.reason_code.clone(),
+                        method: warning.method.clone(),
+                        occurrence: warning.occurrence,
+                    }),
+                )?;
                 tracing::warn!(
                     target: "codex_provider",
                     reason_code = %warning.reason_code,
@@ -358,6 +435,13 @@ where
                         &cancel,
                     )
                     .await?;
+                    // durable 落盘（双路径）：append 失败沿 kill 链终止。
+                    audit_policy_event(
+                        input.audit_sink.as_ref(),
+                        DurableToolPolicyEvent::SessionTerminated(SessionTerminatedAudit {
+                            reason_code: reason_code.to_string(),
+                        }),
+                    )?;
                     tracing::warn!(
                         target: "codex_provider",
                         reason_code,
@@ -388,6 +472,15 @@ where
                     &cancel,
                 )
                 .await?;
+                // durable 落盘（双路径）：append 失败沿 kill 链终止。
+                audit_policy_event(
+                    input.audit_sink.as_ref(),
+                    DurableToolPolicyEvent::ApprovalDecision(ApprovalDecisionAudit {
+                        request_id: decision_event.request_id.clone(),
+                        category: decision_event.category.to_string(),
+                        decision: decision_event.decision.to_string(),
+                    }),
+                )?;
                 tracing::info!(
                     target: "codex_provider",
                     request_id = %decision_event.request_id,

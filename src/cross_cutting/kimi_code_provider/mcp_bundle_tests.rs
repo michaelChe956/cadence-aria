@@ -20,6 +20,7 @@ use crate::cross_cutting::kimi_code_provider::session::run_kimi_session_with_mcp
 fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::KimiCode,
         role: AdapterRole::Orchestrator,
         prompt: "fixture prompt".to_string(),

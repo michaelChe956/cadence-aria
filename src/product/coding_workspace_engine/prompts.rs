@@ -532,6 +532,7 @@ pub(crate) fn streaming_input_from_adapter(
 ) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: coding_tool_policy_for_role(&input.role),
+        audit_sink: None,
         provider_type: input.provider_type.clone(),
         role: input.role.clone(),
         prompt: input.prompt.clone(),
