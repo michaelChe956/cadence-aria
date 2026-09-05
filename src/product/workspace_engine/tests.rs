@@ -36,6 +36,7 @@ include!("tests/part_29.rs");
 include!("tests/part_30.rs");
 include!("tests/part_31.rs");
 include!("tests/part_32.rs");
+include!("tests/part_32/prompt_window_and_builder_policy.rs");
 include!("tests/recovery_task7.rs");
 include!("tests/severity_three_tier.rs");
 include!("tests/design_reviewer_boundary.rs");
