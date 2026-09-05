@@ -11,9 +11,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use crate::cross_cutting::tool_policy_audit::{
-    DurableToolPolicyEvent, ProviderStartAudit, TOOL_POLICY_RUN_AUDIT_PARTITION,
-    ToolPolicyAuditError, ToolPolicyAuditLine, ToolPolicyAuditReadResult,
-    ToolPolicyAuditReadWarning, ToolPolicyAuditSink,
+    DurableToolPolicyEvent, ProviderStartAudit, StoredProviderStart,
+    TOOL_POLICY_RUN_AUDIT_PARTITION, ToolPolicyAuditError, ToolPolicyAuditLine,
+    ToolPolicyAuditReadResult, ToolPolicyAuditReadWarning, ToolPolicyAuditSink,
 };
 use crate::product::json_store::validate_relative_id;
 
@@ -189,7 +189,7 @@ impl ToolPolicyAuditSink for LifecycleStore {
     fn find_provider_start(
         &self,
         _native_provider_session_id: &str,
-    ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
         // 裸 sink 的检索需显式 workspace 维度；bound 装饰器总是走
         // `find_provider_start_by_session`，本入口仅对未绑定调用方兜底。
         Ok(None)
@@ -199,7 +199,7 @@ impl ToolPolicyAuditSink for LifecycleStore {
         &self,
         workspace_session_id: &str,
         native_provider_session_id: &str,
-    ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
         self.find_latest_tool_policy_provider_start(
             workspace_session_id,
             native_provider_session_id,
@@ -209,12 +209,14 @@ impl ToolPolicyAuditSink for LifecycleStore {
 
 impl LifecycleStore {
     /// resume 检索（Task 3.3）：在 workspace 分区内按原生 provider session id
-    /// 扫描最近 provider_start（max role_run_seq）。同时覆写 sink trait 默认实现。
+    /// 扫描最近 provider_start（max role_run_seq），返回记录及其所在 run 文件
+    /// 定位（P1-4：drift 的 superseded 事件追加到被取代旧 run 的文件）。
+    /// 同时覆写 sink trait 默认实现。
     pub fn find_latest_tool_policy_provider_start(
         &self,
         workspace_session_id: &str,
         native_provider_session_id: &str,
-    ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
         let root = self.tool_policy_audit_workspace_root(workspace_session_id)?;
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -242,7 +244,11 @@ impl LifecycleStore {
                 }
             }
         }
-        Ok(matched.map(|(_, record)| record))
+        Ok(matched.map(|(role_run_seq, record)| StoredProviderStart {
+            workspace_session_id: workspace_session_id.to_string(),
+            role_run_seq,
+            record,
+        }))
     }
 }
 

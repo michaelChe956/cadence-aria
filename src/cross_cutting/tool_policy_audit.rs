@@ -229,6 +229,35 @@ pub enum ResumeDecision {
     RejectSupersedeAndStartNew,
 }
 
+/// resume drift 的 superseded 终止原因码（D7/GC9 冻结）。
+pub const SUPERSEDED_POLICY_DRIFT: &str = "superseded_policy_drift";
+
+/// resume 检索结果：provider_start 记录 + 其所在 run 文件定位。定位信息供 drift
+/// 时把 superseded `session_terminated` 追加到被取代旧 run 的文件（其
+/// provider_start 已是该文件首行；被终止的是旧会话），而非新 run 文件——新 run
+/// 文件照常以 provider_start 开启（首行不变量，P1-4 裁决）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredProviderStart {
+    pub workspace_session_id: String,
+    pub role_run_seq: u64,
+    pub record: ProviderStartAudit,
+}
+
+/// 把 superseded `session_terminated` 追加到被取代旧 run 的文件（P1-4 裁决
+/// 修法；写入失败错误传播 → 调用方 fail-closed）。
+pub(crate) fn append_superseded_policy_drift(
+    sink: &dyn ToolPolicyAuditSink,
+    stored: &StoredProviderStart,
+) -> Result<(), ToolPolicyAuditError> {
+    sink.append(
+        &stored.workspace_session_id,
+        stored.role_run_seq,
+        DurableToolPolicyEvent::SessionTerminated(SessionTerminatedAudit {
+            reason_code: SUPERSEDED_POLICY_DRIFT.to_string(),
+        }),
+    )
+}
+
 /// 审计 fixture：以冻结三元组构造 provider_start 记录（Task 3.3 resume 测试）。
 pub fn provider_start_record(
     tool_policy_canonical_digest: &str,
@@ -302,11 +331,12 @@ pub trait ToolPolicyAuditSink: Send + Sync {
     }
 
     /// resume 检索（Task 3.3）：按原生 provider session id 检索最近
-    /// `provider_start` 审计记录。默认无实现（裸 sink 不支持检索）。
+    /// `provider_start` 审计记录（含其所在 run 文件定位）。默认无实现
+    /// （裸 sink 不支持检索）。
     fn find_provider_start(
         &self,
         _native_provider_session_id: &str,
-    ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
         Ok(None)
     }
 
@@ -316,7 +346,7 @@ pub trait ToolPolicyAuditSink: Send + Sync {
         &self,
         _workspace_session_id: &str,
         _native_provider_session_id: &str,
-    ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
         Ok(None)
     }
 }
@@ -369,7 +399,7 @@ impl ToolPolicyAuditSink for RoleRunBoundAuditSink {
     fn find_provider_start(
         &self,
         native_provider_session_id: &str,
-    ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+    ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
         self.inner
             .find_provider_start_by_session(&self.workspace_session_id, native_provider_session_id)
     }
@@ -382,12 +412,12 @@ pub(crate) mod test_support {
     use super::*;
     use std::sync::Mutex;
 
-    /// 记录型 sink：按序记录 append_bound 调用；可注入指定次数后的失败；
+    /// 记录型 sink：按序记录 append/append_bound 调用；可注入指定次数后的失败；
     /// 可预置 provider_start 审计记录供 resume 检索（Task 3.3）。
     pub struct RecordingToolPolicyAuditSink {
         pub appends: Mutex<Vec<DurableToolPolicyEvent>>,
         pub fail_after: Option<usize>,
-        stored_provider_starts: Mutex<Vec<ProviderStartAudit>>,
+        stored_provider_starts: Mutex<Vec<StoredProviderStart>>,
     }
 
     impl RecordingToolPolicyAuditSink {
@@ -407,12 +437,17 @@ pub(crate) mod test_support {
             })
         }
 
-        /// 预置一条 provider_start 审计记录（resume 检索输入）。
+        /// 预置一条 provider_start 审计记录（resume 检索输入；定位默认
+        /// ("ws-test", 0)，superseded 追加回写到该位置）。
         pub fn with_stored_provider_start(self: &Arc<Self>, record: ProviderStartAudit) {
             self.stored_provider_starts
                 .lock()
                 .expect("sink lock")
-                .push(record);
+                .push(StoredProviderStart {
+                    workspace_session_id: "ws-test".to_string(),
+                    role_run_seq: 0,
+                    record,
+                });
         }
 
         pub fn events(&self) -> Vec<DurableToolPolicyEvent> {
@@ -461,12 +496,12 @@ pub(crate) mod test_support {
             &self,
             _workspace_session_id: &str,
             native_provider_session_id: &str,
-        ) -> Result<Option<ProviderStartAudit>, ToolPolicyAuditError> {
+        ) -> Result<Option<StoredProviderStart>, ToolPolicyAuditError> {
             let stored = self.stored_provider_starts.lock().expect("sink lock");
             Ok(stored
                 .iter()
                 .rev()
-                .find(|record| record.provider_session_id == native_provider_session_id)
+                .find(|located| located.record.provider_session_id == native_provider_session_id)
                 .cloned())
         }
     }

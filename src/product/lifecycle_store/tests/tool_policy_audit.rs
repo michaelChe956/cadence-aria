@@ -157,6 +157,122 @@ fn tool_policy_audit_required_fields_must_be_present_when_parsing() {
     }
 }
 
+// ---- F3 修复轮 P1-4：resume drift 的 superseded 事件必须落在被取代旧 run 的文件 ----
+
+/// fake pi：rpc 模式下读 stdin 到 EOF 后退出（策略会话 start 只需子进程可拉起）。
+#[cfg(unix)]
+fn fake_pi_rpc_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("fake-pi-rpc");
+    std::fs::write(&path, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n").expect("write fixture");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fixture");
+    path
+}
+
+/// 真实 LifecycleStore 的 drift 端到端（P1-4 裁决）：superseded_policy_drift 的
+/// `session_terminated` 写入被取代旧 run 的文件（其 provider_start 已是首行）；
+/// 新 run 文件照常以 provider_start 开启。RecordingSink 不校验首行不变量，
+/// 必须用真实 store 测。
+#[cfg(unix)]
+#[tokio::test]
+async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() {
+    use crate::cross_cutting::pi_provider::{PI_POLICY_DIALECT, PiProvider, TOOL_POLICY_PROVIDER_NAME};
+    use crate::cross_cutting::streaming_provider::{
+        ProviderToolPolicy, ProviderVersionSupplier, StreamingProviderAdapter as _,
+    };
+    use crate::cross_cutting::tool_policy_audit::{ProviderStartAudit, RoleRunBoundAuditSink};
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let store = std::sync::Arc::new(super::LifecycleStore::new(
+        crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria")),
+    ));
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::deny_file_write_builtins(),
+    )
+    .expect("canonical policy");
+    // 旧 run（seq 0）：同 native id，但 version 漂移（pi 9.9.9-stale ≠ 当前 supplier）。
+    let stale = ProviderStartAudit {
+        provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+        role: "orchestrator".to_string(),
+        workspace_session_id: "ws-drift".to_string(),
+        provider_session_id: "pi-session-drift".to_string(),
+        tool_policy_canonical_digest: canonical.digest.clone(),
+        argv: Vec::new(),
+        sandbox: None,
+        approval_policy: None,
+        provider_version: "pi 9.9.9-stale".to_string(),
+        adapter_dialect: PI_POLICY_DIALECT.to_string(),
+    };
+    sink_append(store.as_ref(), "ws-drift", 0, stale);
+    let next_seq = store.next_tool_policy_role_run_seq("ws-drift").unwrap();
+    let bound_sink = RoleRunBoundAuditSink::new(store.clone(), "ws-drift", next_seq).into_sink();
+
+    let provider = PiProvider::new(fake_pi_rpc_fixture(tmp.path()))
+        .with_version_supplier(std::sync::Arc::new(|| Ok("pi 0.83.0-policy-fixture".to_string()))
+            as ProviderVersionSupplier);
+    let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+        audit_sink: Some(bound_sink),
+        provider_type: ProviderType::Pi,
+        role: AdapterRole::Orchestrator,
+        prompt: "fixture prompt".to_string(),
+        working_dir: tempfile::tempdir().expect("temporary working dir").keep(),
+        workspace_session_id: Some("ws-drift".to_string()),
+        resume_provider_session_id: Some("pi-session-drift".to_string()),
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: std::collections::BTreeMap::new(),
+        timeout_secs: 60,
+    };
+    let session = provider
+        .start(input, tokio_util::sync::CancellationToken::new())
+        .await
+        .expect("drifted resume must supersede and start a fresh session");
+    drop(session.events);
+
+    // 旧 run 文件（seq 0）：provider_start 仍为首行，superseded 终止审计追加其后。
+    let old_lines = store.read_tool_policy_lines("ws-drift", 0).unwrap();
+    assert_eq!(old_lines[0].event_type(), "provider_start");
+    assert_eq!(
+        old_lines.len(),
+        2,
+        "superseded session_terminated must land on the replaced run's file"
+    );
+    assert_eq!(old_lines[1].event_type(), "session_terminated");
+    assert!(serde_json::to_string(&old_lines[1]).unwrap().contains("superseded_policy_drift"));
+    // 新 run 文件（seq 1）：provider_start 恰为首行，无终止事件前置。
+    let new_lines = store.read_tool_policy_lines("ws-drift", 1).unwrap();
+    assert_eq!(
+        new_lines[0].event_type(),
+        "provider_start",
+        "new run must start with provider_start"
+    );
+    assert!(new_lines
+        .iter()
+        .all(|line| line.event_type() != "session_terminated"));
+}
+
+/// 测试内同步 append 辅助（真实 store 的 sink trait 入口）。
+#[cfg(unix)]
+fn sink_append(
+    store: &super::LifecycleStore,
+    workspace_session_id: &str,
+    role_run_seq: u64,
+    record: crate::cross_cutting::tool_policy_audit::ProviderStartAudit,
+) {
+    use crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink as _;
+    store
+        .append(
+            workspace_session_id,
+            role_run_seq,
+            DurableToolPolicyEvent::ProviderStart(record),
+        )
+        .expect("seed old run provider_start");
+}
+
 #[test]
 fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
     let sink = test_tool_policy_audit_sink();
@@ -328,7 +444,8 @@ fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session
         .find_latest_tool_policy_provider_start("ws-6", "thread-shared")
         .unwrap()
         .expect("stored provider_start must be found");
-    assert!(found.tool_policy_canonical_digest == "sha256:a2");
+    assert_eq!(found.record.tool_policy_canonical_digest, "sha256:a2");
+    assert_eq!(found.role_run_seq, 1, "lookup must surface the run location (P1-4)");
 
     // 其它 native id / 其它 workspace：缺失 → None（resume 决策拒绝并新建）。
     assert!(sink

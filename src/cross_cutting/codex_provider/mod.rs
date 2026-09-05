@@ -214,18 +214,21 @@ impl StreamingProviderAdapter for CodexProvider {
                     adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
                 };
-                if matches!(
-                    crate::cross_cutting::tool_policy_audit::resume_with_audit_record(
-                        stored, &current
-                    ),
-                    crate::cross_cutting::tool_policy_audit::ResumeDecision::RejectSupersedeAndStartNew
-                ) {
-                    sink.append_bound(
-                        crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::SessionTerminated(
-                            crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
-                                reason_code: "superseded_policy_drift".to_string(),
-                            },
+                if let Some(stored) = stored.as_ref()
+                    && matches!(
+                        crate::cross_cutting::tool_policy_audit::resume_with_audit_record(
+                            Some(stored.record.clone()),
+                            &current
                         ),
+                        crate::cross_cutting::tool_policy_audit::ResumeDecision::RejectSupersedeAndStartNew
+                    )
+                {
+                    // P1-4 裁决：superseded 终止审计写入被取代旧 run 的文件（其
+                    // provider_start 已是首行；被终止的是旧会话），新 run 照常从
+                    // provider_start 开始。
+                    crate::cross_cutting::tool_policy_audit::append_superseded_policy_drift(
+                        sink.as_ref(),
+                        stored,
                     )
                     .map_err(|error| {
                         ProviderAdapterError::parse_error(

@@ -27,8 +27,8 @@ use crate::cross_cutting::streaming_provider::{
     canonical_tool_policy, validate_tool_policy_for_role,
 };
 use crate::cross_cutting::tool_policy_audit::{
-    DurableToolPolicyEvent, ProviderStartAudit, ResumeDecision, SessionTerminatedAudit,
-    ToolPolicyAuditSink, resume_with_audit_record,
+    DurableToolPolicyEvent, ProviderStartAudit, ResumeDecision, ToolPolicyAuditSink,
+    append_superseded_policy_drift, resume_with_audit_record,
 };
 
 mod parse;
@@ -241,9 +241,6 @@ fn ensure_pi_version_compatible(version: &PiVersion) -> Result<(), ProviderAdapt
 /// pi 的 adapter dialect 常量（GC9 冻结：`pi-rpc`）。resume 冻结三元组的方言位。
 pub const PI_POLICY_DIALECT: &str = "pi-rpc";
 
-/// resume 冻结三元组 drift 时的 superseded 终止审计原因码（Task 3.3）。
-pub(crate) const SUPERSEDED_POLICY_DRIFT: &str = "superseded_policy_drift";
-
 fn tool_policy_session_error(message: impl std::fmt::Display) -> ProviderAdapterError {
     ProviderAdapterError::parse_error(
         format!("pi policy session: {message}"),
@@ -387,16 +384,17 @@ impl StreamingProviderAdapter for PiProvider {
                     adapter_dialect: PI_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
                 };
-                if matches!(
-                    resume_with_audit_record(stored, &current),
-                    ResumeDecision::RejectSupersedeAndStartNew
-                ) {
-                    sink.append_bound(DurableToolPolicyEvent::SessionTerminated(
-                        SessionTerminatedAudit {
-                            reason_code: SUPERSEDED_POLICY_DRIFT.to_string(),
-                        },
-                    ))
-                    .map_err(tool_policy_session_error)?;
+                if let Some(stored) = stored.as_ref()
+                    && matches!(
+                        resume_with_audit_record(Some(stored.record.clone()), &current),
+                        ResumeDecision::RejectSupersedeAndStartNew
+                    )
+                {
+                    // P1-4 裁决：superseded 终止审计写入被取代旧 run 的文件（其
+                    // provider_start 已是首行；被终止的是旧会话），新 run 照常从
+                    // provider_start 开始。
+                    append_superseded_policy_drift(sink.as_ref(), stored)
+                        .map_err(tool_policy_session_error)?;
                     input.resume_provider_session_id = None;
                 }
             }
