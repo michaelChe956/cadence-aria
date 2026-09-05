@@ -18,6 +18,8 @@ while IFS= read -r line; do
   fi
   if [[ "$sent_request" == "0" && "$line" == *'"user"'* ]]; then
     sent_request=1
+    echo '{"type":"system","subtype":"init","session_id":"claude_fixture_session"}'
+
     echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Drink?","options":[{"label":"Tea"},{"label":"Coffee"}]}]}}]}}'
     echo '{"type":"control_request","request_id":"ask_req_001","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Drink?","options":[{"label":"Tea"},{"label":"Coffee"}]}]},"tool_use_id":"toolu_question"}}'
     continue
