@@ -339,6 +339,147 @@ mod tests {
                 updated_at: now,
             }
         }
+
+        /// 构造可 `validate` 的 planning gateway（不触达真实 adapter start）。
+        /// 政策 store 复用本 fixture 的 paths——bootstrap 政策已由
+        /// `write_active_manifest_index_and_policy` 写入，validate 可直接冻结
+        /// envelope。authority_root 取 manifest 的 provider_context_root
+        /// （aggregate-root，canonicalize 前需真实存在）。
+        fn planning_gateway(&self) -> crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway {
+            use crate::cross_cutting::provider_registry::ProviderRegistry;
+            use crate::product::logical_codebase::provider_gateway::{
+                GatewayRunAudit, LogicalCodebaseProviderGateway,
+            };
+
+            let policy_store = AggregatePolicyArtifactStore::new(self.paths.clone());
+            let authority_root = std::fs::canonicalize(self.aggregate_root())
+                .expect("aggregate root exists for canonicalize");
+            LogicalCodebaseProviderGateway::with_audit(
+                policy_store,
+                Arc::new(PlanningStaticCapabilitySource),
+                Arc::new(PlanningPassThroughTargetResolver),
+                Arc::new(ProviderRegistry::new()),
+                Arc::new(PlanningStubSyncAdapter),
+                planning_always_available_gate(),
+                Arc::new(GatewayRunAudit::new()),
+                authority_root,
+            )
+        }
+    }
+
+    /// planning gateway 测试用 capability source：固定 version/dialect，resume
+    /// 证据恒 `Confirmed`（与 provider_gateway_tests 的 StaticCapabilitySource
+    /// 同构，仅服务于 `validate` 冻结 envelope）。
+    struct PlanningStaticCapabilitySource;
+
+    impl crate::product::logical_codebase::provider_gateway::ProviderCapabilitySource
+        for PlanningStaticCapabilitySource
+    {
+        fn require_supported(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            use crate::product::logical_codebase::policy::ProviderDialect;
+            use crate::product::logical_codebase::provider_gateway::{
+                ProviderCapability, ProviderRefType, ResumeEvidenceState,
+            };
+            let adapter_dialect = match provider.provider_type {
+                ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
+                ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+            };
+            Ok(ProviderCapability {
+                provider_type: provider.provider_type,
+                version: "1.4.0".to_string(),
+                adapter_dialect,
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                resume_evidence: ResumeEvidenceState::Confirmed,
+            })
+        }
+    }
+
+    /// planning gateway 测试用 target resolver：透传请求 target（validate 阶段
+    /// 不做 canonical 复验，复验在 spawn 前的 `revalidate_before_spawn`）。
+    struct PlanningPassThroughTargetResolver;
+
+    impl crate::product::logical_codebase::provider_gateway::PolicyTargetResolver
+        for PlanningPassThroughTargetResolver
+    {
+        fn resolve_and_revalidate(
+            &self,
+            request: &crate::product::logical_codebase::provider_gateway::SessionLaunchRequest,
+        ) -> Result<PolicyTarget, crate::product::logical_codebase::provider_gateway::ProviderGatewayError>
+        {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// planning gateway 测试用同步 adapter stub：`run` 返回最小成功输出。
+    struct PlanningStubSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for PlanningStubSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            use crate::protocol::contracts::TimeoutStatus;
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    /// planning gateway 测试用 availability gate：所有 provider 恒可用（与
+    /// workspace_engine part_32 的 `review_always_available_gate` 同构）。
+    fn planning_always_available_gate(
+    ) -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+        use crate::product::models::ProviderName;
+
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
+            Arc::new(AlwaysHealthy(snapshot)),
+        ))
     }
 
     fn active_index_record(
@@ -694,5 +835,52 @@ mod tests {
                 .is_invalidated("project_0001", "issue_0001")
                 .unwrap()
         );
+    }
+
+    /// F3 裁决（契约 oracle S1 终裁 + REQ-ENV-09 矩阵）：gateway-mediated
+    /// planning 路径的 `validated_planning_input` role=Orchestrator 必带
+    /// `DenyFileWriteBuiltins`——tool_policy 沿 `ValidatedStreamingProviderInput`
+    /// 传到 adapter；envelope 的 `PlanningReadOnly` 语义不动（语义策略叠加，
+    /// 不取代只读 action）。Task 3.1 双向守卫落地后 Orchestrator+None 会被
+    /// fail-closed 拒绝、打断 gateway planning 路径，故在此锁定。
+    #[tokio::test]
+    async fn validated_planning_input_pairs_orchestrator_with_deny_file_write_policy() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        // authority_root canonicalize 需聚合根真实存在。
+        std::fs::create_dir_all(fixture.aggregate_root()).unwrap();
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        let gateway = fixture.planning_gateway();
+
+        let validated = resolved
+            .validated_planning_input(
+                &gateway,
+                fixture.provider_ref(),
+                fixture.config_artifact_ref(),
+                "planning prompt".to_string(),
+            )
+            .unwrap();
+
+        let (input, launch) = validated.into_parts();
+        assert_eq!(
+            input.role,
+            crate::protocol::contracts::AdapterRole::Orchestrator
+        );
+        assert!(
+            matches!(
+                input.tool_policy,
+                Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                    intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins
+                })
+            ),
+            "gateway planning 路径 Orchestrator 必带 DenyFileWriteBuiltins"
+        );
+        // envelope 的 PlanningReadOnly 语义不动（空 writable_roots 的只读 action
+        // 与语义 tool_policy 叠加共存）。
+        assert_eq!(launch.envelope().action, SessionPolicyAction::PlanningReadOnly);
+        assert!(launch.envelope().writable_roots.is_empty());
     }
 }

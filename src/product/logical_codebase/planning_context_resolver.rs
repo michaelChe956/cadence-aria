@@ -96,6 +96,12 @@ impl ResolvedPlanningContext {
     /// envelope 的 `PlanningReadOnly` action(空 writable_roots)+ prompt 层
     /// 「只读」指令表达(best_effort_configured,design §5.2),permission_mode
     /// 取 `Supervised`。
+    ///
+    /// tool_policy(F3 裁决,契约 oracle S1 终裁 + REQ-ENV-09 矩阵):planning 走
+    /// gateway 的 Orchestrator 必带 `DenyFileWriteBuiltins`,沿
+    /// `ValidatedStreamingProviderInput` 传到 adapter;与 envelope 的
+    /// `PlanningReadOnly` 语义叠加共存、不取代。Task 3.1 双向守卫落地后
+    /// Orchestrator+None 会被 fail-closed 拒绝,禁止回退为 None。
     pub fn validated_planning_input(
         &self,
         gateway: &crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway,
@@ -110,7 +116,9 @@ impl ResolvedPlanningContext {
         let validated = gateway.validate(request)?;
         let provider_type = provider_type_for_dialect(validated.envelope().provider_dialect);
         let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
-            tool_policy: None,
+            tool_policy: Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
+            ),
             provider_type,
             role: crate::protocol::contracts::AdapterRole::Orchestrator,
             prompt,

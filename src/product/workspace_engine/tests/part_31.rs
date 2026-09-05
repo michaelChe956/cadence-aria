@@ -953,3 +953,90 @@ fn aggregate_work_item_plan_author_input_keeps_structured_output_contract_none()
         "WorkItemPlan aggregate author input must NOT carry a structured output contract"
     );
 }
+
+/// F3 restrict-role-write-tools（F2 修复）：author 家族入口的策略断言，与上文
+/// part_31 既有 author 路由/契约测试同构（同款 session fixture + 聚合视野
+/// context message + `build_streaming_input`），逐一覆盖聚合 Story/Design、
+/// 单仓 Story/Design、聚合 WorkItemPlan 五个入口，断言 D2 矩阵：SC author
+/// = Orchestrator 必带 `DenyFileWriteBuiltins`（黑名单，非 allowlist）。
+#[test]
+fn author_family_streaming_inputs_pair_orchestrator_with_deny_file_write_policy() {
+    use crate::cross_cutting::streaming_provider::{
+        ProviderToolPolicy, ToolPolicyIntent as PolicyIntent,
+    };
+
+    fn author_input_for_case(
+        session_id: &str,
+        workspace_type: WorkspaceType,
+        aggregate_context: Option<String>,
+    ) -> StreamingProviderInput {
+        let (_tmp, store) = setup();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(session_id);
+        session.workspace_type = workspace_type;
+        if let Some(content) = aggregate_context {
+            // 与既有聚合 author 测试同构：模拟 web ensure_workspace_context_message
+            // 注入的聚合视野 context message。
+            session.messages.push(SessionMessage {
+                id: "msg_generation_context".to_string(),
+                role: "system".to_string(),
+                content,
+                checkpoint_id: None,
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+            });
+        }
+        let engine = WorkspaceEngine::new(store, event_tx, session);
+        engine
+            .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+            .expect("author input")
+    }
+
+    let cases = [
+        (
+            "aggregate_story",
+            WorkspaceType::Story,
+            Some(crate::product::workspace_engine::aggregate_story_scope_prompt(
+                "inventory-rendered",
+                &[],
+            )),
+        ),
+        (
+            "aggregate_design",
+            WorkspaceType::Design,
+            Some(crate::product::workspace_engine::aggregate_design_scope_prompt(
+                "inventory-rendered",
+                &[],
+            )),
+        ),
+        ("single_repo_story", WorkspaceType::Story, None),
+        ("single_repo_design", WorkspaceType::Design, None),
+        (
+            "aggregate_work_item_plan",
+            WorkspaceType::WorkItemPlan,
+            Some(
+                               crate::product::workspace_engine::aggregate_work_item_target_scope_prompt(
+                    "inventory-rendered",
+                    &[],
+                ),
+            ),
+        ),
+    ];
+
+    for (entry, workspace_type, aggregate_context) in cases {
+        let input = author_input_for_case(
+            &format!("sess_author_policy_{entry}"),
+            workspace_type,
+            aggregate_context,
+        );
+        assert_eq!(input.role, AdapterRole::Orchestrator, "{entry}");
+        assert!(
+            matches!(
+                input.tool_policy,
+                Some(ProviderToolPolicy {
+                    intent: PolicyIntent::DenyFileWriteBuiltins
+                })
+            ),
+            "{entry}: SC author 入口必带 DenyFileWriteBuiltins"
+        );
+    }
+}
