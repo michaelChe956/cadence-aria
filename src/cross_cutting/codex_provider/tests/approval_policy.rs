@@ -292,6 +292,25 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
 }
 
 #[tokio::test]
+async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
+    // I1：策略 input 的 thread/resume（与 start 同源）必须在真实 wire 上携带
+    // sandbox=read-only + approvalPolicy=on-request（fixture 对缺失任一字面退出）。
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_resume_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let mut input = codex_streaming_input_with_policy();
+    input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let completed = recv_completed(&mut session.events).await;
+
+    assert_eq!(completed, "policy resume done");
+}
+
+#[tokio::test]
 async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
     let fixture = executable_fixture(
         "tests/fixtures/provider/codex_app_server_coder_mcp_approval_fixture.sh",
