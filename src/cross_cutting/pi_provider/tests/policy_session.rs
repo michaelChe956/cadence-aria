@@ -99,6 +99,52 @@ fn read_marker_pid(marker: &std::path::Path) -> Option<u32> {
     }
 }
 
+/// P2-2：策略会话的版本探测必须走进程内缓存——同一命令路径的第二次策略启动
+/// 不得重复执行 `--version`（计数 fixture：预检每次 start 各 1 次 + 策略探测仅
+/// 首次 1 次，共 3 次；无缓存时为 4 次）。
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_policy_version_probe_uses_process_cache_across_starts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let counter = temp.path().join("version-probe.count");
+    let fixture = temp.path().join("fake-pi-counting");
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  n=$(cat {counter} 2>/dev/null || echo 0)\n  echo $((n + 1)) > {counter}\n  echo 0.83.0\n  exit 0\nfi\nwhile IFS= read -r line; do :; done\n",
+            counter = counter.display()
+        ),
+    )
+    .expect("write fixture");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&fixture).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fixture, permissions).expect("chmod fixture");
+    }
+    let provider = PiProvider::new(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    for _ in 0..2 {
+        let session = provider
+            .start(
+                policy_pi_input(None, Some(sink.clone().bound())),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("policy session starts with real probing");
+        drop(session);
+    }
+    let invocations: u32 = std::fs::read_to_string(&counter)
+        .expect("counter file")
+        .trim()
+        .parse()
+        .expect("counter value");
+    assert_eq!(
+        invocations, 3,
+        "两次策略启动：预检各 1 次 + 策略探测仅首次（后续命中缓存）"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn pi_policy_start_pregenerates_session_id_and_writes_provider_start() {

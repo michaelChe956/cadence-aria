@@ -356,10 +356,19 @@ impl StreamingProviderAdapter for PiProvider {
             let provider_version = match self.version_supplier.clone() {
                 Some(supplier) => supplier().map_err(tool_policy_session_error)?,
                 None => {
-                    let probed =
-                        probe_pi_version_with_timeout(&self.command, PI_VERSION_PROBE_TIMEOUT)
-                            .await;
-                    pi_policy_version(&probed).map_err(tool_policy_session_error)?
+                    // P2-2：策略会话版本探测走既有进程内缓存（GC9；claude/codex 同法）。
+                    let command = self.command.clone();
+                    crate::cross_cutting::streaming_provider::cached_cli_version(
+                        &self.command,
+                        async move {
+                            let probed =
+                                probe_pi_version_with_timeout(&command, PI_VERSION_PROBE_TIMEOUT)
+                                    .await;
+                            pi_policy_version(&probed)
+                        },
+                    )
+                    .await
+                    .map_err(tool_policy_session_error)?
                 }
             };
             let canonical = canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
