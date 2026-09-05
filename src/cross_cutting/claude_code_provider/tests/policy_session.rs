@@ -244,6 +244,63 @@ async fn claude_policy_start_append_failure_fails_closed() {
     );
 }
 
+/// 带内收集首个 ToolPolicyWarning（带 2s 界限；warning 在 start 返回前已入队）。
+async fn recv_tool_policy_warning(
+    events: &mut mpsc::Receiver<ProviderEvent>,
+) -> Option<crate::cross_cutting::streaming_provider::CodexProtocolWarningEvent> {
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, events.recv()).await {
+            Err(_) => return None,
+            Ok(None) => return None,
+            Ok(Some(ProviderEvent::ToolPolicyWarning(warning))) => return Some(warning),
+            Ok(Some(_)) => {}
+        }
+    }
+}
+
+/// GC9：resume 记录缺失（find_provider_start → None）与 drift 同路径处置——
+/// 清除 resume id、以全新会话（fresh init 握手+provider_start）启动；「标记 superseded」
+/// 仅带内 ToolPolicyWarning（🔴 无旧文件可写，不得伪造无 provider_start 首行的
+/// durable 文件）。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_resume_with_missing_record_starts_fresh_and_warns_in_band() {
+    let sink = RecordingToolPolicyAuditSink::new();
+    let provider = ClaudeCodeProvider::new(init_then_result_fixture())
+        .with_version_supplier(policy_version_supplier());
+    let mut session = provider
+        .start(
+            policy_claude_input(
+                Some("claude-session-resume-policy".to_string()),
+                Some(sink.clone().bound()),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("missing record must start a fresh session");
+
+    // 全新会话：native id 来自首个 init 事件（非 resume id），argv 不携带 --resume。
+    assert_eq!(session.native_session_id.as_deref(), Some("sess-policy-1"));
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "only the fresh provider_start is written");
+    let DurableToolPolicyEvent::ProviderStart(record) = &events[0] else {
+        panic!("expected provider_start");
+    };
+    assert!(!record.argv.contains(&"--resume".to_string()));
+    assert_eq!(record.provider_session_id, "sess-policy-1");
+
+    // 带内标记：ToolPolicyWarning(superseded_policy_record_missing)。
+    let warning = recv_tool_policy_warning(&mut session.events)
+        .await
+        .expect("missing record must emit an in-band superseded warning");
+    assert_eq!(
+        warning.reason_code, "superseded_policy_record_missing",
+        "unexpected warning: {warning:?}"
+    );
+    // 全新会话功能不受影响：result 仍可送达。
+    assert_eq!(recv_completed(&mut session.events).await, "policy done");
+}
+
 /// 登记 PID 并发 init 后存活的 fixture（kill 链断言用：子进程不自行退出）。
 #[cfg(unix)]
 fn pid_registering_init_fixture(marker: &std::path::Path) -> PathBuf {

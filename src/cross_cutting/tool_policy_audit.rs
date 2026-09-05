@@ -239,6 +239,12 @@ pub enum ResumeDecision {
 /// resume drift 的 superseded 终止原因码（D7/GC9 冻结）。
 pub const SUPERSEDED_POLICY_DRIFT: &str = "superseded_policy_drift";
 
+/// resume 记录缺失的 superseded 原因码（GC9：记录缺失时拒绝 resume、标记
+/// superseded、新建会话）。缺失路径无旧文件可写（🔴 不得伪造无 provider_start
+/// 首行的 durable 文件，首行不变量优先），「标记 superseded」仅经事件通道带内
+/// 可观测（见 `streaming_provider::superseded_policy_record_missing_warning`）。
+pub const SUPERSEDED_POLICY_RECORD_MISSING: &str = "superseded_policy_record_missing";
+
 /// resume 检索结果：provider_start 记录 + 其所在 run 文件定位。定位信息供 drift
 /// 时把 superseded `session_terminated` 追加到被取代旧 run 的文件（其
 /// provider_start 已是该文件首行；被终止的是旧会话），而非新 run 文件——新 run

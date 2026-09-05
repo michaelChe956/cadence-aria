@@ -300,6 +300,19 @@ pub struct CodexSessionTerminatedEvent {
     pub reason_code: String,
 }
 
+/// resume 记录缺失的带内 superseded 标记（GC9）：reason_code 冻结
+/// `superseded_policy_record_missing`。缺失路径无旧文件可写（🔴 不得伪造无
+/// provider_start 首行的 durable 文件，与 drift 有旧文件可写不同），故仅经
+/// 事件通道可观测；三 adapter 在清除 resume id、以全新会话启动时发出。
+pub fn superseded_policy_record_missing_warning() -> ProviderEvent {
+    ProviderEvent::ToolPolicyWarning(CodexProtocolWarningEvent {
+        reason_code: crate::cross_cutting::tool_policy_audit::SUPERSEDED_POLICY_RECORD_MISSING
+            .to_string(),
+        method: "resume_provider_session_id".to_string(),
+        occurrence: 1,
+    })
+}
+
 /// Tool-policy 翻译/canonical 化错误。未知 provider 名 fail-closed（kimi 不接策略）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolPolicyError {

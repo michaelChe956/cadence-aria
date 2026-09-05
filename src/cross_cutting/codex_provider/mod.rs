@@ -150,6 +150,10 @@ impl StreamingProviderAdapter for CodexProvider {
         // 真实 `--version` 探测+进程内缓存，不可得 fail-closed）与 resume 冻结三元组
         // 比对（记录缺失或 digest/version/dialect 任一不一致 → 追加 superseded 终止
         // 审计并新建会话，丢弃 resume id）。
+        // GC9：resume 记录缺失与 drift 同路径处置（清除 resume id、全新会话）；
+        // 「标记 superseded」仅带内 ToolPolicyWarning（🔴 无旧文件可写，不伪造
+        // durable 文件），在事件通道建立后送出。
+        let mut superseded_record_missing = false;
         let mut policy_context: Option<(
             std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
             String,
@@ -240,6 +244,13 @@ impl StreamingProviderAdapter for CodexProvider {
                         )
                     })?;
                     input.resume_provider_session_id = None;
+                } else if stored.is_none() {
+                    // GC9：记录缺失与 drift 同路径处置——清除 resume id、以全新会话
+                    // （thread/start + 新 run 的 provider_start）启动；「标记 superseded」
+                    // 仅带内 ToolPolicyWarning：无旧文件可写，🔴 不得伪造无
+                    // provider_start 首行的 durable 文件（首行不变量优先）。
+                    input.resume_provider_session_id = None;
+                    superseded_record_missing = true;
                 }
             }
             policy_context = Some((sink, provider_version, canonical.digest));
@@ -339,6 +350,14 @@ impl StreamingProviderAdapter for CodexProvider {
                 exit_code: None,
             }))
             .await;
+
+        // GC9：resume 记录缺失的带内 superseded 标记（事件通道在握手/append 之后
+        // 建立，故在此送出；新会话 provider_start 已先落盘）。
+        if superseded_record_missing {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::superseded_policy_record_missing_warning())
+                .await;
+        }
 
         tokio::spawn(async move {
             let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));

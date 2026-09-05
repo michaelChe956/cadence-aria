@@ -551,6 +551,77 @@ async fn codex_policy_resume_drift_marks_superseded_and_starts_fresh_thread() {
 }
 
 #[tokio::test]
+async fn codex_policy_resume_with_missing_record_starts_fresh_and_warns_in_band() {
+    // GC9：resume 记录缺失（find_provider_start → None）与 drift 同路径处置——
+    // 清除 resume id、以全新会话（thread/start+provider_start）启动；「标记 superseded」
+    // 仅带内 ToolPolicyWarning（🔴 无旧文件可写，不得伪造无 provider_start 首行的
+    // durable 文件；与 drift 有旧文件可写不同）。
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("missing record must start a fresh session");
+
+    // 全新会话：fresh thread/start（native id 来自新 thread，非 resume id）。
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-policy")
+    );
+    // 🔴 不得伪造 durable 事件：无 session_terminated，仅新会话 provider_start。
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "only the fresh provider_start is written");
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        &events[0]
+    else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.provider_session_id, "codex-thread-policy");
+
+    // 带内标记：ToolPolicyWarning(superseded_policy_record_missing)，随后会话照常完成。
+    let mut warning: Option<CodexProtocolWarningEvent> = None;
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::ToolPolicyWarning(event) => warning = Some(event),
+            ProviderEvent::Completed(completion) => {
+                assert_eq!(completion.full_output, "policy approvals done");
+                break;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+    let warning = warning.expect("missing record must emit an in-band superseded warning");
+    assert_eq!(
+        warning.reason_code, "superseded_policy_record_missing",
+        "unexpected warning: {warning:?}"
+    );
+}
+
+#[tokio::test]
 async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
     let fixture = executable_fixture(
         "tests/fixtures/provider/codex_app_server_coder_mcp_approval_fixture.sh",

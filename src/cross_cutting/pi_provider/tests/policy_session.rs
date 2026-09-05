@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{
-    ProviderPermissionMode, ProviderToolPolicy, ProviderVersionSupplier, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ProviderEvent, ProviderPermissionMode, ProviderToolPolicy, ProviderVersionSupplier,
+    StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ToolPolicyAuditSink};
@@ -362,6 +362,67 @@ async fn pi_policy_resume_compares_frozen_triple_and_supersedes_on_drift() {
         panic!("expected provider_start");
     };
     assert_eq!(record.provider_session_id, native_id);
+}
+
+/// 带内收集首个 ToolPolicyWarning（带 2s 界限；warning 在 start 返回前已入队，
+/// 通常首个非状态事件即命中）。
+async fn recv_tool_policy_warning(
+    events: &mut mpsc::Receiver<ProviderEvent>,
+) -> Option<crate::cross_cutting::streaming_provider::CodexProtocolWarningEvent> {
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await {
+            Err(_) => return None,
+            Ok(None) => return None,
+            Ok(Some(ProviderEvent::ToolPolicyWarning(warning))) => return Some(warning),
+            Ok(Some(_)) => {}
+        }
+    }
+}
+
+/// GC9：resume 记录缺失（find_provider_start → None）与 drift 同路径处置——
+/// 清除 resume id、以全新会话（新预生成 id+provider_start）启动；「标记 superseded」
+/// 仅带内 ToolPolicyWarning（🔴 无旧文件可写，不得伪造无 provider_start 首行的
+/// durable 文件）。
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_policy_resume_with_missing_record_starts_fresh_and_warns_in_band() {
+    let sink = RecordingToolPolicyAuditSink::new();
+    let provider =
+        PiProvider::new(plain_policy_pi_fixture()).with_version_supplier(policy_version_supplier());
+    let mut session = provider
+        .start(
+            policy_pi_input(
+                Some("pi-session-resume-policy".to_string()),
+                Some(sink.clone().bound()),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("missing record must start a fresh session");
+
+    // 全新会话：native id 为预生成新 id，不复用 resume id。
+    let native_id = session
+        .native_session_id
+        .clone()
+        .expect("fresh session carries a pre-generated id");
+    assert_ne!(native_id, "pi-session-resume-policy");
+
+    // 🔴 不得伪造 durable 事件：无 session_terminated，仅新会话 provider_start。
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "only the fresh provider_start is written");
+    let DurableToolPolicyEvent::ProviderStart(record) = &events[0] else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.provider_session_id, native_id);
+
+    // 带内标记：ToolPolicyWarning(superseded_policy_record_missing)。
+    let warning = recv_tool_policy_warning(&mut session.events)
+        .await
+        .expect("missing record must emit an in-band superseded warning");
+    assert_eq!(
+        warning.reason_code, "superseded_policy_record_missing",
+        "unexpected warning: {warning:?}"
+    );
 }
 
 #[cfg(unix)]

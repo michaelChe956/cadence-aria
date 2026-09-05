@@ -347,6 +347,10 @@ impl StreamingProviderAdapter for PiProvider {
             String,
             String,
         )> = None;
+        // GC9：resume 记录缺失与 drift 同路径处置（清除 resume id、全新会话）；
+        // 「标记 superseded」仅带内 ToolPolicyWarning（🔴 无旧文件可写，不伪造
+        // durable 文件），在事件通道建立后送出。
+        let mut superseded_record_missing = false;
         if let Some(policy) = input.tool_policy.as_ref() {
             let sink = input.audit_sink.clone().ok_or_else(|| {
                 tool_policy_session_error("audit sink is required for policy sessions")
@@ -405,6 +409,13 @@ impl StreamingProviderAdapter for PiProvider {
                     append_superseded_policy_drift(sink.as_ref(), stored)
                         .map_err(tool_policy_session_error)?;
                     input.resume_provider_session_id = None;
+                } else if stored.is_none() {
+                    // GC9：记录缺失与 drift 同路径处置——清除 resume id、以全新会话
+                    // （新预生成 id + 新 run 的 provider_start）启动；「标记 superseded」
+                    // 仅带内 ToolPolicyWarning：无旧文件可写，🔴 不得伪造无
+                    // provider_start 首行的 durable 文件（首行不变量优先）。
+                    input.resume_provider_session_id = None;
+                    superseded_record_missing = true;
                 }
             }
             let native_session_id = input
@@ -466,6 +477,14 @@ impl StreamingProviderAdapter for PiProvider {
                 exit_code: None,
             }))
             .await;
+
+        // GC9：resume 记录缺失的带内 superseded 标记（先于新会话 provider_start，
+        // 与 drift 路径的 durable 顺序镜像）。
+        if superseded_record_missing {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::superseded_policy_record_missing_warning())
+                .await;
+        }
 
         // 策略会话：spawn 后、start 返回前写 `provider_start`（握手=id 已预生成/传入
         // 完成）；append 失败终止子进程并返回错误（engine 沿既有 kill 链判失败）。

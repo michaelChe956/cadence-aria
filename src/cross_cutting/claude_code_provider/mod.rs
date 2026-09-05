@@ -471,6 +471,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         // 真实 `--version` 探测+进程内缓存，不可得 fail-closed）与 resume 冻结三元组
         // 比对（记录缺失或 digest/version/dialect 任一不一致 → 追加 superseded 终止
         // 审计并新建会话）。
+        // GC9：resume 记录缺失与 drift 同路径处置（清除 resume id、全新会话）；
+        // 「标记 superseded」仅带内 ToolPolicyWarning（🔴 无旧文件可写，不伪造
+        // durable 文件），在事件通道建立后送出。
+        let mut superseded_record_missing = false;
         let mut policy_context: Option<(
             std::sync::Arc<dyn ToolPolicyAuditSink>,
             String,
@@ -562,6 +566,13 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                         )
                     })?;
                     input.resume_provider_session_id = None;
+                } else if stored.is_none() {
+                    // GC9：记录缺失与 drift 同路径处置——清除 resume id、以全新会话
+                    // （fresh init 握手 + 新 run 的 provider_start）启动；「标记 superseded」
+                    // 仅带内 ToolPolicyWarning：无旧文件可写，🔴 不得伪造无
+                    // provider_start 首行的 durable 文件（首行不变量优先）。
+                    input.resume_provider_session_id = None;
+                    superseded_record_missing = true;
                 }
             }
             // P1-8：durable 审计 role 保留真实 AdapterRole 序列化值（usage 展示层
@@ -630,6 +641,14 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 exit_code: None,
             }))
             .await;
+
+        // GC9：resume 记录缺失的带内 superseded 标记（先于新会话 provider_start，
+        // 与 drift 路径的 durable 顺序镜像）。
+        if superseded_record_missing {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::superseded_policy_record_missing_warning())
+                .await;
+        }
 
         let start_cancel = cancel.clone();
         // workspace 会话 id（D6 冻结字段）在 input 移入后台任务前捕获，供
