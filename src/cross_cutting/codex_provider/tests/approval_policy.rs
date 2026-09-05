@@ -7,6 +7,9 @@ use crate::cross_cutting::codex_provider::parse_approval_request;
 use crate::cross_cutting::codex_provider::session::{
     decide_for_policy, decide_unknown, unknown_storm_reason_after,
 };
+use crate::cross_cutting::streaming_provider::{
+    CodexProtocolWarningEvent, CodexSessionTerminatedEvent,
+};
 
 fn codex_streaming_input_with_policy() -> StreamingProviderInput {
     let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
@@ -134,16 +137,52 @@ async fn codex_generic_elicitation_gets_wire_error_reply_and_storm_terminates_se
         .await
         .unwrap();
 
+    let mut warnings: Vec<CodexProtocolWarningEvent> = Vec::new();
+    let mut terminations: Vec<CodexSessionTerminatedEvent> = Vec::new();
     loop {
         match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
             .await
             .expect("provider should fail after unknown approval storm")
             .expect("provider event channel should stay open until failure")
         {
+            ProviderEvent::ToolPolicyWarning(warning) => warnings.push(warning),
+            ProviderEvent::ToolPolicyTerminated(termination) => terminations.push(termination),
             ProviderEvent::Failed { message } => {
                 assert!(
                     message.contains("unknown_approval_storm"),
                     "unexpected failure message: {message}"
+                );
+                // C1：每次未知形态的 protocol_warning 必须经事件出口可观测
+                // （occurrence 单调递增，reason_code/method 为 GC6 冻结值）。
+                assert_eq!(
+                    warnings,
+                    vec![
+                        CodexProtocolWarningEvent {
+                            reason_code: "unsupported_approval_kind".to_string(),
+                            method: "mcpServer/elicitation/request".to_string(),
+                            occurrence: 1,
+                        },
+                        CodexProtocolWarningEvent {
+                            reason_code: "unsupported_approval_kind".to_string(),
+                            method: "mcpServer/elicitation/request".to_string(),
+                            occurrence: 2,
+                        },
+                        CodexProtocolWarningEvent {
+                            reason_code: "unsupported_approval_kind".to_string(),
+                            method: "mcpServer/elicitation/request".to_string(),
+                            occurrence: 3,
+                        },
+                    ],
+                    "each unknown approval form must surface as a ToolPolicyWarning event"
+                );
+                // C1：第 3 次未知的 session_terminated（reason_code 冻结）可观测。
+                assert_eq!(
+                    terminations,
+                    vec![CodexSessionTerminatedEvent {
+                        reason_code: "unknown_approval_storm".to_string(),
+                    }],
+                    "the third consecutive unknown form must surface a ToolPolicyTerminated \
+                     event before failure"
                 );
                 return;
             }
@@ -171,6 +210,9 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
         .await
         .unwrap();
 
+    // C1：策略会话的审批决策必须以 ToolPolicyDecision 事件可观测（wire 顺序：
+    // fileChange decline → commandExecution decline → MCP accept）。
+    let mut decisions = Vec::new();
     loop {
         match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
             .await
@@ -180,8 +222,20 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
             ProviderEvent::PermissionRequest(_) => {
                 panic!("policy session must answer approvals without bridging")
             }
+            ProviderEvent::ToolPolicyDecision(decision) => {
+                decisions.push((decision.category, decision.decision))
+            }
             ProviderEvent::Completed(completion) => {
                 assert_eq!(completion.full_output, "policy approvals done");
+                assert_eq!(
+                    decisions,
+                    vec![
+                        ("file_change", "decline"),
+                        ("command_execution", "decline"),
+                        ("mcp_tool_call", "accept"),
+                    ],
+                    "policy approval decisions must surface as ToolPolicyDecision events"
+                );
                 return;
             }
             ProviderEvent::StatusChanged(_)
@@ -191,6 +245,12 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
             | ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::ToolPolicyWarning(warning) => {
+                panic!("classified approvals must not raise protocol warnings: {warning:?}")
+            }
+            ProviderEvent::ToolPolicyTerminated(termination) => {
+                panic!("classified approvals must not terminate the session: {termination:?}")
+            }
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
@@ -238,7 +298,10 @@ async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::UsageReport(_) => {}
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")

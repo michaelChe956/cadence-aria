@@ -276,6 +276,12 @@ impl WorkspaceEngine {
                         // token 用量采集仅覆盖 workspace_engine 主事件循环；计划拆分链路
                         // 暂不消费 usage（best-effort，缺失不报错）。
                         ProviderEvent::UsageReport(_) => {}
+                        // 策略审计出口（approval_decision/protocol_warning/
+                        // session_terminated）：观测性事件，engine 主循环不消费；
+                        // durable 落盘在 Task 3.2 的 LifecycleStore sink 注入。
+                        ProviderEvent::ToolPolicyDecision(_)
+                        | ProviderEvent::ToolPolicyWarning(_)
+                        | ProviderEvent::ToolPolicyTerminated(_) => {}
                     }
                 }
             }

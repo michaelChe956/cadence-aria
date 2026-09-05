@@ -77,7 +77,10 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -104,7 +107,10 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -305,7 +311,10 @@ async fn codex_provider_responds_to_current_command_approval_with_json_rpc_resul
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -361,7 +370,10 @@ async fn codex_provider_streams_completed_only_agent_messages() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -404,7 +416,10 @@ async fn codex_provider_bridges_request_user_input_and_completes() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -463,7 +478,10 @@ async fn codex_provider_bridges_all_request_user_input_questions() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -596,7 +614,10 @@ async fn codex_provider_times_out_when_turn_stops_emitting_events() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -644,7 +665,10 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -686,6 +710,9 @@ async fn codex_provider_empty_turn_output_retries_once_and_completes() {
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
             | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
@@ -732,6 +759,9 @@ async fn codex_provider_empty_output_retry_recovers_when_retry_turn_reuses_item_
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
             | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
@@ -793,6 +823,9 @@ async fn codex_provider_empty_turn_output_fails_with_provider_empty_output_after
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
             | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;

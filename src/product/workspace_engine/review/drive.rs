@@ -770,6 +770,10 @@ impl WorkspaceEngine {
                             )
                             .await;
                         }
+                        // 策略审计出口：观测性事件，review 驱动不消费（Task 3.2 接 sink）。
+                        ProviderEvent::ToolPolicyDecision(_)
+                        | ProviderEvent::ToolPolicyWarning(_)
+                        | ProviderEvent::ToolPolicyTerminated(_) => {}
                         ProviderEvent::Execution(event) => {
                             self
                                 .emit_execution_event(

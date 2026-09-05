@@ -320,7 +320,10 @@ impl ClaudeRepositoryInitializer {
                 }
                 Some(ProviderEvent::StatusChanged(_))
                 | Some(ProviderEvent::ToolCall(_))
-                | Some(ProviderEvent::UsageReport(_)) => {}
+                | Some(ProviderEvent::UsageReport(_))
+                | Some(ProviderEvent::ToolPolicyDecision(_))
+                | Some(ProviderEvent::ToolPolicyWarning(_))
+                | Some(ProviderEvent::ToolPolicyTerminated(_)) => {}
                 None => {
                     return Err(command_failure_with_output(
                         command_index,

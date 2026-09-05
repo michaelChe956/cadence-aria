@@ -324,12 +324,19 @@ where
 
             if let CodexApprovalCategory::Unknown { method } = request.category.clone() {
                 unknown_approval_occurrence += 1;
-                // 结构化 protocol_warning 事件（内存出口；durable 接线在 Task 3.2）
+                // 结构化 protocol_warning 事件：经事件通道送出会话循环（C1 真实出口）；
+                // durable 落盘在 Task 3.2 的 sink 注入。
                 let warning = CodexProtocolWarningEvent {
                     reason_code: "unsupported_approval_kind".to_string(),
                     method: method.clone(),
                     occurrence: unknown_approval_occurrence,
                 };
+                send_provider_event(
+                    &event_tx,
+                    ProviderEvent::ToolPolicyWarning(warning.clone()),
+                    &cancel,
+                )
+                .await?;
                 tracing::warn!(
                     target: "codex_provider",
                     reason_code = %warning.reason_code,
@@ -340,13 +347,20 @@ where
                 let response = decide_unknown(&method, unknown_approval_occurrence);
                 write_approval_decision(&peer, request.rpc_id.clone(), &response).await?;
                 if let Some(reason_code) = unknown_storm_reason_after(unknown_approval_occurrence) {
-                    // 结构化 session_terminated 事件（内存出口；durable 接线在 Task 3.2）
+                    // 结构化 session_terminated 事件：先经事件通道送出再终止会话
+                    // （C1 真实出口；durable 落盘在 Task 3.2）。
                     let termination = CodexSessionTerminatedEvent {
                         reason_code: reason_code.to_string(),
                     };
+                    send_provider_event(
+                        &event_tx,
+                        ProviderEvent::ToolPolicyTerminated(termination),
+                        &cancel,
+                    )
+                    .await?;
                     tracing::warn!(
                         target: "codex_provider",
-                        reason_code = %termination.reason_code,
+                        reason_code,
                         "terminating codex session after unknown approval storm"
                     );
                     return Err(provider_error(format!(
@@ -360,14 +374,20 @@ where
             unknown_approval_occurrence = 0;
 
             if tool_policy_session {
-                // 策略会话即时决策：exec/fileChange 拒绝、MCP accept，并产出结构化
-                // approval_decision 事件（内存出口；durable 接线在 Task 3.2）。
+                // 策略会话即时决策：exec/fileChange 拒绝、MCP accept，决策经事件通道
+                // 送出会话循环（C1 真实出口；durable 落盘在 Task 3.2 的 sink 注入）。
                 let response = decide_for_policy(request.category.clone());
                 let decision_event = CodexApprovalDecisionEvent {
                     request_id: request.request_id.clone(),
                     category: request.category.audit_text(),
                     decision: response.audit_text(),
                 };
+                send_provider_event(
+                    &event_tx,
+                    ProviderEvent::ToolPolicyDecision(decision_event.clone()),
+                    &cancel,
+                )
+                .await?;
                 tracing::info!(
                     target: "codex_provider",
                     request_id = %decision_event.request_id,

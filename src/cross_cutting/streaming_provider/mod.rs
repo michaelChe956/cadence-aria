@@ -522,6 +522,13 @@ pub enum ProviderEvent {
     /// 数据源因 provider 而异（claude stream-json result.usage、pi get_state cost 等）；
     /// 任一字段不可得时为 `None`，不视为错误。
     UsageReport(UsageReportData),
+    /// 策略会话审批决策的结构化出口（GC11 canonical `approval_decision` 的内存形态；
+    /// durable 落盘在后续 task 的 LifecycleStore sink 注入接线）。
+    ToolPolicyDecision(CodexApprovalDecisionEvent),
+    /// 未知审批形态告警的结构化出口（GC11 canonical `protocol_warning` 内存形态）。
+    ToolPolicyWarning(CodexProtocolWarningEvent),
+    /// 未知审批风暴终止的结构化出口（GC11 canonical `session_terminated` 内存形态）。
+    ToolPolicyTerminated(CodexSessionTerminatedEvent),
 }
 
 /// 一次 provider 会话的 token 用量快照。
@@ -696,7 +703,10 @@ pub trait StreamingProviderAdapter: Send + Sync {
                     | ProviderEvent::Execution(_)
                     | ProviderEvent::ToolCall(_)
                     | ProviderEvent::ToolResult(_)
-                    | ProviderEvent::UsageReport(_) => {
+                    | ProviderEvent::UsageReport(_)
+                    | ProviderEvent::ToolPolicyDecision(_)
+                    | ProviderEvent::ToolPolicyWarning(_)
+                    | ProviderEvent::ToolPolicyTerminated(_) => {
                         continue;
                     }
                 };

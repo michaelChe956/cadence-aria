@@ -27,7 +27,10 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -129,7 +132,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -254,7 +260,10 @@ async fn claude_provider_truncates_multibyte_tool_result_preview_without_panicki
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }

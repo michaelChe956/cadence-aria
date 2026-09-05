@@ -422,6 +422,12 @@ impl WorkspaceEngine {
                             )
                             .await;
                         }
+                        // 策略审计出口（approval_decision/protocol_warning/
+                        // session_terminated）：观测性事件，主循环不消费；durable
+                        // 落盘在 Task 3.2 的 LifecycleStore sink 注入。
+                        ProviderEvent::ToolPolicyDecision(_)
+                        | ProviderEvent::ToolPolicyWarning(_)
+                        | ProviderEvent::ToolPolicyTerminated(_) => {}
                         ProviderEvent::ToolCall(call) => {
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {

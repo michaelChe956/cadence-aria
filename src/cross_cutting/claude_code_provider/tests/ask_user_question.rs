@@ -55,7 +55,10 @@ async fn claude_provider_continues_same_session_after_ask_user_question_choice()
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out before choice: {permission_id}")
             }
@@ -146,7 +149,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out before choice: {permission_id}")
             }
@@ -250,7 +256,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out before choice: {permission_id}")
             }
@@ -357,7 +366,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out before choice: {permission_id}")
             }
@@ -459,7 +471,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out before choice: {permission_id}")
             }
@@ -508,7 +523,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -581,7 +599,10 @@ done
             ProviderEvent::Failed { message } => {
                 panic!("provider failed before protocol error: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -672,7 +693,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error before choice: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out before choice: {permission_id}")
             }
@@ -718,7 +742,10 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error during abort: {message}")
             }
-            ProviderEvent::UsageReport(_) => {}
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out during abort: {permission_id}")
             }
