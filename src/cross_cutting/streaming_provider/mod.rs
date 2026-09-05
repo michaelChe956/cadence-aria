@@ -127,7 +127,9 @@ impl std::fmt::Display for ToolPolicyGuardError {
 
 impl std::error::Error for ToolPolicyGuardError {}
 
-fn adapter_role_text(role: &AdapterRole) -> &'static str {
+/// AdapterRole 的真实序列化文本（durable 审计 provider_start.role 用；与
+/// `UsageReportData::role_text` 的 usage 展示层归一严格分离，P1-8）。
+pub(crate) fn adapter_role_text(role: &AdapterRole) -> &'static str {
     match role {
         AdapterRole::Orchestrator => "orchestrator",
         AdapterRole::Executor => "executor",

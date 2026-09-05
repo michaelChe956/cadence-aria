@@ -464,10 +464,8 @@ impl StreamingProviderAdapter for PiProvider {
         if let Some((sink, provider_version, digest, session_id)) = policy_start {
             let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
                 provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
-                role: crate::cross_cutting::streaming_provider::UsageReportData::role_text(
-                    &input.role,
-                )
-                .to_string(),
+                role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
+                    .to_string(),
                 workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
                 provider_session_id: session_id.clone(),
                 tool_policy_canonical_digest: digest,

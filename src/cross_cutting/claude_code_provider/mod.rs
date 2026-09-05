@@ -550,7 +550,11 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     input.resume_provider_session_id = None;
                 }
             }
-            let role_text = UsageReportData::role_text(&input.role).to_string();
+            // P1-8：durable 审计 role 保留真实 AdapterRole 序列化值（usage 展示层
+            // 归一仅在 read_claude_stream 的 usage 上报使用）。
+            let role_text =
+                crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
+                    .to_string();
             policy_context = Some((sink, provider_version, canonical.digest, role_text));
         }
         let args = self.build_args(

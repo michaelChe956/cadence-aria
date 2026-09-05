@@ -127,6 +127,9 @@ async fn pi_policy_start_pregenerates_session_id_and_writes_provider_start() {
         panic!("expected provider_start");
     };
     assert_eq!(record.provider, "pi");
+    // P1-8：durable 审计保留真实 AdapterRole 序列化值（orchestrator），不与
+    // usage 展示层归一（usage 把 Orchestrator 归一为 author）。
+    assert_eq!(record.role, "orchestrator");
     assert_eq!(record.adapter_dialect, PI_POLICY_DIALECT);
     assert_eq!(record.provider_version, "pi 0.83.0-policy-fixture");
     assert_eq!(record.provider_session_id, native_id);

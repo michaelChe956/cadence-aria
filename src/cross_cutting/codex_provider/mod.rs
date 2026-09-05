@@ -12,7 +12,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderSession, ProviderStatus, ProviderVersionSupplier,
-    StreamingProviderAdapter, StreamingProviderInput, UsageReportData, canonical_tool_policy,
+    StreamingProviderAdapter, StreamingProviderInput, canonical_tool_policy,
     validate_tool_policy_for_role,
 };
 use crate::cross_cutting::tool_policy_audit::{DurableToolPolicyEvent, ProviderStartAudit};
@@ -289,7 +289,8 @@ impl StreamingProviderAdapter for CodexProvider {
             let launch_params = session::codex_launch_params(&input);
             let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
                 provider: session::TOOL_POLICY_PROVIDER_NAME.to_string(),
-                role: UsageReportData::role_text(&input.role).to_string(),
+                role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
+                    .to_string(),
                 workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
                 provider_session_id: thread_id.clone(),
                 tool_policy_canonical_digest: tool_policy_digest,
