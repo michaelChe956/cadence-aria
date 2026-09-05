@@ -1,5 +1,7 @@
 # 2026-09-05 计划文档：F3 角色黑名单实施 `restrict-role-write-tools` v1.0
 
+> v1.0.1（2026-09-05 controller 亲验修订）：Task 0 证据不入 git（.superpowers 为 git-ignored）；测试片段改为真实 API 签名（pi/claude `build_args`、`ensure_request_id`、新增 `codex_launch_params` 抽取）；`json_rpc_peer.rs` 路径纠正；行号锚点校正；语义层 provider 参数定为 `&str`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan. Steps use checkbox (`- [ ]`) syntax.
 
 ## Goal
@@ -44,6 +46,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
 14. **REQ-ENV-06/08 自发现边界。** provider 原生发现的项目/用户配置（`.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）是用户裁决的受信任通道，不受 Aria bundle 管控；Aria 主动注入的 settings/MCP bundle 仍按既有审计、脱敏和 digest 规则。MCP 可用性不作正向保证。
 15. **命令纪律。** 所有本地命令在当前 worktree 根目录、宿主机 Rust 环境执行；`cargo test` **禁止 `-j` 参数**。定向单测必须用 `cargo test --locked --lib <filter>`；approval_bridge 使用 `cargo test-approval-bridge`。全量门禁严格为：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`、`cargo test --locked`。每个 Task 收尾必须运行对应 targeted 测试与 `openspec validate restrict-role-write-tools --strict`。
 16. **实施停止条件。** Task 0 的三项 CLI 实测任一与契约不符，立即停止本 change 实施并提交证据，不得擅自改名单、沙箱、审批分类或扩大范围。
+17. **证据与 fixture 约定。** `.superpowers/` 为 git-ignored（SDD workspace 磁盘持久），其下证据文件只落盘不 commit，完成后在 `progress.md` 台账登记路径。测试片段中未在生产代码中存在的 helper（`build_test_streaming_input`、`test_tool_policy_audit_sink`、`*_event`、`probe_fixture`、`provider_start_record` 等）均为随实现新建的测试 fixture，签名以各 Task Interfaces 为准；生产函数（`codex_launch_params`、`ensure_request_id` 扩展、`validate_tool_policy_for_role` 等）必须先在 Interfaces 声明再使用。
 
 
 ## Task 0 — CLI 实测门禁（OpenSpec task 0.x / REQ-ENV-09）
@@ -63,8 +66,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - [ ] 运行 `claude --version` 与 `claude --help`，把原始输出和 exit status 记录到证据文件；预期帮助中存在 `--disallowedTools` 与 `--resume`，不存在时立即停止。
   - [ ] 以最小非交互 fixture 启动 `claude --disallowedTools Edit,Write,NotebookEdit`，发送一个 Edit/Write/NotebookEdit 请求和一个读取请求；预期三个写工具均被拒绝或不可用，读取仍可用。
   - [ ] 以同一 denylist 组合有效 `--resume <provider-session-id>` 启动 fixture；预期参数解析成功且 denylist 未丢失。
-  - [ ] 在证据文件写入版本、命令、原始输出、通过断言与失败停止条件；不得用摘要替代原始输出。
-  - [ ] 提交门禁证据：`git add .superpowers/sdd/2026-09-04_计划文档_3.6全量收敛轮_v1.0/f3-task0-claude.md && git commit -m "test(restrict-role-write-tools): verify claude denylist gate"`。
+  - [ ] 在证据文件写入版本、命令、原始输出、通过断言与失败停止条件；不得用摘要替代原始输出。证据文件落盘即完成（`.superpowers/` 为 git-ignored，不入 git），并在 `.superpowers/sdd/2026-09-04_计划文档_3.6全量收敛轮_v1.0/progress.md` 登记证据路径。
 
 ### Task 0.2 — Codex 三联动、MCP 与 Coder 对照复核
 
@@ -82,8 +84,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - [ ] 在 read-only 线程发送 shell 写请求，记录 `item/commandExecution/requestApproval`；预期审批形态可判别，批准后确认写入确实落盘。
   - [ ] 在 read-only 线程发送 MCP 请求，确认方法为 `mcpServer/elicitation/request` 且 `_meta.codex_approval_kind="mcp_tool_call"`，记录批准后的 `serverRequest/resolved` 与结果；预期 MCP 调用完成。
   - [ ] 以 Coder 对照参数 `sandbox=danger-full-access`、`approvalPolicy=never` 触发 fileChange/MCP 可能到达的路径并记录实际 wire；预期结果支持“Coder fileChange/commandExecution 维持 bridge，MCP accept”的契约断言，不得推断未观察到的请求。
-  - [ ] 在证据文件写入 version、启动参数、所有原始 wire、通过断言与失败停止条件；任一三联动或分类事实不符立即停止。
-  - [ ] 提交门禁证据：`git add .superpowers/sdd/2026-09-04_计划文档_3.6全量收敛轮_v1.0/f3-task0-codex.md && git commit -m "test(restrict-role-write-tools): verify codex approval gate"`。
+  - [ ] 在证据文件写入 version、启动参数、所有原始 wire、通过断言与失败停止条件；任一三联动或分类事实不符立即停止。证据文件落盘即完成（git-ignored，不入 git），并在 progress.md 登记证据路径。
 
 ### Task 0.3 — Pi exclude-tools、session-id 与空 id 复核
 
@@ -98,13 +99,12 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - [ ] 运行 `pi --version` 与 `pi --help`，记录完整输出；预期存在 `--exclude-tools` 与 `--session-id`。
   - [ ] 以 `pi --exclude-tools edit,write --session-id aria-task0-pi` 启动最小 fixture；预期 edit/write 不可用，非写工具仍可用。
   - [ ] 以空 session id 运行等价 fixture；预期行为与 adapter 设计的边界断言一致且无静默放宽，异常必须被记录为 fail-closed。
-  - [ ] 在证据文件写入版本、命令、原始输出、通过断言与失败停止条件。
-  - [ ] 提交门禁证据：`git add .superpowers/sdd/2026-09-04_计划文档_3.6全量收敛轮_v1.0/f3-task0-pi.md && git commit -m "test(restrict-role-write-tools): verify pi denylist gate"`。
+  - [ ] 在证据文件写入版本、命令、原始输出、通过断言与失败停止条件。证据文件落盘即完成（git-ignored，不入 git），并在 progress.md 登记证据路径。
 
 ### Task 0 收尾
 
 - [ ] 运行 `openspec validate restrict-role-write-tools --strict`；预期输出通过。
-- [ ] 运行 `git status --short`；预期只显示本 Task 证据文件或干净工作树，且不存在实现文件变更。
+- [ ] 运行 `git status --short`；预期干净工作树（Task 0 证据不入 git，无实现文件变更）。
 
 ## Task 1 — 语义策略与宿主注入（OpenSpec task 1.x / REQ-ENV-09）
 
@@ -118,13 +118,13 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Modify：`Cargo.toml`、`Cargo.lock`（仅在现有 sha256 依赖不存在时，以仓库现有依赖方式加入）
   - Test：`src/cross_cutting/streaming_provider/tests.rs` 或对应 provider 单测模块
 - **Interfaces**
-  - Consumes：`AdapterRole`、provider 名、`Option<ProviderToolPolicy>`。
+  - Consumes：`AdapterRole`、provider 名（`&str`，各 adapter 提供自身 CLI 名常量：`"pi"`/`"claude-code"`/`"codex"`）、`Option<ProviderToolPolicy>`。语义层不依赖 gateway 层枚举（`ProviderRefType` 属 `logical_codebase/provider_gateway.rs:133`，不引入 cross-cutting→product 反向依赖）。
   - Produces：
     - `pub enum ToolPolicyIntent { DenyFileWriteBuiltins }`。
-    - `pub struct ProviderToolPolicy { pub intent: ToolPolicyIntent }`。
+    - `pub struct ProviderToolPolicy { pub intent: ToolPolicyIntent }` + `impl ProviderToolPolicy { pub fn deny_file_write_builtins() -> Self }`（后续 Task 统一用此构造器）。
     - `pub struct CanonicalToolPolicy { pub provider: String, pub tokens: Vec<String>, pub approval_policy_version: String, pub digest: String }`。
-    - `pub fn canonical_tool_policy(provider: ProviderRefType, policy: &ProviderToolPolicy) -> Result<CanonicalToolPolicy, ToolPolicyError>`。
-    - `pub fn translate_tool_policy(provider: ProviderRefType, policy: &ProviderToolPolicy) -> Result<Vec<String>, ToolPolicyError>`。
+    - `pub fn canonical_tool_policy(provider: &str, policy: &ProviderToolPolicy) -> Result<CanonicalToolPolicy, ToolPolicyError>`。
+    - `pub fn translate_tool_policy(provider: &str, policy: &ProviderToolPolicy) -> Result<Vec<String>, ToolPolicyError>`。
   - `StreamingProviderInput` 增加 `pub tool_policy: Option<ProviderToolPolicy>`；非策略路径必须传 `None`。
 - **Steps**
   - [ ] 先写失败单测，定义唯一意图和精确向量：
@@ -132,7 +132,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     #[test]
     fn canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1() {
         let policy = ProviderToolPolicy { intent: ToolPolicyIntent::DenyFileWriteBuiltins };
-        let actual = canonical_tool_policy(ProviderRefType::Pi, &policy).unwrap();
+        let actual = canonical_tool_policy("pi", &policy).unwrap();
         assert_eq!(actual.tokens, vec!["--exclude-tools", "edit,write"]);
         assert_eq!(actual.approval_policy_version, "ap-v1");
         assert_eq!(actual.digest.len(), 64);
@@ -141,7 +141,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1`；预期失败信息为 `cannot find ... canonical_tool_policy` 或 digest 断言失败。
   - [ ] 以最小实现加入 `ToolPolicyIntent`、`ProviderToolPolicy`、`CanonicalToolPolicy` 和 translator；pi tokens 必须是 `vec!["--exclude-tools", "edit,write"]`，claude tokens 必须是 `vec!["--disallowedTools", "Edit,Write,NotebookEdit"]`，codex tokens 必须包含 `sandbox=read-only` 与 `approvalPolicy=on-request`，并按 `"tp-v1" + \x1f + provider + \x1f + tokens.join(\x1f) + \x1f + "ap-v1"` 计算 sha256。
-  - [ ] 更新失败向量为由实际 sha256 实现计算出的固定 64 位 hex 值，再运行 `cargo test --locked --lib canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1`；预期通过且 digest 在同一输入下稳定。
+  - [ ] 以 shell 实算向量替换长度断言（禁止手写假 digest）：`printf 'tp-v1\x1fpi\x1f--exclude-tools\x1fedit,write\x1fap-v1' | sha256sum`，把输出 hex 写入测试的精确断言 `assert_eq!(actual.digest, "<实算值>")` 并在测试注释记录实算命令；再运行 `cargo test --locked --lib canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1`；预期通过且 digest 在同一输入下稳定。
   - [ ] 追加物理片段、大小写、token 顺序和 `ap-v1` 漂移测试：改变任一 token 或审批规则版本时 `assert_ne!(old.digest, new.digest)`。
   - [ ] 运行 `cargo fmt --check`；预期通过。
   - [ ] 提交实现：`git add src/cross_cutting/streaming_provider src/cross_cutting/pi_provider src/cross_cutting/claude_code_provider src/cross_cutting/codex_provider Cargo.toml Cargo.lock && git commit -m "feat(restrict-role-write-tools): add canonical tool policy"`。
@@ -156,7 +156,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Consumes：`ProviderToolPolicy`、`AdapterRole`、各已有 builder 的 provider/session 参数。
   - Produces：每个作者/评审 builder 返回 `StreamingProviderInput { tool_policy: Some(ProviderToolPolicy { intent: DenyFileWriteBuiltins }), .. }`；Executor/Coder 与聚合初始化返回 `tool_policy: None`。
 - **Steps**
-  - [ ] 先写失败参数化测试，复用各 builder 返回的真实 `StreamingProviderInput`；为生产函数加一个测试可见的 `build_test_streaming_input(role: AdapterRole) -> StreamingProviderInput`，测试仅调用该 fixture，不虚构生产 API：
+  - [ ] 先写失败参数化测试，复用各 builder 返回的真实 `StreamingProviderInput`；在 workspace_engine 测试模块新建 fixture `pub(crate) fn build_test_streaming_input(role: AdapterRole) -> StreamingProviderInput`（内部分派到真实 builder 工厂，不虚构生产 API；Task 4.1 复用同一 fixture），测试仅调用该 fixture：
     ```rust
     #[test]
     fn streaming_input_builder_applies_role_policy_matrix() {
@@ -186,22 +186,27 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Test：`src/cross_cutting/pi_provider/tests.rs:275-296` 或同模块 args 测试
 - **Interfaces**
   - Consumes：`StreamingProviderInput.tool_policy`、已有 `session_id` 与 `build_args`。
-  - Produces：策略输入 argv 精确包含 `--exclude-tools`, `edit,write`；session id 原有位置与 resume 行为不变。
+  - Produces：`PiProvider::build_args(&self, resume_session_id: Option<&str>, extension_path: &Path, tool_policy: Option<&ProviderToolPolicy>) -> Vec<String>`（现签名 `mod.rs:230-248` 为两参，扩第三参；既有调用点与测试同步补 `None`）；策略输入 argv 精确包含 `--exclude-tools`, `edit,write`；session id 原有位置与 resume 行为不变。
 - **Steps**
   - [ ] 先写失败单测，直接调用现有 `src/cross_cutting/pi_provider/tests.rs:299-312` 的 `streaming_input_for_test` fixture 与生产 `build_args`：
     ```rust
     #[test]
     fn build_args_policy_keeps_session_id_and_excludes_only_file_writes() {
-        let mut input = streaming_input_for_test(Some("aria-17".to_owned()));
-        input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
-        let args = build_args(&input).unwrap();
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let provider = PiProvider::new("pi".into());
+        let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
+        let args = provider.build_args(
+            Some("aria-17"),
+            &extension,
+            Some(&ProviderToolPolicy::deny_file_write_builtins()),
+        );
         assert!(args.windows(2).any(|w| w == ["--exclude-tools", "edit,write"]));
         assert!(args.windows(2).any(|w| w == ["--session-id", "aria-17"]));
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib build_args_policy_keeps_session_id_and_excludes_only_file_writes`；预期失败为 `StreamingProviderInput` 无 `tool_policy` 或 argv 缺少 `--exclude-tools`。
-  - [ ] 在 `build_args` 仅对 `Some(DenyFileWriteBuiltins)` 追加 `--exclude-tools edit,write`，不改变 `--session-id` 顺序；空 session id 复用现有 `streaming_input_for_test(None)` 语义并返回既有错误，不降级成无限制 argv。
-  - [ ] 运行 `cargo test --locked --lib build_args_rpc_mode_auto_only` 与 `cargo test --locked --lib build_args_resume_includes_session_id`，并在 `src/cross_cutting/pi_provider/tests.rs:299-312` 的 `streaming_input_for_test` fixture 上扩展 `tool_policy` 字段；预期既有 args 测试通过，再以新增策略 fixture 验证 `--exclude-tools edit,write`。
+  - [ ] 运行 `cargo test --locked --lib build_args_policy_keeps_session_id_and_excludes_only_file_writes`；预期先因 `build_args` 无第三参编译失败——加第三参并在既有调用点传 `None` 后，转为 argv 缺 `--exclude-tools` 的断言失败。
+  - [ ] 在 `build_args` 仅对 `Some(DenyFileWriteBuiltins)` 追加 `--exclude-tools edit,write`（置于 `--session-id` 逻辑之后，不改变其顺序）；空 session id 复用既有 trim/filter 语义，不降级成无限制 argv。
+  - [ ] 运行 `cargo test --locked --lib build_args_rpc_mode_auto_only` 与 `cargo test --locked --lib build_args_resume_includes_session_id`（既有两测试同步补第三参 `None`）；预期既有 args 测试通过，再以新增策略断言验证 `--exclude-tools edit,write`。
   - [ ] 提交实现：`git add src/cross_cutting/pi_provider && git commit -m "feat(restrict-role-write-tools): enforce pi write denylist"`。
 
 ### Task 1 收尾
@@ -220,60 +225,69 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
   - Test：`src/cross_cutting/claude_code_provider/tests/args.rs:9-25`
 - **Interfaces**
   - Consumes：`StreamingProviderInput.tool_policy`、`provider_session_id`、现有 `--permission-prompt-tool=stdio`。
-  - Produces：策略 input 的 argv 精确增加 `--disallowedTools Edit,Write,NotebookEdit`，fresh/resume 均保留；非策略 input 不增加该片段。
+  - Produces：`ClaudeCodeProvider::build_args(&self, resume_provider_session_id: Option<&str>, tool_policy: Option<&ProviderToolPolicy>) -> Vec<String>`（现签名 `mod.rs:82` 为单 policy 前两参，扩第三参；既有调用点与测试同步补 `None`）；策略 input 的 argv 精确增加 `--disallowedTools Edit,Write,NotebookEdit`，fresh/resume 均保留；非策略 input 不增加该片段。
 - **Steps**
   - [ ] 先写失败测试：
     ```rust
     #[test]
     fn claude_policy_args_include_frozen_denylist_with_resume() {
-        let input = test_claude_input(Some("claude-session-7"), Some(DenyFileWriteBuiltins));
-        let args = build_args(&input).unwrap();
+        let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
+        let deny = ProviderToolPolicy::deny_file_write_builtins();
+        let args = provider.build_args(Some("claude-session-7"), Some(&deny));
         assert!(args.windows(2).any(|w| w == ["--disallowedTools", "Edit,Write,NotebookEdit"]));
         assert!(args.windows(2).any(|w| w == ["--resume", "claude-session-7"]));
         assert_eq!(args.iter().filter(|arg| arg.as_str() == "--disallowedTools").count(), 1);
+        let fresh = provider.build_args(None, Some(&deny));
+        assert!(fresh.windows(2).any(|w| w == ["--disallowedTools", "Edit,Write,NotebookEdit"]));
+        assert!(!fresh.contains(&"--resume".to_string()));
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`；预期失败为找不到 denylist 参数。
-  - [ ] 在 Claude `build_args` 对策略 input 追加冻结片段，保持 stdio permission prompt 与现有 resume 参数；非策略 input 保持原 argv。
-  - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`、现有 `claude_args_include_resume_when_provider_session_is_available` 与 `claude_args_always_include_stdio_permission_prompt`；预期全部通过。
+  - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`；预期先因 `build_args` 无第三参编译失败——扩参并在既有调用点传 `None` 后，转为 argv 缺 denylist 的断言失败。
+  - [ ] 在 Claude `build_args` 对 `Some(DenyFileWriteBuiltins)` 追加冻结片段，保持 stdio permission prompt 与现有 resume 参数；非策略 input（`None`）保持原 argv；既有 `claude_args_*` 测试同步补第三参 `None`。
+  - [ ] 运行 `cargo test --locked --lib claude_policy_args_include_frozen_denylist_with_resume`、现有 `claude_args_include_resume_when_provider_session_is_available` 与 `claude_args_always_include_stdio_permission_prompt`（补参后）；预期全部通过。
   - [ ] 提交实现：`git add src/cross_cutting/claude_code_provider && git commit -m "feat(restrict-role-write-tools): enforce claude denylist"`。
 
 ### Task 2.2 — Codex thread/start、thread/resume 与 request id
 
 - **Files**
-  - Modify：`src/cross_cutting/codex_provider/session.rs:102-150`、`src/cross_cutting/codex_provider/json_rpc_peer.rs:263-280`
+  - Modify：`src/cross_cutting/codex_provider/session.rs:102-150`、`src/cross_cutting/json_rpc_peer.rs:263-280`（注意：在 codex_provider 之外，为共享 JSON-RPC peer）
   - Test：`src/cross_cutting/codex_provider/tests.rs:149-209`、request id 单测
 - **Interfaces**
   - Consumes：`StreamingProviderInput.tool_policy`、`ProviderPermissionMode`、native resume id。
-  - Produces：策略 start/resume JSON 参数同时为 `sandbox:"read-only"` 与 `approvalPolicy:"on-request"`；Coder 继续旧参数；出站 id 类型为 `String`，格式 `aria-<seq>`，server id 仍为数字。
+  - Produces：
+    - `pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json::Value`：从 `session.rs:102-150` 既有内联构造抽出的单一来源，`thread/start` 与 `thread/resume` 两路复用；策略 input（`tool_policy.is_some()`）同时给出 `sandbox:"read-only"` 与 `approvalPolicy:"on-request"`，Coder（`None`）保持 `danger-full-access` 与既有 permission mode 映射。
+    - `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）出站分配改为 `aria-<seq>` 字符串；入站（server→client）已有 id 原样透传不转换。
 - **Steps**
-  - [ ] 先写失败 Codex launch 测试，直接扩展现有 `src/cross_cutting/codex_provider/tests.rs:149-209` 的 thread start/resume 参数断言：
+  - [ ] 先写失败 Codex launch 测试，在 `src/cross_cutting/codex_provider/tests.rs:149-209` 既有 fixture 基础上新增两个变体（策略/Coder）：
     ```rust
     #[test]
     fn codex_policy_start_and_resume_use_read_only_on_request() {
-        let input = streaming_input_with_policy(Some(ProviderToolPolicy::deny_file_write_builtins()));
-        let start = thread_start_params(&input);
-        assert_eq!(start["sandbox"], "read-only");
-        assert_eq!(start["approvalPolicy"], "on-request");
-        let resume = thread_resume_params(&input);
-        assert_eq!(resume["sandbox"], "read-only");
-        assert_eq!(resume["approvalPolicy"], "on-request");
+        let policy_input = codex_streaming_input_with_policy(); // 扩展既有 fixture:tool_policy=Some(deny)
+        let params = codex_launch_params(&policy_input);
+        assert_eq!(params["sandbox"], "read-only");
+        assert_eq!(params["approvalPolicy"], "on-request");
+        let coder_input = codex_streaming_input_without_policy(); // 既有形态:tool_policy=None
+        let coder = codex_launch_params(&coder_input);
+        assert_eq!(coder["sandbox"], "danger-full-access");
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib codex_policy_start_and_resume_use_read_only_on_request`；预期失败为参数仍为 `danger-full-access` 或 permission mode 映射值。
-  - [ ] 最小修改 start/resume 参数构造：仅由 `tool_policy.is_some()` 选择 `read-only`/`on-request`；`None` 保持 Coder 的 `danger-full-access` 与现有 permission mode 映射。
-  - [ ] 先写失败 request-id 测试，复用 `src/cross_cutting/codex_provider/json_rpc_peer.rs:263-280` 的 client request id 分配点：
+  - [ ] 运行 `cargo test --locked --lib codex_policy_start_and_resume_use_read_only_on_request`；预期先因 `codex_launch_params` 不存在编译失败——抽出该函数（start/resume 两路改为复用）后，转为策略参数断言失败。
+  - [ ] 在 `codex_launch_params` 内仅由 `tool_policy.is_some()` 分派 `read-only`/`on-request`；`None` 保持 Coder 的 `danger-full-access` 与现有 permission mode 映射；`thread/start`（session.rs:132）与 `thread/resume`（session.rs:107）两路均改用该函数。
+  - [ ] 先写失败 request-id 测试，基于真实分配点 `ensure_request_id`（`src/cross_cutting/json_rpc_peer.rs:263`）：
     ```rust
     #[test]
     fn codex_request_ids_keep_server_zero_separate_from_client_aria_zero() {
-        let server_id = serde_json::json!(0);
-        let client_id = next_client_request_id(0);
-        assert_eq!(client_id, "aria-0");
-        assert_ne!(server_id.to_string(), client_id);
+        let mut outbound = serde_json::json!({"method":"item/commandExecution/requestApproval"});
+        let next_id = std::sync::atomic::AtomicU64::new(0);
+        let assigned = ensure_request_id(&mut outbound, &next_id).unwrap();
+        assert_eq!(assigned, "aria-0");
+        let mut server_style = serde_json::json!({"id":0,"method":"mcpServer/elicitation/request"});
+        let passthrough = ensure_request_id(&mut server_style, &next_id).unwrap();
+        assert_eq!(passthrough, "0"); // 入站已有 id 原样透传，不转字符串
     }
     ```
-  - [ ] 运行 `cargo test --locked --lib codex_request_ids_keep_server_zero_separate_from_client_aria_zero`；预期失败为 client id 仍是数字 `0` 或类型不匹配。
-  - [ ] 使 client request id 生成器返回 `aria-<seq>`，仅替换 Aria 出站请求，不转换 server→client 入站 id；运行两个定向测试及既有 sandbox start/resume 测试，预期通过。
+  - [ ] 运行 `cargo test --locked --lib codex_request_ids_keep_server_zero_separate_from_client_aria_zero`；预期失败为出站 id 仍为数字 `0`（类型/值断言均不符）。
+  - [ ] 修改 `ensure_request_id`：无 id 时分配 `format!("aria-{seq}")` 字符串（仅 Aria 出站请求），已有 id（server→client 入站）原样透传；同步修正依赖数字出站 id 的既有断言后，运行两个定向测试及既有 sandbox start/resume 测试，预期通过。
   - [ ] 提交实现：`git add src/cross_cutting/codex_provider && git commit -m "feat(restrict-role-write-tools): enforce codex policy launch"`。
 
 ### Task 2.3 — Codex 三类审批、未知应答与审计事件载荷
@@ -366,7 +380,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     }
     ```
   - [ ] 运行 `cargo test --locked --lib adapter_tool_policy_guard_is_bidirectional_for_every_role`；预期失败为守卫函数或双向错误分支不存在。
-  - [ ] 将同一守卫接入 pi `PiProvider::start`（`src/cross_cutting/pi_provider/mod.rs:250`）、Claude `ClaudeCodeProvider::start`（`src/cross_cutting/claude_code_provider/mod.rs:344`）和 Codex `run_codex_session`（`src/cross_cutting/codex_provider/session.rs:63`）中，且均位于创建子进程之前；非法 `ToolPolicyIntent` 只能走拒绝路径，不得 fallback 到无策略 argv。
+  - [ ] 将同一守卫接入 pi `PiProvider::start`（`src/cross_cutting/pi_provider/mod.rs:251`）、Claude `ClaudeCodeProvider::start`（`src/cross_cutting/claude_code_provider/mod.rs:345`）和 Codex `run_codex_session`（`src/cross_cutting/codex_provider/session.rs:63`）中，且均位于创建子进程之前；非法 `ToolPolicyIntent` 只能走拒绝路径，不得 fallback 到无策略 argv。
   - [ ] 运行该定向测试及三 provider 缺失/非法/误带策略 fixture；预期所有拒绝发生在 spawn 前。
   - [ ] 提交实现：`git add src/cross_cutting/pi_provider src/cross_cutting/claude_code_provider src/cross_cutting/codex_provider src/protocol/contracts.rs && git commit -m "feat(restrict-role-write-tools): add bidirectional launch guards"`。
 
@@ -481,13 +495,11 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```rust
     #[test]
     fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
-        let coder = build_coder_input();
+        let coder = build_test_streaming_input(AdapterRole::Executor);
         assert_eq!(coder.role, AdapterRole::Executor);
         assert_eq!(coder.tool_policy, None);
-        let aggregate = build_aggregate_provider_turn();
-        assert_eq!(aggregate.role, AdapterRole::Executor);
-        assert_eq!(aggregate.tool_policy, None);
-        assert_eq!(codex_sandbox_for(&coder), "danger-full-access");
+        // 聚合初始化同 Executor 档：经 coordinator_provider_turn.inc.rs:57-77 真实构造路径断言（同 Task 1.2 builder 全集断言）
+        assert_eq!(codex_launch_params(&coder)["sandbox"], "danger-full-access");
     }
     ```
   - [ ] 运行 `cargo test --locked --lib coder_and_aggregate_executor_keep_existing_full_tool_launch`；预期失败为 Coder 被误注入 denylist 或沙箱被改写。
