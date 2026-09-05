@@ -6,6 +6,8 @@
 
 > v1.0.3（2026-09-05 oracle 窄复审驱动修订，P2/P5 残留闭环）：P2 补 GC7 同 wire 共存 fixture（server 数字 `id:0`×client `aria-0` 并存互不误配+应答原样回带）+警示引用勘误（GC 7 与 12）+Task 2.2 commit 纳入 `json_rpc_peer.rs`；P5 Task 3.2 commit 纳入新建 `tool_policy_audit.rs`+`cross_cutting/mod.rs` 模块注册。
 
+> v1.0.4（2026-09-05 oracle 微复审驱动修订，P2-② 闭环）：该 fixture 降级为 id 命名空间编码级单测（删除「同一 wire」过强描述），generic elicitation 应答改为 GC6 正确形态 `-32601`+data；真实 wire/pending 匹配与 writer 调用覆盖移入 Task 2.3（writer 所在处）新增步骤。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan. Steps use checkbox (`- [ ]`) syntax.
 
 ## Goal
@@ -298,10 +300,10 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
         assert_eq!(ensure_request_id(&mut with_id, &next3, OutboundIdNamespace::Aria).unwrap(), "0"); // 已带 id 原样保留（入站消息不经本函数，由读取分发保持原 id）
     }
     ```
-  - [ ] 再补 GC7 同 wire 共存 fixture（codex_provider/tests.rs）：同一会话内 server→client 请求携数字 `id:0`，我方出站请求分得 `aria-0`，两者并存互不误配，且对 server 请求的应答原样回带其 id：
+  - [ ] 再补 id 命名空间编码级单测（codex_provider/tests.rs；仅验证 GC7 值域隔离与应答 id 保留，真实 wire/pending 匹配与 writer 调用覆盖在 Task 2.3 补全）：
     ```rust
     #[test]
-    fn codex_wire_ids_server_zero_and_client_aria_zero_coexist() {
+    fn codex_id_namespaces_keep_server_zero_and_client_aria_zero_distinct() {
         let mut outbound = serde_json::json!({"method":"item/commandExecution/requestApproval"});
         let next = std::sync::atomic::AtomicU64::new(0);
         let client_id = ensure_request_id(&mut outbound, &next, OutboundIdNamespace::Aria).unwrap();
@@ -309,9 +311,13 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
         let server_id = server_request["id"].clone();
         assert_eq!(client_id, "aria-0");
         assert_eq!(server_id, serde_json::json!(0));
-        assert_ne!(serde_json::Value::from(client_id.clone()), server_id); // 同一 wire 上两类 id 并存且互不误配（GC7）
-        let reply = serde_json::json!({"id": server_id.clone(), "result": {"decision":"decline"}});
-        assert_eq!(reply["id"], server_request["id"]); // 应答原样回带 server 数字 id（响应 writer 用同一 id 构造，见 response.rs:8-25）
+        assert_ne!(serde_json::Value::from(client_id.clone()), server_id); // 两类 id 值域隔离（GC7）
+        // generic elicitation（无 _meta.codex_approval_kind）的 GC6 应答形态=-32601+data，应答 id 原样回带 server 数字 id
+        let reply = serde_json::json!({
+            "id": server_id.clone(),
+            "error": {"code": -32601, "data": {"codex_approval_kind": null, "reason": "unsupported_approval_kind"}}
+        });
+        assert_eq!(reply["id"], server_request["id"]);
         assert_ne!(reply["id"].to_string(), client_id);
     }
     ```
@@ -372,6 +378,7 @@ Rust 2024、Cargo stable（`rust-toolchain.toml`）、现有 streaming provider 
     ```
   - [ ] 运行 `cargo test --locked --lib codex_unknown_approval_has_protocol_reply_and_terminates_on_third`；预期失败为静默忽略或未在第三次终止。
   - [ ] 实现未知 elicitation `-32601`+data、未知 item `{"decision":"decline"}`、连续第三次 `session_terminated`，并让每次未知产生 `protocol_warning`；所有响应复用入站 rpc id。
+  - [ ] 补真实 wire 覆盖（Task 2.2 编码级单测的 wire 级补全，GC7）：经 `session.rs:233-245` 既有应答入口与 `response.rs:8-25` 真实 writer，对携数字 `id:0` 的 generic elicitation 请求产出 `-32601`+data 应答并断言应答 `id==0`；同会话出站请求已分配 `aria-0`，断言两类 id 在 pending/应答匹配中互不误配。
   - [ ] 运行 `cargo test --locked --lib codex_parser_distinguishes_mcp_from_generic_elicitation`、`cargo test --locked --lib codex_policy_session_declines_exec_and_file_change_but_accepts_mcp`、`cargo test --locked --lib codex_unknown_approval_has_protocol_reply_and_terminates_on_third`；预期通过。
   - [ ] 提交实现：`git add src/cross_cutting/codex_provider src/cross_cutting/streaming_provider && git commit -m "feat(restrict-role-write-tools): classify codex approvals"`。
 
