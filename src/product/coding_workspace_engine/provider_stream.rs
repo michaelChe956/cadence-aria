@@ -879,7 +879,14 @@ impl CodingWorkspaceEngine {
         // role-run/execution_event 审计不变。
         let mut stream = tokio::select! {
             biased;
-            result = provider.run_streaming(input, cancel.clone()) => result?,
+            // P2-1：策略角色的 legacy 直连由 engine 注入 run-bound sink（不得
+            // policy+缺 sink 运行时 fail-closed）；非策略角色原样透传。
+            result = self.run_legacy_provider_stream(
+                provider,
+                input,
+                &attempt.id,
+                cancel.clone(),
+            ) => result?,
             _ = self.cancellation.cancelled() => {
                 cancel.cancel();
                 self.persist_provider_cancellation(attempt, role_run, "legacy_provider_start")?;

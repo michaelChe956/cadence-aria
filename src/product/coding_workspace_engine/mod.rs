@@ -77,6 +77,7 @@ mod group_review_repair;
 mod group_review_types;
 mod handoffs;
 mod internal_pr_review;
+mod legacy_tool_policy_audit;
 mod lifecycle;
 #[cfg(test)]
 mod mutation_test_pause;

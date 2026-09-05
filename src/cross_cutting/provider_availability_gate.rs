@@ -193,6 +193,13 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
         self.inner.supports_tool_calls()
     }
 
+    fn legacy_tool_policy_audit_sink(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>
+    {
+        self.inner.legacy_tool_policy_audit_sink()
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,

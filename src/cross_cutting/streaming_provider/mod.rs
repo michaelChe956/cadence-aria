@@ -755,6 +755,17 @@ pub trait StreamingProviderAdapter: Send + Sync {
         false
     }
 
+    /// legacy bridge 按角色矩阵派生策略会话时注入的 durable 审计 sink（engine 侧
+    /// 注入点，P2-1）：真实 adapter 的策略会话缺 sink 会 fail-closed，engine 必须
+    /// 在 legacy 直连路径同时提供策略与 sink。默认 `None`（非 engine 直调方不
+    /// 派生 sink，策略会话对裸直调保持 fail-closed）。
+    fn legacy_tool_policy_audit_sink(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>
+    {
+        None
+    }
+
     async fn start(
         &self,
         _input: StreamingProviderInput,
@@ -779,119 +790,160 @@ pub trait StreamingProviderAdapter: Send + Sync {
         input: &AdapterInput,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
-            std::env::current_dir().map_err(|error| {
-                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
-            })?,
-        );
-        // REQ-ENV-09（GC13 例外边界 + Task 3.1）：legacy 同步直连不携带策略字段，
-        // 但必须接受 adapter 双向守卫——被角色矩阵派生语义策略（策略角色带上
-        // DenyFileWriteBuiltins，Executor/Handoff 保持 None），随后统一经
-        // `start` 接受守卫与 argv 注入。kimi 不读 `tool_policy`，零物理变化。
-        let tool_policy = match input.role {
-            AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
-                Some(ProviderToolPolicy::deny_file_write_builtins())
-            }
-            AdapterRole::Executor | AdapterRole::Handoff => None,
-        };
-        let provider_input = StreamingProviderInput {
-            tool_policy,
-            audit_sink: None,
-            provider_type: input.provider_type.clone(),
-            role: input.role.clone(),
-            prompt: input.prompt.clone(),
-            working_dir,
-            workspace_session_id: None,
-            resume_provider_session_id: None,
-            permission_mode: ProviderPermissionMode::Auto,
-            structured_output_contract: None,
-            env_vars: BTreeMap::new(),
-            timeout_secs: input.timeout,
-        };
-        let bridge_cancel = cancel.clone();
-        let mut session = self.start(provider_input, cancel).await?;
-        let (tx, rx) = mpsc::channel(32);
+        let audit_sink = self.legacy_tool_policy_audit_sink();
+        let this = self;
+        run_legacy_bridge_stream(
+            audit_sink,
+            Box::new(move |provider_input, cancel| {
+                Box::pin(async move { this.start(provider_input, cancel).await })
+            }),
+            input,
+            cancel,
+        )
+        .await
+    }
+}
 
-        tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    event = session.events.recv() => {
-                        match event {
-                            Some(event) => event,
-                            None => return,
-                        }
+/// legacy bridge 的启动闭包（返回装箱 future，供自由函数复用默认桥接体）。
+pub(crate) type LegacyBridgeStart<'a> = Box<
+    dyn FnOnce(
+            StreamingProviderInput,
+            CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ProviderSession, ProviderAdapterError>>
+                    + Send
+                    + 'a,
+            >,
+        > + Send
+        + 'a,
+>;
+
+/// 默认 legacy bridge 的桥接体（P2-1 抽出为自由函数）：`run_streaming` 默认实现
+/// 与 engine 侧注入装饰器（`LegacyToolPolicyAuditProvider`）共用，避免装饰器经
+/// 虚分发回调自身默认实现导致递归。
+pub(crate) async fn run_legacy_bridge_stream<'a>(
+    audit_sink: Option<
+        std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+    >,
+    start: LegacyBridgeStart<'a>,
+    input: &'a AdapterInput,
+    cancel: CancellationToken,
+) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+    let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
+        std::env::current_dir().map_err(|error| {
+            ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+        })?,
+    );
+    // REQ-ENV-09（GC13 例外边界 + Task 3.1）：legacy 同步直连不携带策略字段，
+    // 但必须接受 adapter 双向守卫——被角色矩阵派生语义策略（策略角色带上
+    // DenyFileWriteBuiltins，Executor/Handoff 保持 None），随后统一经
+    // `start` 接受守卫与 argv 注入。kimi 不读 `tool_policy`，零物理变化。
+    let tool_policy = match input.role {
+        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
+            Some(ProviderToolPolicy::deny_file_write_builtins())
+        }
+        AdapterRole::Executor | AdapterRole::Handoff => None,
+    };
+    let provider_input = StreamingProviderInput {
+        tool_policy,
+        // P2-1：派生策略必须同时注入 sink（engine 侧 hook）。
+        audit_sink: audit_sink.clone(),
+        provider_type: input.provider_type.clone(),
+        role: input.role.clone(),
+        prompt: input.prompt.clone(),
+        working_dir,
+        workspace_session_id: None,
+        resume_provider_session_id: None,
+        permission_mode: ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: BTreeMap::new(),
+        timeout_secs: input.timeout,
+    };
+    let bridge_cancel = cancel.clone();
+    let mut session = start(provider_input, cancel).await?;
+    let (tx, rx) = mpsc::channel(32);
+
+    tokio::spawn(async move {
+        loop {
+            let event = tokio::select! {
+                _ = bridge_cancel.cancelled() => return,
+                event = session.events.recv() => {
+                    match event {
+                        Some(event) => event,
+                        None => return,
                     }
-                };
-                let chunk = match event {
-                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
-                    ProviderEvent::Completed(completion) => StreamChunk::Done {
-                        full_output: completion.full_output,
-                    },
-                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionTimeout { permission_id } => {
-                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
-                    }
-                    ProviderEvent::PermissionRequest(request) => {
-                        let _ = session
-                            .commands
-                            .send(ProviderCommand::PermissionResponse {
-                                id: request.id,
-                                approved: false,
-                                reason: Some(
-                                    "run_streaming does not support interactive permission requests".to_string(),
-                                ),
-                            })
-                            .await;
-                        let _ = tx
-                            .send(StreamChunk::Error(
-                                "interactive permission request is not supported in run_streaming"
+                }
+            };
+            let chunk = match event {
+                ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
+                ProviderEvent::Completed(completion) => StreamChunk::Done {
+                    full_output: completion.full_output,
+                },
+                ProviderEvent::Failed { message } => StreamChunk::Error(message),
+                ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    StreamChunk::Error(format!("Permission request {permission_id} timed out"))
+                }
+                ProviderEvent::PermissionRequest(request) => {
+                    let _ = session
+                        .commands
+                        .send(ProviderCommand::PermissionResponse {
+                            id: request.id,
+                            approved: false,
+                            reason: Some(
+                                "run_streaming does not support interactive permission requests"
                                     .to_string(),
-                            ))
-                            .await;
+                            ),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(StreamChunk::Error(
+                            "interactive permission request is not supported in run_streaming"
+                                .to_string(),
+                        ))
+                        .await;
+                    return;
+                }
+                ProviderEvent::ChoiceRequest(request) => {
+                    let _ = session
+                        .commands
+                        .send(ProviderCommand::ChoiceResponse {
+                            id: request.id,
+                            selected_option_ids: vec![],
+                            free_text: Some("aborted".to_string()),
+                            answers: vec![],
+                        })
+                        .await;
+                    let _ = tx
+                        .send(StreamChunk::Error(
+                            "interactive choice request is not supported in run_streaming"
+                                .to_string(),
+                        ))
+                        .await;
+                    return;
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_)
+                | ProviderEvent::UsageReport(_)
+                | ProviderEvent::ToolPolicyDecision(_)
+                | ProviderEvent::ToolPolicyWarning(_)
+                | ProviderEvent::ToolPolicyTerminated(_) => {
+                    continue;
+                }
+            };
+            tokio::select! {
+                _ = bridge_cancel.cancelled() => return,
+                send_result = tx.send(chunk) => {
+                    if send_result.is_err() {
                         return;
-                    }
-                    ProviderEvent::ChoiceRequest(request) => {
-                        let _ = session
-                            .commands
-                            .send(ProviderCommand::ChoiceResponse {
-                                id: request.id,
-                                selected_option_ids: vec![],
-                                free_text: Some("aborted".to_string()),
-                                answers: vec![],
-                            })
-                            .await;
-                        let _ = tx
-                            .send(StreamChunk::Error(
-                                "interactive choice request is not supported in run_streaming"
-                                    .to_string(),
-                            ))
-                            .await;
-                        return;
-                    }
-                    ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_)
-                    | ProviderEvent::ToolCall(_)
-                    | ProviderEvent::ToolResult(_)
-                    | ProviderEvent::UsageReport(_)
-                    | ProviderEvent::ToolPolicyDecision(_)
-                    | ProviderEvent::ToolPolicyWarning(_)
-                    | ProviderEvent::ToolPolicyTerminated(_) => {
-                        continue;
-                    }
-                };
-                tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    send_result = tx.send(chunk) => {
-                        if send_result.is_err() {
-                            return;
-                        }
                     }
                 }
             }
-        });
+        }
+    });
 
-        Ok(rx)
-    }
+    Ok(rx)
 }

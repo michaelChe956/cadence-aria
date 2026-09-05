@@ -491,6 +491,87 @@ async fn run_streaming_declines_choice_request_instead_of_hanging() {
     );
 }
 
+// ---- F3 修复轮 P2-1：legacy bridge 按角色派生策略时必须同时注入 sink ----
+
+struct LegacySinkHookProvider {
+    sink: std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+    saw_policy: std::sync::atomic::AtomicBool,
+    saw_sink: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for LegacySinkHookProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        use std::sync::atomic::Ordering;
+        self.saw_policy
+            .store(input.tool_policy.is_some(), Ordering::SeqCst);
+        self.saw_sink
+            .store(input.audit_sink.is_some(), Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(
+                    crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                        crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                            "legacy sink probe done",
+                            None,
+                        ),
+                    ),
+                )
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    fn legacy_tool_policy_audit_sink(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>
+    {
+        Some(self.sink.clone())
+    }
+}
+
+#[tokio::test]
+async fn run_streaming_bridge_injects_engine_provided_sink_for_policy_roles() {
+    use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
+    use std::sync::atomic::Ordering;
+
+    let provider = LegacySinkHookProvider {
+        sink: RecordingToolPolicyAuditSink::new(),
+        saw_policy: std::sync::atomic::AtomicBool::new(false),
+        saw_sink: std::sync::atomic::AtomicBool::new(false),
+    };
+    // make_input 的 role=Orchestrator（策略角色）：默认 bridge 必须派生策略并
+    // 同时注入 hook 提供的 sink，不得让真实 adapter 在 legacy 直连上缺 sink
+    // 运行时 fail-closed。
+    let mut rx = provider
+        .run_streaming(&make_input("legacy sink"), CancellationToken::new())
+        .await
+        .expect("legacy bridge run");
+    while let Some(chunk) = rx.recv().await {
+        if matches!(chunk, super::StreamChunk::Done { .. }) {
+            break;
+        }
+    }
+    assert!(
+        provider.saw_policy.load(Ordering::SeqCst),
+        "legacy bridge must derive the deny policy for policy roles"
+    );
+    assert!(
+        provider.saw_sink.load(Ordering::SeqCst),
+        "legacy bridge must inject the engine-provided audit sink alongside the derived policy"
+    );
+}
+
 #[test]
 fn fake_launch_is_constructible_only_through_fake_registry_path() {
     // Task 12:Fake launch input 必须经 `FakeStreamingProviderInput::for_test` 构造,
