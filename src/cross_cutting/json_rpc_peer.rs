@@ -292,8 +292,11 @@ pub(crate) fn ensure_request_id(
 
     let seq = next_id.fetch_add(1, Ordering::Relaxed);
     let id_value = match namespace {
+        // Numeric：计数器 1 起（pi/kimi 现状），出站数字 id 零变化（1, 2, 3…）。
         OutboundIdNamespace::Numeric => Value::from(seq),
-        OutboundIdNamespace::Aria => Value::from(format!("aria-{seq}")),
+        // Aria：seq 0 起（GC7 契约字面要求：codex 首出站=aria-0）。peer 计数器
+        // 仍 1 起，故 fetch_add 后减一；对以 0 起传入的计数器 saturating 保持 0。
+        OutboundIdNamespace::Aria => Value::from(format!("aria-{}", seq.saturating_sub(1))),
     };
     let id = id_key(&id_value).expect("namespace-assigned ids are numeric or string");
     let Some(object) = payload.as_object_mut() else {

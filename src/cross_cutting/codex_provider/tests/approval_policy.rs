@@ -50,6 +50,35 @@ fn codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric() {
         ensure_request_id(&mut with_id, &next3, OutboundIdNamespace::Aria).unwrap(),
         "0"
     ); // 已带 id 原样保留（入站消息不经本函数，由读取分发保持原 id）
+    // 真实 peer 计数器 1 起（JsonRpcPeer::new）：Aria 出站 seq 0 起（首出站
+    // aria-0，随后 aria-1），Numeric 维持 1 起（pi/kimi 零变化）。
+    let mut aria_peer_out = serde_json::json!({"method":"initialize"});
+    let peer_counter = std::sync::atomic::AtomicU64::new(1);
+    assert_eq!(
+        ensure_request_id(&mut aria_peer_out, &peer_counter, OutboundIdNamespace::Aria).unwrap(),
+        "aria-0"
+    );
+    let mut aria_peer_out2 = serde_json::json!({"method":"thread/start"});
+    assert_eq!(
+        ensure_request_id(
+            &mut aria_peer_out2,
+            &peer_counter,
+            OutboundIdNamespace::Aria
+        )
+        .unwrap(),
+        "aria-1"
+    );
+    let mut numeric_peer_out = serde_json::json!({"method":"initialize"});
+    let numeric_counter = std::sync::atomic::AtomicU64::new(1);
+    assert_eq!(
+        ensure_request_id(
+            &mut numeric_peer_out,
+            &numeric_counter,
+            OutboundIdNamespace::Numeric
+        )
+        .unwrap(),
+        "1"
+    );
 }
 
 #[test]
