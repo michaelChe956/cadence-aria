@@ -515,9 +515,11 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     )
                 })?;
                 let current = ProviderStartAudit {
-                    tool_policy_digest: canonical.digest.clone(),
+                    workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+                    provider_session_id: resume_id.clone(),
+                    tool_policy_canonical_digest: canonical.digest.clone(),
                     provider_version: provider_version.clone(),
-                    dialect: CLAUDE_POLICY_DIALECT.to_string(),
+                    adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
                 };
                 if matches!(
@@ -609,6 +611,9 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             .await;
 
         let start_cancel = cancel.clone();
+        // workspace 会话 id（D6 冻结字段）在 input 移入后台任务前捕获，供
+        // provider_start 审计落盘使用。
+        let workspace_session_id = input.workspace_session_id.clone().unwrap_or_default();
         tokio::spawn(async move {
             let stderr_output = Arc::new(Mutex::new(String::new()));
             let stderr_output_for_task = Arc::clone(&stderr_output);
@@ -820,13 +825,14 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
                 provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
                 role: role_text,
-                tool_policy_digest,
+                workspace_session_id: workspace_session_id.clone(),
+                provider_session_id: native_id.clone(),
+                tool_policy_canonical_digest: tool_policy_digest,
                 argv: args.clone(),
                 sandbox: None,
                 approval_policy: None,
                 provider_version,
-                dialect: CLAUDE_POLICY_DIALECT.to_string(),
-                native_session_id: native_id.clone(),
+                adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
             });
             if let Err(error) = sink.append_bound(audit_event) {
                 start_cancel.cancel();

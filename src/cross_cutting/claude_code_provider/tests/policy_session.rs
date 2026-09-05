@@ -88,12 +88,12 @@ async fn claude_policy_start_waits_for_init_writes_provider_start_and_returns_na
         panic!("expected provider_start");
     };
     assert_eq!(record.provider, "claude-code");
-    assert_eq!(record.dialect, "claude-stream-json");
+    assert_eq!(record.adapter_dialect, "claude-stream-json");
     assert_eq!(record.provider_version, "claude 1.0.99-policy-fixture");
-    assert_eq!(record.native_session_id, "sess-policy-1");
+    assert_eq!(record.provider_session_id, "sess-policy-1");
     assert!(record.argv.contains(&"--disallowedTools".to_string()));
     assert!(record.argv.contains(&"Edit,Write,NotebookEdit".to_string()));
-    assert!(!record.tool_policy_digest.is_empty());
+    assert!(!record.tool_policy_canonical_digest.is_empty());
     assert_eq!(record.sandbox, None);
     assert_eq!(record.approval_policy, None);
 
@@ -114,14 +114,15 @@ async fn claude_policy_resume_uses_known_native_id_without_waiting_for_init() {
     sink.with_stored_provider_start(
         crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
             provider: "claude-code".to_string(),
+            workspace_session_id: "ws-test".to_string(),
             role: "reviewer".to_string(),
-            tool_policy_digest: canonical.digest,
+            tool_policy_canonical_digest: canonical.digest,
             argv: Vec::new(),
             sandbox: None,
             approval_policy: None,
             provider_version: "claude 1.0.99-policy-fixture".to_string(),
-            dialect: "claude-stream-json".to_string(),
-            native_session_id: "claude-session-resume-policy".to_string(),
+            adapter_dialect: "claude-stream-json".to_string(),
+            provider_session_id: "claude-session-resume-policy".to_string(),
         },
     );
     let provider = ClaudeCodeProvider::new(init_then_result_fixture())
@@ -145,7 +146,7 @@ async fn claude_policy_resume_uses_known_native_id_without_waiting_for_init() {
     let DurableToolPolicyEvent::ProviderStart(record) = &sink.events()[0] else {
         panic!("expected provider_start");
     };
-    assert_eq!(record.native_session_id, "claude-session-resume-policy");
+    assert_eq!(record.provider_session_id, "claude-session-resume-policy");
     assert!(record.argv.contains(&"--resume".to_string()));
     assert!(
         record

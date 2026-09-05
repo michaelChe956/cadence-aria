@@ -127,14 +127,14 @@ async fn pi_policy_start_pregenerates_session_id_and_writes_provider_start() {
         panic!("expected provider_start");
     };
     assert_eq!(record.provider, "pi");
-    assert_eq!(record.dialect, PI_POLICY_DIALECT);
+    assert_eq!(record.adapter_dialect, PI_POLICY_DIALECT);
     assert_eq!(record.provider_version, "pi 0.83.0-policy-fixture");
-    assert_eq!(record.native_session_id, native_id);
+    assert_eq!(record.provider_session_id, native_id);
     assert!(record.argv.contains(&"--session-id".to_string()));
     assert!(record.argv.contains(&native_id));
     assert!(record.argv.contains(&"--exclude-tools".to_string()));
     assert!(record.argv.contains(&"edit,write".to_string()));
-    assert!(!record.tool_policy_digest.is_empty());
+    assert!(!record.tool_policy_canonical_digest.is_empty());
     assert_eq!(record.sandbox, None);
     assert_eq!(record.approval_policy, None);
 }
@@ -152,14 +152,15 @@ async fn pi_policy_start_reuses_resume_session_id_as_native_id() {
     sink.with_stored_provider_start(
         crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
             provider: "pi".to_string(),
+            workspace_session_id: "ws-test".to_string(),
             role: "author".to_string(),
-            tool_policy_digest: canonical.digest,
+            tool_policy_canonical_digest: canonical.digest,
             argv: Vec::new(),
             sandbox: None,
             approval_policy: None,
             provider_version: "pi 0.83.0-policy-fixture".to_string(),
-            dialect: PI_POLICY_DIALECT.to_string(),
-            native_session_id: "pi-session-resume-policy".to_string(),
+            adapter_dialect: PI_POLICY_DIALECT.to_string(),
+            provider_session_id: "pi-session-resume-policy".to_string(),
         },
     );
     let provider =
@@ -180,7 +181,7 @@ async fn pi_policy_start_reuses_resume_session_id_as_native_id() {
     let DurableToolPolicyEvent::ProviderStart(record) = &sink.events()[0] else {
         panic!("expected provider_start");
     };
-    assert_eq!(record.native_session_id, "pi-session-resume-policy");
+    assert_eq!(record.provider_session_id, "pi-session-resume-policy");
 }
 
 #[cfg(unix)]
@@ -235,14 +236,15 @@ async fn pi_policy_resume_compares_frozen_triple_and_supersedes_on_drift() {
     let base_record =
         |digest: String| crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
             provider: "pi".to_string(),
+            workspace_session_id: "ws-test".to_string(),
             role: "author".to_string(),
-            tool_policy_digest: digest,
+            tool_policy_canonical_digest: digest,
             argv: Vec::new(),
             sandbox: None,
             approval_policy: None,
             provider_version: "pi 0.83.0-policy-fixture".to_string(),
-            dialect: PI_POLICY_DIALECT.to_string(),
-            native_session_id: "pi-session-resume-policy".to_string(),
+            adapter_dialect: PI_POLICY_DIALECT.to_string(),
+            provider_session_id: "pi-session-resume-policy".to_string(),
         };
 
     // 匹配：resume id 保留为 native id，无 superseded 审计。
@@ -310,7 +312,7 @@ async fn pi_policy_resume_compares_frozen_triple_and_supersedes_on_drift() {
     else {
         panic!("expected provider_start");
     };
-    assert_eq!(record.native_session_id, native_id);
+    assert_eq!(record.provider_session_id, native_id);
 }
 
 #[cfg(unix)]

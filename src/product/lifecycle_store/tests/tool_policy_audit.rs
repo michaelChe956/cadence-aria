@@ -18,13 +18,14 @@ fn provider_start_event(provider: &str) -> DurableToolPolicyEvent {
     DurableToolPolicyEvent::ProviderStart(crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
         provider: provider.to_string(),
         role: "orchestrator".to_string(),
-        tool_policy_digest: format!("sha256:{provider}-digest"),
+        workspace_session_id: "ws-1".to_string(),
+        provider_session_id: "thread-1".to_string(),
+        tool_policy_canonical_digest: format!("sha256:{provider}-digest"),
         argv: vec!["--mode".to_string(), "rpc".to_string()],
         sandbox: None,
         approval_policy: None,
         provider_version: "provider 1.2.3".to_string(),
-        dialect: "codex-app-server-rpc".to_string(),
-        native_session_id: "thread-1".to_string(),
+        adapter_dialect: "codex-app-server-rpc".to_string(),
     })
 }
 
@@ -32,7 +33,11 @@ fn approval_decision_event(category: &str, request_id: &str) -> DurableToolPolic
     DurableToolPolicyEvent::ApprovalDecision(crate::cross_cutting::tool_policy_audit::ApprovalDecisionAudit {
         request_id: request_id.to_string(),
         category: category.to_string(),
+        server_name: None,
+        tool_name: Some("command".to_string()),
         decision: "decline".to_string(),
+        reason_code: "policy_denies_write_side".to_string(),
+        policy_digest: "sha256:codex-digest".to_string(),
     })
 }
 
@@ -91,6 +96,67 @@ async fn tool_policy_audit_writes_provider_start_once_then_canonical_events() {
     assert!(serialized.contains("unknown_approval_storm"), "{serialized}");
 }
 
+// ---- F3 修复轮 P1-1：D6/D7 冻结字段名与必需字段严格性 ----
+
+#[test]
+fn tool_policy_audit_schema_freezes_d6_d7_persisted_field_names() {
+    // D6/D7 冻结字段名逐字对账：provider_start/approval_decision 的 durable 序列化
+    // 键名必须与契约一致（不得以别名落盘）。
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-frozen", 0, provider_start_event("codex")).unwrap();
+    sink.append("ws-frozen", 0, approval_decision_event("file_change", "aria-0"))
+        .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-frozen", 0).unwrap();
+    let start = serde_json::to_value(&lines[0]).unwrap();
+    assert_eq!(start["workspace_session_id"], "ws-frozen", "{start}");
+    assert!(start.get("provider_session_id").is_some(), "{start}");
+    assert!(start.get("tool_policy_canonical_digest").is_some(), "{start}");
+    assert!(start.get("adapter_dialect").is_some(), "{start}");
+    assert!(start.get("provider_version").is_some(), "{start}");
+    let decision = serde_json::to_value(&lines[1]).unwrap();
+    for field in [
+        "server_name",
+        "tool_name",
+        "reason_code",
+        "policy_digest",
+        "category",
+        "request_id",
+        "decision",
+    ] {
+        assert!(decision.get(field).is_some(), "approval_decision missing {field}: {decision}");
+    }
+}
+
+#[test]
+fn tool_policy_audit_required_fields_must_be_present_when_parsing() {
+    // 必需字段缺失 = 解析失败：不得以 `#[serde(default)]` 宽容出无指纹记录。
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-strict", 0, provider_start_event("codex")).unwrap();
+    let lines = sink.read_tool_policy_lines("ws-strict", 0).unwrap();
+    let base = serde_json::to_string(&lines[0]).unwrap();
+    for field in [
+        "workspace_session_id",
+        "provider_session_id",
+        "tool_policy_canonical_digest",
+        "provider_version",
+        "adapter_dialect",
+        "schema_version",
+        "seq",
+    ] {
+        let mut value = serde_json::from_str::<serde_json::Value>(&base).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .unwrap_or_else(|| panic!("fixture must carry {field}: {base}"));
+        let line = serde_json::to_string(&value).unwrap();
+        assert!(
+            serde_json::from_str::<ToolPolicyAuditLine>(&line).is_err(),
+            "missing required field {field} must fail parsing"
+        );
+    }
+}
+
 #[test]
 fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
     let sink = test_tool_policy_audit_sink();
@@ -117,14 +183,14 @@ fn tool_policy_audit_bad_line_reader_skips_and_reports_without_writing_back() {
     let root = tmp.path().join(".aria").join("tool-policy-run-audit").join("ws-1");
     std::fs::create_dir_all(&root).expect("partition dir");
     let file = root.join("7.jsonl");
-    std::fs::write(
-        &file,
-        concat!(
-            "{\"schema_version\":1,\"seq\":0,\"event_type\":\"provider_start\"}\n",
-            "not-json\n"
-        ),
-    )
-    .expect("write bad fixture");
+    // 首行为完整 provider_start（冻结字段齐全）；第二行坏 JSON。P1-1 后必需字段
+    // 缺失的行同样是坏行（见 required_fields 测试）。
+    let valid_start = serde_json::to_string(&ToolPolicyAuditLine::from_event(
+        0,
+        provider_start_event("codex"),
+    ))
+    .unwrap();
+    std::fs::write(&file, format!("{valid_start}\nnot-json\n")).expect("write bad fixture");
 
     let store = super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
         tmp.path().join(".aria"),
@@ -245,7 +311,7 @@ fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session
         0,
         DurableToolPolicyEvent::ProviderStart(
             provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc")
-                .with_native_session_id("thread-shared"),
+                .with_provider_session_id("thread-shared"),
         ),
     )
     .unwrap();
@@ -254,7 +320,7 @@ fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session
         1,
         DurableToolPolicyEvent::ProviderStart(
             provider_start_record("sha256:a2", "provider 1.2.3", "codex-app-server-rpc")
-                .with_native_session_id("thread-shared"),
+                .with_provider_session_id("thread-shared"),
         ),
     )
     .unwrap();
@@ -262,7 +328,7 @@ fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session
         .find_latest_tool_policy_provider_start("ws-6", "thread-shared")
         .unwrap()
         .expect("stored provider_start must be found");
-    assert_eq!(found.tool_policy_digest, "sha256:a2");
+    assert!(found.tool_policy_canonical_digest == "sha256:a2");
 
     // 其它 native id / 其它 workspace：缺失 → None（resume 决策拒绝并新建）。
     assert!(sink

@@ -68,16 +68,26 @@ impl std::fmt::Display for ToolPolicyAuditError {
 impl std::error::Error for ToolPolicyAuditError {}
 
 /// `provider_start`（D7/GC9）：一次策略 provider run 的启动指纹。
+/// D6 冻结持久化字段：`workspace_session_id`、`provider_session_id`、
+/// `tool_policy_canonical_digest`、`provider_version`、`adapter_dialect`、
+/// provider 名、role、最终片段（argv/沙箱/审批原文）。
 /// digest/version/dialect 三元组即 resume 冻结比对输入（Task 3.3）。
+/// 🔴 必需字段不以 `#[serde(default)]` 宽容：缺失 = 解析失败（fail-closed）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
 pub struct ProviderStartAudit {
     /// tool-policy canonical 序列 provider 名（`pi`/`claude-code`/`codex`）。
     pub provider: String,
-    /// 投放侧角色（`orchestrator`/`work_item_splitter`/`reviewer`）。
+    /// 投放侧角色（`AdapterRole` 真实序列化值：`orchestrator`/
+    /// `work_item_splitter`/`reviewer`/`executor`/`handoff`）。
     pub role: String,
-    /// canonical tool-policy digest（sha256，见 `tool_policy_digest` 规范）。
-    pub tool_policy_digest: String,
+    /// workspace 会话 id（与文件 key 同源；D6 冻结进入事件 DTO）。
+    pub workspace_session_id: String,
+    /// 原生 provider session id（握手确认：codex thread id / claude init session id /
+    /// pi 预生成 `--session-id`）。
+    pub provider_session_id: String,
+    /// canonical tool-policy digest（sha256，见 `tool_policy_digest` 规范；独立字段，
+    /// 不与 gateway aggregate policy digest 混用）。
+    pub tool_policy_canonical_digest: String,
     /// 最终 argv（策略片段按出现顺序原样、大小写保留）。
     pub argv: Vec<String>,
     /// sandbox 原文（codex `read-only`/`danger-full-access`；pi/claude 为 `None`）。
@@ -87,16 +97,13 @@ pub struct ProviderStartAudit {
     /// provider CLI version（策略会话启动时探测；不可得则启动 fail-closed）。
     pub provider_version: String,
     /// adapter dialect 常量（如 `codex-app-server-rpc`/`claude-stream-json`/`pi-rpc`）。
-    pub dialect: String,
-    /// 原生 provider session id（握手确认：codex thread id / claude init session id /
-    /// pi 预生成 `--session-id`）。
-    pub native_session_id: String,
+    pub adapter_dialect: String,
 }
 
 impl ProviderStartAudit {
     /// resume 冻结三元组的 digest 变体（审计 fixture / drift 测试用）。
     pub fn with_digest(mut self, digest: impl Into<String>) -> Self {
-        self.tool_policy_digest = digest.into();
+        self.tool_policy_canonical_digest = digest.into();
         self
     }
 
@@ -108,41 +115,49 @@ impl ProviderStartAudit {
 
     /// resume 冻结三元组的 dialect 变体（审计 fixture / drift 测试用）。
     pub fn with_dialect(mut self, dialect: impl Into<String>) -> Self {
-        self.dialect = dialect.into();
+        self.adapter_dialect = dialect.into();
         self
     }
 
-    /// native session id 变体（审计 fixture / resume 检索测试用）。
-    pub fn with_native_session_id(mut self, native_session_id: impl Into<String>) -> Self {
-        self.native_session_id = native_session_id.into();
+    /// provider session id 变体（审计 fixture / resume 检索测试用）。
+    pub fn with_provider_session_id(mut self, provider_session_id: impl Into<String>) -> Self {
+        self.provider_session_id = provider_session_id.into();
         self
     }
 
     /// resume 冻结三元组（digest, version, dialect）。
     pub fn resume_fingerprint(&self) -> (&str, &str, &str) {
         (
-            &self.tool_policy_digest,
+            &self.tool_policy_canonical_digest,
             &self.provider_version,
-            &self.dialect,
+            &self.adapter_dialect,
         )
     }
 }
 
-/// `approval_decision`（GC6）：策略会话审批决策审计。
+/// `approval_decision`（GC6/D7）：策略会话审批决策审计。D7 冻结字段：
+/// category/server_name/tool_name/request_id/decision/reason_code/policy_digest。
+/// server_name/tool_name 仅 MCP 形态携带（commandExecution/fileChange 为 `None`）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
 pub struct ApprovalDecisionAudit {
     /// 决策对应的 request id（codex 策略会话为 Aria 出站 `aria-<seq>` 或原生 id 原文）。
     pub request_id: String,
     /// 审批分类（`command_execution`/`file_change`/`mcp_tool_call`/`unknown`）。
     pub category: String,
+    /// MCP server 名（仅 `mcp_tool_call` 形态；其余为 `None`）。
+    pub server_name: Option<String>,
+    /// 工具/形态名（MCP 工具名；commandExecution=`command`、fileChange=`file_change`）。
+    pub tool_name: Option<String>,
     /// 决策（`accept`/`decline`/`protocol_error`）。
     pub decision: String,
+    /// 决策原因码（策略拒绝/允许的语义原因，如 `policy_denies_write_side`）。
+    pub reason_code: String,
+    /// 会话 tool-policy canonical digest（决策归属的策略指纹）。
+    pub policy_digest: String,
 }
 
 /// `protocol_warning`（GC6）：未知审批形态告警审计。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
 pub struct ProtocolWarningAudit {
     /// 告警原因码（如 `unsupported_approval_kind`、读取端 `invalid_json_line` 内存形态）。
     pub reason_code: String,
@@ -154,7 +169,6 @@ pub struct ProtocolWarningAudit {
 
 /// `session_terminated`（GC6/GC9）：会话终止审计（风暴终止 / resume superseded）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
 pub struct SessionTerminatedAudit {
     /// 终止原因码（如 `unknown_approval_storm`、`superseded_policy_drift`）。
     pub reason_code: String,
@@ -217,20 +231,21 @@ pub enum ResumeDecision {
 
 /// 审计 fixture：以冻结三元组构造 provider_start 记录（Task 3.3 resume 测试）。
 pub fn provider_start_record(
-    tool_policy_digest: &str,
+    tool_policy_canonical_digest: &str,
     provider_version: &str,
-    dialect: &str,
+    adapter_dialect: &str,
 ) -> ProviderStartAudit {
     ProviderStartAudit {
         provider: "codex".to_string(),
         role: "orchestrator".to_string(),
-        tool_policy_digest: tool_policy_digest.to_string(),
+        workspace_session_id: "ws-fixture".to_string(),
+        provider_session_id: "thread-1".to_string(),
+        tool_policy_canonical_digest: tool_policy_canonical_digest.to_string(),
         argv: Vec::new(),
         sandbox: Some("read-only".to_string()),
         approval_policy: Some("on-request".to_string()),
         provider_version: provider_version.to_string(),
-        dialect: dialect.to_string(),
-        native_session_id: "thread-1".to_string(),
+        adapter_dialect: adapter_dialect.to_string(),
     }
 }
 
@@ -451,7 +466,7 @@ pub(crate) mod test_support {
             Ok(stored
                 .iter()
                 .rev()
-                .find(|record| record.native_session_id == native_provider_session_id)
+                .find(|record| record.provider_session_id == native_provider_session_id)
                 .cloned())
         }
     }

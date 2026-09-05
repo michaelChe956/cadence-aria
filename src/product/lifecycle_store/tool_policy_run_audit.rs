@@ -143,9 +143,14 @@ impl ToolPolicyAuditSink for LifecycleStore {
         &self,
         workspace_session_id: &str,
         role_run_seq: u64,
-        event: DurableToolPolicyEvent,
+        mut event: DurableToolPolicyEvent,
     ) -> Result<(), ToolPolicyAuditError> {
         let path = self.tool_policy_audit_file(workspace_session_id, role_run_seq)?;
+        // D6 冻结：`workspace_session_id` 进入事件 DTO，且以文件 key 为准（落盘
+        // 记录与所在分区位置永远一致，不受调用方填充遗漏影响）。
+        if let DurableToolPolicyEvent::ProviderStart(record) = &mut event {
+            record.workspace_session_id = workspace_session_id.to_string();
+        };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(audit_error)?;
         }
@@ -230,7 +235,7 @@ impl LifecycleStore {
             let lines = self.read_tool_policy_lines(workspace_session_id, role_run_seq)?;
             for line in lines {
                 if let DurableToolPolicyEvent::ProviderStart(record) = line.event
-                    && record.native_session_id == native_provider_session_id
+                    && record.provider_session_id == native_provider_session_id
                     && matched.as_ref().is_none_or(|(seq, _)| role_run_seq > *seq)
                 {
                     matched = Some((role_run_seq, record));

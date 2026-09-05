@@ -83,6 +83,18 @@ pub(crate) fn decide_for_policy(category: CodexApprovalCategory) -> CodexApprova
     }
 }
 
+/// 策略决策的原因码（D7 `approval_decision.reason_code` 冻结枚举）：决策归属的
+/// 策略语义，不读自然语言 reason。
+pub(crate) fn policy_decision_reason_code(category: CodexApprovalCategory) -> &'static str {
+    match category {
+        CodexApprovalCategory::McpToolCall => "policy_allows_mcp",
+        CodexApprovalCategory::CommandExecution | CodexApprovalCategory::FileChange => {
+            "policy_denies_write_side"
+        }
+        CodexApprovalCategory::Unknown { .. } => "unsupported_approval_kind",
+    }
+}
+
 /// 策略事件双路径出口（Task 3.2）：结构化事件先经事件通道送出会话循环（可观测），
 /// 再经 run-bound sink durable 落盘（GC11）；append 失败返回错误，沿既有 kill 链
 /// 终止会话并将 run 判失败。
@@ -96,6 +108,25 @@ fn audit_policy_event(
         })?;
     }
     Ok(())
+}
+
+/// 会话 tool-policy canonical digest（决策审计归属指纹，D7 `policy_digest`）：
+/// 从 input 策略确定性重算，与 provider_start 记录的 digest 同源（GC8）。
+fn policy_digest_for_input(
+    input: &crate::cross_cutting::streaming_provider::StreamingProviderInput,
+) -> String {
+    input
+        .tool_policy
+        .as_ref()
+        .and_then(|policy| {
+            crate::cross_cutting::streaming_provider::canonical_tool_policy(
+                TOOL_POLICY_PROVIDER_NAME,
+                policy,
+            )
+            .map(|canonical| canonical.digest)
+            .ok()
+        })
+        .unwrap_or_default()
 }
 
 /// 未知审批形态的确定性应答（GC6）：未知 elicitation 返回 JSON-RPC error
@@ -472,13 +503,20 @@ where
                     &cancel,
                 )
                 .await?;
-                // durable 落盘（双路径）：append 失败沿 kill 链终止。
+                // durable 落盘（双路径）：append 失败沿 kill 链终止。D7 冻结字段：
+                // server_name/tool_name 仅 MCP 形态携带；reason_code/policy_digest
+                // 为决策归属的语义原因与会话策略指纹。
                 audit_policy_event(
                     input.audit_sink.as_ref(),
                     DurableToolPolicyEvent::ApprovalDecision(ApprovalDecisionAudit {
                         request_id: decision_event.request_id.clone(),
                         category: decision_event.category.to_string(),
+                        server_name: request.server_name.clone(),
+                        tool_name: request.tool_name.clone(),
                         decision: decision_event.decision.to_string(),
+                        reason_code: policy_decision_reason_code(request.category.clone())
+                            .to_string(),
+                        policy_digest: policy_digest_for_input(&input),
                     }),
                 )?;
                 tracing::info!(

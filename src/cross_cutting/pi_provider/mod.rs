@@ -380,9 +380,11 @@ impl StreamingProviderAdapter for PiProvider {
                     .find_provider_start(resume_id)
                     .map_err(tool_policy_session_error)?;
                 let current = ProviderStartAudit {
-                    tool_policy_digest: canonical.digest.clone(),
+                    workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+                    provider_session_id: resume_id.clone(),
+                    tool_policy_canonical_digest: canonical.digest.clone(),
                     provider_version: provider_version.clone(),
-                    dialect: PI_POLICY_DIALECT.to_string(),
+                    adapter_dialect: PI_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
                 };
                 if matches!(
@@ -468,13 +470,14 @@ impl StreamingProviderAdapter for PiProvider {
                     &input.role,
                 )
                 .to_string(),
-                tool_policy_digest: digest,
+                workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+                provider_session_id: session_id.clone(),
+                tool_policy_canonical_digest: digest,
                 argv: args.clone(),
                 sandbox: None,
                 approval_policy: None,
                 provider_version,
-                dialect: PI_POLICY_DIALECT.to_string(),
-                native_session_id: session_id.clone(),
+                adapter_dialect: PI_POLICY_DIALECT.to_string(),
             });
             if let Err(error) = sink.append_bound(audit_event) {
                 let _ = child.start_kill();

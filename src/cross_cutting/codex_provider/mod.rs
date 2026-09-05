@@ -207,9 +207,11 @@ impl StreamingProviderAdapter for CodexProvider {
                     )
                 })?;
                 let current = ProviderStartAudit {
-                    tool_policy_digest: canonical.digest.clone(),
+                    workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+                    provider_session_id: resume_id.clone(),
+                    tool_policy_canonical_digest: canonical.digest.clone(),
                     provider_version: provider_version.clone(),
-                    dialect: session::CODEX_POLICY_DIALECT.to_string(),
+                    adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
                 };
                 if matches!(
@@ -285,7 +287,9 @@ impl StreamingProviderAdapter for CodexProvider {
             let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
                 provider: session::TOOL_POLICY_PROVIDER_NAME.to_string(),
                 role: UsageReportData::role_text(&input.role).to_string(),
-                tool_policy_digest,
+                workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
+                provider_session_id: thread_id.clone(),
+                tool_policy_canonical_digest: tool_policy_digest,
                 argv: args.clone(),
                 sandbox: launch_params
                     .get("sandbox")
@@ -296,8 +300,7 @@ impl StreamingProviderAdapter for CodexProvider {
                     .and_then(serde_json::Value::as_str)
                     .map(ToString::to_string),
                 provider_version,
-                dialect: session::CODEX_POLICY_DIALECT.to_string(),
-                native_session_id: thread_id.clone(),
+                adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
             });
             if let Err(error) = sink.append_bound(audit_event) {
                 let _ = child.start_kill();

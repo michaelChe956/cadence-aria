@@ -315,6 +315,39 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
                     ],
                     "durable approval decisions must mirror the wire order"
                 );
+                // D7 冻结字段（P1-1）：server_name/tool_name 仅 MCP 形态携带；
+                // reason_code/policy_digest 表达决策归属的策略语义。
+                let durable_decision_records: Vec<&crate::cross_cutting::tool_policy_audit::ApprovalDecisionAudit> =
+                    durable
+                        .iter()
+                        .filter_map(|event| match event {
+                            crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ApprovalDecision(decision) => Some(decision),
+                            _ => None,
+                        })
+                        .collect();
+                let mcp = durable_decision_records
+                    .iter()
+                    .find(|decision| decision.category == "mcp_tool_call")
+                    .expect("mcp decision must be durable");
+                assert!(
+                    mcp.server_name
+                        .as_deref()
+                        .is_some_and(|name| !name.is_empty()),
+                    "mcp approval must carry server_name"
+                );
+                assert_eq!(mcp.reason_code, "policy_allows_mcp");
+                let write_side = durable_decision_records
+                    .iter()
+                    .find(|decision| decision.category == "file_change")
+                    .expect("file_change decision must be durable");
+                assert_eq!(write_side.server_name, None);
+                assert_eq!(
+                    write_side.tool_name.as_deref(),
+                    Some("file_change"),
+                    "file_change 形态携带冻结 tool_name"
+                );
+                assert_eq!(write_side.reason_code, "policy_denies_write_side");
+                assert!(!write_side.policy_digest.is_empty());
                 return;
             }
             ProviderEvent::StatusChanged(_)
@@ -444,7 +477,7 @@ async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
 
 /// 与当前策略会话完全一致的 provider_start 存档记录（Task 3.3 fixture）。
 fn matching_resume_record(
-    native_session_id: &str,
+    provider_session_id: &str,
 ) -> crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
     let policy = ProviderToolPolicy::deny_file_write_builtins();
     let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
@@ -454,14 +487,15 @@ fn matching_resume_record(
     .expect("canonical policy");
     crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
         provider: "codex".to_string(),
+        workspace_session_id: "ws-test".to_string(),
         role: "author".to_string(),
-        tool_policy_digest: canonical.digest,
+        tool_policy_canonical_digest: canonical.digest,
         argv: Vec::new(),
         sandbox: Some("read-only".to_string()),
         approval_policy: Some("on-request".to_string()),
         provider_version: "codex 0.124.0-policy-fixture".to_string(),
-        dialect: "codex-app-server-rpc".to_string(),
-        native_session_id: native_session_id.to_string(),
+        adapter_dialect: "codex-app-server-rpc".to_string(),
+        provider_session_id: provider_session_id.to_string(),
     }
 }
 
@@ -599,13 +633,13 @@ async fn codex_policy_start_handshake_yields_native_thread_id_and_frozen_start_r
         panic!("first durable event must be provider_start");
     };
     assert_eq!(record.provider, "codex");
-    assert_eq!(record.dialect, "codex-app-server-rpc");
+    assert_eq!(record.adapter_dialect, "codex-app-server-rpc");
     assert_eq!(record.provider_version, "codex 0.124.0-policy-fixture");
-    assert_eq!(record.native_session_id, "codex-thread-policy");
+    assert_eq!(record.provider_session_id, "codex-thread-policy");
     assert_eq!(record.sandbox.as_deref(), Some("read-only"));
     assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
     assert!(record.argv.contains(&"app-server".to_string()));
-    assert!(!record.tool_policy_digest.is_empty());
+    assert!(!record.tool_policy_canonical_digest.is_empty());
 
     // 会话照常跑完（握手前置不破坏后台循环）。
     let completed = recv_completed(&mut session.events).await;
