@@ -517,6 +517,7 @@ pub(crate) fn streaming_input_from_adapter(
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
+        tool_policy: None,
         provider_type: input.provider_type.clone(),
         role: input.role.clone(),
         prompt: input.prompt.clone(),

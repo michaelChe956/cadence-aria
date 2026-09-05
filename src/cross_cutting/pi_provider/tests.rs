@@ -298,6 +298,7 @@ fn build_args_resume_includes_session_id() {
 
 fn streaming_input_for_test(resume_id: Option<String>) -> StreamingProviderInput {
     StreamingProviderInput {
+        tool_policy: None,
         provider_type: ProviderType::Pi,
         role: AdapterRole::Orchestrator,
         prompt: "fixture prompt".to_string(),

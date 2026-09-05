@@ -17,7 +17,7 @@ use crate::cross_cutting::streaming_provider::{
 
 mod parse;
 mod response;
-mod session;
+pub(crate) mod session;
 mod support;
 
 #[cfg(test)]

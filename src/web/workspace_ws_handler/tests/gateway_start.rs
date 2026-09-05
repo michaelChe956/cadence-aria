@@ -154,6 +154,7 @@ fn gateway_fixture() -> GatewayFixture {
 
 fn streaming_input(working_dir: std::path::PathBuf) -> StreamingProviderInput {
     StreamingProviderInput {
+        tool_policy: None,
         provider_type: ProviderType::ClaudeCode,
         role: AdapterRole::WorkItemSplitter,
         prompt: "work item plan outline".to_string(),

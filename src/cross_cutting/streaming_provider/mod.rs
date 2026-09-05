@@ -71,6 +71,130 @@ pub enum ProviderPermissionMode {
     Supervised,
 }
 
+/// Tool-policy canonical 序列的规范版本前缀（REQ-ENV-09 digest 规范冻结：`"tp-v1"`）。
+pub(crate) const TOOL_POLICY_CANONICAL_VERSION: &str = "tp-v1";
+
+/// Codex 审批分类规则的版本后缀（digest 规范冻结：`"ap-v1"`；审批规则变化必须升级）。
+pub(crate) const TOOL_POLICY_APPROVAL_POLICY_VERSION: &str = "ap-v1";
+
+/// Tool-policy 语义意图。本期唯一合法意图为 `DenyFileWriteBuiltins`：
+/// 保护范围是 built-in 文件写工具（黑名单），不是全工具 allowlist。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPolicyIntent {
+    DenyFileWriteBuiltins,
+}
+
+/// Provider 无关的语义工具策略。只表达语义意图，不携带 provider 物理片段；
+/// 物理片段由各 provider translator（`translate_tool_policy`）按 provider 名冻结。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderToolPolicy {
+    pub intent: ToolPolicyIntent,
+}
+
+impl ProviderToolPolicy {
+    /// 唯一合法意图构造器：拒绝 built-in 文件写工具。后续 Task 统一用此构造器。
+    pub fn deny_file_write_builtins() -> Self {
+        Self {
+            intent: ToolPolicyIntent::DenyFileWriteBuiltins,
+        }
+    }
+}
+
+/// Canonical tool policy 投影：provider 名 + 按 provider 冻结的 canonical token
+/// 序列 + 审批规则版本 + 依规范输入实算的 sha256 digest。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalToolPolicy {
+    pub provider: String,
+    pub tokens: Vec<String>,
+    pub approval_policy_version: String,
+    pub digest: String,
+}
+
+/// Tool-policy 翻译/canonical 化错误。未知 provider 名 fail-closed（kimi 不接策略）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPolicyError {
+    UnsupportedProvider(String),
+}
+
+impl std::fmt::Display for ToolPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolPolicyError::UnsupportedProvider(provider) => {
+                write!(f, "unsupported tool-policy provider: {provider}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ToolPolicyError {}
+
+/// 依 digest 规范实算：`"tp-v1" + \x1f + provider + \x1f + tokens.join(\x1f) + \x1f + "ap-v1"`
+/// 的 sha256 hex。argv flag/value 按出现顺序原样、大小写保留。
+pub(crate) fn tool_policy_digest(
+    provider: &str,
+    tokens: &[String],
+    approval_policy_version: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let canonical_input = [
+        TOOL_POLICY_CANONICAL_VERSION,
+        provider,
+        &tokens.join("\x1f"),
+        approval_policy_version,
+    ]
+    .join("\x1f");
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// 各 provider 冻结的 DenyFileWriteBuiltins canonical token 序列；
+/// 未知 provider 返回 `UnsupportedProvider`。
+fn deny_file_write_builtins_tokens(provider: &str) -> Result<Vec<String>, ToolPolicyError> {
+    match provider {
+        crate::cross_cutting::pi_provider::TOOL_POLICY_PROVIDER_NAME => {
+            Ok(crate::cross_cutting::pi_provider::deny_file_write_builtins_tokens())
+        }
+        crate::cross_cutting::claude_code_provider::TOOL_POLICY_PROVIDER_NAME => {
+            Ok(crate::cross_cutting::claude_code_provider::deny_file_write_builtins_tokens())
+        }
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME => {
+            Ok(crate::cross_cutting::codex_provider::session::deny_file_write_builtins_tokens())
+        }
+        other => Err(ToolPolicyError::UnsupportedProvider(other.to_string())),
+    }
+}
+
+/// 把语义策略投影为 canonical 形态（provider + tokens + 审批规则版本 + digest）。
+pub fn canonical_tool_policy(
+    provider: &str,
+    policy: &ProviderToolPolicy,
+) -> Result<CanonicalToolPolicy, ToolPolicyError> {
+    match policy.intent {
+        ToolPolicyIntent::DenyFileWriteBuiltins => {
+            let tokens = deny_file_write_builtins_tokens(provider)?;
+            Ok(CanonicalToolPolicy {
+                provider: provider.to_string(),
+                digest: tool_policy_digest(provider, &tokens, TOOL_POLICY_APPROVAL_POLICY_VERSION),
+                tokens,
+                approval_policy_version: TOOL_POLICY_APPROVAL_POLICY_VERSION.to_string(),
+            })
+        }
+    }
+}
+
+/// 把语义策略翻译为 provider 物理片段（argv flag/value 或 codex 启动参数原文，
+/// 按出现顺序原样、大小写保留）。
+pub fn translate_tool_policy(
+    provider: &str,
+    policy: &ProviderToolPolicy,
+) -> Result<Vec<String>, ToolPolicyError> {
+    match policy.intent {
+        ToolPolicyIntent::DenyFileWriteBuiltins => deny_file_write_builtins_tokens(provider),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamingProviderInput {
     pub provider_type: ProviderType,
@@ -82,6 +206,10 @@ pub struct StreamingProviderInput {
     /// Provider 原生 session ID，用于续接 Claude Code / Codex 会话。
     pub resume_provider_session_id: Option<String>,
     pub permission_mode: ProviderPermissionMode,
+    /// 语义工具策略（REQ-ENV-09）。策略角色（Orchestrator/WorkItemSplitter/Reviewer
+    /// 的作者/评审链）携带 `DenyFileWriteBuiltins`；Executor/Coder、聚合初始化与
+    /// 非策略路径必须传 `None`（kimi 零改动，不读此字段）。
+    pub tool_policy: Option<ProviderToolPolicy>,
     pub structured_output_contract: Option<StructuredOutputContract>,
     pub env_vars: BTreeMap<String, String>,
     pub timeout_secs: u64,
@@ -101,6 +229,7 @@ impl StreamingProviderInput {
             workspace_session_id: None,
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
+            tool_policy: None,
             structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: 60,
@@ -421,6 +550,7 @@ pub trait StreamingProviderAdapter: Send + Sync {
             })?,
         );
         let provider_input = StreamingProviderInput {
+            tool_policy: None,
             provider_type: input.provider_type.clone(),
             role: input.role.clone(),
             prompt: input.prompt.clone(),

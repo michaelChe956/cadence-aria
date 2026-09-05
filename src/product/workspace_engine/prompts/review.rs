@@ -222,6 +222,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -416,6 +417,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -628,6 +630,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -758,6 +761,7 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -932,6 +936,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -1004,6 +1009,7 @@ impl WorkspaceEngine {
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
@@ -1140,6 +1146,7 @@ impl WorkspaceEngine {
             &self.routing_reference_context(),
         ));
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,

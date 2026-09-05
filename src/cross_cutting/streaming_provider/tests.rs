@@ -32,6 +32,7 @@ fn make_input(prompt: &str) -> AdapterInput {
 
 fn make_provider_input(prompt: &str) -> StreamingProviderInput {
     StreamingProviderInput {
+        tool_policy: None,
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::Orchestrator,
         prompt: prompt.to_string(),
@@ -109,6 +110,7 @@ fn provider_completion_plain_marks_structured_output_not_requested() {
 #[test]
 fn streaming_provider_input_distinguishes_workspace_and_resume_sessions() {
     let input = StreamingProviderInput {
+        tool_policy: None,
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::Orchestrator,
         prompt: "prompt".to_string(),
@@ -301,6 +303,7 @@ async fn fake_streaming_provider_parses_requested_structured_output() {
 async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
     let provider = FakeStreamingProvider;
     let input = StreamingProviderInput {
+        tool_policy: None,
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
         prompt: "你是 Aria 的 Work Item Splitter".to_string(),
@@ -550,6 +553,129 @@ fn usage_report_role_text_maps_reviewer_and_author() {
     assert_eq!(
         UsageReportData::role_text(&AdapterRole::Orchestrator),
         "author"
+    );
+}
+
+#[test]
+fn canonical_tool_policy_uses_tp_v1_provider_tokens_and_ap_v1() {
+    use super::{ProviderToolPolicy, ToolPolicyIntent, canonical_tool_policy};
+
+    let policy = ProviderToolPolicy {
+        intent: ToolPolicyIntent::DenyFileWriteBuiltins,
+    };
+    let actual = canonical_tool_policy("pi", &policy).unwrap();
+    assert_eq!(actual.provider, "pi");
+    assert_eq!(actual.tokens, vec!["--exclude-tools", "edit,write"]);
+    assert_eq!(actual.approval_policy_version, "ap-v1");
+    // 实算命令（禁手写假 digest，物理片段/审批规则变化必须改变 digest）：
+    // printf 'tp-v1\x1fpi\x1f--exclude-tools\x1fedit,write\x1fap-v1' | sha256sum
+    assert_eq!(
+        actual.digest,
+        "06ad73691367e2029b7c6c172532ff724eb4604040165ef244c17eae5c66ef91"
+    );
+    // 同一输入 digest 穷定：重复计算必须逐字节一致。
+    let again = canonical_tool_policy("pi", &policy).unwrap();
+    assert_eq!(actual.digest, again.digest);
+}
+
+#[test]
+fn canonical_tool_policy_freezes_provider_physical_fragments() {
+    use super::{ProviderToolPolicy, canonical_tool_policy, translate_tool_policy};
+
+    let policy = ProviderToolPolicy::deny_file_write_builtins();
+    // claude 实算命令：
+    // printf 'tp-v1\x1fclaude-code\x1f--disallowedTools\x1fEdit,Write,NotebookEdit\x1fap-v1' | sha256sum
+    let claude = canonical_tool_policy("claude-code", &policy).unwrap();
+    assert_eq!(
+        claude.tokens,
+        vec!["--disallowedTools", "Edit,Write,NotebookEdit"]
+    );
+    assert_eq!(
+        claude.digest,
+        "4d6a4ddf803656ce6e298888beec1980671fc40fdb5bd92aaabbf0dba4bff9bf"
+    );
+    // codex 实算命令：
+    // printf 'tp-v1\x1fcodex\x1fsandbox=read-only\x1fapprovalPolicy=on-request\x1fap-v1' | sha256sum
+    let codex = canonical_tool_policy("codex", &policy).unwrap();
+    assert!(codex.tokens.contains(&"sandbox=read-only".to_string()));
+    assert!(
+        codex
+            .tokens
+            .contains(&"approvalPolicy=on-request".to_string())
+    );
+    assert_eq!(
+        codex.digest,
+        "55589d94224ef120ba52681e12ac9a9f0a940c600f094a6a49d9fcd8eac48315"
+    );
+
+    // translator 与 canonical tokens 同源：argv flag/value 按出现顺序原样、大小写保留。
+    assert_eq!(
+        translate_tool_policy("pi", &policy).unwrap(),
+        vec!["--exclude-tools", "edit,write"]
+    );
+    assert_eq!(
+        translate_tool_policy("claude-code", &policy).unwrap(),
+        vec!["--disallowedTools", "Edit,Write,NotebookEdit"]
+    );
+    // 未知 provider fail-closed（kimi 不接策略，不得静默翻译成空片段）。
+    assert!(canonical_tool_policy("kimi-code", &policy).is_err());
+    assert!(translate_tool_policy("kimi-code", &policy).is_err());
+}
+
+#[test]
+fn canonical_tool_policy_digest_drifts_on_fragment_case_order_and_approval_version() {
+    use super::tool_policy_digest;
+
+    // 基线 = pi 冻结片段 + ap-v1（与实算向量测试同源）。
+    let base = tool_policy_digest(
+        "pi",
+        &["--exclude-tools".to_string(), "edit,write".to_string()],
+        "ap-v1",
+    );
+    // 物理片段漂移：换成 claude denylist 必须改变 digest。
+    assert_ne!(
+        base,
+        tool_policy_digest(
+            "pi",
+            &["--disallowedTools".to_string(), "Edit,Write".to_string(),],
+            "ap-v1",
+        )
+    );
+    // 大小写漂移：名单大小写是冻结语义，变化必须改变 digest。
+    assert_ne!(
+        base,
+        tool_policy_digest(
+            "pi",
+            &["--exclude-tools".to_string(), "Edit,Write".to_string(),],
+            "ap-v1",
+        )
+    );
+    // token 顺序漂移：flag/value 顺序是规范输入一部分。
+    assert_ne!(
+        base,
+        tool_policy_digest(
+            "pi",
+            &["edit,write".to_string(), "--exclude-tools".to_string(),],
+            "ap-v1",
+        )
+    );
+    // 审批规则版本漂移：ap-v1 → ap-v2 必须改变 digest（Codex 审批规则升级即升版本）。
+    assert_ne!(
+        base,
+        tool_policy_digest(
+            "pi",
+            &["--exclude-tools".to_string(), "edit,write".to_string(),],
+            "ap-v2",
+        )
+    );
+    // provider 名漂移：同片段不同 provider 不得碰撞。
+    assert_ne!(
+        base,
+        tool_policy_digest(
+            "codex",
+            &["--exclude-tools".to_string(), "edit,write".to_string(),],
+            "ap-v1",
+        )
     );
 }
 

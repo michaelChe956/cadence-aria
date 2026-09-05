@@ -40,6 +40,7 @@ fn streaming_input(
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
+        tool_policy: None,
         provider_type,
         role: AdapterRole::Orchestrator,
         prompt: "fixture prompt".to_string(),

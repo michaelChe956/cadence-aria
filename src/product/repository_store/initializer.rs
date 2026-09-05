@@ -109,6 +109,7 @@ impl ClaudeRepositoryInitializer {
                     )
                 })?;
             let input = StreamingProviderInput {
+                tool_policy: None,
                 provider_type: ProviderType::ClaudeCode,
                 role: AdapterRole::Executor,
                 prompt: command.to_string(),

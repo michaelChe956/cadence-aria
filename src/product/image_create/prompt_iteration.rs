@@ -122,6 +122,7 @@ fn iteration_input(
         "{prompt}\n\n请严格按以下格式输出（不要输出其他内容）：\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n{{\"nonce\":\"{nonce}\",\"suggested_prompt\":\"用中文撰写的最终图片生成 prompt\"}}\n</ARIA_STRUCTURED_OUTPUT>\n\n要求：suggested_prompt 的内容必须用中文撰写（描述主体、场景、风格、构图等），不要用英文。\n"
     );
     StreamingProviderInput {
+        tool_policy: None,
         provider_type,
         role: AdapterRole::Executor,
         prompt,

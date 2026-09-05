@@ -36,6 +36,7 @@ async fn live_kimi_bash_echo_hi_round_trip() {
     let (commands, command_rx) = mpsc::channel(8);
     let (event_tx, mut events) = mpsc::channel::<ProviderEvent>(256);
     let input = StreamingProviderInput {
+        tool_policy: None,
         provider_type: ProviderType::KimiCode,
         role: AdapterRole::Executor,
         prompt: "Use the bash tool to run exactly: echo hi . Then report the output.".to_string(),

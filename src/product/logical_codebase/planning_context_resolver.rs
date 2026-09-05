@@ -110,6 +110,7 @@ impl ResolvedPlanningContext {
         let validated = gateway.validate(request)?;
         let provider_type = provider_type_for_dialect(validated.envelope().provider_dialect);
         let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            tool_policy: None,
             provider_type,
             role: crate::protocol::contracts::AdapterRole::Orchestrator,
             prompt,

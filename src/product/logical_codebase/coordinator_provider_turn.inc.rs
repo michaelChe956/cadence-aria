@@ -64,6 +64,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
         };
         use crate::protocol::contracts::{AdapterRole, ProviderType};
         StreamingProviderInput {
+            tool_policy: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
             prompt: format!("aggregate initialization turn: {}", step.as_str()),

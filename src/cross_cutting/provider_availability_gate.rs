@@ -434,6 +434,7 @@ mod tests {
 
     fn streaming_input() -> StreamingProviderInput {
         StreamingProviderInput {
+            tool_policy: None,
             provider_type: ProviderType::Codex,
             role: AdapterRole::Executor,
             prompt: "probe".to_string(),

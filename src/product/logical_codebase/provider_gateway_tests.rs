@@ -708,6 +708,7 @@ impl GatewayFixture {
         };
         use crate::protocol::contracts::{AdapterRole, ProviderType};
         StreamingProviderInput {
+            tool_policy: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
             prompt: "probe".to_string(),

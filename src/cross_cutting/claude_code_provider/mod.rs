@@ -27,6 +27,18 @@ mod tool;
 pub mod tests;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
+
+/// claude 在 tool-policy canonical 序列中的 provider 名（CLI 名常量）。
+pub const TOOL_POLICY_PROVIDER_NAME: &str = "claude-code";
+
+/// DenyFileWriteBuiltins 的 claude canonical 物理片段（denylist 冻结：
+/// `--disallowedTools Edit,Write,NotebookEdit`；名单大小写与成员冻结）。
+pub fn deny_file_write_builtins_tokens() -> Vec<String> {
+    vec![
+        "--disallowedTools".to_string(),
+        "Edit,Write,NotebookEdit".to_string(),
+    ]
+}
 #[derive(Debug, Clone)]
 struct ClaudePermissionRequest {
     request_id: String,

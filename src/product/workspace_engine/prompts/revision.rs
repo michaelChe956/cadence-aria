@@ -56,6 +56,7 @@ impl WorkspaceEngine {
         };
 
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
             prompt,

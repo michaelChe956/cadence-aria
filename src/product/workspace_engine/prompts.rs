@@ -252,6 +252,7 @@ impl WorkspaceEngine {
         };
 
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
             prompt,
@@ -332,6 +333,7 @@ impl WorkspaceEngine {
         resume_provider_session_id: Option<String>,
     ) -> StreamingProviderInput {
         StreamingProviderInput {
+            tool_policy: None,
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             prompt,

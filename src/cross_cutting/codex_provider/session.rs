@@ -27,6 +27,18 @@ const CODEX_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
 const CODEX_EMPTY_OUTPUT_RETRY_PROMPT: &str =
     "Your previous reply was empty. Please reply again with your complete output.";
 
+/// codex 在 tool-policy canonical 序列中的 provider 名（CLI 名常量）。
+pub const TOOL_POLICY_PROVIDER_NAME: &str = "codex";
+
+/// DenyFileWriteBuiltins 的 codex canonical 参数（三联动冻结：`sandbox=read-only` +
+/// `approvalPolicy=on-request`；argv/参数原文按出现顺序、大小写保留）。
+pub fn deny_file_write_builtins_tokens() -> Vec<String> {
+    vec![
+        "sandbox=read-only".to_string(),
+        "approvalPolicy=on-request".to_string(),
+    ]
+}
+
 async fn start_codex_turn<W>(
     peer: &JsonRpcPeer<W>,
     thread_id: &str,

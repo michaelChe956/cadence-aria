@@ -45,6 +45,7 @@ impl WorkspaceEngine {
             nonce,
         );
         Ok(StreamingProviderInput {
+            tool_policy: None,
             provider_type: base_input.provider_type.clone(),
             role: AdapterRole::Reviewer,
             prompt,

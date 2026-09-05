@@ -29,6 +29,15 @@ use crate::cross_cutting::streaming_provider::{
 mod parse;
 mod session;
 
+/// pi 在 tool-policy canonical 序列中的 provider 名（CLI 名常量）。
+pub const TOOL_POLICY_PROVIDER_NAME: &str = "pi";
+
+/// DenyFileWriteBuiltins 的 pi canonical 物理片段（argv 片段冻结：`--exclude-tools
+/// edit,write`；flag/value 按出现顺序原样、大小写保留）。
+pub fn deny_file_write_builtins_tokens() -> Vec<String> {
+    vec!["--exclude-tools".to_string(), "edit,write".to_string()]
+}
+
 #[cfg(test)]
 pub mod tests;
 #[cfg(test)]

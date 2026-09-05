@@ -798,6 +798,7 @@ mod tests {
         let mut session = provider
             .start(
                 StreamingProviderInput {
+                    tool_policy: None,
                     provider_type: ProviderType::Codex,
                     role: AdapterRole::Reviewer,
                     prompt: "Workspace 类型: Story Spec\nIssue: E2E\n[user]: 开始生成".to_string(),
