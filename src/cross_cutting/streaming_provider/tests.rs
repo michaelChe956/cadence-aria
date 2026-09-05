@@ -11,7 +11,8 @@ use crate::cross_cutting::structured_output::{StructuredOutputContract, Structur
 use super::{
     ChoiceRequestData, ChoiceRequestSource, FakeStreamingProvider, FakeStreamingProviderInput,
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderPermissionMode, ProviderSession,
-    ProviderToolCall, ProviderToolResult, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderToolCall, ProviderToolPolicy, ProviderToolResult, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(1);
@@ -691,4 +692,137 @@ fn usage_report_without_any_tokens_is_not_reportable() {
         cache_creation_tokens: None,
     };
     assert!(!empty.has_any_tokens());
+}
+
+// ---- Task 3.1（REQ-ENV-09）：三 adapter 双向 spawn 前守卫 ----
+
+#[test]
+fn adapter_tool_policy_guard_is_bidirectional_for_every_role() {
+    use super::validate_tool_policy_for_role;
+    use crate::protocol::contracts::AdapterRole;
+
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+    for role in [
+        AdapterRole::Orchestrator,
+        AdapterRole::WorkItemSplitter,
+        AdapterRole::Reviewer,
+    ] {
+        assert!(
+            validate_tool_policy_for_role(&role, None).is_err(),
+            "policy role {role:?} without policy must be rejected"
+        );
+        assert!(
+            validate_tool_policy_for_role(&role, Some(&deny)).is_ok(),
+            "policy role {role:?} with deny policy must be accepted"
+        );
+    }
+    for role in [AdapterRole::Executor, AdapterRole::Handoff] {
+        assert!(
+            validate_tool_policy_for_role(&role, None).is_ok(),
+            "non-policy role {role:?} without policy must be accepted"
+        );
+        assert!(
+            validate_tool_policy_for_role(&role, Some(&deny)).is_err(),
+            "non-policy role {role:?} carrying policy must be rejected"
+        );
+    }
+}
+
+/// 守卫必须先于子进程创建：用不存在的 CLI 路径区分「守卫拒绝」与「spawn 失败」。
+/// 若守卫位于 spawn 之前，返回错误是 tool-policy guard 文案；否则是进程启动错误。
+#[tokio::test]
+async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
+    use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+    use crate::cross_cutting::codex_provider::CodexProvider;
+    use crate::cross_cutting::pi_provider::PiProvider;
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+    async fn expect_guard_rejection(
+        provider: &str,
+        adapter: &dyn StreamingProviderAdapter,
+        input: StreamingProviderInput,
+    ) {
+        match adapter.start(input, CancellationToken::new()).await {
+            Ok(_) => panic!("{provider}: expected launch guard rejection before spawn"),
+            Err(error) => {
+                assert!(
+                    error.details.contains("tool policy guard"),
+                    "{provider}: rejection must be the launch guard, got: {}",
+                    error.details
+                );
+            }
+        }
+    }
+
+    let missing_cli = std::path::PathBuf::from("/nonexistent/aria-tool-policy-guard-probe-cli");
+
+    let base_input = |provider_type: ProviderType,
+                      role: AdapterRole,
+                      tool_policy: Option<ProviderToolPolicy>| {
+        StreamingProviderInput {
+            tool_policy,
+            provider_type,
+            role,
+            prompt: "guard probe".to_string(),
+            working_dir: std::env::temp_dir(),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 5,
+        }
+    };
+
+    // 策略角色缺失策略：spawn 前拒绝。
+    expect_guard_rejection(
+        "pi",
+        &PiProvider::new(missing_cli.clone()),
+        base_input(ProviderType::Pi, AdapterRole::Orchestrator, None),
+    )
+    .await;
+    expect_guard_rejection(
+        "claude",
+        &ClaudeCodeProvider::new(missing_cli.clone()),
+        base_input(ProviderType::ClaudeCode, AdapterRole::Reviewer, None),
+    )
+    .await;
+    expect_guard_rejection(
+        "codex",
+        &CodexProvider::new(missing_cli.clone()),
+        base_input(ProviderType::Codex, AdapterRole::WorkItemSplitter, None),
+    )
+    .await;
+
+    // 非策略角色误带策略：spawn 前拒绝。
+    expect_guard_rejection(
+        "pi",
+        &PiProvider::new(missing_cli.clone()),
+        base_input(
+            ProviderType::Pi,
+            AdapterRole::Executor,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
+    )
+    .await;
+    expect_guard_rejection(
+        "claude",
+        &ClaudeCodeProvider::new(missing_cli.clone()),
+        base_input(
+            ProviderType::ClaudeCode,
+            AdapterRole::Executor,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
+    )
+    .await;
+    expect_guard_rejection(
+        "codex",
+        &CodexProvider::new(missing_cli),
+        base_input(
+            ProviderType::Codex,
+            AdapterRole::Executor,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
+    )
+    .await;
 }

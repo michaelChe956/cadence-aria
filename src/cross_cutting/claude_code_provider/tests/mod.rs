@@ -51,10 +51,12 @@ fn streaming_input(
     provider_type: ProviderType,
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
+    // 非策略 legacy 路径 fixture：守卫（Task 3.1）要求非策略会话使用非策略角色，
+    // 故测试 helper 用 Executor（Coder/聚合初始化同侧），与生产行为一致。
     StreamingProviderInput {
         tool_policy: None,
         provider_type,
-        role: AdapterRole::Orchestrator,
+        role: AdapterRole::Executor,
         prompt: "Run the fixture provider".to_string(),
         working_dir: std::env::current_dir().unwrap(),
         workspace_session_id: None,

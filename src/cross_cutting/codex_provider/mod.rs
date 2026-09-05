@@ -12,7 +12,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderSession, ProviderStatus, StreamingProviderAdapter,
-    StreamingProviderInput,
+    StreamingProviderInput, validate_tool_policy_for_role,
 };
 
 mod parse;
@@ -70,6 +70,14 @@ impl StreamingProviderAdapter for CodexProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝
+        //（位于 ProcessManager::spawn 之前；策略会话的握手/审计在 Task 3.2 同样
+        // 位于本守卫之后、spawn 之前/之后按契约分层）。
+        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
+            |error| {
+                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+            },
+        )?;
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();

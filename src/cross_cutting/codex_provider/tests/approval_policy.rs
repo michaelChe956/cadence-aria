@@ -13,6 +13,8 @@ use crate::cross_cutting::streaming_provider::{
 
 fn codex_streaming_input_with_policy() -> StreamingProviderInput {
     let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    // 策略会话 fixture：守卫（Task 3.1）要求策略会话使用策略角色（Reviewer 侧）。
+    input.role = AdapterRole::Orchestrator;
     input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
     input
 }

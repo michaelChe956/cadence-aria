@@ -100,6 +100,75 @@ impl ProviderToolPolicy {
     }
 }
 
+/// 双向 spawn 前守卫错误（REQ-ENV-09 Task 3.1）。策略角色缺失策略与
+/// 非策略角色误带策略都在创建子进程之前拒绝，不 fallback 到无策略 argv。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPolicyGuardError {
+    /// 策略角色（Orchestrator/WorkItemSplitter/Reviewer）缺失或非法策略。
+    PolicyRequired { role: String },
+    /// 非策略角色（Executor/Handoff，含 Coder 与聚合初始化 turns）误带策略。
+    PolicyForbidden { role: String },
+}
+
+impl std::fmt::Display for ToolPolicyGuardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolPolicyGuardError::PolicyRequired { role } => write!(
+                f,
+                "tool policy guard: policy role {role} must carry DenyFileWriteBuiltins"
+            ),
+            ToolPolicyGuardError::PolicyForbidden { role } => write!(
+                f,
+                "tool policy guard: non-policy role {role} must not carry a tool policy"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ToolPolicyGuardError {}
+
+fn adapter_role_text(role: &AdapterRole) -> &'static str {
+    match role {
+        AdapterRole::Orchestrator => "orchestrator",
+        AdapterRole::Executor => "executor",
+        AdapterRole::Reviewer => "reviewer",
+        AdapterRole::WorkItemSplitter => "work_item_splitter",
+        AdapterRole::Handoff => "handoff",
+    }
+}
+
+/// 双向角色×策略守卫：Orchestrator/WorkItemSplitter/Reviewer 必须携带
+/// `DenyFileWriteBuiltins`；Executor/Handoff 必须不携带策略。非法组合在
+/// provider 创建子进程之前拒绝（三 adapter `start` 首步调用）。
+pub fn validate_tool_policy_for_role(
+    role: &AdapterRole,
+    policy: Option<&ProviderToolPolicy>,
+) -> Result<(), ToolPolicyGuardError> {
+    match role {
+        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
+            // 缺失或未来非法意图均拒绝：`matches!` 对新增 intent 变体默认不命中，
+            // fail-closed（本期唯一合法意图为 DenyFileWriteBuiltins）。
+            if policy.is_some_and(|policy| {
+                matches!(policy.intent, ToolPolicyIntent::DenyFileWriteBuiltins)
+            }) {
+                Ok(())
+            } else {
+                Err(ToolPolicyGuardError::PolicyRequired {
+                    role: adapter_role_text(role).to_string(),
+                })
+            }
+        }
+        AdapterRole::Executor | AdapterRole::Handoff => {
+            if policy.is_some() {
+                return Err(ToolPolicyGuardError::PolicyForbidden {
+                    role: adapter_role_text(role).to_string(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Canonical tool policy 投影：provider 名 + 按 provider 冻结的 canonical token
 /// 序列 + 审批规则版本 + 依规范输入实算的 sha256 digest。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,8 +693,18 @@ pub trait StreamingProviderAdapter: Send + Sync {
                 ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
             })?,
         );
+        // REQ-ENV-09（GC13 例外边界 + Task 3.1）：legacy 同步直连不携带策略字段，
+        // 但必须接受 adapter 双向守卫——被角色矩阵派生语义策略（策略角色带上
+        // DenyFileWriteBuiltins，Executor/Handoff 保持 None），随后统一经
+        // `start` 接受守卫与 argv 注入。kimi 不读 `tool_policy`，零物理变化。
+        let tool_policy = match input.role {
+            AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
+                Some(ProviderToolPolicy::deny_file_write_builtins())
+            }
+            AdapterRole::Executor | AdapterRole::Handoff => None,
+        };
         let provider_input = StreamingProviderInput {
-            tool_policy: None,
+            tool_policy,
             provider_type: input.provider_type.clone(),
             role: input.role.clone(),
             prompt: input.prompt.clone(),

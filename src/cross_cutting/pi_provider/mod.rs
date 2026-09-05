@@ -23,7 +23,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    StreamingProviderAdapter, StreamingProviderInput,
+    StreamingProviderAdapter, StreamingProviderInput, validate_tool_policy_for_role,
 };
 
 mod parse;
@@ -273,6 +273,12 @@ impl StreamingProviderAdapter for PiProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
+        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
+            |error| {
+                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+            },
+        )?;
         let version = probe_pi_version(&self.command).await;
         ensure_pi_version_compatible(&version)?;
         let extension_path = ensure_ask_extension()?;

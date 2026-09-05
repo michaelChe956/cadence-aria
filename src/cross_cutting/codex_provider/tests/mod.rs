@@ -43,10 +43,11 @@ fn streaming_input(
     provider_type: ProviderType,
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
+    // 非策略 legacy 路径 fixture：守卫（Task 3.1）要求非策略会话使用非策略角色。
     StreamingProviderInput {
         tool_policy: None,
         provider_type,
-        role: AdapterRole::Orchestrator,
+        role: AdapterRole::Executor,
         prompt: "fixture prompt".to_string(),
         working_dir: std::env::current_dir().unwrap(),
         workspace_session_id: None,

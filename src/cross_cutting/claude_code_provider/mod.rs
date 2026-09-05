@@ -17,6 +17,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
     RiskLevel, StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
+    validate_tool_policy_for_role,
 };
 
 mod ask_user_question;
@@ -374,6 +375,12 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
+        validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
+            |error| {
+                ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+            },
+        )?;
         let args = self.build_args(
             input.resume_provider_session_id.as_deref(),
             input.tool_policy.as_ref(),
