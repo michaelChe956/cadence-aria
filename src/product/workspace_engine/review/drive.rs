@@ -46,6 +46,9 @@ impl WorkspaceEngine {
             .await;
         }
         let mut command_rx = command_rx;
+        // P1-2：reviewer 是策略角色——与 author 主流同法绑定 run-bound durable
+        // sink（持久 store 缺失时不接线，真实 adapter 对 policy+缺 sink fail-closed）。
+        let input = self.attach_tool_policy_audit(input);
         let first_session = provider.start(input.clone(), self.cancel.clone()).await;
         let first_completion = match self
             .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
@@ -95,6 +98,7 @@ impl WorkspaceEngine {
                     Some(reviewer.clone()),
                 )
                 .await;
+                let repair_input = self.attach_tool_policy_audit(repair_input);
                 let repair_session = provider.start(repair_input, self.cancel.clone()).await;
                 let repair_result = self
                     .drive_reviewer_provider_session_once(
@@ -260,6 +264,9 @@ impl WorkspaceEngine {
             .map(|(project_id, _)| project_id)
             .unwrap_or_else(|| self.session.project_id.clone());
         let mut command_rx = command_rx;
+        // P1-2：gateway review 路径同样绑定 run-bound durable sink（input 进入
+        // validated 包装前附着，sink 随 input 原样透传 gateway.start_streaming）。
+        let input = self.attach_tool_policy_audit(input);
         let first_session = start_review_session_via_gateway(
             &gateway,
             input.clone(),
@@ -312,6 +319,7 @@ impl WorkspaceEngine {
                     Some(reviewer.clone()),
                 )
                 .await;
+                let repair_input = self.attach_tool_policy_audit(repair_input);
                 let repair_session = start_review_session_via_gateway(
                     &gateway,
                     repair_input,
@@ -478,6 +486,7 @@ impl WorkspaceEngine {
         } else {
             None
         };
+        let input = self.attach_tool_policy_audit(input);
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
             session,

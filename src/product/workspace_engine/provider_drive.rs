@@ -145,7 +145,7 @@ impl WorkspaceEngine {
     /// 持久化）。每次 provider run 重新分配（重试 run 独立审计文件）。持久 store
     /// 缺失（内存态 engine）时不接线——真实 adapter 对 policy 会话缺 sink 自身
     /// fail-closed，fake provider 测试路径不受影响。
-    fn attach_tool_policy_audit(
+    pub(crate) fn attach_tool_policy_audit(
         &self,
         mut input: StreamingProviderInput,
     ) -> StreamingProviderInput {
