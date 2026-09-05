@@ -39,6 +39,30 @@ pub fn deny_file_write_builtins_tokens() -> Vec<String> {
     ]
 }
 
+/// thread/start 与 thread/resume 共用的启动参数单一来源（三联动冻结，GC5）：
+/// - 策略 input（`tool_policy.is_some()`）同时给出 `sandbox:"read-only"` 与
+///   `approvalPolicy:"on-request"`（策略会话禁写禁执行，审批走分类规则）；
+/// - Coder（`None`）保持 `danger-full-access` 与既有 permission mode 映射
+///   （Auto→never / Supervised→on-request）。
+pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json::Value {
+    if input.tool_policy.is_some() {
+        json!({
+            "cwd": input.working_dir.clone(),
+            "approvalPolicy": "on-request",
+            "sandbox": "read-only",
+        })
+    } else {
+        json!({
+            "cwd": input.working_dir.clone(),
+            "approvalPolicy": match input.permission_mode {
+                ProviderPermissionMode::Auto => "never",
+                ProviderPermissionMode::Supervised => "on-request",
+            },
+            "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
+        })
+    }
+}
+
 async fn start_codex_turn<W>(
     peer: &JsonRpcPeer<W>,
     thread_id: &str,
@@ -112,20 +136,17 @@ where
         .map(ToString::to_string);
 
     let thread_id = if let Some(session_id) = resume_session_id.as_deref() {
+        let mut resume_params = codex_launch_params(&input);
+        resume_params
+            .as_object_mut()
+            .expect("codex launch params are a JSON object")
+            .insert("threadId".to_string(), json!(session_id));
         let resume_response = peer
             .request_with_timeout(
                 json!({
                     "jsonrpc": "2.0",
                     "method": "thread/resume",
-                    "params": {
-                        "threadId": session_id,
-                        "cwd": input.working_dir.clone(),
-                        "approvalPolicy": match input.permission_mode {
-                            ProviderPermissionMode::Auto => "never",
-                            ProviderPermissionMode::Supervised => "on-request",
-                        },
-                        "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
-                    },
+                    "params": resume_params,
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
             )
@@ -142,14 +163,7 @@ where
                 json!({
                     "jsonrpc": "2.0",
                     "method": "thread/start",
-                    "params": {
-                        "cwd": input.working_dir.clone(),
-                        "approvalPolicy": match input.permission_mode {
-                            ProviderPermissionMode::Auto => "never",
-                            ProviderPermissionMode::Supervised => "on-request",
-                        },
-                        "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
-                    },
+                    "params": codex_launch_params(&input),
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
             )

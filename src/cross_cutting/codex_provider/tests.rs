@@ -6,16 +6,28 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::json_rpc_peer::{OutboundIdNamespace, ensure_request_id};
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ProviderCommand, ProviderCompletion, ProviderEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderToolPolicy, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::CodexProvider;
 use super::parse_codex_usage;
+use super::session::codex_launch_params;
+
+fn codex_streaming_input_with_policy() -> StreamingProviderInput {
+    let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
+    input
+}
+
+fn codex_streaming_input_without_policy() -> StreamingProviderInput {
+    streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised)
+}
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -191,6 +203,57 @@ async fn codex_thread_start_requests_danger_full_access_sandbox() {
     let completed = recv_completed(&mut session.events).await;
 
     assert_eq!(completed, "sandbox disabled done");
+}
+
+#[test]
+fn codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric() {
+    let mut codex_out = serde_json::json!({"method":"item/commandExecution/requestApproval"});
+    let next = std::sync::atomic::AtomicU64::new(0);
+    let assigned = ensure_request_id(&mut codex_out, &next, OutboundIdNamespace::Aria).unwrap();
+    assert_eq!(assigned, "aria-0");
+    let mut default_out = serde_json::json!({"method":"session/new"});
+    let next2 = std::sync::atomic::AtomicU64::new(0);
+    assert_eq!(
+        ensure_request_id(&mut default_out, &next2, OutboundIdNamespace::Numeric).unwrap(),
+        "0"
+    ); // pi/kimi 路径零变化
+    let mut with_id = serde_json::json!({"id":0,"method":"mcpServer/elicitation/request"});
+    let next3 = std::sync::atomic::AtomicU64::new(0);
+    assert_eq!(
+        ensure_request_id(&mut with_id, &next3, OutboundIdNamespace::Aria).unwrap(),
+        "0"
+    ); // 已带 id 原样保留（入站消息不经本函数，由读取分发保持原 id）
+}
+
+#[test]
+fn codex_id_namespaces_keep_server_zero_and_client_aria_zero_distinct() {
+    let mut outbound = serde_json::json!({"method":"item/commandExecution/requestApproval"});
+    let next = std::sync::atomic::AtomicU64::new(0);
+    let client_id = ensure_request_id(&mut outbound, &next, OutboundIdNamespace::Aria).unwrap();
+    let server_request = serde_json::json!({"id":0,"method":"mcpServer/elicitation/request"});
+    let server_id = server_request["id"].clone();
+    assert_eq!(client_id, "aria-0");
+    assert_eq!(server_id, serde_json::json!(0));
+    assert_ne!(serde_json::Value::from(client_id.clone()), server_id); // 两类 id 值域隔离（GC7）
+    // generic elicitation（无 _meta.codex_approval_kind）的 GC6 应答形态=-32601+data，
+    // 应答 id 原样回带 server 数字 id
+    let reply = serde_json::json!({
+        "id": server_id.clone(),
+        "error": {"code": -32601, "data": {"codex_approval_kind": null, "reason": "unsupported_approval_kind"}}
+    });
+    assert_eq!(reply["id"], server_request["id"]);
+    assert_ne!(reply["id"].to_string(), client_id);
+}
+
+#[test]
+fn codex_policy_start_and_resume_use_read_only_on_request() {
+    let policy_input = codex_streaming_input_with_policy();
+    let params = codex_launch_params(&policy_input);
+    assert_eq!(params["sandbox"], "read-only");
+    assert_eq!(params["approvalPolicy"], "on-request");
+    let coder_input = codex_streaming_input_without_policy();
+    let coder = codex_launch_params(&coder_input);
+    assert_eq!(coder["sandbox"], "danger-full-access");
 }
 
 #[tokio::test]

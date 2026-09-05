@@ -92,8 +92,8 @@ impl ClaudeCodeProvider {
     }
 
     /// - Tool policy（REQ-ENV-09）：`Some(DenyFileWriteBuiltins)` 时追加冻结片段
-    /// `--disallowedTools Edit,Write,NotebookEdit`（名单大小写与成员冻结，fresh/resume
-    /// 均保留）；非策略 input（`None`）保持原 argv。
+    ///   `--disallowedTools Edit,Write,NotebookEdit`（名单大小写与成员冻结，fresh/resume
+    ///   均保留）；非策略 input（`None`）保持原 argv。
     fn build_args(
         &self,
         resume_provider_session_id: Option<&str>,

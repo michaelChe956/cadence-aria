@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
-use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::json_rpc_peer::{JsonRpcPeer, OutboundIdNamespace};
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
@@ -82,7 +82,10 @@ impl StreamingProviderAdapter for CodexProvider {
         )
         .await?;
 
-        let peer = JsonRpcPeer::new(process.stdout, process.stdin);
+        // GC7：codex peer 出站 request id 使用 typed namespace `aria-<seq>`，
+        // 与 server→client 入站原生数字 id 值域隔离；pi/kimi peer 保持默认 Numeric。
+        let peer = JsonRpcPeer::new(process.stdout, process.stdin)
+            .with_outbound_id_namespace(OutboundIdNamespace::Aria);
         let stderr = process.stderr;
         let mut child = process.child;
         let (event_tx, event_rx) = mpsc::channel(32);

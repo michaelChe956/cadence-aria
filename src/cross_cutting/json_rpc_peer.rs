@@ -44,6 +44,17 @@ pub struct JsonRpcPeer<W> {
     pending: PendingResponses,
     incoming_rx: Arc<Mutex<mpsc::Receiver<Value>>>,
     next_id: Arc<AtomicU64>,
+    outbound_id_namespace: OutboundIdNamespace,
+}
+
+/// Outbound JSON-RPC request-id namespace (GC7)：server→client 入站 id 保持原生
+/// （数字）；Aria 出站 request id 使用 typed namespace 字符串 `aria-<seq>`，
+/// 两类 id 在 pending/应答匹配中值域隔离、互不误配。仅 codex peer 配 `Aria`；
+/// pi/kimi 默认 `Numeric` 保持数字 id 零变化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboundIdNamespace {
+    Numeric,
+    Aria,
 }
 
 /// Manual Clone: the writer/pending/incoming handles are all `Arc`-shared, so
@@ -56,6 +67,7 @@ impl<W> Clone for JsonRpcPeer<W> {
             pending: Arc::clone(&self.pending),
             incoming_rx: Arc::clone(&self.incoming_rx),
             next_id: Arc::clone(&self.next_id),
+            outbound_id_namespace: self.outbound_id_namespace,
         }
     }
 }
@@ -82,7 +94,16 @@ where
             pending,
             incoming_rx: Arc::new(Mutex::new(incoming_rx)),
             next_id: Arc::new(AtomicU64::new(1)),
+            outbound_id_namespace: OutboundIdNamespace::Numeric,
         }
+    }
+
+    /// Sets the outbound request-id namespace for this peer (GC7). Codex
+    /// app-server peers use `Aria` (typed `aria-<seq>` string ids); pi/kimi keep
+    /// the default `Numeric` so outbound ids remain numeric with zero change.
+    pub(crate) fn with_outbound_id_namespace(mut self, namespace: OutboundIdNamespace) -> Self {
+        self.outbound_id_namespace = namespace;
+        self
     }
 }
 
@@ -126,7 +147,7 @@ where
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        let id = ensure_request_id(&mut payload, &self.next_id)?;
+        let id = ensure_request_id(&mut payload, &self.next_id, self.outbound_id_namespace)?;
         let (response_tx, mut response_rx) = oneshot::channel();
         let _pending_request =
             PendingRequestGuard::register(Arc::clone(&self.pending), id.clone(), response_tx);
@@ -260,15 +281,21 @@ async fn read_json_rpc_lines<R>(
     pending.lock().expect("pending response lock").clear();
 }
 
-fn ensure_request_id(
+pub(crate) fn ensure_request_id(
     payload: &mut Value,
     next_id: &AtomicU64,
+    namespace: OutboundIdNamespace,
 ) -> Result<String, ProviderAdapterError> {
     if let Some(id) = payload.get("id").and_then(id_key) {
         return Ok(id);
     }
 
-    let id = next_id.fetch_add(1, Ordering::Relaxed);
+    let seq = next_id.fetch_add(1, Ordering::Relaxed);
+    let id_value = match namespace {
+        OutboundIdNamespace::Numeric => Value::from(seq),
+        OutboundIdNamespace::Aria => Value::from(format!("aria-{seq}")),
+    };
+    let id = id_key(&id_value).expect("namespace-assigned ids are numeric or string");
     let Some(object) = payload.as_object_mut() else {
         return Err(ProviderAdapterError::parse_error(
             "JSON-RPC request payload must be an object",
@@ -276,8 +303,8 @@ fn ensure_request_id(
             String::new(),
         ));
     };
-    object.insert("id".to_string(), Value::from(id));
-    Ok(id.to_string())
+    object.insert("id".to_string(), id_value);
+    Ok(id)
 }
 
 fn is_response(value: &Value) -> bool {
