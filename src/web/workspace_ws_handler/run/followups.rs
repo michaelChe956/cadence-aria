@@ -179,6 +179,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     invocation.worktree_path.clone(),
                     invocation.author_provider.clone(),
                 );
+                let provider_input = $engine.attach_tool_policy_audit(provider_input);
                 let provider_session = start_work_item_plan_author(
                     plan_launch,
                     $provider_for_run.clone(),
@@ -367,6 +368,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
                             );
+                            let provider_input = $engine.attach_tool_policy_audit(provider_input);
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
                                 $provider_for_run.clone(),
@@ -687,6 +689,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     Some(author_name.clone()),
                 )
                 .await;
+            let provider_input = $engine.attach_tool_policy_audit(provider_input);
             let provider_session = start_work_item_plan_author(
                 plan_launch,
                 provider_for_draft.clone(),
@@ -835,6 +838,7 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             invocation.worktree_path.clone(),
             invocation.author_provider.clone(),
         );
+        let provider_input = engine.attach_tool_policy_audit(provider_input);
         let provider_session = start_work_item_plan_author(
             plan_launch,
             provider.clone(),

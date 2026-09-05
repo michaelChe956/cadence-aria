@@ -147,6 +147,7 @@ pub(crate) fn resolve_plan_author_launch(
 /// `ProviderAdapterError`(与 `drive_author_provider_session_via_gateway` 相同形态),
 /// 使调用点后续对 `Err` 的处理方式与直接 `provider.start` 完全一致。
 /// `launch` 为 `Legacy` 时原样透传 `provider.start(input, cancel)`(Legacy 零变化)。
+///
 pub(crate) async fn start_work_item_plan_author(
     launch: PlanAuthorLaunch,
     provider: Arc<dyn StreamingProviderAdapter>,

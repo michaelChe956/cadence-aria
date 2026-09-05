@@ -407,6 +407,17 @@ async fn legacy_provider_run_uses_outline_builder_and_legacy_parser_only() {
     };
     assert!(input.prompt.contains("WorkItemPlan Outline"));
     assert!(!input.prompt.contains("[markdown_grammar]"));
+    // F3 修复轮 P1-3：WorkItemPlan author（WorkItemSplitter）是策略角色——真实
+    // web 启动路径必须在 provider.start 前绑定 run-bound durable sink（Legacy
+    // 直连不得 policy+缺 sink 运行时 fail-closed）。
+    assert!(
+        input.tool_policy.is_some(),
+        "WorkItemPlan author input must carry the deny policy"
+    );
+    assert!(
+        input.audit_sink.is_some(),
+        "WorkItemPlan author legacy web path must carry the run-bound durable audit sink"
+    );
     wait_for_stage(&fixture.engine, WorkspaceStage::AuthorConfirm).await;
     assert_eq!(
         work_item_plan_parser_paths_for_session(&fixture.record.id),

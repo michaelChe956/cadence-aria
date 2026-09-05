@@ -372,6 +372,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         invocation.author_provider.clone(),
                     )
                 };
+                let provider_input = engine.attach_tool_policy_audit(provider_input);
                 let provider_session = start_work_item_plan_author(
                     plan_launch,
                     provider_for_run.clone(),
@@ -543,6 +544,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
                             );
+                            let provider_input = engine.attach_tool_policy_audit(provider_input);
                             let provider_session = start_work_item_plan_author(
                                 plan_launch,
                                 provider_for_run.clone(),
@@ -684,6 +686,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             Some(author_provider.clone()),
                         )
                         .await;
+                    let provider_input = engine.attach_tool_policy_audit(provider_input);
                     let provider_session = start_work_item_plan_author(
                         plan_launch,
                         provider_for_run.clone(),
@@ -807,6 +810,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             Some(author_provider.clone()),
                         )
                         .await;
+                    let provider_input = engine.attach_tool_policy_audit(provider_input);
                     let provider_session = start_work_item_plan_author(
                         plan_launch,
                         provider_for_run.clone(),
@@ -1021,6 +1025,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
+                let provider_input = engine.attach_tool_policy_audit(provider_input);
                 let provider_session = start_work_item_plan_author(
                     launch,
                     provider_for_run.clone(),

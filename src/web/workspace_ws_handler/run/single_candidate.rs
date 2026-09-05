@@ -203,6 +203,7 @@ pub(crate) async fn run_single_candidate_author(
         repository.path.to_string_lossy().to_string(),
         author_provider.clone(),
     );
+    let provider_input = engine.attach_tool_policy_audit(provider_input);
     let provider_session =
         start_work_item_plan_author(launch, provider_for_run, provider_input, run_cancel).await;
     let full_output = match engine
