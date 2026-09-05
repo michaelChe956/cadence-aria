@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderStatus,
-    StreamingProviderInput,
+    ProviderToolPolicy, StreamingProviderInput,
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
@@ -276,7 +276,7 @@ fn build_args_rpc_mode_auto_only() {
     let cache = tempfile::tempdir().expect("temporary cache");
     let provider = PiProvider::new("pi".into());
     let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
-    let args = provider.build_args(None, &extension);
+    let args = provider.build_args(None, &extension, None);
     assert!(args.contains(&"--mode".to_string()));
     assert!(args.contains(&"rpc".to_string()));
     assert!(args.contains(&"-e".to_string()));
@@ -291,9 +291,63 @@ fn build_args_resume_includes_session_id() {
     let cache = tempfile::tempdir().expect("temporary cache");
     let provider = PiProvider::new("pi".into());
     let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
-    let args = provider.build_args(Some("sess-123"), &extension);
+    let args = provider.build_args(Some("sess-123"), &extension, None);
     assert!(args.contains(&"--session-id".to_string()));
     assert!(args.contains(&"sess-123".to_string()));
+}
+
+/// F3 restrict-role-write-tools Task 1.3：pi argv enforcement（--exclude-tools 冻结片段）。
+mod pi_policy_args {
+    use super::*;
+
+    #[test]
+    fn build_args_policy_keeps_session_id_and_excludes_only_file_writes() {
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let provider = PiProvider::new("pi".into());
+        let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
+        let args = provider.build_args(
+            Some("aria-17"),
+            &extension,
+            Some(&ProviderToolPolicy::deny_file_write_builtins()),
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--exclude-tools", "edit,write"])
+        );
+        assert!(args.windows(2).any(|w| w == ["--session-id", "aria-17"]));
+    }
+
+    #[test]
+    fn build_args_policy_with_empty_session_id_still_excludes_file_writes() {
+        // 空 session id 复用既有 trim/filter 语义（不注入 --session-id），
+        // 但不得降级成无限制 argv：策略片段必须仍在。
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let provider = PiProvider::new("pi".into());
+        let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
+        let args = provider.build_args(
+            Some("   "),
+            &extension,
+            Some(&ProviderToolPolicy::deny_file_write_builtins()),
+        );
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--exclude-tools", "edit,write"])
+        );
+    }
+
+    #[test]
+    fn build_args_without_policy_keeps_legacy_argv_unchanged() {
+        // 非策略路径（Executor/Coder/聚合初始化/kimi）argv 与既有完全一致。
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let provider = PiProvider::new("pi".into());
+        let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
+        let args = provider.build_args(None, &extension, None);
+        assert!(!args.contains(&"--exclude-tools".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(args.contains(&"--mode".to_string()));
+        assert!(args.contains(&"rpc".to_string()));
+    }
 }
 
 fn streaming_input_for_test(resume_id: Option<String>) -> StreamingProviderInput {
@@ -1081,7 +1135,11 @@ async fn session_resumes_with_existing_session_id() {
     let input = streaming_input_for_test(Some("sess-old".to_string()));
     let provider = PiProvider::new("pi".into());
     let extension = ensure_ask_extension().expect("ask extension");
-    let args = provider.build_args(input.resume_provider_session_id.as_deref(), &extension);
+    let args = provider.build_args(
+        input.resume_provider_session_id.as_deref(),
+        &extension,
+        input.tool_policy.as_ref(),
+    );
     assert!(args.contains(&"--session-id".to_string()));
     assert!(args.contains(&"sess-old".to_string()));
     run_pi_session(peer, command_rx, event_tx, input, CancellationToken::new())

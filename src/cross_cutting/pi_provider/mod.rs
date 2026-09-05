@@ -236,10 +236,14 @@ impl PiProvider {
     /// - No `--session-dir`: Pi uses its default `~/.pi` directory.
     /// - No `--no-extensions`: Pi preserves user-global extensions.
     /// - The project repository is passed as the process cwd at spawn time.
+    /// - Tool policy（REQ-ENV-09）：`Some(DenyFileWriteBuiltins)` 时在 `--session-id`
+    ///   逻辑之后追加冻结片段 `--exclude-tools edit,write`（置于 session id 之后，
+    ///   不改变其顺序；空 session id 不会降级成无限制 argv）。
     pub(crate) fn build_args(
         &self,
         resume_session_id: Option<&str>,
         extension_path: &Path,
+        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
     ) -> Vec<String> {
         let mut args = vec![
             "--mode".to_string(),
@@ -250,6 +254,13 @@ impl PiProvider {
         if let Some(session_id) = resume_session_id.map(str::trim).filter(|id| !id.is_empty()) {
             args.push("--session-id".to_string());
             args.push(session_id.to_string());
+        }
+        if let Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+            intent:
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+        }) = tool_policy
+        {
+            args.extend(deny_file_write_builtins_tokens());
         }
         args
     }
@@ -265,7 +276,11 @@ impl StreamingProviderAdapter for PiProvider {
         let version = probe_pi_version(&self.command).await;
         ensure_pi_version_compatible(&version)?;
         let extension_path = ensure_ask_extension()?;
-        let args = self.build_args(input.resume_provider_session_id.as_deref(), &extension_path);
+        let args = self.build_args(
+            input.resume_provider_session_id.as_deref(),
+            &extension_path,
+            input.tool_policy.as_ref(),
+        );
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process = ProcessManager::spawn(
