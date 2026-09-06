@@ -370,6 +370,25 @@ fn work_item_plan_outline_revision_feedback_returns_none_when_empty() {
     );
 }
 
+#[test]
+fn work_item_plan_fixture_session_ids_are_process_unique() {
+    // failpoint 家族键隔离前提（3.6 F7-D 项 2）：所有复用本 fixture 的测试
+    // 共享固定 project/issue/plan id，session id 必须进程内唯一，否则
+    // 单候选 compile failpoint 的 durable scope 键
+    // (session, project, issue, plan, checkpoint) 会跨测试撞车——持
+    // 全局锁的 failpoint 测试与不持锁的 compile 测试并发时互相误伤
+    // （3.5 台账 compile-failpoint 并行负载偶发根因）。锁死该前提：
+    // 同一进程内两次构建 fixture，session id 必不相同。
+    let (_tmp_a, _checkpoint_a, _lifecycle_a, _plan_a, engine_a) =
+        make_work_item_plan_engine_with_draft_candidate("sess_a");
+    let (_tmp_b, _checkpoint_b, _lifecycle_b, _plan_b, engine_b) =
+        make_work_item_plan_engine_with_draft_candidate("sess_b");
+    assert_ne!(
+        engine_a.session.session_id, engine_b.session.session_id,
+        "fixture session ids must be process-unique (failpoint key isolation)"
+    );
+}
+
 fn make_work_item_plan_engine_with_draft_candidate(
     _session_id: &str,
 ) -> (
@@ -625,15 +644,28 @@ fn make_work_item_plan_engine_with_draft_candidate(
         )
         .unwrap();
 
+    // failpoint 键隔离纪律（3.6 F7-D 项 2，与 campaign_stage3_amendment 的
+    // 「session id 进程内唯一化」同源）：本 fixture 的 project/issue/plan id
+    // 全部固定，session id 若也相同（旧实现基于各测试独立 TempDir 计数，
+    // 每个都是 workspace_session_0001），单候选 compile failpoint 的
+    // durable scope 键会跨测试撞车。进程级原子计数保证唯一，且
+    // `workspace_session_{seq:06}` 形态与 next_workspace_session_id 的
+    // 序号扫描兼容（同 store 后续自动分配从 max+1 继续，不冲突）。
+    static FIXTURE_SESSION_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    let session_sequence = FIXTURE_SESSION_SEQUENCE
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let session_record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
+        .create_workspace_session_with_id(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
         issue_id: issue_id.to_string(),
         entity_id: plan.id.clone(),
         workspace_type: WorkspaceType::WorkItemPlan,
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: ProviderName::Codex,
         review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, },
+            format!("workspace_session_{session_sequence:06}"),
+        )
         .unwrap();
 
     let session = WorkspaceSession::from_record(session_record);
