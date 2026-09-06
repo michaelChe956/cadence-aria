@@ -240,4 +240,20 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
             "missing teaching {teaching}"
         );
     }
+    // F5-C：防打转教学段——同一批未解决 findings 不得无限 revise。
+    for teaching in [
+        "[review_repetition_discipline]",
+        "若本轮 findings 与你上一轮实质相同（同一批未解决问题，且 author 已在修订中声明处理或本轮输出仍未解决）",
+        "改判 needs_human，并在 summary 中说明卡点",
+        "不要对同一批未解决 findings 无限第 N 次 revise",
+    ] {
+        assert!(
+            input.prompt.contains(teaching),
+            "missing repetition discipline teaching {teaching}"
+        );
+        assert!(
+            verification_input.prompt.contains(teaching),
+            "verification prompt must also carry the repetition discipline teaching {teaching}"
+        );
+    }
 }

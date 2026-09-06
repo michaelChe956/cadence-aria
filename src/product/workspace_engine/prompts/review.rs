@@ -3,9 +3,9 @@ use super::history_compaction::{
     render_intermediate_artifact_diffs, render_open_required_findings,
 };
 use super::review_context::{
-    PlanReviewSource, append_review_context_section, append_single_candidate_contract_gap_teaching,
-    load_plan_review_context, single_candidate_dependency_graph,
-    single_candidate_reviewer_coverage,
+    PlanReviewSource, SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING, append_review_context_section,
+    append_single_candidate_contract_gap_teaching, load_plan_review_context,
+    single_candidate_dependency_graph, single_candidate_reviewer_coverage,
 };
 use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
@@ -606,6 +606,7 @@ impl WorkspaceEngine {
             ));
         }
         append_single_candidate_contract_gap_teaching(&mut prompt, &reviewer_coverage);
+        prompt.push_str(SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING);
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),

@@ -61,6 +61,14 @@ pub(super) fn single_candidate_reviewer_coverage(
     Ok(project_contract_reviewer_coverage(&graph))
 }
 
+/// F5-C：SC reviewer 防打转教学段。修订循环不收敛的第一根因已由 findings 回灌
+/// （F5-A）修复，本段数导 reviewer 不对同一批未解决 findings 无限 revise：
+/// 与上一轮实质相同且 author 已声明处理时改判 needs_human 并说明卡点。
+pub(super) const SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING: &str = "\
+[review_repetition_discipline]\
+若本轮 findings 与你上一轮实质相同（同一批未解决问题，且 author 已在修订中声明处理或本轮输出仍未解决），不得再次返回 revise：改判 needs_human，并在 summary 中说明卡点（哪条 finding 为何无法通过自动修订收敛）。不要对同一批未解决 findings 无限第 N 次 revise。\
+\n";
+
 pub(super) fn append_single_candidate_contract_gap_teaching(
     prompt: &mut String,
     coverage: &ContractReviewerCoverageProjection,
