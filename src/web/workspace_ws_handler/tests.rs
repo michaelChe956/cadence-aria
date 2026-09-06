@@ -258,11 +258,7 @@ mod outbound_writer_liveness {
         );
         let sink = CollectOutboundSink::default();
         let observed = sink.sent.clone();
-        let writer_task = tokio::spawn(pump_outbound_controls(
-            writer_rx,
-            sink,
-            liveness.clone(),
-        ));
+        let writer_task = tokio::spawn(pump_outbound_controls(writer_rx, sink, liveness.clone()));
 
         // 模拟事件流 fixture：服务器每 15ms 成功写出一条出站消息，持续 ~150ms
         // （远超 40ms idle 阈值）；客户端全程静默（不触碰 liveness）。
@@ -328,7 +324,6 @@ mod outbound_writer_liveness {
         );
     }
 }
-
 
 #[test]
 fn revision_path_messages_are_only_valid_in_review_decision() {
@@ -1315,4 +1310,3 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
     assert!(feedback.contains("write_scope_required"));
     assert!(feedback.contains("work item must have at least one exclusive_write_scope"));
 }
-
