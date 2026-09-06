@@ -17,3 +17,7 @@ mod live_kimi_tests;
 #[cfg(unix)]
 #[path = "tests/local_usage_tests.rs"]
 mod local_usage_tests;
+
+#[cfg(unix)]
+#[path = "tests/tool_policy_zero_change.rs"]
+mod tool_policy_zero_change;

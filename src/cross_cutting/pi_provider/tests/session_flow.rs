@@ -739,3 +739,83 @@ async fn session_demultiplexes_response_by_id() {
         )
     );
 }
+
+/// F3 Task 4.1 零变化回归（restrict-role-write-tools）：
+/// ①pi 出站 request id 保持既有 `pi-<N>` 字符串命名空间（Task 2.2 只升级 codex
+///   peer 到 aria-<seq>，pi 不得被牵连改写）；
+/// ②pi→Auto permission mapping 不变：pi 是 Auto-only，bridge 恒以
+///   `ProviderPermissionMode::Auto` 构造且从不经它上抛授权——即使 input 携带
+///   Supervised 也不得出现 PermissionRequest 事件或权限参数。
+#[tokio::test]
+async fn pi_outbound_ids_and_auto_permission_mapping_stay_unchanged() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+
+    let server = tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let get_state = read_outbound(&mut reader).await;
+        // 出站 id 保持 pi-1 起（字符串命名空间，非 aria-<seq>、非裸数字）。
+        assert_eq!(get_state["id"], serde_json::json!("pi-1"));
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({
+                "type": "response", "id": get_state["id"], "command": "get_state",
+                "success": true, "data": {"sessionId": "sess-ids-locked"}
+            }),
+        )
+        .await;
+        let prompt = read_outbound(&mut reader).await;
+        assert_eq!(prompt["id"], serde_json::json!("pi-2"));
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({
+                "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+            }),
+        )
+        .await;
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "ids locked"}
+            }),
+        )
+        .await;
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({"type":"agent_settled"}),
+        )
+        .await;
+    });
+
+    let mut supervised_input = streaming_input_for_test(None);
+    supervised_input.permission_mode = ProviderPermissionMode::Supervised;
+    run_pi_session(
+        peer,
+        command_rx,
+        event_tx,
+        supervised_input,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("supervised input must not change pi behavior");
+    server.await.expect("server");
+
+    let events = drain_events(&mut event_rx).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Completed(_))),
+        "pi session must still complete under a Supervised input"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::PermissionRequest(_))),
+        "pi is Auto-only: Supervised input must never surface permission requests"
+    );
+}

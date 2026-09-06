@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::super::session::run_kimi_session;
 use super::super::{KimiCodeProvider, StreamingProviderAdapter};
 
-fn fixture_command(name: &str) -> PathBuf {
+pub(crate) fn fixture_command(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/provider")
         .join(name)

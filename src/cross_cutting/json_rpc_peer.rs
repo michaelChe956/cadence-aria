@@ -509,4 +509,71 @@ mod tests {
 
         assert_eq!(value["ok"], true);
     }
+
+    /// F3 Task 4.1（restrict-role-write-tools GC7 回归锁）：默认 peer（pi/kimi
+    /// 构造路径，`JsonRpcPeer::new`）出站 request id 保持 Numeric 命名空间、
+    /// 1 起（1、2、3…），永不出现 `aria-<seq>` typed namespace（仅 codex peer
+    /// 经 `with_outbound_id_namespace(Aria)` 升级——Task 2.2 作用域约束）。
+    #[tokio::test]
+    async fn default_peer_outbound_request_ids_stay_numeric_and_one_based() {
+        // 命名空间锁定：默认 peer 出站 id 必须是 1 起的 JSON 数字（wire 级断言；
+        // 若默认翻成 Aria 档，id 会变成 "aria-0"/"aria-1" 字符串，下列断言即红）。
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(client_io);
+        let peer = JsonRpcPeer::new(reader, writer);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = tokio::io::split(server_io);
+            let mut reader = tokio::io::BufReader::new(server_reader);
+            let mut seen_ids = Vec::new();
+            for expected in [1_u64, 2_u64] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read outbound");
+                let request: serde_json::Value =
+                    serde_json::from_str(line.trim()).expect("outbound json");
+                // wire 断言：id 是 JSON 数字（非字符串、非 aria- 前缀）。
+                assert_eq!(
+                    request["id"],
+                    serde_json::json!(expected),
+                    "default peer outbound id must be the {expected}-based numeric id"
+                );
+                seen_ids.push(request["id"].clone());
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"].clone(),
+                    "result": {"ok": true},
+                });
+                server_writer
+                    .write_all(reply.to_string().as_bytes())
+                    .await
+                    .expect("write reply");
+                server_writer.write_all(b"\n").await.expect("write newline");
+            }
+            seen_ids
+        });
+
+        for _ in 0..2 {
+            let value = tokio::time::timeout(
+                Duration::from_secs(1),
+                peer.request(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "params": {},
+                })),
+            )
+            .await
+            .expect("default peer request should complete")
+            .expect("default peer request should succeed");
+            assert_eq!(value["ok"], true);
+        }
+
+        let seen_ids = server_task.await.expect("server task");
+        assert_eq!(seen_ids.len(), 2);
+        assert!(
+            seen_ids
+                .iter()
+                .all(|id| id.is_u64() && !id.is_string()),
+            "pi/kimi outbound ids must stay numeric, never aria-<seq> strings"
+        );
+    }
 }
