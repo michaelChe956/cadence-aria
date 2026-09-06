@@ -3,8 +3,10 @@
 //! 策略角色（pi/claude/codex）使用本分区（`tool-policy-run-audit/`）；Coder、非策略
 //! 路径与 kimi 继续使用既有 `execution_event_audit`，两者严格分离（GC10）。
 //! 文件 key=`(workspace_session_id, role_run_seq)`，append-only JSONL；
-//! `provider_start` 恰为首行且唯一，行 `seq` 单调递增；读取坏行跳过并返回
-//! 内存告警（不写回 durable 分区）；写入失败传播错误。
+//! `provider_start` 恰为首行且唯一，行 `seq` 从约定起点（0）单调递增；读取坏行
+//! 跳过并返回内存告警（不写回 durable 分区）；可解析行违反结构不变量
+//! （schema 版本/seq 起点+严格递增/首行 provider_start 唯一）视为结构性损坏，
+//! 读取返回 `CorruptAuditFile` fail-closed（写入端据此拒绝追加）；写入失败传播错误。
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -71,12 +73,19 @@ impl LifecycleStore {
             .join(workspace_session_id))
     }
 
-    /// 读取 durable 分区文件（坏行跳过 + 内存告警；不写回分区）。
+    /// 读取 durable 分区文件：可解析行逐行结构校验（F3 最终审）——
+    /// `schema_version` 必须为当前冻结版本、行 `seq` 从约定起点（0，与 append
+    /// 首行分配 `unwrap_or(0)` 同源）严格递增、`provider_start` 恰为首行且唯一；
+    /// 任一违反视为结构性损坏，返回 `CorruptAuditFile` fail-closed（写入端据此
+    /// 拒绝在损坏文件上追加）。坏 JSON 行仍为跳过+内存告警（既有行为，不写回
+    /// 分区；告警行不参与结构校验，两侧可解析行间 seq 只需严格递增）。
     pub fn read_tool_policy_lines_with_warnings(
         &self,
         workspace_session_id: &str,
         role_run_seq: u64,
     ) -> Result<ToolPolicyAuditReadResult, ToolPolicyAuditError> {
+        use crate::cross_cutting::tool_policy_audit::TOOL_POLICY_AUDIT_SCHEMA_VERSION;
+
         let path = self.tool_policy_audit_file(workspace_session_id, role_run_seq)?;
         let mut result = ToolPolicyAuditReadResult::default();
         let file = match std::fs::File::open(&path) {
@@ -84,16 +93,39 @@ impl LifecycleStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(result),
             Err(error) => return Err(audit_error(error)),
         };
+        // F3：结构校验状态——首行必须 provider_start 且 seq==0，后续行 seq 严格
+        // 递增且不再出现 provider_start（唯一）。
+        let mut last_seq: Option<u64> = None;
         for (index, line) in BufReader::new(file).lines().enumerate() {
+            let line_no = index as u32 + 1;
             let line = line.map_err(audit_error)?;
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<ToolPolicyAuditLine>(&line) {
-                Ok(parsed) => result.events.push(parsed),
+                Ok(parsed) => {
+                    if parsed.schema_version != TOOL_POLICY_AUDIT_SCHEMA_VERSION {
+                        return Err(ToolPolicyAuditError::CorruptAuditFile { line_no });
+                    }
+                    let is_provider_start = parsed.event_type() == "provider_start";
+                    match last_seq {
+                        None => {
+                            if parsed.seq != 0 || !is_provider_start {
+                                return Err(ToolPolicyAuditError::CorruptAuditFile { line_no });
+                            }
+                        }
+                        Some(previous) => {
+                            if parsed.seq <= previous || is_provider_start {
+                                return Err(ToolPolicyAuditError::CorruptAuditFile { line_no });
+                            }
+                        }
+                    }
+                    last_seq = Some(parsed.seq);
+                    result.events.push(parsed);
+                }
                 Err(_) => result.warnings.push(ToolPolicyAuditReadWarning {
                     reason_code: "invalid_json_line".to_string(),
-                    line_no: index as u32 + 1,
+                    line_no,
                 }),
             }
         }

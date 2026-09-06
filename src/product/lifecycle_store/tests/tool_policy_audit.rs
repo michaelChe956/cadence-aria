@@ -3,7 +3,7 @@
 // 经 include! 引入 tests.rs（large_file_guard 1200 行红线）。
 
 use crate::cross_cutting::tool_policy_audit::{
-    DurableToolPolicyEvent, ToolPolicyAuditSink, ToolPolicyAuditLine,
+    DurableToolPolicyEvent, ToolPolicyAuditError, ToolPolicyAuditLine, ToolPolicyAuditSink,
 };
 
 /// durable sink fixture：真实 LifecycleStore（临时 .aria 根）。
@@ -393,6 +393,212 @@ fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
     // 空/不存在文件不允许以非 provider_start 开头。
     let orphan = sink.append("ws-2", 2, protocol_warning_event("unknown"));
     assert!(orphan.is_err(), "canonical file must start with provider_start");
+}
+
+// ---- F3（最终审）：读端结构校验（有效事件 vs 结构性损坏 fail-closed） ----
+
+/// 手工构造原始 JSONL 行（绕过 append 的不变量），可改写 seq/schema_version。
+fn raw_audit_line(event: &DurableToolPolicyEvent, seq: u64, schema_version: u32) -> String {
+    let mut value =
+        serde_json::to_value(ToolPolicyAuditLine::from_event(seq, event.clone())).unwrap();
+    value["schema_version"] = serde_json::json!(schema_version);
+    serde_json::to_string(&value).unwrap()
+}
+
+/// 直接写原始分区文件（模拟外部损坏/篡改）。
+fn write_raw_audit_file(
+    tmp: &tempfile::TempDir,
+    workspace_session_id: &str,
+    role_run_seq: u64,
+    body: &str,
+) -> std::path::PathBuf {
+    let file = tmp
+        .path()
+        .join(".aria")
+        .join("tool-policy-run-audit")
+        .join(workspace_session_id)
+        .join(format!("{role_run_seq}.jsonl"));
+    std::fs::create_dir_all(file.parent().expect("partition dir"))
+        .expect("create partition dir");
+    std::fs::write(&file, body).expect("write raw fixture");
+    file
+}
+
+fn raw_audit_store(tmp: &tempfile::TempDir) -> super::LifecycleStore {
+    super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        tmp.path().join(".aria"),
+    ))
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_unknown_schema_version() {
+    // F3：schema_version≠1 的可解析行是结构性损坏——读取返回 CorruptAuditFile，
+ // append 拒绝在损坏文件上继续追加，原始文件保持不变。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 2),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-schema", 3, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-schema", 3),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 1 })
+    ));
+    assert!(
+        store
+            .append("ws-schema", 3, approval_decision_event("file_change", "aria-9"))
+            .is_err(),
+        "append must refuse a schema-corrupted file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        2,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_seq_regression() {
+    // F3（终审定例）：已有 seq 0,4,2 的文件——seq 倒退是结构性损坏，读取
+    // CorruptAuditFile，且不得在其上追加 seq 3（旧实现会继续追加 3）。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 4, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-1"), 2, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-regression", 5, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-regression", 5),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 3 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-regression",
+                5,
+                approval_decision_event("file_change", "aria-2")
+            )
+            .is_err(),
+        "append must refuse a seq-regressed file (would append seq 3)"
+    );
+    let raw = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(raw.lines().count(), 3, "corrupted file must not be appended");
+    assert!(!raw.contains("aria-2"), "no new event may land on the corrupt file");
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_duplicate_seq() {
+    // F3：重复 seq（非严格递增）是结构性损坏。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 1, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-1"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-dup-seq", 7, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-dup-seq", 7),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 3 })
+    ));
+    assert!(
+        store
+            .append("ws-dup-seq", 7, approval_decision_event("file_change", "aria-2"))
+            .is_err(),
+        "append must refuse a duplicate-seq file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        3,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_when_first_line_is_not_provider_start() {
+    // F3：首行非 provider_start 是结构性损坏（首行恰为唯一 provider_start）。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 0, 1),
+        raw_audit_line(&protocol_warning_event("unsupported_approval_kind"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-first-line", 9, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-first-line", 9),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 1 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-first-line",
+                9,
+                approval_decision_event("file_change", "aria-9")
+            )
+            .is_err(),
+        "append must refuse a file not opened by provider_start"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        2,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_non_first_provider_start_line() {
+    // F3：provider_start 必须唯一且恰为首行——中途再出现即是结构性损坏。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 1),
+        raw_audit_line(&provider_start_event("codex"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-second-start", 4, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-second-start", 4),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 2 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-second-start",
+                4,
+                approval_decision_event("file_change", "aria-9")
+            )
+            .is_err(),
+        "append must refuse a file with a non-first provider_start line"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        2,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_when_seq_does_not_start_at_conventional_origin() {
+    // F3：seq 必须从约定起点（0）开始——首行 seq≠0 是结构性损坏。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 3, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 4, 1),
+    );
+    write_raw_audit_file(&tmp, "ws-seq-origin", 6, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-seq-origin", 6),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 1 })
+    ));
 }
 
 #[test]
