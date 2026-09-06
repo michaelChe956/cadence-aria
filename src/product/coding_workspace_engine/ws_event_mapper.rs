@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::streaming_provider::UsageReportData;
 
 pub(crate) fn provider_start_is_not_implemented(error: &ProviderAdapterError) -> bool {
     error.stderr == "streaming provider start is not implemented"
@@ -127,6 +128,30 @@ pub(crate) fn ws_event_from_provider_status(
         command: None,
         cwd: None,
         output: None,
+        exit_code: None,
+    }
+}
+
+/// 将 provider 上报的 token 用量映射为 kind=usage 的 execution event（与
+/// `workspace_engine::mappings::execution_event_from_usage_report` 同构）。
+///
+/// `event_id` 固定为 `usage_{role}`，同 role 多次上报时消费侧按 event_id
+/// upsert 覆盖为最新快照；`output` 为 `UsageReportData` 的 JSON 序列化，
+/// 供 campaign driver 提取按角色 token 用量。
+pub(crate) fn ws_execution_event_from_usage_report(
+    report: UsageReportData,
+) -> ProviderExecutionEvent {
+    let role = report.role.clone();
+    let output = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
+    ProviderExecutionEvent {
+        event_id: format!("usage_{role}"),
+        kind: ProviderExecutionEventKind::Usage,
+        status: ProviderExecutionEventStatus::Completed,
+        title: format!("{role} token usage"),
+        detail: None,
+        command: None,
+        cwd: None,
+        output: Some(output),
         exit_code: None,
     }
 }

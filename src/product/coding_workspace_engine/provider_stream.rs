@@ -845,10 +845,42 @@ impl CodingWorkspaceEngine {
                                     )
                                     .await;
                             }
-                            // token 用量采集当前仅覆盖 workspace_engine 主事件循环；coding
-                            // workspace 链路暂不消费 usage（best-effort，缺失不报错）。
-                            ProviderEvent::UsageReport(_)
-                            | ProviderEvent::ToolPolicyDecision(_)
+                            // token 用量（best-effort）：与 workspace_engine 主循环
+                            // 同构，映射为 kind=usage 的 execution event
+                            // （event_id=usage_{role}，同 role upsert 覆盖最新快照），
+                            // 经 CodingExecutionEvent 送达 WS 并落 role-run 审计。
+                            ProviderEvent::UsageReport(report) => {
+                                let event = ws_execution_event_from_usage_report(report);
+                                let event_for_record = event.clone();
+                                let _ = self
+                                    .event_tx
+                                    .send(CodingWsOutMessage::CodingExecutionEvent {
+                                        event: ws_event_from_provider_execution(
+                                            event,
+                                            node_id,
+                                            provider_name,
+                                        ),
+                                    })
+                                    .await;
+                                self.record_role_run_event(
+                                    attempt,
+                                    role_run,
+                                    CodingRoleRunEventType::ExecutionEvent,
+                                    json!({
+                                        "event_id": event_for_record.event_id,
+                                        "kind": format!("{:?}", event_for_record.kind),
+                                        "status": format!("{:?}", event_for_record.status),
+                                        "title": event_for_record.title,
+                                        "detail": event_for_record.detail,
+                                        "command": event_for_record.command,
+                                        "cwd": event_for_record.cwd,
+                                        "output": event_for_record.output,
+                                        "exit_code": event_for_record.exit_code
+                                    }),
+                                );
+                            }
+                            // 策略审计出口：观测性事件，主循环不消费。
+                            ProviderEvent::ToolPolicyDecision(_)
                             | ProviderEvent::ToolPolicyWarning(_)
                             | ProviderEvent::ToolPolicyTerminated(_) => {}
                         }
