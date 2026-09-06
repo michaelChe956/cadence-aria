@@ -1,9 +1,10 @@
-// F3 Task 4.1（restrict-role-write-tools，GC12）：kimi 零变化回归。
+// F3 Task 4.1（restrict-role-write-tools，GC12；修复轮 Minor3 收窄）：kimi 零变化回归。
 // ①argv 冻结：仅 `acp`，不注入任何 tool-policy 物理片段（pi/claude/codex 的
 //   denylist 片段不得串入 kimi）；
-// ②kimi 不读 `tool_policy`/`audit_sink`：即使 input 误挂策略与 run-bound
-//   durable sink，会话行为零变化、不向 sink 追加任何 tool-policy canonical
-//   事件（tool-policy-run-audit/ 分区文件因此永不因 kimi 产生）；
+// ②kimi 不读 `tool_policy`/`audit_sink`：即使 input 误挂策略与传入的 sink，
+//   provider 也不调用该 sink（零追加）——断言范围收窄为 provider 行为本身；
+//   分区文件级断言（tool-policy-run-audit/ 永不因 kimi 产生）已由
+//   coding/workspace 侧真实 LifecycleStore 根上的隔离测试覆盖；
 // ③出站 request id 保持既有数字命名空间（initialize=1/session/new=2/
 //   session/prompt=3，Task 2.2 只升级 codex peer 到 aria-<seq>）。
 
@@ -69,19 +70,13 @@ async fn write_wire_line(
     writer.write_all(b"\n").await.expect("write wire newline");
 }
 
-/// ①argv 冻结：kimi build_args 是完整向量等值 `["acp"]`——不因本 change 混入
-/// `--exclude-tools`/`--disallowedTools` 等策略片段。
+/// ①argv 冻结：kimi build_args 是完整向量等值 `"acp"`——不因本 change 混入
+/// `--exclude-tools`/`--disallowedTools` 等策略片段（向量等值已覆盖，无需
+/// 冗余 contains 检查）。
 #[test]
 fn kimi_build_args_stay_policy_free() {
     let provider = KimiCodeProvider::new("kimi".into());
-    let args = provider.build_args();
-    assert_eq!(args, vec!["acp".to_string()]);
-    assert!(
-        !args.iter().any(|arg| arg.contains("exclude-tools")
-            || arg.contains("disallowedTools")
-            || arg.contains("sandbox")),
-        "kimi argv must not carry any provider tool-policy fragment: {args:?}"
-    );
+    assert_eq!(provider.build_args(), vec!["acp".to_string()]);
 }
 
 /// ③出站 request id 保持数字：真实 `run_kimi_session` wire 级断言
@@ -194,10 +189,12 @@ async fn kimi_outbound_request_ids_stay_numeric() {
     }
 }
 
-/// ②kimi 忽略 tool_policy/audit_sink：Orchestrator（策略角色档）input 误挂
-/// deny 策略与 run-bound durable sink 时，会话行为零变化、sink 零追加。
+/// ②kimi 忽略 tool_policy/audit_sink（修复轮 Minor3 收窄命名）：断言范围是
+/// provider 不调用传入的 sink——Orchestrator（策略角色档）input 误挂 deny
+/// 策略与 sink 时，会话行为零变化、sink 零追加。分区文件级断言已由
+/// coding/workspace 侧真实 LifecycleStore 根上的隔离测试覆盖。
 #[tokio::test]
-async fn kimi_session_ignores_tool_policy_and_never_appends_tool_policy_audit() {
+async fn kimi_session_ignores_attached_policy_and_never_calls_passed_in_sink() {
     let sink = RecordingToolPolicyAuditSink::new();
     let provider = KimiCodeProvider::new(fixture_command("kimi_acp_text_fixture.sh"));
     let mut input = kimi_input(AdapterRole::Orchestrator);

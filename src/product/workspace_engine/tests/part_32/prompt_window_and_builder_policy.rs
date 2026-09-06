@@ -530,8 +530,11 @@ fn builder_factory_applies_role_policy_matrix_per_entry() {
 }
 
 /// F3 Task 4.1 零变化回归：Coder 与聚合初始化 provider turn 保持既有全工具
-/// 启动档（无 denylist、无沙箱改写）。沙箱参数经现有 Codex sandbox 参数解析器
-/// （`codex_launch_params` 单一来源）断言 `danger-full-access`；若 Coder 被误注入
+/// 启动档（无 denylist、无沙箱改写）。聚合 turn 固定 Claude Code（Codex 在
+/// danger-full-access 下被 gateway 路由级阻断），与 Codex 沙箱参数无关——
+/// 聚合侧按真实 input 断言 launch 档字段（provider_type/role/tool_policy/
+/// permission_mode），codex sandbox 参数仅在真实 Codex input（coder）上经
+/// `codex_launch_params` 单一来源断言 `danger-full-access`；若 Coder 被误注入
 /// denylist 或沙箱被改写，本测试必须失败。
 #[test]
 fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
@@ -540,6 +543,8 @@ fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
     let coder = entry_input("coding_coder");
     assert_eq!(coder.role, AdapterRole::Executor);
     assert_eq!(coder.tool_policy, None);
+    assert_eq!(coder.provider_type, ProviderType::Codex);
+    assert_eq!(coder.permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(
         codex_launch_params(&coder)["sandbox"],
         "danger-full-access",
@@ -547,15 +552,13 @@ fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
     );
 
     // 聚合初始化同 Executor 档：经 coordinator_provider_turn.inc.rs:57-77 真实
-    // 构造路径断言（同 Task 1.2 builder 全集断言），同样禁带策略、维持全工具档。
+    // 构造路径断言（同 Task 1.2 builder 全集断言），同样禁带策略、维持全工具档；
+    // 该 input 是 Claude Code 档，不喂 codex_launch_params（类型不匹配的弱断言）。
     let aggregate = entry_input("aggregate_turn");
+    assert_eq!(aggregate.provider_type, ProviderType::ClaudeCode);
     assert_eq!(aggregate.role, AdapterRole::Executor);
     assert_eq!(aggregate.tool_policy, None);
-    assert_eq!(
-        codex_launch_params(&aggregate)["sandbox"],
-        "danger-full-access",
-        "aggregate initialization turn must keep the existing full-tool sandbox"
-    );
+    assert_eq!(aggregate.permission_mode, ProviderPermissionMode::Auto);
 }
 
 /// 断言 role 与 tool_policy 成对一致（D2：作者/评审必带 DenyFileWriteBuiltins，
