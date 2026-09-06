@@ -661,7 +661,7 @@ async fn single_candidate_projects_declared_verification_command_without_outline
 }
 
 #[tokio::test]
-async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_provider_call() {
+async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_teaching_reredrive() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(RecordingOutputProvider {
@@ -688,12 +688,24 @@ async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_provider_ca
             .prompt
             .contains("完整 `work-item-plan.md` source")
     );
+    // F2-B：missing_section 类失败给恰一次教学重驱；重驱仍败则终态。
+    let reredrive_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("teaching re-drive must invoke the provider exactly once more")
+        .expect("teaching re-drive input");
+    assert!(
+        reredrive_input
+            .prompt
+            .contains("立即输出完整 work-item-plan markdown source"),
+        "re-drive prompt must carry the immediate-output teaching: {}",
+        reredrive_input.prompt
+    );
     assert!(
         !matches!(
             tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
             Ok(Some(_))
         ),
-        "full-plan parse failure must not start another provider invocation"
+        "teaching re-drive must be bounded to exactly one extra provider invocation"
     );
     let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -712,11 +724,11 @@ async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_provider_ca
     })
     .await
     .expect("full-plan parse failure error");
+    let message = error["message"].as_str().expect("error message");
+    assert!(message.contains("compile markdown source failed"));
     assert!(
-        error["message"]
-            .as_str()
-            .expect("error message")
-            .contains("compile markdown source failed")
+        message.contains("first round") && message.contains("re-drive round"),
+        "terminal failure must carry both rounds' diagnostics: {message}"
     );
     wait_for_single_candidate_phase(
         &fixture,
@@ -758,4 +770,265 @@ async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expected: Workspac
     })
     .await
     .expect("provider run must reach expected stage");
+}
+
+// F2-B（SC compile 失败教学重驱）：missing_section 类 compile 失败给一次教学重驱
+// 自修机会（错误原文进重驱 prompt）；重驱成功→正常继续；重驱再败→终态失败含
+// 两轮信息；非 missing_section 错误不触发重驱。
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct SequenceOutputProvider {
+    outputs: Vec<String>,
+    inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+    next: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SequenceOutputProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let _ = self.inputs.send(input);
+        let index = self.next.fetch_add(1, Ordering::SeqCst);
+        let output = self
+            .outputs
+            .get(index)
+            .or_else(|| self.outputs.last())
+            .cloned()
+            .unwrap_or_default();
+        provider_session_with_output(output).await
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("sequence provider tests use start")
+    }
+}
+
+/// 从合法 SC markdown 中删除一个 section 块，制造 missing_section 类 compile 失败。
+fn markdown_without_section(story_id: &str, design_id: &str, section_heading: &str) -> String {
+    single_candidate_markdown(story_id, design_id)
+        .split("\n\n")
+        .filter(|chunk| !chunk.starts_with(section_heading))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 在结构化 section 内追加表外 key，制造 unknown_structured_key 类 compile 失败
+/// （所有必需 section/字段仍在，不产生 missing_section）。
+fn markdown_with_unknown_structured_key(story_id: &str, design_id: &str) -> String {
+    single_candidate_markdown(story_id, design_id).replacen(
+        "### Handoff Schema\n- required_fields: commit_sha",
+        "### Handoff Schema\n- bogus_key: x\n- required_fields: commit_sha",
+        1,
+    )
+}
+
+async fn next_provider_input(
+    input_rx: &mut mpsc::UnboundedReceiver<StreamingProviderInput>,
+) -> StreamingProviderInput {
+    tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("provider input expected")
+        .expect("provider input channel open")
+}
+
+async fn no_more_provider_inputs(input_rx: &mut mpsc::UnboundedReceiver<StreamingProviderInput>) {
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "no further provider invocation is allowed here"
+    );
+}
+
+async fn next_error_message(outbound_rx: &mut mpsc::Receiver<OutboundControl>) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let outbound = outbound_rx.recv().await.expect("outbound control expected");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == "error" {
+                return value["message"]
+                    .as_str()
+                    .expect("error message")
+                    .to_string();
+            }
+        }
+    })
+    .await
+    .expect("error outbound expected")
+}
+
+#[tokio::test]
+async fn single_candidate_compile_missing_section_reredrive_recovers_and_continues() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            markdown_without_section(&fixture.story_id, &fixture.design_id, "### Goal"),
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let first_input = next_provider_input(&mut input_rx).await;
+    assert!(
+        first_input.prompt.contains("[markdown_grammar]"),
+        "first round must stay the full markdown author prompt"
+    );
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    for required in [
+        "立即输出完整 work-item-plan markdown source",
+        "第一行即文档标题 `# Work Item Plan`",
+        "missing_section",
+        "Work Item 缺少必需 section",
+    ] {
+        assert!(
+            reredrive_input.prompt.contains(required),
+            "teaching re-drive prompt must contain {required}: {}",
+            reredrive_input.prompt
+        );
+    }
+    no_more_provider_inputs(&mut input_rx).await;
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    assert_eq!(
+        single_candidate_generation_steps_for_session(&fixture.record.id),
+        vec!["full_markdown_author", "parse_source_revision", "selector"],
+        "re-drive recovery must continue through the canonical compile path exactly once",
+    );
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload single-candidate session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+    );
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: durable.project_id.clone(),
+        issue_id: durable.issue_id.clone(),
+        plan_id: durable.entity_id.clone(),
+    };
+    let source_store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+        fixture.app_paths.clone(),
+    );
+    let stored = source_store
+        .get_source_revision(
+            &scope,
+            durable
+                .work_item_plan_source_revision_ref
+                .as_deref()
+                .expect("source revision ref"),
+        )
+        .expect("stored source");
+    assert_eq!(
+        stored.source,
+        single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        "the recovered re-drive output must become the persisted source revision"
+    );
+}
+
+#[tokio::test]
+async fn single_candidate_compile_missing_section_reredrive_failure_is_terminal_with_both_rounds() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            markdown_without_section(&fixture.story_id, &fixture.design_id, "### Goal"),
+            markdown_without_section(&fixture.story_id, &fixture.design_id, "### Tasks"),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _first_input = next_provider_input(&mut input_rx).await;
+    let _reredrive_input = next_provider_input(&mut input_rx).await;
+    no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("compile markdown source failed"),
+        "{message}"
+    );
+    assert!(
+        message.contains("first round") && message.contains("re-drive round"),
+        "terminal failure must carry both rounds' diagnostics: {message}"
+    );
+    assert!(
+        message.matches("missing_section").count() >= 2,
+        "terminal failure must contain both rounds' error text: {message}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn single_candidate_compile_unknown_key_failure_stays_terminal_without_reredrive() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![markdown_with_unknown_structured_key(
+            &fixture.story_id,
+            &fixture.design_id,
+        )],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _first_input = next_provider_input(&mut input_rx).await;
+    no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("compile markdown source failed")
+            && message.contains("unknown_structured_key"),
+        "non-missing_section compile failure must stay terminal: {message}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
 }

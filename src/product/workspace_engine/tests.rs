@@ -51,6 +51,7 @@ mod conversational_gate_recovery;
 mod conversational_gate_revision;
 mod conversational_gate_revision_fingerprint;
 mod review_repair_prompt;
+mod sc_compile_reredrive_prompt;
 mod single_candidate;
 mod single_candidate_flow_dispatch;
 mod single_candidate_prompt;

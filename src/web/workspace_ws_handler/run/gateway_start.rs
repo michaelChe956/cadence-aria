@@ -45,6 +45,9 @@ use crate::product::models::ProviderName;
 use crate::product::workspace_engine::WorkspaceEngine;
 
 /// 逻辑会话经 gateway 启动所需的已解析 launch 信息。
+/// `Clone`：F2-B SC compile 教学重驱需在同一 run 内复用已 resolve 的 launch
+/// （避免二次 gateway validate）；字段均为不可变快照，克隆无副作用。
+#[derive(Clone)]
 pub(crate) struct LogicalPlanLaunch {
     pub gateway: Arc<LogicalCodebaseProviderGateway>,
     pub project_id: String,
@@ -94,12 +97,14 @@ impl LogicalPlanLaunch {
 
 /// 已冻结政策的逻辑会话启动:launch + validated policy 成对保存,供 prompt 构建
 /// (取 `RoutingReferenceContext::Logical`)与 provider 启动(复用 validated policy)共用。
+#[derive(Clone)]
 pub(crate) struct ValidatedPlanLaunch {
     pub launch: LogicalPlanLaunch,
     pub validated: ValidatedSessionLaunchPolicy,
 }
 
 /// planning author 启动选择:Legacy(直接 `provider.start`)或 Logical(经 gateway)。
+#[derive(Clone)]
 pub(crate) enum PlanAuthorLaunch {
     Legacy,
     Logical(Box<ValidatedPlanLaunch>),

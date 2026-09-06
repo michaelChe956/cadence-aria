@@ -57,6 +57,62 @@ fn author_heading_normalized_event_id(node_id: &str, raw_output: &str) -> String
     )
 }
 
+/// 归一化审计事件发射（首轮与 F2-B 教学重驱轮共用）：归一化行数>0 时才发。
+async fn emit_author_heading_normalized_event(
+    engine: &mut WorkspaceEngine,
+    node_id: &str,
+    raw_output: &str,
+    delivery: &crate::product::work_item_plan_compiler::NormalizedPlanSource,
+    author_provider: &ProviderName,
+) {
+    if delivery.normalized_heading_lines == 0 {
+        return;
+    }
+    tracing::info!(
+        session_id = %engine.session().session_id,
+        node_id = %node_id,
+        diagnostic = crate::product::work_item_plan_compiler::PLAN_HEADING_NORMALIZATION_DIAGNOSTIC,
+        normalized_heading_lines = delivery.normalized_heading_lines,
+        "single-candidate author markdown 结构标题已确定性归一化后再编译"
+    );
+    engine
+        .emit_execution_event(
+            ProviderExecutionEvent {
+                event_id: author_heading_normalized_event_id(node_id, raw_output),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Completed,
+                title: "SingleCandidate 结构标题确定性归一化".to_string(),
+                detail: Some(format!(
+                    "normalized {} structural heading lines via the fixed zh→en table before compile",
+                    delivery.normalized_heading_lines
+                )),
+                command: None,
+                cwd: None,
+                output: None,
+                exit_code: None,
+            },
+            Some(node_id.to_string()),
+            Some(author_provider.clone()),
+        )
+        .await;
+}
+
+/// compile 失败原因原文（与 single_candidate.rs `format_compiler_diagnostics`
+/// 同源的 code:line:message 形态，供教学重驱 prompt 回灌与终态错误拼装）。
+fn format_compile_failure_reasons(
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+) -> Vec<String> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}:{}",
+                diagnostic.code, diagnostic.line, diagnostic.message
+            )
+        })
+        .collect()
+}
+
 pub(crate) async fn run_single_candidate_author(
     engine: &mut WorkspaceEngine,
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
@@ -231,8 +287,13 @@ pub(crate) async fn run_single_candidate_author(
         author_provider.clone(),
     );
     let provider_input = engine.attach_tool_policy_audit(provider_input);
-    let provider_session =
-        start_work_item_plan_author(launch, provider_for_run, provider_input, run_cancel).await;
+    let provider_session = start_work_item_plan_author(
+        launch.clone(),
+        Arc::clone(&provider_for_run),
+        provider_input,
+        run_cancel.clone(),
+    )
+    .await;
     let full_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             provider_session,
@@ -251,46 +312,137 @@ pub(crate) async fn run_single_candidate_author(
         }
     };
     let delivery = prepare_author_delivery_for_compile(&full_output);
-    if delivery.normalized_heading_lines > 0 {
-        tracing::info!(
-            session_id = %engine.session().session_id,
-            node_id = %node_id,
-            diagnostic = crate::product::work_item_plan_compiler::PLAN_HEADING_NORMALIZATION_DIAGNOSTIC,
-            normalized_heading_lines = delivery.normalized_heading_lines,
-            "single-candidate author markdown 结构标题已确定性归一化后再编译"
-        );
-        engine
-            .emit_execution_event(
-                ProviderExecutionEvent {
-                    event_id: author_heading_normalized_event_id(&node_id, &full_output),
-                    kind: ProviderExecutionEventKind::Provider,
-                    status: ProviderExecutionEventStatus::Completed,
-                    title: "SingleCandidate 结构标题确定性归一化".to_string(),
-                    detail: Some(format!(
-                        "normalized {} structural heading lines via the fixed zh→en table before compile",
-                        delivery.normalized_heading_lines
-                    )),
-                    command: None,
-                    cwd: None,
-                    output: None,
-                    exit_code: None,
-                },
-                Some(node_id.clone()),
-                Some(author_provider.clone()),
-            )
-            .await;
-    }
+    emit_author_heading_normalized_event(
+        engine,
+        &node_id,
+        &full_output,
+        &delivery,
+        &author_provider,
+    )
+    .await;
     let full_output = delivery.source;
-    let candidate_item_count = match engine
-        .complete_single_candidate_work_item_plan_author(full_output, repository.id)
-        .await
-    {
-        Ok(candidate_item_count) => candidate_item_count,
-        Err(message) => {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            return Err(SingleCandidateProviderRunError::Message(message));
+    // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。missing_section 类
+    // compile 失败不再直接终态：先在 handler 预编译分类（compile 为纯函数，与
+    // complete_... 内部编译同源同果），命中则同 node 发送教学重驱 prompt（含
+    // compile 错误原文）再驱一次 provider；重驱仍败→维持终态失败（错误含两轮
+    // 信息）；非 missing_section 错误不触发重驱，保持既有终态错误形态。
+    let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
+        target_repository_id: repository.id.clone(),
+    };
+    let mut compile_source = full_output;
+    let mut first_round_failure: Option<String> = None;
+    let candidate_item_count = loop {
+        match crate::product::work_item_plan_compiler::compile_work_item_plan(
+            &compile_source,
+            &compile_context,
+        ) {
+            Ok(_) => {
+                break match engine
+                    .complete_single_candidate_work_item_plan_author(
+                        compile_source,
+                        repository.id.clone(),
+                    )
+                    .await
+                {
+                    Ok(candidate_item_count) => candidate_item_count,
+                    Err(message) => {
+                        engine.persist_single_candidate_terminal_phase(
+                            crate::product::models::SingleCandidatePhase::Failed,
+                        );
+                        return Err(SingleCandidateProviderRunError::Message(message));
+                    }
+                };
+            }
+            Err(diagnostics) => {
+                let reasons = format_compile_failure_reasons(&diagnostics);
+                if first_round_failure.is_none()
+                    && diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "missing_section")
+                {
+                    first_round_failure = Some(reasons.join("; "));
+                    let reredrive_prompt =
+                        crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
+                            &reasons,
+                        );
+                    engine
+                        .emit_execution_event(
+                            ProviderExecutionEvent {
+                                event_id: format!("{node_id}_prompt_compile_reredrive"),
+                                kind: ProviderExecutionEventKind::Output,
+                                status: ProviderExecutionEventStatus::Started,
+                                title: "SC compile 失败教学重驱提示词".to_string(),
+                                detail: Some(
+                                    "missing_section 类 compile 失败的教学重驱（含 compile 错误原文），恰一次"
+                                        .to_string(),
+                                ),
+                                command: None,
+                                cwd: None,
+                                output: Some(reredrive_prompt.clone()),
+                                exit_code: None,
+                            },
+                            Some(node_id.clone()),
+                            Some(author_provider.clone()),
+                        )
+                        .await;
+                    let reredrive_input = engine.build_work_item_plan_streaming_input(
+                        crate::product::work_item_split_engine::types::provider_name_to_type(
+                            &author_provider,
+                        ),
+                        reredrive_prompt,
+                        repository.path.to_string_lossy().to_string(),
+                        author_provider.clone(),
+                    );
+                    let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
+                    let reredrive_session = start_work_item_plan_author(
+                        launch.clone(),
+                        Arc::clone(&provider_for_run),
+                        reredrive_input,
+                        run_cancel.clone(),
+                    )
+                    .await;
+                    let reredrive_output = match engine
+                        .drive_work_item_plan_provider_session_to_output(
+                            reredrive_session,
+                            command_rx,
+                            node_id.clone(),
+                            author_provider.clone(),
+                        )
+                        .await
+                    {
+                        Ok(output) => output,
+                        Err(_) => {
+                            engine.persist_single_candidate_terminal_phase(
+                                crate::product::models::SingleCandidatePhase::Failed,
+                            );
+                            return Err(SingleCandidateProviderRunError::AlreadyFinished);
+                        }
+                    };
+                    let reredrive_delivery = prepare_author_delivery_for_compile(&reredrive_output);
+                    emit_author_heading_normalized_event(
+                        engine,
+                        &node_id,
+                        &reredrive_output,
+                        &reredrive_delivery,
+                        &author_provider,
+                    )
+                    .await;
+                    compile_source = reredrive_delivery.source;
+                    continue;
+                }
+                let detail = reasons.join("; ");
+                let message = match first_round_failure {
+                    Some(first_round) => format!(
+                        "compile markdown source failed (after one teaching re-drive): \
+                         first round: {first_round}; re-drive round: {detail}"
+                    ),
+                    None => format!("compile markdown source failed: {detail}"),
+                };
+                engine.persist_single_candidate_terminal_phase(
+                    crate::product::models::SingleCandidatePhase::Failed,
+                );
+                return Err(SingleCandidateProviderRunError::Message(message));
+            }
         }
     };
     #[cfg(test)]
