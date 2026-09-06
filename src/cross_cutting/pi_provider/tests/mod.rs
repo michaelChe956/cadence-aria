@@ -350,6 +350,97 @@ mod pi_policy_args {
         assert!(args.contains(&"--mode".to_string()));
         assert!(args.contains(&"rpc".to_string()));
     }
+
+    /// Task 4.1 deferred minor①（前轮 Task 1 Minor）：pi legacy/策略 argv 改为
+    /// 精确等值断言（完整向量比对，顺序即契约）。
+    #[test]
+    fn build_args_legacy_and_policy_vectors_match_exactly_frozen_order() {
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let provider = PiProvider::new("pi".into());
+        let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
+        let extension_arg = extension.display().to_string();
+
+        // legacy（无策略）：冻结四元素向量，不得多出任何策略片段。
+        let legacy = provider.build_args(None, &extension, None);
+        assert_eq!(
+            legacy,
+            vec![
+                "--mode".to_string(),
+                "rpc".to_string(),
+                "-e".to_string(),
+                extension_arg.clone(),
+            ]
+        );
+
+        // 策略 + resume id：session id 在前、冻结片段紧随其后（顺序即契约）。
+        let policy_resume = provider.build_args(
+            Some("aria-17"),
+            &extension,
+            Some(&ProviderToolPolicy::deny_file_write_builtins()),
+        );
+        assert_eq!(
+            policy_resume,
+            vec![
+                "--mode".to_string(),
+                "rpc".to_string(),
+                "-e".to_string(),
+                extension_arg.clone(),
+                "--session-id".to_string(),
+                "aria-17".to_string(),
+                "--exclude-tools".to_string(),
+                "edit,write".to_string(),
+            ]
+        );
+
+        // 策略 + 空 session id：不注入 --session-id，但策略片段必须在。
+        let policy_empty = provider.build_args(
+            Some("   "),
+            &extension,
+            Some(&ProviderToolPolicy::deny_file_write_builtins()),
+        );
+        assert_eq!(
+            policy_empty,
+            vec![
+                "--mode".to_string(),
+                "rpc".to_string(),
+                "-e".to_string(),
+                extension_arg,
+                "--exclude-tools".to_string(),
+                "edit,write".to_string(),
+            ]
+        );
+    }
+
+    /// Task 4.1 正向可用性：排除面含且仅含内建文件写工具（edit/write）；
+    /// MCP、extension、ask_user 等非写能力不在排除集合（黑名单而非 allowlist）。
+    #[test]
+    fn pi_exclude_tools_set_denies_only_file_write_builtins() {
+        let tokens = crate::cross_cutting::pi_provider::deny_file_write_builtins_tokens();
+        let flag_index = tokens
+            .iter()
+            .position(|token| token == "--exclude-tools")
+            .expect("--exclude-tools flag present");
+        let excluded = tokens[flag_index + 1]
+            .split(',')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        assert_eq!(excluded, vec!["edit", "write"], "denylist 含且仅含 edit/write");
+        for non_write in [
+            "mcp",
+            "extension",
+            "ask_user",
+            "read",
+            "bash",
+            "terminal",
+            "glob",
+            "grep",
+        ] {
+            assert!(
+                !excluded.contains(&non_write),
+                "non-write capability `{non_write}` must not be excluded"
+            );
+        }
+    }
 }
 
 fn streaming_input_for_test(resume_id: Option<String>) -> StreamingProviderInput {

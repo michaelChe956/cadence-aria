@@ -50,6 +50,100 @@ fn codex_policy_start_and_resume_use_read_only_on_request() {
     assert_eq!(coder["sandbox"], "danger-full-access");
 }
 
+/// F3 Task 4.1 零变化回归：策略/Coder 两档 launch 参数全键等值锁定。
+/// 策略档三联动（sandbox=read-only + approvalPolicy=on-request）；Coder 档维持
+/// `danger-full-access` 与既有 permission mode 映射（Auto→never /
+/// Supervised→on-request）——档位不因本 change 改写。
+#[test]
+fn codex_policy_and_coder_launch_params_stay_frozen_zero_change() {
+    let policy = codex_launch_params(&codex_streaming_input_with_policy(None));
+    assert_eq!(
+        policy,
+        serde_json::json!({
+            "cwd": policy["cwd"].clone(),
+            "approvalPolicy": "on-request",
+            "sandbox": "read-only",
+        })
+    );
+
+    let coder_auto = codex_launch_params(&streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto));
+    assert_eq!(coder_auto["sandbox"], "danger-full-access");
+    assert_eq!(coder_auto["approvalPolicy"], "never", "Auto→never 既有映射不变");
+
+    let coder_supervised = codex_launch_params(&streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised));
+    assert_eq!(coder_supervised["sandbox"], "danger-full-access");
+    assert_eq!(
+        coder_supervised["approvalPolicy"],
+        "on-request",
+        "Supervised→on-request 既有映射不变"
+    );
+}
+
+/// F3 Task 4.1 回归锁定：策略会话审批分类决策表（GC6 冻结）——
+/// commandExecution/fileChange 拒绝、MCP accept；未知 elicitation 返回
+/// `-32601`+data（不静默），未知 item（任意方法名）返回 decline，连续
+/// `>=3` 次未知形态终止；自然语言 reason 不作为分类依据。
+#[test]
+fn codex_policy_decisions_and_unknown_replies_regression_lock() {
+    // 策略决策表：commandExecution/fileChange=decline，MCP=accept。
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::CommandExecution),
+        CodexApprovalResponse::Decline
+    );
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::FileChange),
+        CodexApprovalResponse::Decline
+    );
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::McpToolCall),
+        CodexApprovalResponse::Accept
+    );
+
+    // 分类器不读自然语言 reason：带 reason 文本的 elicitation 缺
+    // `_meta.codex_approval_kind` 仍是未知形态，得到协议应答而非静默。
+    let reason_only = parse_approval_request(&serde_json::json!({
+        "method":"mcpServer/elicitation/request", "id":7,
+        "params":{"serverName":"proj","reason":"please approve this write"}
+    }));
+    assert!(
+        reason_only.is_none()
+            || matches!(
+                reason_only.unwrap().category,
+                CodexApprovalCategory::Unknown { .. }
+            ),
+        "natural-language reason must not classify an elicitation as MCP"
+    );
+
+    // 未知 elicitation：JSON-RPC error -32601 且带 data（不静默不应答）。
+    let elicitation_error = decide_unknown("mcpServer/elicitation/request", 1);
+    let CodexApprovalResponse::ElicitationError { code, data } = &elicitation_error else {
+        panic!("unknown elicitation must receive a protocol error reply");
+    };
+    assert_eq!(*code, -32601);
+    assert_eq!(data["reason"], "unsupported_approval_kind");
+    assert_eq!(data["codex_approval_kind"], "unknown");
+
+    // 未知 item（任意未知方法名）：拒绝应答，不静默。
+    for method in [
+        "item/unrecognizedForm/requestApproval",
+        "totally/unknownMethod",
+    ] {
+        assert_eq!(
+            decide_unknown(method, 1),
+            CodexApprovalResponse::Decline,
+            "unknown item `{method}` must get a decline reply"
+        );
+    }
+
+    // 风暴阈值：第 1、2 次不终止，>=3 次终止并记录 reason_code。
+    assert_eq!(unknown_storm_reason_after(1), None);
+    assert_eq!(unknown_storm_reason_after(2), None);
+    assert_eq!(
+        unknown_storm_reason_after(3),
+        Some("unknown_approval_storm")
+    );
+}
+
 #[test]
 fn codex_outbound_ids_use_aria_namespace_default_peers_keep_numeric() {
     let mut codex_out = serde_json::json!({"method":"item/commandExecution/requestApproval"});

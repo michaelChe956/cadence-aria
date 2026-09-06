@@ -7,6 +7,53 @@ use crate::cross_cutting::streaming_provider::{
 
 use super::*;
 
+/// F3 Task 4.1 正向可用性（restrict-role-write-tools）：claude denylist 冻结
+/// 三项物理片段与排除集合。denylist 含且仅含内建文件写工具（Edit/Write/
+/// NotebookEdit，名单大小写与成员冻结）；MCP、extension、ask_user 等非写能力
+/// 不在排除集合（黑名单而非 allowlist）。
+#[test]
+fn claude_policy_denies_exactly_the_frozen_file_write_tools() {
+    let tokens = crate::cross_cutting::claude_code_provider::deny_file_write_builtins_tokens();
+    // 物理片段完整向量等值（顺序/大小写即契约）。
+    assert_eq!(
+        tokens,
+        vec![
+            "--disallowedTools".to_string(),
+            "Edit,Write,NotebookEdit".to_string(),
+        ]
+    );
+
+    let flag_index = tokens
+        .iter()
+        .position(|token| token == "--disallowedTools")
+        .expect("--disallowedTools flag present");
+    let denied = tokens[flag_index + 1]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        denied,
+        vec!["Edit", "Write", "NotebookEdit"],
+        "claude denylist 含且仅含冻结三项（成员与大小写冻结）"
+    );
+    for non_write in [
+        "mcp",
+        "extension",
+        "ask_user",
+        "AskUserQuestion",
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "WebFetch",
+    ] {
+        assert!(
+            !denied.contains(&non_write),
+            "non-write capability `{non_write}` must not be in the denylist"
+        );
+    }
+}
+
 async fn capture_initial_messages(permission_mode: ProviderPermissionMode) -> Vec<Value> {
     let mut child = tokio::process::Command::new("cat")
         .stdin(std::process::Stdio::piped())

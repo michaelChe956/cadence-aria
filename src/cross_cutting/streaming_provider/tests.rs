@@ -765,6 +765,46 @@ fn canonical_tool_policy_digest_drifts_on_fragment_case_order_and_approval_versi
     );
 }
 
+/// F3 Task 4.1 deferred minor②（前轮 Task 1 Minor）：codex translator 补 canonical
+/// token 全序列一致性断言（完整向量比对，顺序即契约；canonical 与 translator 同源）。
+#[test]
+fn translate_tool_policy_freezes_full_canonical_token_sequence() {
+    use super::{ProviderToolPolicy, canonical_tool_policy, translate_tool_policy};
+
+    let policy = ProviderToolPolicy::deny_file_write_builtins();
+    let frozen = vec![
+        "sandbox=read-only".to_string(),
+        "approvalPolicy=on-request".to_string(),
+    ];
+
+    // canonical：全序列等值（不再 contains 式部分匹配，多/少/乱序 token 均红）。
+    let codex = canonical_tool_policy("codex", &policy).unwrap();
+    assert_eq!(codex.tokens, frozen, "codex canonical tokens must be the exact frozen sequence");
+
+    // translator 与 canonical tokens 同源：argv/参数原文按出现顺序、大小写保留。
+    assert_eq!(translate_tool_policy("codex", &policy).unwrap(), frozen);
+    assert_eq!(
+        translate_tool_policy("pi", &policy).unwrap(),
+        vec!["--exclude-tools".to_string(), "edit,write".to_string()]
+    );
+    assert_eq!(
+        translate_tool_policy("claude-code", &policy).unwrap(),
+        vec![
+            "--disallowedTools".to_string(),
+            "Edit,Write,NotebookEdit".to_string()
+        ]
+    );
+
+    // 三 provider 的 canonical 与 translator 全序列一一互等（同源锁定）。
+    for provider in ["pi", "claude-code", "codex"] {
+        assert_eq!(
+            canonical_tool_policy(provider, &policy).unwrap().tokens,
+            translate_tool_policy(provider, &policy).unwrap(),
+            "canonical tokens and translator fragments must stay identical for {provider}"
+        );
+    }
+}
+
 #[test]
 fn usage_report_without_any_tokens_is_not_reportable() {
     use super::UsageReportData;
