@@ -212,118 +212,219 @@ mod tests {
         }
     }
 
-    /// F3 Task 4.1（restrict-role-write-tools，GC12）：kimi 四角色全决策表回归锁。
-    /// 既有 client services 决策完全不变——不因本 change 收紧也不放宽；
-    /// 表外角色（Handoff）维持整表 Deny。
+    /// F3 Task 4.1 修复轮（restrict-role-write-tools，GC12）：kimi 四角色
+    /// 完整笛卡尔决策矩阵回归锁 = 4 角色（Orchestrator/WorkItemSplitter/
+    /// Reviewer/Executor）× 2 权限档（Auto/Supervised）× 3 动作（FsRead/
+    /// Terminal/FsWrite）共 24 格逐一冻结既有决策（含冻结 Deny 文案）；
+    /// Handoff 作为表外边界额外按两种权限档全动作覆盖（整表 Deny）。
+    /// 任何一格收紧/放宽都必须能被对应格断言捕获——既有 client services
+    /// 决策不因本 change 变化。
     #[test]
     fn kimi_four_role_client_service_table_stays_unchanged() {
-        for (role, permission_mode, action, expected) in [
-            // Orchestrator：fs读/terminal 随权限档，fs写恒 Deny。
+        use ProviderPermissionMode::{Auto, Supervised};
+
+        fn deny_planning_write() -> PolicyDecision {
+            PolicyDecision::Deny("planning role is not permitted to write files")
+        }
+        fn deny_services() -> PolicyDecision {
+            PolicyDecision::Deny("role is not permitted to use kimi client services")
+        }
+        fn deny_reviewer_write_side() -> PolicyDecision {
+            PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes")
+        }
+
+        for (role, mode, action, expected) in [
+            // Orchestrator：fs读/terminal 随权限档，fs写两种档恒 Deny。
             (
                 AdapterRole::Orchestrator,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsRead,
                 PolicyDecision::Allow,
             ),
             (
                 AdapterRole::Orchestrator,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::Terminal,
                 PolicyDecision::Allow,
             ),
             (
                 AdapterRole::Orchestrator,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsWrite,
-                PolicyDecision::Deny("planning role is not permitted to write files"),
+                deny_planning_write(),
             ),
             (
                 AdapterRole::Orchestrator,
-                ProviderPermissionMode::Supervised,
+                Supervised,
                 ClientAction::FsRead,
                 PolicyDecision::RequireApproval,
             ),
             (
                 AdapterRole::Orchestrator,
-                ProviderPermissionMode::Supervised,
+                Supervised,
                 ClientAction::Terminal,
                 PolicyDecision::RequireApproval,
             ),
             (
                 AdapterRole::Orchestrator,
-                ProviderPermissionMode::Supervised,
+                Supervised,
                 ClientAction::FsWrite,
-                PolicyDecision::Deny("planning role is not permitted to write files"),
+                deny_planning_write(),
             ),
-            // WorkItemSplitter：无宿主执行，整表 Deny。
+            // WorkItemSplitter：无宿主执行，整表 Deny（两种档 × 三动作全覆盖）。
             (
                 AdapterRole::WorkItemSplitter,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsRead,
-                PolicyDecision::Deny("role is not permitted to use kimi client services"),
+                deny_services(),
             ),
             (
                 AdapterRole::WorkItemSplitter,
-                ProviderPermissionMode::Supervised,
+                Auto,
                 ClientAction::Terminal,
-                PolicyDecision::Deny("role is not permitted to use kimi client services"),
+                deny_services(),
             ),
             (
                 AdapterRole::WorkItemSplitter,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsWrite,
-                PolicyDecision::Deny("role is not permitted to use kimi client services"),
+                deny_services(),
             ),
-            // Reviewer：terminal/fs写恒 Deny（不分权限档），fs读随权限档。
+            (
+                AdapterRole::WorkItemSplitter,
+                Supervised,
+                ClientAction::FsRead,
+                deny_services(),
+            ),
+            (
+                AdapterRole::WorkItemSplitter,
+                Supervised,
+                ClientAction::Terminal,
+                deny_services(),
+            ),
+            (
+                AdapterRole::WorkItemSplitter,
+                Supervised,
+                ClientAction::FsWrite,
+                deny_services(),
+            ),
+            // Reviewer：terminal/fs写两种档恒 Deny，fs读随权限档。
             (
                 AdapterRole::Reviewer,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsRead,
                 PolicyDecision::Allow,
             ),
             (
                 AdapterRole::Reviewer,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::Terminal,
-                PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes"),
+                deny_reviewer_write_side(),
             ),
             (
                 AdapterRole::Reviewer,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsWrite,
-                PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes"),
+                deny_reviewer_write_side(),
             ),
             (
                 AdapterRole::Reviewer,
-                ProviderPermissionMode::Supervised,
+                Supervised,
+                ClientAction::FsRead,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                AdapterRole::Reviewer,
+                Supervised,
+                ClientAction::Terminal,
+                deny_reviewer_write_side(),
+            ),
+            (
+                AdapterRole::Reviewer,
+                Supervised,
                 ClientAction::FsWrite,
-                PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes"),
+                deny_reviewer_write_side(),
             ),
             // Executor（Coder 档）：三动作均随权限档（Auto=Allow/Supervised=审批）。
             (
                 AdapterRole::Executor,
-                ProviderPermissionMode::Auto,
+                Auto,
+                ClientAction::FsRead,
+                PolicyDecision::Allow,
+            ),
+            (
+                AdapterRole::Executor,
+                Auto,
                 ClientAction::Terminal,
                 PolicyDecision::Allow,
             ),
             (
                 AdapterRole::Executor,
-                ProviderPermissionMode::Auto,
+                Auto,
                 ClientAction::FsWrite,
                 PolicyDecision::Allow,
             ),
             (
                 AdapterRole::Executor,
-                ProviderPermissionMode::Supervised,
+                Supervised,
+                ClientAction::FsRead,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                AdapterRole::Executor,
+                Supervised,
+                ClientAction::Terminal,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                AdapterRole::Executor,
+                Supervised,
                 ClientAction::FsWrite,
                 PolicyDecision::RequireApproval,
             ),
+            // Handoff（表外边界）：两种权限档 × 三动作整表 Deny。
+            (
+                AdapterRole::Handoff,
+                Auto,
+                ClientAction::FsRead,
+                deny_services(),
+            ),
+            (
+                AdapterRole::Handoff,
+                Auto,
+                ClientAction::Terminal,
+                deny_services(),
+            ),
+            (
+                AdapterRole::Handoff,
+                Auto,
+                ClientAction::FsWrite,
+                deny_services(),
+            ),
+            (
+                AdapterRole::Handoff,
+                Supervised,
+                ClientAction::FsRead,
+                deny_services(),
+            ),
+            (
+                AdapterRole::Handoff,
+                Supervised,
+                ClientAction::Terminal,
+                deny_services(),
+            ),
+            (
+                AdapterRole::Handoff,
+                Supervised,
+                ClientAction::FsWrite,
+                deny_services(),
+            ),
         ] {
-            let policy = ClientServicePolicy::new(role.clone(), permission_mode.clone());
+            let policy = ClientServicePolicy::new(role.clone(), mode.clone());
             assert_eq!(
                 policy.evaluate(action),
                 expected,
-                "{role:?} x {permission_mode:?} x {action:?}"
+                "{role:?} x {mode:?} x {action:?}"
             );
         }
     }
