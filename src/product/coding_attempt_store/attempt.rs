@@ -519,6 +519,41 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// 半启动恢复专用：未物化 worktree 的 Running+Coding attempt 回落
+    /// WorktreePrepare 以重新物化。
+    ///
+    /// 正向阶段状态机（`valid_stage_transition`）不提供 Coding→WorktreePrepare
+    /// 通道，本方法是该后退的唯一受控例外；前置校验 fail-closed：仅接受
+    /// status=Running、stage=Coding、head_commit 未落盘的 record（调用方需
+    /// 先判定 worktree 未登记或目录不存在）。读-改-写全程持有 attempt 文件
+    /// 锁，并保留 status/version 等冻结字段，周 `update_attempt_stage` 约定。
+    pub fn demote_unprepared_attempt_to_worktree_prepare(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let path = self.attempt_path(project_id, issue_id, attempt_id);
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if attempt.status != CodingAttemptStatus::Running
+                || attempt.stage != CodingExecutionStage::Coding
+                || attempt.head_commit.is_some()
+            {
+                return Err(ProductStoreError::Io(format!(
+                    "coding_attempt_worktree_reprepare_rejected: status={:?} stage={:?} head_commit_present={}",
+                    attempt.status,
+                    attempt.stage,
+                    attempt.head_commit.is_some()
+                )));
+            }
+            attempt.stage = CodingExecutionStage::WorktreePrepare;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
+    }
+
     /// 更新 head commit，只覆盖该 API 负责的字段。
     ///
     /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留

@@ -296,3 +296,100 @@ fn advance_failed_or_aborted_attempt_is_not_rebuilt() {
         assert_eq!(replay, record);
     }
 }
+
+/// 半启动恢复（3b）：group 半启动在 worktree 已物化时补 git head
+/// （与 `start_attempt` group 短路同语义）。
+#[tokio::test]
+async fn prepare_resumed_attempt_backfills_group_head_from_materialized_worktree() {
+    let root = tempdir().expect("root");
+    let (store, attempt) = group_attempt_fixture(root.path());
+    let mut semi_started = attempt.clone();
+    semi_started.status = CodingAttemptStatus::Running;
+    semi_started.stage = CodingExecutionStage::Coding;
+    semi_started.head_commit = None;
+    store
+        .write_coding_attempt_for_test(&semi_started)
+        .expect("persist semi-started group attempt");
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let prepared = engine
+        .prepare_resumed_attempt_for_runner(&semi_started)
+        .await
+        .expect("prepare resumed group attempt");
+
+    let worktree = attempt.worktree_path.as_deref().expect("worktree path");
+    let expected_head = super::git_stdout(worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(prepared.stage, CodingExecutionStage::Coding);
+    assert_eq!(
+        prepared.head_commit.as_deref(),
+        Some(expected_head.trim()),
+        "materialized group worktree must have its git head backfilled before Coding"
+    );
+    assert!(prepared.worktree_path.is_some());
+}
+
+/// 半启动恢复（3b）：worktree 未物化（sc_advance 延迟物化/目录丢失）时回落
+/// WorktreePrepare，由 runner 管道的 execute_worktree_prepare 重新物化。
+#[tokio::test]
+async fn prepare_resumed_attempt_demotes_unmaterialized_worktree() {
+    let root = tempdir().expect("root");
+    let (store, attempt) = group_attempt_fixture(root.path());
+    let missing_worktree = root.path().join("missing-worktree");
+    assert!(!missing_worktree.exists());
+    let mut semi_started = attempt.clone();
+    semi_started.status = CodingAttemptStatus::Running;
+    semi_started.stage = CodingExecutionStage::Coding;
+    semi_started.head_commit = None;
+    semi_started.worktree_path = Some(missing_worktree.clone());
+    store
+        .write_coding_attempt_for_test(&semi_started)
+        .expect("persist unmaterialized semi-started attempt");
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let prepared = engine
+        .prepare_resumed_attempt_for_runner(&semi_started)
+        .await
+        .expect("demote unmaterialized semi-started attempt");
+
+    assert_eq!(prepared.stage, CodingExecutionStage::WorktreePrepare);
+    assert_eq!(prepared.status, CodingAttemptStatus::Running);
+    assert!(
+        !missing_worktree.exists(),
+        "demotion only stages; materialization belongs to execute_worktree_prepare"
+    );
+}
+
+/// 半启动恢复（3b）：head 已落盘或 stage 仍是 WorktreePrepare 时原样返回，
+/// 不改写任何字段。
+#[tokio::test]
+async fn prepare_resumed_attempt_keeps_prepared_states_untouched() {
+    let root = tempdir().expect("root");
+    let (store, attempt) = group_attempt_fixture(root.path());
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+
+    // head 已落盘的 Coding attempt：原样返回。
+    let mut with_head = attempt.clone();
+    with_head.status = CodingAttemptStatus::Running;
+    with_head.stage = CodingExecutionStage::Coding;
+    with_head.head_commit = Some("deadbeef".to_string());
+    let prepared = engine
+        .prepare_resumed_attempt_for_runner(&with_head)
+        .await
+        .expect("prepared head-commit attempt");
+    assert_eq!(prepared.stage, CodingExecutionStage::Coding);
+    assert_eq!(prepared.head_commit.as_deref(), Some("deadbeef"));
+
+    // stage 仍是 WorktreePrepare：原样返回，物化交给管道既有分支。
+    let mut worktree_prepare = attempt.clone();
+    worktree_prepare.status = CodingAttemptStatus::Running;
+    worktree_prepare.stage = CodingExecutionStage::WorktreePrepare;
+    let prepared = engine
+        .prepare_resumed_attempt_for_runner(&worktree_prepare)
+        .await
+        .expect("worktree-prepare attempt");
+    assert_eq!(prepared.stage, CodingExecutionStage::WorktreePrepare);
+}

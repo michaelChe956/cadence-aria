@@ -39,8 +39,10 @@ mod preparation;
 pub(crate) use preparation::{
     CodingMessagePreparation, CodingMessagePreparationError, prepare_coding_message,
 };
+mod resumption;
 #[cfg(test)]
 pub(crate) use preparation::{CodingRecoveryPreparationProbe, prepare_coding_message_with_probe};
+pub(crate) use resumption::{ResumedAttemptRunner, ensure_runner_for_resumed_attempt};
 
 pub async fn coding_ws(
     ws: WebSocketUpgrade,
@@ -96,6 +98,7 @@ async fn handle_coding_socket(
     let socket_token = state
         .coding_sockets
         .register(&attempt_key, event_tx.clone());
+    let resumed_attempt = attempt.clone();
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
     {
@@ -106,6 +109,21 @@ async fn handle_coding_socket(
     let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;
     let mut runner_command_tx: Option<mpsc::Sender<CodingRunnerCommand>> = None;
+    // 3b 第 2 死点：半启动 attempt（Running + WorktreePrepare/Coding + 注册表
+    // 无 runner）在快照后自动重启 runner（复用 StartCoding 分支的既有 spawn
+    // 路径），活 runner 重连/普通 attach 判定零动作、行为不变。
+    if let ResumedAttemptRunner::Restarted { command_tx } = ensure_runner_for_resumed_attempt(
+        &state,
+        &coding_store,
+        &event_tx,
+        &attempt_key,
+        &resumed_attempt,
+    )
+    .await
+    {
+        runner_started = true;
+        runner_command_tx = Some(command_tx);
+    }
     'socket: loop {
         tokio::select! {
             event = event_rx.recv() => {

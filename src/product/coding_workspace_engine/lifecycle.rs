@@ -276,6 +276,52 @@ impl CodingWorkspaceEngine {
         Ok(attempt)
     }
 
+    /// 半启动恢复（3b 第 2 死点）：attach 重启 runner 前，对 Running +
+    /// WorktreePrepare/Coding 的 attempt 补物化判定（与 `start_attempt` 的
+    /// group 短路同语义）：
+    /// - stage 已是 WorktreePrepare → 原样返回，由 runner 管道既有
+    ///   `execute_worktree_prepare` 分支物化；
+    /// - stage=Coding 且 worktree 已物化 → 仅 group 半启动在 head 缺失时补
+    ///   git head（WorkItem Coding 中态 head 延迟到 review request 落盘，
+    ///   不得越权补写）；
+    /// - stage=Coding 但 worktree 未登记/目录不存在（sc_advance 延迟物化、
+    ///   目录丢失）→ 回落 WorktreePrepare 重新物化后再进 Coding。
+    pub async fn prepare_resumed_attempt_for_runner(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.stage != CodingExecutionStage::Coding {
+            return Ok(attempt.clone());
+        }
+        let materialized_worktree = attempt
+            .worktree_path
+            .as_deref()
+            .filter(|path| std::path::Path::exists(path));
+        let Some(worktree_path) = materialized_worktree else {
+            return self
+                .store
+                .demote_unprepared_attempt_to_worktree_prepare(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                )
+                .map_err(CodingWorkspaceEngineError::from);
+        };
+        if attempt.head_commit.is_none() && attempt.scope == CodingAttemptScope::WorkItemGroup {
+            let base_head = self._git_service.git_current_head(worktree_path).await?;
+            return self
+                .store
+                .update_attempt_head_commit(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    Some(base_head),
+                )
+                .map_err(CodingWorkspaceEngineError::from);
+        }
+        Ok(attempt.clone())
+    }
+
     pub async fn execute_worktree_prepare(
         &self,
         attempt: &CodingExecutionAttempt,
