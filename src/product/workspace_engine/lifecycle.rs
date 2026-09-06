@@ -442,7 +442,11 @@ impl WorkspaceEngine {
     ///
     /// 逻辑会话(已注入 gateway 且有 planning cwd)时经 gateway `validate` 冻结
     /// `PlanningReadOnly` envelope 后派生 `Logical`;无 gateway/无 cwd/validate 失败
-    /// 一律回落 `Legacy`(与改造前 `_legacy()` 字节一致)。
+    /// 一律回落 `Legacy`(与改造前 `_legacy()` 字节一致)。C-2:投影 request 的
+    /// provider ref 由 `session.author_provider` 经集中映射派生——author 配置
+    /// Codex 时以 Codex ref 校验(被 REQ-ENV-05 路由级硬门阻断后回落 Legacy)，
+    /// Pi/KimiCode 等无 gateway dialect 的 provider直接回落 Legacy(prompt 路由
+    /// 引用不假装 Logical；真实启动在 gateway 集中映射处 fail-closed)。
     ///
     /// 只用于 prompt 路由引用分流,不改变 provider 启动路径(Task 4 范围)。
     pub(crate) fn routing_reference_context(
@@ -463,13 +467,26 @@ impl WorkspaceEngine {
         // canonicalize 后形态,失败回退原值(resolver 会再 canonicalize 复核)。
         let target_worktree =
             std::fs::canonicalize(&working_dir).unwrap_or_else(|_| working_dir.clone());
-        let request = SessionLaunchRequest::planning(
-            project_id,
-            ProviderRef::claude_code("cap_managed_snapshot"),
-            PolicyTarget::aggregate_root(target_worktree),
-            vec![working_dir],
-            "sha256:managed-config-artifact",
-        );
+        // C-2:provider ref 随 session.author_provider;不支持的 provider 回落
+        // Legacy(启动路径在集中映射处 fail-closed,此处仅 prompt 路由引用)。
+        let provider =
+            ProviderRef::from_provider_name(&self.session.author_provider, "cap_managed_snapshot");
+        let request = match provider {
+            Ok(provider) => SessionLaunchRequest::planning(
+                project_id,
+                provider,
+                PolicyTarget::aggregate_root(target_worktree),
+                vec![working_dir],
+                "sha256:managed-config-artifact",
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "workspace_engine routing_reference_context: author provider has no gateway dialect, falling back to Legacy"
+                );
+                return RoutingReferenceContext::Legacy;
+            }
+        };
         match gateway.validate(request) {
             Ok(policy) => routing_reference_context_from_policy(&policy),
             Err(error) => {

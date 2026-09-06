@@ -302,6 +302,61 @@ async fn drive_review_session_via_gateway_fails_closed_for_unsupported_reviewer(
     );
 }
 
+/// C-2(组2):reviewer 配置 Codex 时，review 启动必须命中 REQ-ENV-05 路由级硬门
+/// (codex_danger_full_access_unsupported)，不得静默改成 Claude 跑 review。
+#[tokio::test]
+async fn drive_review_session_via_gateway_blocks_codex_reviewer_at_route() {
+    let fixture = review_gateway_fixture();
+    let audit = fixture.audit.clone();
+    assert_eq!(audit.stream_launches(), 0);
+
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_review_codex_via_gateway");
+    session.review_rounds = 2;
+    session.reviewer_provider = Some(ProviderName::Codex);
+    session.artifact = Some(artifact_payload("# Artifact\n\n可以确认"));
+    session.repository_path = Some(fixture.worktree.clone());
+
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+
+    engine.start_review_or_skip().await;
+    engine
+        .drive_review_session_via_gateway(empty_provider_commands())
+        .await;
+
+    let mut start_failure = None;
+    while let Ok(event) = event_rx.try_recv() {
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            start_failure = Some(message);
+        }
+    }
+    let message = start_failure.expect("codex reviewer must surface an error event");
+    assert!(
+        message.contains("codex_danger_full_access_unsupported"),
+        "expected codex_danger_full_access_unsupported, got: {message}"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        0,
+        "route-blocked reviewer must not start any gateway session"
+    );
+    assert!(
+        fixture
+            .capabilities
+            .seen_provider_refs()
+            .iter()
+            .any(|r| r.provider_type == ProviderRefType::Codex),
+        "the launch must have validated the session-configured Codex reviewer"
+    );
+}
+
 /// 测试用 target resolver：透传 request target 并记录之，用于验证
 /// `routing_reference_context` 构造 aggregate_root target 时镜像 factory 的
 /// canonicalize 语义。
@@ -339,6 +394,20 @@ fn routing_context_gateway<T: PolicyTargetResolver + 'static>(
     root: &tempfile::TempDir,
     resolver: T,
 ) -> (Arc<LogicalCodebaseProviderGateway>, std::path::PathBuf) {
+    routing_context_gateway_with_capability(
+        root,
+        resolver,
+        Arc::new(ReviewStaticCapabilitySource::default()),
+    )
+}
+
+/// 同 `routing_context_gateway`，但调用方持有 capability source，供断言
+/// 「投影 request 的 provider ref 随 session.author_provider」（C-2）。
+fn routing_context_gateway_with_capability<T: PolicyTargetResolver + 'static>(
+    root: &tempfile::TempDir,
+    resolver: T,
+    capabilities: Arc<ReviewStaticCapabilitySource>,
+) -> (Arc<LogicalCodebaseProviderGateway>, std::path::PathBuf) {
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("create worktree");
@@ -351,7 +420,7 @@ fn routing_context_gateway<T: PolicyTargetResolver + 'static>(
 
     let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
         policy_store,
-        Arc::new(ReviewStaticCapabilitySource::default()),
+        capabilities,
         Arc::new(resolver),
         Arc::new(ProviderRegistry::new()),
         Arc::new(ReviewStubSyncAdapter),
@@ -410,6 +479,77 @@ fn routing_reference_context_canonicalizes_aggregate_root_target() {
         .clone()
         .expect("resolver must record target");
     assert_eq!(recorded.worktree, canonical);
+}
+
+/// C-2(组2):author 配置 Codex 时，投影 request 必须以 session 配置的 Codex ref
+/// 校验(被 REQ-ENV-05 路由级硬门阻断后回落 Legacy)——不得硬编码 ClaudeCode
+/// 假装校验通过。
+#[test]
+fn routing_reference_context_projects_session_codex_author_not_hardcoded_claude() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
+    let (gateway, worktree) = routing_context_gateway_with_capability(
+        &root,
+        ReviewPassThroughTargetResolver,
+        capabilities.clone(),
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_codex");
+    session.author_provider = ProviderName::Codex;
+    session.repository_path = Some(worktree);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    // Codex 被路由级硬门阻断 → validate 失败 → 回落 Legacy(既有 fail-open 契约)。
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Legacy
+    ));
+    let seen = capabilities.seen_provider_refs();
+    assert!(
+        seen.iter().any(|r| r.provider_type == ProviderRefType::Codex
+            && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        "projection must validate the session-configured Codex author, got {seen:?}"
+    );
+}
+
+/// C-2(组3):author 配置 Pi 时投影无 gateway dialect → 回落 Legacy(prompt 路由
+/// 引用不假装 Logical，也不触达 gateway validate)；真实启动在集中映射处
+/// fail-closed(由 gateway_start 测试锁定)。
+#[test]
+fn routing_reference_context_unsupported_author_falls_back_to_legacy() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
+    let (gateway, worktree) = routing_context_gateway_with_capability(
+        &root,
+        ReviewPassThroughTargetResolver,
+        capabilities.clone(),
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_pi");
+    session.author_provider = ProviderName::Pi;
+    session.repository_path = Some(worktree);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Legacy
+    ));
+    assert!(
+        capabilities.seen_provider_refs().is_empty(),
+        "unsupported author must not reach gateway validate from the prompt projection"
+    );
 }
 
 #[test]

@@ -321,6 +321,28 @@ async fn logical_plan_launch_fails_closed_for_unsupported_author_provider() {
     }
 }
 
+/// C-2(组2):author 配置 Codex 时，logical 启动必须命中 REQ-ENV-05 路由级硬门
+/// (codex_danger_full_access_unsupported)——显式阻断错误，而非被改成 Claude 启动。
+/// 既有路由级阻断测试(provider_gateway_tests.rs 的 codex route block 系列)保持绿。
+#[tokio::test]
+async fn logical_plan_launch_codex_author_hits_req_env05_route_block() {
+    let fixture = gateway_fixture();
+    let audit = fixture.gateway.audit();
+    let engine = workspace_engine_with_author(&fixture, true, ProviderName::Codex);
+
+    let error = resolve_plan_author_launch(&engine, None, None)
+        .err()
+        .expect("codex author must be blocked by the gateway route policy");
+    assert!(
+        error
+            .details
+            .contains("codex_danger_full_access_unsupported"),
+        "expected codex_danger_full_access_unsupported, got: {}",
+        error.details
+    );
+    assert_eq!(audit.stream_launches(), 0, "no gateway session may start");
+}
+
 #[tokio::test]
 async fn start_work_item_plan_author_none_uses_legacy_provider_start_unchanged() {
     let fixture = gateway_fixture();
