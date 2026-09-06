@@ -659,16 +659,33 @@ impl WorkspaceEngine {
             {
                 self.route_review_report_to_author_confirm(&verdict).await;
             }
-            _ => match &verdict.review_gate {
-                ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
-                    self.enter_human_confirm(Some(verdict.summary.clone()))
-                        .await;
+            _ => {
+                // F5-B：SC legacy 修订循环防打转闸门——run1d 形态（policy 旁路臂落到
+                // 此处）下，连续 2 轮非 advisory findings 指纹集合相同即强制
+                // human_confirm（reason=repeated_findings），不再进入下一轮 revise。
+                if self.session.workspace_type == WorkspaceType::WorkItemPlan
+                    && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+                    && matches!(verdict.review_gate, ReviewGate::RequiresRevision)
+                    && let Some(count) =
+                        self.single_candidate_consecutive_repeated_finding_count(&verdict)
+                {
+                    self.enter_human_confirm(Some(format!(
+                        "repeated_findings：reviewer 连续 2 轮给出实质相同的非 advisory findings（{count} 项），自动修订无法收敛，等待人工确认"
+                    )))
+                    .await;
+                    return;
                 }
-                ReviewGate::RequiresRevision => {
-                    self.enter_review_decision(round, verdict.summary.clone())
-                        .await;
+                match &verdict.review_gate {
+                    ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
+                        self.enter_human_confirm(Some(verdict.summary.clone()))
+                            .await;
+                    }
+                    ReviewGate::RequiresRevision => {
+                        self.enter_review_decision(round, verdict.summary.clone())
+                            .await;
+                    }
                 }
-            },
+            }
         }
     }
 

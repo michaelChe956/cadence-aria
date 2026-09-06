@@ -1,7 +1,10 @@
 use super::policy_routing::{GateSnapshotContext, route_outcome};
 use super::routing::policy_route_record_values;
 use super::*;
+use std::collections::BTreeSet;
+
 use crate::product::lifecycle_store::PolicyRoutePersist;
+use crate::product::work_item_plan_policy::classify::classify_finding;
 use crate::product::work_item_plan_policy::{
     FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,
     ReviewInvocationScope, ReviewPhase, RunHistory, WorkItemPlanFlowKind,
@@ -9,6 +12,19 @@ use crate::product::work_item_plan_policy::{
 use crate::product::work_item_plan_source_store::{
     SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
 };
+
+/// 计算 verdict 的非 advisory findings 指纹集合（F5-B 闸门口径）：复用 policy
+/// classify_finding 的 class/fingerprint 推导，剔除 class=Advisory 条目。与
+/// evaluate.rs 的 actionable_findings 语义一致：措辞变化在 category 存在时不改指纹。
+fn non_advisory_finding_fingerprints(verdict: &ReviewVerdict) -> BTreeSet<FindingFingerprint> {
+    verdict
+        .findings
+        .iter()
+        .map(|finding| classify_finding(verdict.verdict.clone(), finding))
+        .filter(|classified| classified.class != FindingClass::Advisory)
+        .map(|classified| classified.fingerprint)
+        .collect()
+}
 
 fn scope_for_action(
     durable_scope: Option<&ReviewInvocationScope>,
@@ -502,6 +518,42 @@ impl WorkspaceEngine {
                 self.single_candidate_phase_for_action(action)
             };
         }
+    }
+
+    /// F5-B：SC legacy 修订循环防打转闸门。同一 SC 会话内，当前 verdict 与上一轮
+    /// ReviewerRun 持久化 verdict 的非 advisory findings 指纹集合完全相同且非空时，
+    /// 返回重复指纹数量；否则返回 None（首轮、指纹变化、advisory-only、无法读取
+    /// 上一轮均不触发）。复用 policy 的 classify_finding 指纹口径，不触碰 policy CAS 主链。
+    pub(super) fn single_candidate_consecutive_repeated_finding_count(
+        &self,
+        current: &ReviewVerdict,
+    ) -> Option<usize> {
+        let current_set = non_advisory_finding_fingerprints(current);
+        if current_set.is_empty() {
+            return None;
+        }
+        let active_node_id = self.active_node_id.as_ref()?;
+        let lifecycle = self.lifecycle_store.as_ref()?;
+        let previous = self
+            .timeline_nodes
+            .iter()
+            .rev()
+            .filter(|node| matches!(node.node_type, TimelineNodeType::ReviewerRun))
+            .filter(|node| &node.node_id != active_node_id)
+            .find_map(|node| {
+                let detail = lifecycle
+                    .load_node_detail_for_issue_session(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &self.session.session_id,
+                        &node.node_id,
+                    )
+                    .ok()?;
+                let persisted = detail.verdict?;
+                deserialize_historical_review_verdict(persisted).ok()
+            })?;
+        let previous_set = non_advisory_finding_fingerprints(&previous);
+        (previous_set == current_set).then_some(current_set.len())
     }
 
     pub(super) fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {

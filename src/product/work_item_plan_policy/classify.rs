@@ -119,7 +119,12 @@ fn validate_invocation_scope(
     Ok(())
 }
 
-fn classify_finding(raw_verdict: ReviewVerdictType, finding: &ReviewFinding) -> ClassifiedFinding {
+/// F5-B：SC legacy 防打转闸门复用同一份分类语义（class + fingerprint），
+/// 避免 legacy 侧重复推导与 policy 侧指纹口径漂移。
+pub(crate) fn classify_finding(
+    raw_verdict: ReviewVerdictType,
+    finding: &ReviewFinding,
+) -> ClassifiedFinding {
     let class = finding
         .class_hint
         .map(class_for_hint)

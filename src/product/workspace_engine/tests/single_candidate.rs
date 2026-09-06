@@ -812,3 +812,146 @@ fn single_candidate_pending_revision_verdict_only_flags_sc_revise_rounds() {
         "a pass verdict must not be treated as a revision round"
     );
 }
+
+/// F5-B：SC legacy 修订循环防打转闸门——run1d 形态（verdict=Revise、findings 无
+/// category/class_hint，policy 旁路臂进入 route_legacy_review）下，连续 2 轮
+/// 非 advisory findings 指纹集合相同必须强制 human_confirm（reason=repeated_findings）。
+fn plain_revise_verdict(message: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "reviewer 意见：契约缺口需返修".to_string(),
+        summary: "契约缺口需返修".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::MustFix,
+            message: message.to_string(),
+            evidence: "work-item-plan.md WI-002 Inputs".to_string(),
+            required_action: "补齐 capability 声明".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+fn advisory_only_revise_verdict(message: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "建议性意见".to_string(),
+        summary: "建议性意见".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::Suggestion,
+            message: message.to_string(),
+            evidence: "Traceability section".to_string(),
+            required_action: "建议补登记行".to_string(),
+            category: None,
+            class_hint: Some(FindingClassHint::Advisory),
+            contract_field: None,
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+#[tokio::test]
+async fn sc_legacy_revise_gate_forces_human_confirm_on_consecutive_identical_findings() {
+    let (_tmp, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine.start_review().await;
+    complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-001 capability"))
+        .await;
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::ReviewDecision,
+        "首轮 revise 不触发闸门，仍进入既有 review decision 路由"
+    );
+
+    // 第二轮：author 重跑后同一 candidate 再次收到实质相同 findings。
+    engine.start_review().await;
+    complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-001 capability"))
+        .await;
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::HumanConfirm,
+        "连续 2 轮同指纹非 advisory findings 必须强制 human_confirm"
+    );
+    assert_eq!(
+        engine.session().session_status,
+        WorkspaceSessionStatus::WaitingForHuman
+    );
+    let human_gate_summary = engine
+        .timeline_nodes
+        .iter()
+        .rev()
+        .find(|node| node.node_type == TimelineNodeType::HumanConfirm)
+        .and_then(|node| node.summary.clone())
+        .unwrap_or_default();
+    assert!(
+        human_gate_summary.contains("repeated_findings"),
+        "闸门原因必须可见于 timeline：{human_gate_summary}"
+    );
+    assert!(
+        human_gate_summary.contains("1 项"),
+        "闸门摘要应说明重复指纹数量：{human_gate_summary}"
+    );
+}
+
+#[tokio::test]
+async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition() {
+    let (_tmp, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine.start_review().await;
+    complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-001 capability"))
+        .await;
+    // 第二轮 findings 指纹不同：不触发闸门。
+    engine.start_review().await;
+    complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-002 coverage"))
+        .await;
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::ReviewDecision,
+        "不同指纹的连续 revise 不触发闸门"
+    );
+
+    // advisory-only findings 连续两轮相同：非 advisory 集合为空，不触发闸门。
+    let (_tmp2, lifecycle2, _plan_id2, mut engine2) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle2,
+        &mut engine2,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine2.start_review().await;
+    complete_single_candidate_review(
+        &mut engine2,
+        advisory_only_revise_verdict("建议: 补 Traceability"),
+    )
+    .await;
+    engine2.start_review().await;
+    complete_single_candidate_review(
+        &mut engine2,
+        advisory_only_revise_verdict("建议: 补 Traceability"),
+    )
+    .await;
+    assert_eq!(
+        engine2.session().stage,
+        WorkspaceStage::ReviewDecision,
+        "advisory-only findings 重复不触发闸门"
+    );
+}
