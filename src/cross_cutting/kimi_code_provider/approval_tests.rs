@@ -146,6 +146,14 @@ async fn supervised_tool_approval_approved_maps_to_allow_once() {
         send_message(
             &mut writer,
             serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"approval_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"approved and done"}}}
+            }),
+        )
+        .await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
                 "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
             }),
         )
@@ -233,6 +241,14 @@ async fn supervised_tool_approval_rejected_maps_to_reject_once_and_continues() {
             reply["result"]["outcome"],
             serde_json::json!({"outcome":"selected","optionId":"reject-once"})
         );
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"approval_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"rejected and done"}}}
+            }),
+        )
+        .await;
         send_message(
             &mut writer,
             serde_json::json!({
@@ -390,6 +406,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
             reply["result"]["outcome"],
             serde_json::json!({"outcome":"selected","optionId":"choice-a"})
         );
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ask_select_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"selection made"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -528,6 +545,7 @@ async fn askuserquestion_free_text_only_no_selected() {
             second_prompt["params"]["prompt"][0]["text"],
             "free text only"
         );
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ask_text_only_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"free text answered"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":second_prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -582,6 +600,7 @@ async fn multiquestion_serial_one_at_a_time() {
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-q2","method":"session/request_permission","params":{"options":[{"optionId":"q2-b","name":"Option B","kind":"allow_once"}],"toolCall":{"toolCallId":"ask-q2-tool","title":"AskUserQuestion","content":{"type":"text","text":"Question 2?"}}}})).await;
         let second_reply = read_request(&mut reader).await;
         assert_eq!(second_reply["result"]["outcome"]["optionId"], "q2-b");
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"multi_question_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"questions answered"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -820,6 +839,14 @@ async fn fake_peer_fixture_replay_matches_recorded_transcript() {
         completed["params"]["update"]["status"] = serde_json::json!("completed");
         send_message(&mut writer, completed).await;
 
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":SESSION,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replayed and done"}}}
+            }),
+        )
+        .await;
         send_message(
             &mut writer,
             serde_json::json!({

@@ -11,6 +11,10 @@ mod mcp_bundle_tests;
 mod session_tests;
 
 #[cfg(unix)]
+#[path = "tests/empty_output.rs"]
+mod empty_output;
+
+#[cfg(unix)]
 #[path = "tests/live_kimi_tests.rs"]
 mod live_kimi_tests;
 

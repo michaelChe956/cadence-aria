@@ -27,7 +27,7 @@ pub(crate) fn fixture_command(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
+pub(crate) fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
     StreamingProviderInput {
         tool_policy: None,
         audit_sink: None,
@@ -73,7 +73,7 @@ async fn terminal_events(
     events
 }
 
-async fn read_request(
+pub(crate) async fn read_request(
     reader: &mut tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>,
 ) -> Value {
     let mut line = String::new();
@@ -81,7 +81,7 @@ async fn read_request(
     serde_json::from_str(&line).expect("JSON-RPC request")
 }
 
-async fn send_message(writer: &mut (impl tokio::io::AsyncWrite + Unpin), value: Value) {
+pub(crate) async fn send_message(writer: &mut (impl tokio::io::AsyncWrite + Unpin), value: Value) {
     writer
         .write_all(value.to_string().as_bytes())
         .await
@@ -90,7 +90,7 @@ async fn send_message(writer: &mut (impl tokio::io::AsyncWrite + Unpin), value: 
     writer.flush().await.expect("flush message");
 }
 
-fn test_peer() -> (
+pub(crate) fn test_peer() -> (
     JsonRpcPeer<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
     tokio::io::DuplexStream,
 ) {
@@ -99,7 +99,7 @@ fn test_peer() -> (
     (JsonRpcPeer::new(reader, writer), server)
 }
 
-async fn direct_session_events<W>(
+pub(crate) async fn direct_session_events<W>(
     peer: JsonRpcPeer<W>,
     input: StreamingProviderInput,
 ) -> (
@@ -832,6 +832,10 @@ async fn terminal_response_restarts_prompt_for_buffered_free_text_choice() {
             second_prompt["params"]["prompt"][0]["text"],
             "replacement prompt"
         );
+        send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"terminal_choice","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replacement answered"}}}
+            })).await;
         send_message(
             &mut writer,
             serde_json::json!({

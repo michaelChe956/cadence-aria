@@ -29,6 +29,16 @@ const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
 pub(crate) const KIMI_SESSION_ABORTED: &str = "Kimi provider session aborted";
+const KIMI_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
+/// 空输出后同会话重发的一次固定重试指令（对齐 pi 先例 `PI_EMPTY_OUTPUT_RETRY_PROMPT`）。
+const KIMI_EMPTY_OUTPUT_RETRY_PROMPT: &str =
+    "Your previous reply was empty. Please reply again with your complete output.";
+
+fn kimi_empty_output_error() -> ProviderAdapterError {
+    ProviderAdapterError::provider_empty_output(format!(
+        "{KIMI_EMPTY_OUTPUT_ERROR}: Kimi agent turn ended without assistant output after one bounded in-session retry"
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IncomingDisposition {
@@ -272,6 +282,7 @@ where
     );
     tokio::pin!(prompt);
     let mut full_output = String::new();
+    let mut empty_output_retry_used = false;
     let mut tool_outputs = HashMap::<String, String>::new();
     let mut completed_tools = HashSet::<String>::new();
     let mut askuser_question_counts = HashMap::<String, usize>::new();
@@ -384,6 +395,50 @@ where
                 }
                 match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
                     Parsed::PromptResult(KimiPromptResult::StopReason(reason)) if reason == "end_turn" => {
+                        // F2-A 空输出兑底（对齐 pi 先例）：轮次以 end_turn 结束但无任何
+                        // assistant 输出时，同会话重发一次固定重试指令（每 run 恰一次，
+                        // 留审计 Execution 事件）；重试后仍空 → `provider_empty_output`
+                        // 分类错误。这是会话层输出兑底，不触碰 kimi client services
+                        // 角色策略（REQ-ENV-09 工具策略零改动语义不变）。
+                        if full_output.trim().is_empty() {
+                            if empty_output_retry_used {
+                                return Err(kimi_empty_output_error());
+                            }
+                            empty_output_retry_used = true;
+                            tracing::warn!(
+                                target: "kimi_code_provider",
+                                "Kimi agent turn ended with empty output; retrying once in-session"
+                            );
+                            let _ = event_tx
+                                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                                    event_id: "kimi_empty_output_retry".to_string(),
+                                    kind: ProviderExecutionEventKind::Turn,
+                                    status: ProviderExecutionEventStatus::Running,
+                                    title: "Turn empty output retry".to_string(),
+                                    detail: Some(
+                                        "Kimi agent turn ended with empty output; retrying once"
+                                            .to_string(),
+                                    ),
+                                    command: None,
+                                    cwd: Some(input.working_dir.display().to_string()),
+                                    output: None,
+                                    exit_code: None,
+                                }))
+                                .await;
+                            full_output.clear();
+                            prompt.set(peer.request_with_timeout(
+                                session_prompt_request(
+                                    &session_id,
+                                    KIMI_EMPTY_OUTPUT_RETRY_PROMPT,
+                                    next_prompt_id,
+                                ),
+                                deadline.saturating_duration_since(Instant::now()),
+                            ));
+                            next_prompt_id += 1;
+                            idle_deadline =
+                                Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                            continue;
+                        }
                         // Kimi ACP 当前不填 PromptResponse.usage；仅在正常 turn 终止后，
                         // 汇总当前 session 的所有 agent wire.jsonl 记录。失败仅代表无数据。
                         let usage_role = UsageReportData::role_text(&input.role);

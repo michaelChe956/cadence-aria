@@ -118,6 +118,7 @@ async fn session_new_injects_bundle_derived_mcp_servers() {
         );
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"mcp-injected"}})).await;
         let prompt = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mcp-injected","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"bundle injected"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
     });
     let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -170,6 +171,7 @@ async fn session_load_with_matching_frozen_digest_uses_bundle() {
         );
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":load["id"],"result":{"sessionId":"old-session"}})).await;
         let prompt = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"old-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed with bundle"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
     });
     let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -226,6 +228,7 @@ async fn resume_digest_drift_rejects_load_and_starts_new_session() {
         );
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"sessionId":"fresh-session-after-drift"}})).await;
         let prompt = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fresh-session-after-drift","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fresh after drift"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
     });
     let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -305,6 +308,7 @@ async fn without_bundle_mcp_servers_stay_empty_on_new_and_load() {
         )
         .await;
         let prompt = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"bare","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"bare session output"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
     });
     let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
