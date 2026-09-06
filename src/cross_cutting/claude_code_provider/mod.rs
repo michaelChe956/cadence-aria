@@ -814,6 +814,15 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     provider_version: provider_version.clone(),
                     adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
                 });
+                // F2（最终审）：审计写入前再验 provider_session_id 非空——空白
+                // 原生会话 id 不得进入 durable 审计（fresh/resume 两路同验）。
+                if native_id.trim().is_empty() {
+                    return Err(ProviderAdapterError::parse_error(
+                        "claude policy session: native session id is blank before audit write",
+                        String::new(),
+                        String::new(),
+                    ));
+                }
                 sink.append_bound(audit_event).map_err(|error| {
                     ProviderAdapterError::parse_error(
                         format!(

@@ -313,6 +313,117 @@ fn pid_registering_init_fixture(marker: &std::path::Path) -> PathBuf {
     )
 }
 
+/// F2（最终审）fixture：登记 pid 后发出携带空白 session_id（空串/全空白）的
+/// system/init 事件，随后存活等待 kill 链终止（不自行退出）。
+#[cfg(unix)]
+fn pid_registering_blank_init_fixture(marker: &std::path::Path, session_id: &str) -> PathBuf {
+    write_fixture(
+        "claude_policy_blank_init_fixture.sh",
+        &format!(
+            "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo $$ > {}\n    echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{}\"}}'\n    while IFS= read -r line; do :; done\n    exit 0\n  fi\ndone\n",
+            marker.display(),
+            session_id
+        ),
+    )
+}
+
+/// F2（最终审，红→绿）：`system/init` 的 session_id 为空串/全空白时不是有效
+/// 原生会话 id——握手 fail-closed（无成功 ProviderSession 返回）、子进程被 kill、
+/// 无 provider_start 落盘（空白 id 不得进入 durable 审计）。旧实现只查字符串
+/// 不查 trim 空，会接受空白 id 并写出 provider_start。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_blank_init_session_id_fails_handshake_and_kills_child() {
+    for blank in ["", "   "] {
+        let marker_dir = tempfile::tempdir().expect("marker dir");
+        let marker = marker_dir.path().join("claude-blank-init-child.pid");
+        let provider = ClaudeCodeProvider::new(pid_registering_blank_init_fixture(
+            &marker,
+            blank,
+        ))
+        .with_version_supplier(policy_version_supplier());
+        let sink = RecordingToolPolicyAuditSink::new();
+        let Err(error) = provider
+            .start(
+                policy_claude_input(None, Some(sink.clone().bound())),
+                CancellationToken::new(),
+            )
+            .await
+        else {
+            panic!("blank init session_id ({blank:?}) must fail the policy handshake");
+        };
+        assert!(
+            error.details.contains("session_id"),
+            "unexpected error: {}",
+            error.details
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no provider_start may be written for a blank native session id"
+        );
+        let pid = std::fs::read_to_string(&marker)
+            .expect("fixture registers its pid")
+            .trim()
+            .parse::<u32>()
+            .expect("pid");
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(
+            !alive,
+            "claude policy child (pid {pid}) must be killed for blank init session_id"
+        );
+    }
+}
+
+/// F2（最终审，红→绿）：解析层函数级锁定——`parse_claude_init_session_id` 对
+/// 空串/全空白/非字符串 session_id 返回 None，仅接受非空白字符串。
+#[test]
+fn claude_parse_init_session_id_rejects_blank_and_non_string_ids() {
+    use crate::cross_cutting::claude_code_provider::stream::parse_claude_init_session_id;
+
+    let valid = serde_json::json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": "sess-1",
+    });
+    assert_eq!(
+        parse_claude_init_session_id(&valid),
+        Some("sess-1".to_string())
+    );
+    for blank in ["", "   \t"] {
+        let value = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": blank,
+        });
+        assert_eq!(
+            parse_claude_init_session_id(&value),
+            None,
+            "blank session_id ({blank:?}) must not parse as a native session id"
+        );
+    }
+    let non_string = serde_json::json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": 42,
+    });
+    assert_eq!(parse_claude_init_session_id(&non_string), None);
+    let missing = serde_json::json!({"type": "system", "subtype": "init"});
+    assert_eq!(parse_claude_init_session_id(&missing), None);
+    let not_init = serde_json::json!({
+        "type": "system",
+        "subtype": "other",
+        "session_id": "sess-1",
+    });
+    assert_eq!(parse_claude_init_session_id(&not_init), None);
+}
+
 /// P1-7：append 失败时 adapter 必须同步 kill+wait 后再返回错误——start 返回
 /// Err 的瞬间子进程已终止（不等异步 cancel 链）。
 #[cfg(unix)]

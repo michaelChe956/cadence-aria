@@ -391,14 +391,26 @@ where
     }
 }
 /// 解析 claude stream-json 首个 `system/init` 事件的原生 session id。
+/// F2（最终审）：session id 必须是非空白字符串——空串/全空白不是有效原生
+/// 会话 id，返回 `None`（与「非 init 事件」的区分见 `is_claude_init_event`，
+/// 握手层据此把「init 但 id 非法」立即判为握手失败而非继续等待）。
 pub(crate) fn parse_claude_init_session_id(value: &Value) -> Option<String> {
-    if value.get("type")?.as_str()? != "system" {
+    if !is_claude_init_event(value) {
         return None;
     }
-    if value.get("subtype")?.as_str()? != "init" {
-        return None;
-    }
-    value.get("session_id")?.as_str().map(ToString::to_string)
+    value
+        .get("session_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .map(ToString::to_string)
+}
+
+/// 判定是否为 `system/init` 事件（F2：与 session id 解析分离，供握手区分
+/// 「非 init 行继续等待」与「init 行但 id 缺失/空白/非字符串」）。
+fn is_claude_init_event(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("init")
 }
 
 /// 策略会话有界握手（Task 3.2）：读取首个 `system/init` 事件取原生 session id，
@@ -459,6 +471,15 @@ where
         })?;
         if let Some(session_id) = parse_claude_init_session_id(&value) {
             return Ok((reader, session_id));
+        }
+        // init 事件本身携带非法 session id（缺失/空/全空白/非字符串）：立即握手
+        // 失败（F2），不得当作「非 init 行」继续等待，也不得接受空白 id。
+        if is_claude_init_event(&value) {
+            return Err(ProviderAdapterError::parse_error(
+                "claude init event session_id is missing, blank, or not a string",
+                line.clone(),
+                String::new(),
+            ));
         }
         // init 之前的非 init 行：忽略并继续等待（保留在 reader 缓冲内的语义不变）。
     }
