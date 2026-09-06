@@ -35,7 +35,7 @@ node cadence/reports/workitem-coding-campaign/coding_run_campaign.mjs <handoff.j
 
 成功样本输出在 `<outRoot>/coding-<provider>-<attemptId>/`：
 
-- `result.json`：阶段时间线、gate、权限/选择审计、评审结果、worktree/branch、用量和失败分类。
+- `result.json`：阶段时间线、gate、权限/选择审计、评审结果、worktree/branch、用量（`usage` 与 `usage_by_role`）和失败分类。
 - `ws.jsonl`：完整 Coding WebSocket 收发记录。
 - `coding-result.json`：补充 attempt 结果后的 handoff 副本。
 
@@ -51,7 +51,8 @@ Coding 脚本只自动批准 `coding_permission_request` 并选择 `coding_choic
 - `review_complete`：当 verdict 为 `needs_human` 时，脚本会先将该消息的完整 findings 写入 `result.json`，随后以 `review_needs_human` 失败关闭；绝不进入 accept 或 revise 自动分支。
 - `review_decision_required`：只要服务端提供 options，脚本会完整记录该数组；优先选择与“跳过可选建议”匹配的选项（精确值 `skip_optional_findings`），否则在 `revise` verdict 下选择 `continue_with_context`，或在选项仅有 `continue` 时选择 `continue`，均通过 `review_decision_response` 继续标准返修流程。返修前只依据 durable `run_history.review_cycles` 检查自动返修预算；缺少 durable cycle、所有 cycle 已耗尽或任何未知选项均失败关闭。旧式、无 options 的 `revise` 才使用既有返修路径，其他无 options 情况同样失败关闭。
 - `provider_select_request`：优先根据 `defaults` 中明确的角色发出选择；缺失时再以当前 stage 推断 author/reviewer。若两者均无法判断，脚本只选择 author，并在 `result.json` 的 `provider_selections` 中记录该假设，不会盲发两个角色。
-- `execution_event.kind=usage`：递归解析其 JSON `output`，并以角色维度写入 `result.json` 的 `usage_by_role`；没有有效 usage 事件时明确写入 `usage_unavailable`，不会从其他字段推断。
+- `execution_event.kind=usage`（workitem 侧）：递归解析其 JSON `output`，并以角色维度写入 `result.json` 的 `usage_by_role`；没有有效 usage 事件时明确写入 `usage_unavailable`，不会从其他字段推断。
+- `coding_execution_event` 的 `event.kind=usage`（coding 侧）：与 workitem 侧同构，复用同一 `collectUsageByRole` 采集（含 amendment 双 WS 线的 `noteUsage` 钩子）。`result.json` 同时落两个字段：`usage_by_role` 为按角色原样值（含 `cache_creation_tokens` 与 null 字段），`usage` 为跨角色最新快照汇总（既有扁平 schema 兼容）；零有效事件时两者均回落 `usage_unavailable: true`。同 role 多次上报按 last-wins 覆盖（对齐服务端 `usage_{role}` 事件 upsert 语义，不对各快照累加以免重复计入旧值）；output 解析失败时 fail-closed 于采集。该口径依赖服务端 coding provider stream 发射 usage 事件（随 coding-ws usage 接通修复上线）；旧部署二进制下 coding 侧将如实保持 `usage_unavailable`。
 
 ## 安全验证
 

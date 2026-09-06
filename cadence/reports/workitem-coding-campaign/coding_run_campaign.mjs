@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   campaignCommandId,
+  collectUsageByRole,
   parseHumanScript,
   stage3OutboundLogEntry,
 } from './workitem_run_campaign.mjs';
@@ -170,6 +171,7 @@ function resultTemplate(handoff, outDir) {
     review_results: [],
     worktree: { branch_name: null, base_branch: null, worktree_path: null, head_commit: null, push_status: null, review_request_url: null },
     usage: { usage_unavailable: true },
+    usage_by_role: { usage_unavailable: true },
     timeline_nodes: [],
     failureClass: null,
     error: null,
@@ -177,35 +179,32 @@ function resultTemplate(handoff, outDir) {
   };
 }
 
-function collectUsage(value, observations, source) {
-  if (!value || typeof value !== 'object') return;
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectUsage(item, observations, source));
-    return;
+// coding 侧 usage 采集：复用 workitem 侧 collectUsageByRole（见上方 import），从 WS
+// coding_execution_event（event.kind=usage，output=UsageReportData JSON）递归提取按
+// 角色 token 用量。同 role 多报 last-wins，与服务端 usage_{role} 事件 upsert 语义
+// 对齐（若对各快照扁平求和会重复计入旧快照）；output 解析失败时 fail-closed 于
+// 采集，不从其他字段推断 token 用量。
+// result JSON 同时落两个字段：usage_by_role=按角色原样值；usage=跨角色汇总
+// （既有 schema 兼容）；零事件时两者均回落 usage_unavailable: true。
+function codingUsageResult(usageByRole) {
+  const roles = Object.keys(usageByRole);
+  if (!roles.length) {
+    return {
+      usage: { usage_unavailable: true },
+      usage_by_role: { usage_unavailable: true },
+    };
   }
-  if (value.kind === 'usage' && typeof value.output === 'string') {
-    try { collectUsage(JSON.parse(value.output), observations, source); } catch { /* 按原始事件如实保留。 */ }
-  }
-  const input = Number.isInteger(value.input_tokens) ? value.input_tokens : value.prompt_tokens;
-  const output = Number.isInteger(value.output_tokens) ? value.output_tokens : value.completion_tokens;
-  const cache = Number.isInteger(value.cache_read_tokens) ? value.cache_read_tokens : value.cache_read_input_tokens;
-  if ([input, output, cache].some((token) => Number.isInteger(token) && token >= 0)) {
-    observations.push({
-      source,
-      input_tokens: Number.isInteger(input) && input >= 0 ? input : 0,
-      output_tokens: Number.isInteger(output) && output >= 0 ? output : 0,
-      cache_read_tokens: Number.isInteger(cache) && cache >= 0 ? cache : 0,
-    });
-  }
-  Object.values(value).forEach((nested) => collectUsage(nested, observations, source));
-}
-
-function summarizeUsage(observations) {
-  if (!observations.length) return { usage_unavailable: true };
+  const total = (field) => roles.reduce(
+    (sum, role) => sum + (Number.isInteger(usageByRole[role][field]) ? usageByRole[role][field] : 0),
+    0,
+  );
   return {
-    input_tokens: observations.reduce((total, item) => total + item.input_tokens, 0),
-    output_tokens: observations.reduce((total, item) => total + item.output_tokens, 0),
-    cache_read_tokens: observations.reduce((total, item) => total + item.cache_read_tokens, 0),
+    usage: {
+      input_tokens: total('input_tokens'),
+      output_tokens: total('output_tokens'),
+      cache_read_tokens: total('cache_read_tokens'),
+    },
+    usage_by_role: { ...usageByRole },
   };
 }
 
@@ -1027,7 +1026,7 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
   let reviewResumeSent = false;
   let finalConfirmSent = false;
   let currentStatus = null;
-  const usage = [];
+  const usageByRole = {};
 
   const openOutput = (attemptId) => {
     outDir = path.join(outRoot, `coding-${handoff.provider}-${attemptId}`);
@@ -1041,7 +1040,9 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
   };
   const writeOutputs = () => {
     fs.mkdirSync(outDir, { recursive: true });
-    result.usage = summarizeUsage(usage);
+    const usageResult = codingUsageResult(usageByRole);
+    result.usage = usageResult.usage;
+    result.usage_by_role = usageResult.usage_by_role;
     result.finishedAt = now();
     result.elapsedSec = elapsedSec();
     if (amendment) result.amendment = amendment.evidence();
@@ -1218,7 +1219,7 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
         hooks: {
           fail: (failureClass, error) => fail(failureClass, error),
           log: (entry) => writeLog(entry),
-          noteUsage: (message, source) => collectUsage(message, usage, source),
+          noteUsage: (message) => collectUsageByRole(message, usageByRole),
           elapsedSec,
         },
       });
@@ -1261,7 +1262,7 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
           return;
         }
         writeLog({ direction: 'in', message });
-        collectUsage(message, usage, message.type ?? 'unknown');
+        collectUsageByRole(message, usageByRole);
         switch (message.type) {
         case 'coding_session_state':
           maybeDriveState(message, message.type);
@@ -1439,6 +1440,7 @@ export {
   amendmentResumeJudgment,
   amendmentScriptFromEnv,
   codingControlMessagePlan,
+  codingUsageResult,
   createAmendmentRuntime,
   isAutoReleasedStageGate,
   outputTimestamp,
