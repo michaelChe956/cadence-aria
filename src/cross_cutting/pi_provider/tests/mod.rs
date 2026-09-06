@@ -424,7 +424,11 @@ mod pi_policy_args {
             .split(',')
             .map(str::trim)
             .collect::<Vec<_>>();
-        assert_eq!(excluded, vec!["edit", "write"], "denylist 含且仅含 edit/write");
+        assert_eq!(
+            excluded,
+            vec!["edit", "write"],
+            "denylist 含且仅含 edit/write"
+        );
         for non_write in [
             "mcp",
             "extension",

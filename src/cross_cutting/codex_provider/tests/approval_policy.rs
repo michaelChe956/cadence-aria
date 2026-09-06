@@ -66,15 +66,23 @@ fn codex_policy_and_coder_launch_params_stay_frozen_zero_change() {
         })
     );
 
-    let coder_auto = codex_launch_params(&streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto));
+    let coder_auto = codex_launch_params(&streaming_input(
+        ProviderType::Codex,
+        ProviderPermissionMode::Auto,
+    ));
     assert_eq!(coder_auto["sandbox"], "danger-full-access");
-    assert_eq!(coder_auto["approvalPolicy"], "never", "Auto→never 既有映射不变");
+    assert_eq!(
+        coder_auto["approvalPolicy"], "never",
+        "Auto→never 既有映射不变"
+    );
 
-    let coder_supervised = codex_launch_params(&streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised));
+    let coder_supervised = codex_launch_params(&streaming_input(
+        ProviderType::Codex,
+        ProviderPermissionMode::Supervised,
+    ));
     assert_eq!(coder_supervised["sandbox"], "danger-full-access");
     assert_eq!(
-        coder_supervised["approvalPolicy"],
-        "on-request",
+        coder_supervised["approvalPolicy"], "on-request",
         "Supervised→on-request 既有映射不变"
     );
 }

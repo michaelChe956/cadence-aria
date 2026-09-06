@@ -570,9 +570,7 @@ mod tests {
         let seen_ids = server_task.await.expect("server task");
         assert_eq!(seen_ids.len(), 2);
         assert!(
-            seen_ids
-                .iter()
-                .all(|id| id.is_u64() && !id.is_string()),
+            seen_ids.iter().all(|id| id.is_u64() && !id.is_string()),
             "pi/kimi outbound ids must stay numeric, never aria-<seq> strings"
         );
     }

@@ -779,7 +779,10 @@ fn translate_tool_policy_freezes_full_canonical_token_sequence() {
 
     // canonical：全序列等值（不再 contains 式部分匹配，多/少/乱序 token 均红）。
     let codex = canonical_tool_policy("codex", &policy).unwrap();
-    assert_eq!(codex.tokens, frozen, "codex canonical tokens must be the exact frozen sequence");
+    assert_eq!(
+        codex.tokens, frozen,
+        "codex canonical tokens must be the exact frozen sequence"
+    );
 
     // translator 与 canonical tokens 同源：argv/参数原文按出现顺序、大小写保留。
     assert_eq!(translate_tool_policy("codex", &policy).unwrap(), frozen);

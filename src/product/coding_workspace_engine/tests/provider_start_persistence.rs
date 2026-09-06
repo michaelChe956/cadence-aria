@@ -938,9 +938,7 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     let aria_root = root.path().join(".aria");
     let tool_policy_partition = aria_root.join("tool-policy-run-audit");
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let event_drain = tokio::spawn(async move {
-        while event_rx.recv().await.is_some() {}
-    });
+    let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
 
     // —— Coder（非策略）run：完整 provider 调用，execution 审计照常落盘 ——
@@ -979,7 +977,12 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         matches!(outcome, ProviderInvocationOutcome::Completed(_)),
         "coder run must complete: {outcome:?}"
     );
-    assert_role_run_raw_output(&store, &attempt, &coder_role_run, "completed invocation evidence");
+    assert_role_run_raw_output(
+        &store,
+        &attempt,
+        &coder_role_run,
+        "completed invocation evidence",
+    );
     // Coder run 不得产生任何 tool-policy durable 记录（分区目录不存在）。
     assert!(
         !tool_policy_partition.exists(),
@@ -1032,7 +1035,11 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     let policy_legacy_input = AdapterInput {
         provider_type: ProviderType::Codex,
         role: AdapterRole::Reviewer,
-        worktree_path: policy_input.working_dir.clone().to_str().map(str::to_string),
+        worktree_path: policy_input
+            .working_dir
+            .clone()
+            .to_str()
+            .map(str::to_string),
         provider_stream_log_dir: None,
         prompt: policy_input.prompt.clone(),
         context_files: Vec::new(),
@@ -1118,7 +1125,8 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     // durable canonical 事件（策略事件不串入执行审计）。注意执行通道有既有的
     // 生命周期事件 `"event_type":"provider_start"`（CodingRoleRunEventType），与
     // durable 分区同名不同载体；用 tool-policy DTO 独有键与专属事件类型作标记。
-    let events_root = store.role_run_events_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+    let events_root =
+        store.role_run_events_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
     let mut execution_files = Vec::new();
     collect_files_recursive(&events_root, &mut execution_files);
     assert!(

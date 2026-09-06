@@ -47,10 +47,13 @@ async fn read_wire_request(
     reader: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
 ) -> Value {
     let mut line = String::new();
-    tokio::time::timeout(std::time::Duration::from_secs(2), reader.read_line(&mut line))
-        .await
-        .expect("wire line timeout")
-        .expect("wire line");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reader.read_line(&mut line),
+    )
+    .await
+    .expect("wire line timeout")
+    .expect("wire line");
     assert!(!line.trim().is_empty(), "unexpected empty wire line");
     serde_json::from_str(line.trim()).expect("wire json")
 }
@@ -97,7 +100,11 @@ async fn kimi_outbound_request_ids_stay_numeric() {
 
         let initialize = read_wire_request(&mut reader).await;
         assert_eq!(initialize["method"], "initialize");
-        assert_eq!(initialize["id"], json!(1), "kimi initialize id stays numeric 1");
+        assert_eq!(
+            initialize["id"],
+            json!(1),
+            "kimi initialize id stays numeric 1"
+        );
         write_wire_line(
             &mut server_writer,
             &json!({
@@ -114,7 +121,11 @@ async fn kimi_outbound_request_ids_stay_numeric() {
 
         let session_new = read_wire_request(&mut reader).await;
         assert_eq!(session_new["method"], "session/new");
-        assert_eq!(session_new["id"], json!(2), "kimi session/new id stays numeric 2");
+        assert_eq!(
+            session_new["id"],
+            json!(2),
+            "kimi session/new id stays numeric 2"
+        );
         write_wire_line(
             &mut server_writer,
             &json!({
@@ -126,7 +137,11 @@ async fn kimi_outbound_request_ids_stay_numeric() {
 
         let prompt = read_wire_request(&mut reader).await;
         assert_eq!(prompt["method"], "session/prompt");
-        assert_eq!(prompt["id"], json!(3), "kimi session/prompt id stays numeric 3");
+        assert_eq!(
+            prompt["id"],
+            json!(3),
+            "kimi session/prompt id stays numeric 3"
+        );
         assert!(
             !prompt["id"].is_string(),
             "kimi outbound ids must never become aria-<seq> strings"
@@ -184,8 +199,7 @@ async fn kimi_outbound_request_ids_stay_numeric() {
 #[tokio::test]
 async fn kimi_session_ignores_tool_policy_and_never_appends_tool_policy_audit() {
     let sink = RecordingToolPolicyAuditSink::new();
-    let provider =
-        KimiCodeProvider::new(fixture_command("kimi_acp_text_fixture.sh"));
+    let provider = KimiCodeProvider::new(fixture_command("kimi_acp_text_fixture.sh"));
     let mut input = kimi_input(AdapterRole::Orchestrator);
     input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
     input.audit_sink = Some(sink.clone().bound());
