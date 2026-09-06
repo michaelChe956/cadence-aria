@@ -402,3 +402,92 @@ async fn approval_bridge_pending_guard_drop_cleans_when_remove_now_future_is_dro
     }
     panic!("pending permission should be cleaned after guard drop");
 }
+
+/// F3 Task 4.1（restrict-role-write-tools）：ApprovalBridge commandExecution
+/// 既有链回归锁——Coder（非策略会话）的 commandExecution/fileChange 审批继续经
+/// bridge `request_tool` 上抛，API 语义不因本 change 改变：
+/// Auto 档即时批准并审计、Supervised 档等待 PermissionResponse（approve/deny
+/// 原因回传）。codex session 的 `request.tool_name`（command/file_change）
+/// 只是普通工具名入参，不得被策略分类改写。
+#[tokio::test]
+async fn approval_bridge_command_execution_chain_stays_unchanged_for_coder() {
+    // —— Auto 档：commandExecution 形态立即放行并发出既有审计事件 ——
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx);
+    for tool_name in ["command", "file_change"] {
+        let decision = bridge
+            .request_tool(
+                tool_name,
+                "codex commandExecution requestApproval",
+                RiskLevel::High,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(decision.approved, "{tool_name} auto approval");
+        assert_eq!(decision.reason.as_deref(), Some("auto_approved"));
+    }
+    for _ in 0..2 {
+        match event_rx.recv().await.unwrap() {
+            ProviderEvent::Execution(event) => assert_eq!(event.title, "Auto approval"),
+            other => panic!("unexpected auto approval event: {other:?}"),
+        }
+    }
+
+    // —— Supervised 档：上抛 PermissionRequest，approve→approved=true；deny→false ——
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let bridge = ApprovalBridge::new(ProviderPermissionMode::Supervised, event_tx);
+    let command_tx = bridge.command_sender();
+    let supervised_bridge = std::sync::Arc::new(bridge);
+    let approve_bridge = supervised_bridge.clone();
+    let approve_task = tokio::spawn(async move {
+        approve_bridge
+            .request_tool(
+                "command",
+                "/bin/zsh -lc pnpm install",
+                RiskLevel::High,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+    });
+    let approved_id = receive_permission_request(&mut event_rx).await;
+    assert_eq!(pending_len(&supervised_bridge).await, 1);
+    command_tx
+        .send(ProviderCommand::PermissionResponse {
+            id: approved_id,
+            approved: true,
+            reason: None,
+        })
+        .await
+        .unwrap();
+    let approved = approve_task.await.unwrap();
+    assert!(approved.approved);
+    assert_eq!(approved.reason, None);
+
+    let deny_bridge = supervised_bridge.clone();
+    let deny_task = tokio::spawn(async move {
+        deny_bridge
+            .request_tool(
+                "file_change",
+                "写 src/main.rs",
+                RiskLevel::High,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+    });
+    let denied_id = receive_permission_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::PermissionResponse {
+            id: denied_id,
+            approved: false,
+            reason: Some("拒绝写面".to_string()),
+        })
+        .await
+        .unwrap();
+    let denied = deny_task.await.unwrap();
+    assert!(!denied.approved);
+    assert_eq!(denied.reason.as_deref(), Some("拒绝写面"));
+    assert_eq!(pending_len(&supervised_bridge).await, 0);
+}
