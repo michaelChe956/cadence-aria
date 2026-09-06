@@ -71,6 +71,15 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 #[cfg(test)]
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 20_000;
 
+/// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
+/// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，
+/// 首轮 prompt 逐字节不变。
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE: &str =
+    "[output] 现在仅输出完整 markdown source。";
+
+mod sc_revision;
+pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;
+
 pub(crate) const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##/### section 名)、字段 key、ID(WI-*/CT-*/TASK-*/AC-*/REQ-*/CHECK-* 等)、枚举值(require_all/require_any/backend/frontend/integration 等)永远保持 grammar 指定的英文原样,不做翻译;上述语言规则仅约束自由文本值(各 ## 标题的 <title> 部分、statement/description/capabilities 等字段的值)与说明性文字;代码、路径、命令、契约 ID 保持原样。字段行分隔符必须是半角 ASCII:每行写作 `- key: value`(冒号+一个空格均为半角),禁止全角冒号`：`或全角空格;EARS 关键词(WHEN/THE SYSTEM SHALL)、ID 前缀(WI-/CT-/TASK-/AC-/REQ-/CHECK-)与枚举值内的分隔亦为半角;中文仅出现在值的自由文本中。";
 
 const SINGLE_CANDIDATE_CODE_USAGE_SUMMARY: &str = "任务拆分与验证设计遵循测试先行纪律：先明确可验证验收，再安排实现步骤；验证命令必须真实可执行、可复现，并与仓库现有工具链相符；遵守安全边界，不引入未授权依赖、凭据、网络访问或外部服务；保持职责与范围最小化，产出精炼，只含结构化必需内容，不写重复过程说明。";
@@ -347,7 +356,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          {few_shot}\n\
          [format_clamp]\n\
          重申：结构标题必须逐字照抄 [markdown_grammar]/[minimum_legal_source] 的英文原文（含 `# Work Item Plan` 与全部 `###` 标题）；仅自由文本值用中文；禁止翻译、改写或加中文括号。\n\
-         [output] 现在仅输出完整 markdown source。",
+         {output_directive}",
         issue_title = issue.title,
         issue_description = issue.description.as_deref().unwrap_or("无"),
         repository_id = repository.id,
@@ -366,6 +375,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),
         few_shot = few_shot,
+        output_directive = WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE,
     );
     if prompt.len() > WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES {
         return Err(format!(

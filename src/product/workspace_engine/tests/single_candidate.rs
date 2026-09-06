@@ -781,3 +781,34 @@ mod phase_machine {
         assert_eq!(replayed, failed, "failed phase must be absorbing");
     }
 }
+
+/// F5-A：SC author 修订轮判定——只有 SC 流且最近 verdict 要求返修时才回灌
+/// findings；首轮（无 verdict）与 Pass verdict 不触发，legacy 流永不触发。
+#[test]
+fn single_candidate_pending_revision_verdict_only_flags_sc_revise_rounds() {
+    let (_tmp, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    assert!(
+        engine.single_candidate_pending_revision_verdict().is_none(),
+        "no review verdict yet: first author round must keep the byte-identical first prompt"
+    );
+
+    engine.latest_review_verdict = Some(repairable_verdict("pending contract gap"));
+    assert!(
+        engine.single_candidate_pending_revision_verdict().is_none(),
+        "legacy flow must never consume the single-candidate revision predicate"
+    );
+
+    engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    let pending = engine
+        .single_candidate_pending_revision_verdict()
+        .expect("single-candidate revise verdict must mark a revision round");
+    assert_eq!(pending.verdict, ReviewVerdictType::Revise);
+    assert_eq!(pending.findings.len(), 1);
+
+    engine.latest_review_verdict = Some(pass_verdict());
+    assert!(
+        engine.single_candidate_pending_revision_verdict().is_none(),
+        "a pass verdict must not be treated as a revision round"
+    );
+}

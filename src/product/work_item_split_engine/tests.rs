@@ -6,6 +6,11 @@ mod prompt_contract {
 
     include!("tests/prompt_contract.rs");
 }
+mod prompt_contract_sc_revision {
+    use super::*;
+
+    include!("tests/prompt_contract_sc_revision.rs");
+}
 include!("tests/part_02.rs");
 include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");

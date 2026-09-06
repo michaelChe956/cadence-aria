@@ -171,6 +171,7 @@ pub(crate) use plan_repair_recovery::*;
 pub(crate) use plan_repair_transaction::*;
 pub(crate) use plan_repair_validation::*;
 pub(crate) use prompts::*;
+pub(crate) use review::trusted_review_comments;
 #[cfg(test)]
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;

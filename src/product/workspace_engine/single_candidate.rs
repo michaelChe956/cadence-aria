@@ -12,6 +12,7 @@ use crate::product::work_item_plan_source_store::{
     WorkItemPlanSourceStore,
 };
 use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
+use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictType};
 
 /// 仅由已编译 IR 的 item 数与服务端 provider profile 驱动的内部诊断输入。
 ///
@@ -93,6 +94,21 @@ impl WorkspaceEngine {
             .map_err(|error| format!("persist provider reservation failed: {error}"))?;
         self.session = WorkspaceSession::from_record(saved);
         Ok(should_start)
+    }
+
+    /// F5-A：SC author 修订轮判定。最近一次 review verdict 要求返修（Revise 或
+    /// RequiresRevision）时，本轮 SC author 重跑是修订轮，必须把 reviewer findings
+    /// 回灌进 prompt；首轮（无 verdict）与 Pass verdict 返回 None，prompt 逐字节不变。
+    pub(crate) fn single_candidate_pending_revision_verdict(&self) -> Option<ReviewVerdict> {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        {
+            return None;
+        }
+        self.latest_review_verdict.clone().filter(|verdict| {
+            verdict.verdict == ReviewVerdictType::Revise
+                || verdict.review_gate == ReviewGate::RequiresRevision
+        })
     }
 
     /// 将 SingleCandidate provider 的 markdown 原文通过 compiler 与 typed source store

@@ -157,8 +157,29 @@ pub(crate) async fn run_single_candidate_author(
     .map_err(|error| {
         SingleCandidateProviderRunError::Message(format!("logical plan launch failed: {error}"))
     })?;
-    let full_prompt =
-        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+    // F5-A：SC 修订轮 findings 回灌——最近 verdict 要求返修时，本轮 author 重跑
+    // 使用返修 prompt（在首轮完整 prompt 的尾部输出指令前注入 reviewer findings 与
+    // 硬性修复指令）；首轮（无 verdict）prompt 逐字节不变。
+    let revision_verdict = engine.single_candidate_pending_revision_verdict();
+    let full_prompt = match revision_verdict.as_ref() {
+        Some(review) => {
+            crate::product::work_item_split_engine::prompts::
+                build_work_item_plan_markdown_revision_prompt(
+                    &request,
+                    &issue,
+                    &repository,
+                    crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                        story_context: &story_context,
+                        design_context: &design_context,
+                        design_requirement_ids: &design_requirement_ids,
+                        repository_structure: &repository_structure,
+                        language_rules: &language_rules,
+                        routing_context: &launch.routing_context(),
+                    },
+                    review,
+                )
+        }
+        None => crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
             &request,
             &issue,
             &repository,
@@ -170,8 +191,9 @@ pub(crate) async fn run_single_candidate_author(
                 language_rules: &language_rules,
                 routing_context: &launch.routing_context(),
             },
-        )
-        .map_err(SingleCandidateProviderRunError::Message)?;
+        ),
+    }
+    .map_err(SingleCandidateProviderRunError::Message)?;
     let node_id = if engine.active_node_type()
         == Some(crate::web::workspace_ws_types::TimelineNodeType::AuthorRun)
     {
@@ -189,11 +211,16 @@ pub(crate) async fn run_single_candidate_author(
         &engine.session().session_id,
         "full_markdown_author",
     );
+    let prompt_event_detail = if revision_verdict.is_some() {
+        "发送给 SingleCandidate markdown author 的返修提示词（已回灌 reviewer findings）"
+    } else {
+        "发送给 SingleCandidate markdown author 的完整提示词"
+    };
     engine
         .emit_provider_prompt_event(
             &node_id,
             full_prompt.clone(),
-            "发送给 SingleCandidate markdown author 的完整提示词",
+            prompt_event_detail,
             Some(author_provider.clone()),
         )
         .await;
