@@ -147,10 +147,10 @@ pub(crate) fn structured_output_nonce() -> String {
 /// artifact…不要继续调研，不要只解释…立即输出完整…」）+ compile 错误原文
 /// 逐条回灌 + work-item-plan markdown source 的硬性重驱指令（第一行即文档标题）。
 pub(crate) fn build_work_item_plan_compile_reredrive_prompt(blocking_reasons: &[String]) -> String {
-    let mut prompt = format!(
+    let mut prompt = String::from(
         "上一轮已结束，但没有输出完整的 work-item-plan markdown source。\n\
          不要继续调研，不要只解释，不要输出任何前言或路由回执。\n\
-         请基于已有上下文和刚才读取的文件，立即输出完整 work-item-plan markdown source；第一行即文档标题 `# Work Item Plan`。\n"
+         请基于已有上下文和刚才读取的文件，立即输出完整 work-item-plan markdown source；第一行即文档标题 `# Work Item Plan`。\n",
     );
     if !blocking_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");

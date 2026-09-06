@@ -3,8 +3,6 @@
 // `[output]` 段前必须有一行硬性禁令；🔴 首轮既有教学段不删不改，只增此行
 // （`[format_clamp]` 钳制块的最后一行、`[output]` 指令之前）。
 
-use super::*;
-
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
     "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n";
 
