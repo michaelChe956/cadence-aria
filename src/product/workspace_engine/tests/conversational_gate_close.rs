@@ -1,6 +1,8 @@
 use super::conversational_gate::gate_fixture;
 use super::*;
-use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
+use crate::product::models::{
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, SingleCandidatePhase, WorkspaceSessionStatus,
+};
 use crate::product::work_item_plan_policy::RunPolicy;
 use crate::product::workspace_engine::compile::SingleCandidateCompileCheckpoint;
 
@@ -310,4 +312,165 @@ async fn conversational_gate_close_is_busy_during_inflight_turn() {
             }
         );
     }
+}
+
+// —— F7 项 1（历史观察项族 12）：confirm 失败必须上抛 validator findings ——
+
+fn seeded_gate_findings() -> Vec<WorkItemSplitFinding> {
+    vec![
+        WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Error,
+            code: "WI_DEP_CYCLE".to_string(),
+            message: "work item dependency cycle: wi_a -> wi_b -> wi_a".to_string(),
+            work_item_ids: vec!["wi_a".to_string(), "wi_b".to_string()],
+        },
+        WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Warning,
+            code: "WI_MISSING_VERIFICATION".to_string(),
+            message: "work item wi_c has no verification plan".to_string(),
+            work_item_ids: vec!["wi_c".to_string()],
+        },
+    ]
+}
+
+const SEEDED_FAILURE_REASON: &str =
+    "Final Compile strict validator failed（errors: 1, warnings: 1）";
+
+/// 模拟 execute_initial_plan_compile 的 validator 失败落盘结果：一个携带
+/// failure_reason + validator_findings 原文的 Failed compile transaction。
+fn seed_failed_compile_with_findings(lifecycle: &LifecycleStore, plan_id: &str) {
+    use crate::product::models::{
+        IssueWorkItemDependencyEdge, IssueWorkItemPlan, WorkItemPlanCommitState,
+        WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction,
+    };
+    WorkItemPlanStore::new(lifecycle.app_paths())
+        .put_compile_transaction(&WorkItemPlanCompileTransaction {
+            compile_id: "compile_gate_findings".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: plan_id.to_string(),
+            flow_kind: Some(WorkItemPlanFlowKind::SingleCandidate),
+            source_revision_id: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            publication_provenance_content_hash: None,
+            generation_round_id: "round_gate_findings".to_string(),
+            outline_version_ref: "outline_gate_findings".to_string(),
+            active_draft_ids: Vec::new(),
+            status: WorkItemPlanCompileStatus::Failed,
+            plan_commit_state: WorkItemPlanCommitState::NotStarted,
+            step_cursor: "validating".to_string(),
+            outline_to_work_item_id: Default::default(),
+            outline_to_verification_plan_id: Default::default(),
+            created_work_item_ids: Vec::new(),
+            created_verification_plan_ids: Vec::new(),
+            child_session_ids: Vec::new(),
+            validator_findings: seeded_gate_findings(),
+            abort_requested_at: None,
+            failure_reason: Some(SEEDED_FAILURE_REASON.to_string()),
+            previous_plan_snapshot: IssueWorkItemPlan {
+                id: plan_id.to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: Vec::new(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: vec![IssueWorkItemDependencyEdge {
+                    from_work_item_id: "wi_a".to_string(),
+                    to_work_item_id: "wi_b".to_string(),
+                }],
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+                review_summary: None,
+                created_at: "2026-09-04T00:00:00Z".to_string(),
+                updated_at: "2026-09-04T00:00:00Z".to_string(),
+            },
+            created_at: "2026-09-04T00:00:01Z".to_string(),
+            updated_at: "2026-09-04T00:00:01Z".to_string(),
+            committed_at: None,
+        })
+        .expect("seed failed compile transaction");
+}
+
+#[tokio::test]
+async fn conversational_gate_approve_compile_failure_surfaces_validator_findings() {
+    let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(1);
+    seed_failed_compile_with_findings(&lifecycle, "plan_0001");
+
+    let error = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .await
+        .expect_err("incomplete fixture must fail closed before confirming");
+    assert!(error.contains("human gate remains open"), "{error}");
+    // failure_reason 原文与每条 finding 的 severity/code/message/work_item_ids 原文可见
+    assert!(error.contains(SEEDED_FAILURE_REASON), "{error}");
+    assert!(error.contains("[error] WI_DEP_CYCLE"), "{error}");
+    assert!(
+        error.contains("work item dependency cycle: wi_a -> wi_b -> wi_a"),
+        "{error}"
+    );
+    assert!(
+        error.contains("[warning] WI_MISSING_VERIFICATION"),
+        "{error}"
+    );
+    assert!(error.contains("wi_a, wi_b"), "{error}");
+
+    // 结构化副本供 web 层 ProtocolError.context 使用
+    let context = engine
+        .last_human_gate_close_compile_failure_context()
+        .expect("structured findings context");
+    assert_eq!(
+        context["failure_reason"],
+        serde_json::json!(SEEDED_FAILURE_REASON)
+    );
+    let findings = context["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 2);
+    assert_eq!(findings[0]["severity"], serde_json::json!("error"));
+    assert_eq!(findings[0]["code"], serde_json::json!("WI_DEP_CYCLE"));
+    assert_eq!(
+        findings[0]["message"],
+        serde_json::json!("work item dependency cycle: wi_a -> wi_b -> wi_a")
+    );
+    assert_eq!(
+        findings[0]["work_item_ids"],
+        serde_json::json!(["wi_a", "wi_b"])
+    );
+    assert_eq!(findings[1]["severity"], serde_json::json!("warning"));
+    assert_eq!(
+        findings[1]["code"],
+        serde_json::json!("WI_MISSING_VERIFICATION")
+    );
+}
+
+// 注：compile 失败后 durable 停在 WaitingForHuman+phase=Failed（既有语义，修订后
+// 须重走 Evaluate/Approval 链），此时重试 confirm 属项 2 的「真冲突保持」分支，
+// 由 late_confirm_with_waiting_phase_drift_keeps_conflict 覆盖，此处不重复断言。
+
+#[tokio::test]
+async fn conversational_gate_approve_success_leaves_no_compile_failure_context() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, _lifecycle, mut engine) = approval_fixture();
+    let (event_tx, _event_rx) = mpsc::channel(32);
+    engine.event_tx = event_tx;
+    let result = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .await;
+    assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
+    assert!(
+        engine
+            .last_human_gate_close_compile_failure_context()
+            .is_none(),
+        "successful approval must not surface stale compile failure findings"
+    );
 }

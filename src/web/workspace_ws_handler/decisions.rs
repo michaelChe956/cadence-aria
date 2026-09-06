@@ -323,6 +323,7 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
     outbound_tx: mpsc::Sender<OutboundControl>,
     decision: HumanConfirmDecision,
 ) {
+    let is_confirm = decision == HumanConfirmDecision::Confirm;
     let outcome = {
         let mut engine = run_context.engine.lock().await;
         engine.handle_human_gate_termination(decision).await
@@ -333,7 +334,28 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
         }
         Ok(HumanGateCloseOutcome::Confirmed) => None,
         Ok(HumanGateCloseOutcome::Abandoned) => None,
-        Err(message) => Some(WsOutMessage::Error { message }),
+        Err(message) => {
+            // F7 项 1（历史观察项族 12）：confirm 后 compile 失败的 validator
+            // findings 经 ProtocolError.context 上抛给 WS 客户端；其余错误维持
+            // 既有 Error 通道。
+            let findings_context = if is_confirm {
+                run_context
+                    .engine
+                    .lock()
+                    .await
+                    .last_human_gate_close_compile_failure_context()
+            } else {
+                None
+            };
+            match findings_context {
+                Some(context) => Some(WsOutMessage::ProtocolError {
+                    code: "SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED".to_string(),
+                    message,
+                    context: Some(context),
+                }),
+                None => Some(WsOutMessage::Error { message }),
+            }
+        }
     };
     if let Some(message) = message {
         let _ = send_json_outbound(&outbound_tx, &message).await;

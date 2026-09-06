@@ -520,3 +520,218 @@ async fn conversational_gate_post_approve_feedback_is_structured_protocol_error(
         "stage rejection must not emit events"
     );
 }
+
+#[tokio::test]
+async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
+    // F7 项 1（历史观察项族 12）：SC Approval 门 confirm 后 compile 失败，
+    // validator findings 数组必须经 ProtocolError.context 上抛（WS 客户端可见）。
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
+    };
+    use crate::product::models::{
+        IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
+        IssueWorkItemPlanStatus, SingleCandidatePhase, WorkItemPlanCommitState,
+        WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemSplitFinding,
+        WorkItemSplitFindingSeverity, WorkspaceSessionStatus, WorkspaceType,
+    };
+    use crate::product::work_item_plan_policy::{
+        HumanGateSnapshot, HumanReason, RunPolicy, WorkItemPlanFlowKind,
+    };
+    use crate::product::work_item_plan_store::WorkItemPlanStore;
+    use tempfile::tempdir;
+
+    let root = tempdir().expect("tempdir");
+    let app_paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let mut record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "plan_gate_findings".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::Interactive,
+                rollout_snapshot: true,
+            }),
+        })
+        .expect("create gate session");
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: false,
+    });
+    crate::product::json_store::write_json(
+        &app_paths
+            .issue_lifecycle_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist gate session");
+
+    let findings = vec![
+        WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Error,
+            code: "WI_DEP_CYCLE".to_string(),
+            message: "work item dependency cycle: wi_a -> wi_b -> wi_a".to_string(),
+            work_item_ids: vec!["wi_a".to_string(), "wi_b".to_string()],
+        },
+        WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Warning,
+            code: "WI_MISSING_VERIFICATION".to_string(),
+            message: "work item wi_c has no verification plan".to_string(),
+            work_item_ids: vec!["wi_c".to_string()],
+        },
+    ];
+    let failure_reason = "Final Compile strict validator failed（errors: 1, warnings: 1）";
+    WorkItemPlanStore::new(app_paths.clone())
+        .put_compile_transaction(&WorkItemPlanCompileTransaction {
+            compile_id: "compile_gate_findings".to_string(),
+            project_id: record.project_id.clone(),
+            issue_id: record.issue_id.clone(),
+            plan_id: record.entity_id.clone(),
+            flow_kind: Some(WorkItemPlanFlowKind::SingleCandidate),
+            source_revision_id: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            publication_provenance_content_hash: None,
+            generation_round_id: "round_gate_findings".to_string(),
+            outline_version_ref: "outline_gate_findings".to_string(),
+            active_draft_ids: Vec::new(),
+            status: WorkItemPlanCompileStatus::Failed,
+            plan_commit_state: WorkItemPlanCommitState::NotStarted,
+            step_cursor: "validating".to_string(),
+            outline_to_work_item_id: Default::default(),
+            outline_to_verification_plan_id: Default::default(),
+            created_work_item_ids: Vec::new(),
+            created_verification_plan_ids: Vec::new(),
+            child_session_ids: Vec::new(),
+            validator_findings: findings,
+            abort_requested_at: None,
+            failure_reason: Some(failure_reason.to_string()),
+            previous_plan_snapshot: IssueWorkItemPlan {
+                id: record.entity_id.clone(),
+                project_id: record.project_id.clone(),
+                issue_id: record.issue_id.clone(),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: Vec::new(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: vec![IssueWorkItemDependencyEdge {
+                    from_work_item_id: "wi_a".to_string(),
+                    to_work_item_id: "wi_b".to_string(),
+                }],
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+                review_summary: None,
+                created_at: "2026-09-04T00:00:00Z".to_string(),
+                updated_at: "2026-09-04T00:00:00Z".to_string(),
+            },
+            created_at: "2026-09-04T00:00:01Z".to_string(),
+            updated_at: "2026-09-04T00:00:01Z".to_string(),
+            committed_at: None,
+        })
+        .expect("seed failed compile transaction");
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = WorkspaceSession::from_record(record.clone());
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Work Item Plan\n".to_string(),
+        diff: None,
+    });
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle,
+        event_tx,
+        session,
+    )));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        engine: engine.clone(),
+        run_context: ProviderRunContext {
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            engine: engine.clone(),
+            current_run: current_run.clone(),
+            workspace_runs: workspace_runs.clone(),
+            session_id: record.id.clone(),
+            next_run_id: Arc::new(Mutex::new(0)),
+            app_paths,
+            session_record: record,
+        },
+        outbound_tx,
+        current_run,
+        workspace_runs,
+        session_id: "confirm_gate_findings".to_string(),
+    };
+
+    handle_workspace_inbound_message(context, WsInMessage::Confirm).await;
+
+    let outbound = outbound_rx
+        .recv()
+        .await
+        .expect("confirm compile failure must reach the client");
+    let OutboundControl::Text(json) = outbound else {
+        panic!("expected text protocol error");
+    };
+    let message: WsOutMessage = serde_json::from_str(&json).expect("protocol error json");
+    let WsOutMessage::ProtocolError {
+        code,
+        message,
+        context,
+    } = message
+    else {
+        panic!(
+            "confirm compile failure must surface as a protocol error with findings, got {message:?}"
+        )
+    };
+    assert_eq!(code, "SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED");
+    assert!(message.contains("human gate remains open"), "{message}");
+    assert!(message.contains("WI_DEP_CYCLE"), "{message}");
+    let context = context.expect("findings context");
+    assert_eq!(context["failure_reason"], serde_json::json!(failure_reason));
+    let findings = context["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 2);
+    assert_eq!(findings[0]["severity"], serde_json::json!("error"));
+    assert_eq!(findings[0]["code"], serde_json::json!("WI_DEP_CYCLE"));
+    assert_eq!(
+        findings[0]["message"],
+        serde_json::json!("work item dependency cycle: wi_a -> wi_b -> wi_a")
+    );
+    assert_eq!(
+        findings[0]["work_item_ids"],
+        serde_json::json!(["wi_a", "wi_b"])
+    );
+    assert_eq!(findings[1]["severity"], serde_json::json!("warning"));
+    assert_eq!(
+        findings[1]["code"],
+        serde_json::json!("WI_MISSING_VERIFICATION")
+    );
+}

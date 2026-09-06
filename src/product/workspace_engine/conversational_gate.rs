@@ -4,6 +4,7 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::PlanAmendmentContext;
 use crate::product::models::{
     HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
+    WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemSplitFinding,
     WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_compiler::grammar;
@@ -50,6 +51,15 @@ pub(crate) enum HumanGateCloseOutcome {
     Confirmed,
     Abandoned,
     Busy { turn_id: String },
+}
+
+/// confirm 后 compile 失败的结构化详情：engine 层 Err 文本与 web 层
+/// ProtocolError.context 共用同一 durable 来源（最近一次 Failed compile
+/// transaction 的 failure_reason + validator findings）。
+#[derive(Debug, Clone)]
+pub(crate) struct HumanGateCloseCompileFailure {
+    pub(crate) failure_reason: Option<String>,
+    pub(crate) findings: Vec<WorkItemSplitFinding>,
 }
 
 fn rejected(code: &str, reason: impl Into<String>) -> HumanGateCommandOutcome {
@@ -775,6 +785,7 @@ impl super::WorkspaceEngine {
         {
             return Err("human gate close is only available for a single-candidate work-item plan in human_confirm".to_string());
         }
+        self.last_gate_close_compile_failure = None;
 
         let expected = lifecycle
             .get_workspace_session(&self.session.session_id)
@@ -815,10 +826,7 @@ impl super::WorkspaceEngine {
                     || durable.single_candidate_phase
                         != Some(crate::product::models::SingleCandidatePhase::Completed)
                 {
-                    return Err(
-                        "single-candidate approval compile failed; human gate remains open"
-                            .to_string(),
-                    );
+                    return Err(self.single_candidate_gate_close_failure_error());
                 }
                 let _ = self
                     .event_tx
@@ -867,5 +875,66 @@ impl super::WorkspaceEngine {
                     .to_string(),
             ),
         }
+    }
+
+    /// confirm 后 compile 未达 Confirmed/Completed 的失败错误：附加最近一次
+    /// Failed compile transaction 的 failure_reason 与 validator findings 原文，
+    /// 并缓存结构化副本供 web 层 ProtocolError.context 上抛（WS 客户端可见）。
+    fn single_candidate_gate_close_failure_error(&mut self) -> String {
+        let mut message =
+            "single-candidate approval compile failed; human gate remains open".to_string();
+        let failure = self.latest_single_candidate_compile_failure();
+        if let Some(tx) = &failure {
+            if let Some(reason) = tx.failure_reason.as_deref() {
+                message.push_str("\nfailure_reason: ");
+                message.push_str(reason);
+            }
+            if !tx.validator_findings.is_empty() {
+                message.push_str("\nvalidator findings:");
+                for finding in &tx.validator_findings {
+                    message.push_str(&format!(
+                        "\n[{}] {}: {} (work_items: {})",
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.message,
+                        finding.work_item_ids.join(", ")
+                    ));
+                }
+            }
+        }
+        self.last_gate_close_compile_failure = failure.map(|tx| HumanGateCloseCompileFailure {
+            failure_reason: tx.failure_reason.clone(),
+            findings: tx.validator_findings.clone(),
+        });
+        message
+    }
+
+    fn latest_single_candidate_compile_failure(&self) -> Option<WorkItemPlanCompileTransaction> {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan {
+            return None;
+        }
+        self.work_item_plan_store()
+            .ok()?
+            .list_compile_transactions(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .ok()?
+            .into_iter()
+            .filter(|tx| tx.status == WorkItemPlanCompileStatus::Failed)
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+    }
+
+    /// web 层读取最近一次 gate close compile 失败的结构化 findings 上下文
+    /// （仅在同一 close 调用内失败时非空，避免陈旧 findings 误挂）。
+    pub(crate) fn last_human_gate_close_compile_failure_context(
+        &self,
+    ) -> Option<serde_json::Value> {
+        let failure = self.last_gate_close_compile_failure.as_ref()?;
+        Some(serde_json::json!({
+            "failure_reason": failure.failure_reason,
+            "findings": failure.findings,
+        }))
     }
 }

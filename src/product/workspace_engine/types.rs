@@ -523,6 +523,10 @@ pub struct WorkspaceEngine {
     /// 逻辑代码库 issue 注入真实 gateway。
     pub(crate) logical_provider_gateway:
         Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
+    /// F7 项 1：最近一次 close_human_gate 中 confirm 后 compile 失败的结构化
+    /// 详情（每次 close 入口清空，仅当次失败时非空）。
+    pub(crate) last_gate_close_compile_failure:
+        Option<super::conversational_gate::HumanGateCloseCompileFailure>,
 }
 
 #[derive(Debug, Clone)]
