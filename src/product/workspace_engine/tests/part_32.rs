@@ -342,5 +342,3 @@ fn routing_reference_context_returns_legacy_when_validate_fails() {
         RoutingReferenceContext::Legacy
     ));
 }
-
-

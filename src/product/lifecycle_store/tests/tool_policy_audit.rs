@@ -338,14 +338,15 @@ fn tool_policy_audit_concurrent_appends_and_allocations_are_serialized() {
 #[test]
 fn tool_policy_audit_role_run_seq_allocation_persists_immediately_and_is_not_reused() {
     // P1-6：seq 分配随 marker 持久化（provider_start 写失败/崩溃后不得复用），
-    // 且跨进程（新 store 实例同根）单调。
+    // 且重开 store 实例（同进程、同根）继续单调。🔴 单写者约束：这不是跨进程
+    // 保证——跨进程并发需部署层保证单写者，不在本测试范围。
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
     let store = super::LifecycleStore::new(paths.clone());
     assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 0);
     // 未写任何 provider_start（模拟写失败/崩溃）：再次分配不得复用 0。
     assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 1);
-    // 跨进程：新实例同根继续单调。
+    // 重开实例（同进程、同根）：进程内高水位继续单调；跨进程需部署层单写者。
     let reopened = super::LifecycleStore::new(paths);
     assert_eq!(reopened.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 2);
     // 兼容：无 marker 的既有分区按文件 max 推导。

@@ -840,6 +840,19 @@ async fn codex_policy_start_without_sink_fails_closed_before_handshake_events() 
     );
 }
 
+/// F1（最终审）：`decide_for_policy` 对 Unknown 形态必须直接 Decline——
+/// 函数级单测防未来重构把 Unknown 误并入 accept 分支（fail-closed 语义）。
+#[test]
+fn codex_decide_for_policy_declines_unknown_category_fail_closed() {
+    assert_eq!(
+        decide_for_policy(CodexApprovalCategory::Unknown {
+            method: "item/newForm/requestApproval".to_string(),
+        }),
+        CodexApprovalResponse::Decline,
+        "unknown approval category must be declined by decide_for_policy, never accepted"
+    );
+}
+
 // ---- F1（最终审）：codex resume 握手不得回退请求 id 冒充确认 ----
 
 /// F1 fixture：应答 initialize 与 thread/resume，但 thread/resume 应答不确认

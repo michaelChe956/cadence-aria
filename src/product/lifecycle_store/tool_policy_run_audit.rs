@@ -22,8 +22,10 @@ use crate::product::json_store::validate_relative_id;
 
 use super::LifecycleStore;
 
-/// 分区内互斥串行化（P1-5，先例 coding_attempt_store/role_run_event.rs）：包住
-/// 「seq 分配+读尾行+append」全临界区。契约⑥单写者假设，无需跨进程锁。
+/// 分区内互斥串行化（P1-5，先例 coding_attempt_store/role_run_event.rs）：
+/// **进程内** Mutex 包住「seq 分配+读尾行+append」全临界区。仅保证单进程内
+/// 串行；跨进程并发写同一分区需部署层保证单写者（本实现不提供跨进程锁，
+/// 见 `next_tool_policy_role_run_seq` 的单写者约束说明）。
 static TOOL_POLICY_AUDIT_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 /// seq 分配高水位 marker 文件名（追加式 JSONL；崩溃安全：读取取最后可解析行）。
@@ -162,8 +164,10 @@ impl LifecycleStore {
         workspace_session_id: &str,
     ) -> Result<u64, ToolPolicyAuditError> {
         // P1-5：与 append 同锁互斥。P1-6：分配即持久化——高水位 marker 追加式
-        // 落盘，provider_start 写失败/崩溃后 seq 不得被复用；跨进程依 marker
-        // 单调。既有无 marker 分区回退按文件 max 推导（兼容）。
+        // 落盘，provider_start 写失败/崩溃后 seq 不得被复用。🔴 单写者约束：
+        // 互斥与高水位均为**进程内**语义（进程内 Mutex+marker 高水位）；跨进程
+        // 并发分配依赖部署层保证同一 workspace 分区单写者，本实现不提供跨进程
+        // 锁，不宣称跨进程单调。既有无 marker 分区回退按文件 max 推导（兼容）。
         let _guard = lock_audit_log()?;
         let root = self.tool_policy_audit_workspace_root(workspace_session_id)?;
         let marker = root.join(ROLE_RUN_SEQ_MARKER);
