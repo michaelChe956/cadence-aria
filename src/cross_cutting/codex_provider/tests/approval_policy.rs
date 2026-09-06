@@ -935,10 +935,7 @@ async fn codex_policy_resume_response_missing_thread_id_fails_closed_and_kills_c
     sink.with_stored_provider_start(matching_resume_record("codex-thread-resume-policy"));
     let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
     input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
-    let Err(error) = provider
-        .start(input, CancellationToken::new())
-        .await
-    else {
+    let Err(error) = provider.start(input, CancellationToken::new()).await else {
         panic!("thread/resume response missing thread id must fail the policy handshake");
     };
     assert!(
@@ -969,10 +966,7 @@ async fn codex_policy_resume_response_mismatched_thread_id_fails_closed() {
     sink.with_stored_provider_start(matching_resume_record("codex-thread-resume-policy"));
     let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
     input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
-    let Err(error) = provider
-        .start(input, CancellationToken::new())
-        .await
-    else {
+    let Err(error) = provider.start(input, CancellationToken::new()).await else {
         panic!("thread/resume response with a mismatched thread id must fail the handshake");
     };
     assert!(

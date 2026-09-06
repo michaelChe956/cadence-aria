@@ -337,11 +337,8 @@ async fn claude_policy_blank_init_session_id_fails_handshake_and_kills_child() {
     for blank in ["", "   "] {
         let marker_dir = tempfile::tempdir().expect("marker dir");
         let marker = marker_dir.path().join("claude-blank-init-child.pid");
-        let provider = ClaudeCodeProvider::new(pid_registering_blank_init_fixture(
-            &marker,
-            blank,
-        ))
-        .with_version_supplier(policy_version_supplier());
+        let provider = ClaudeCodeProvider::new(pid_registering_blank_init_fixture(&marker, blank))
+            .with_version_supplier(policy_version_supplier());
         let sink = RecordingToolPolicyAuditSink::new();
         let Err(error) = provider
             .start(
