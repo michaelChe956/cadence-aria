@@ -529,6 +529,35 @@ fn builder_factory_applies_role_policy_matrix_per_entry() {
     }
 }
 
+/// F3 Task 4.1 零变化回归：Coder 与聚合初始化 provider turn 保持既有全工具
+/// 启动档（无 denylist、无沙箱改写）。沙箱参数经现有 Codex sandbox 参数解析器
+/// （`codex_launch_params` 单一来源）断言 `danger-full-access`；若 Coder 被误注入
+/// denylist 或沙箱被改写，本测试必须失败。
+#[test]
+fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
+    use crate::cross_cutting::codex_provider::session::codex_launch_params;
+
+    let coder = entry_input("coding_coder");
+    assert_eq!(coder.role, AdapterRole::Executor);
+    assert_eq!(coder.tool_policy, None);
+    assert_eq!(
+        codex_launch_params(&coder)["sandbox"],
+        "danger-full-access",
+        "Coder must keep the existing full-tool sandbox"
+    );
+
+    // 聚合初始化同 Executor 档：经 coordinator_provider_turn.inc.rs:57-77 真实
+    // 构造路径断言（同 Task 1.2 builder 全集断言），同样禁带策略、维持全工具档。
+    let aggregate = entry_input("aggregate_turn");
+    assert_eq!(aggregate.role, AdapterRole::Executor);
+    assert_eq!(aggregate.tool_policy, None);
+    assert_eq!(
+        codex_launch_params(&aggregate)["sandbox"],
+        "danger-full-access",
+        "aggregate initialization turn must keep the existing full-tool sandbox"
+    );
+}
+
 /// 断言 role 与 tool_policy 成对一致（D2：作者/评审必带 DenyFileWriteBuiltins，
 /// Executor/Coder/聚合初始化禁带）。
 fn assert_role_policy_pair(
