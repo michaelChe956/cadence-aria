@@ -211,4 +211,120 @@ mod tests {
             ));
         }
     }
+
+    /// F3 Task 4.1（restrict-role-write-tools，GC12）：kimi 四角色全决策表回归锁。
+    /// 既有 client services 决策完全不变——不因本 change 收紧也不放宽；
+    /// 表外角色（Handoff）维持整表 Deny。
+    #[test]
+    fn kimi_four_role_client_service_table_stays_unchanged() {
+        for (role, permission_mode, action, expected) in [
+            // Orchestrator：fs读/terminal 随权限档，fs写恒 Deny。
+            (
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsRead,
+                PolicyDecision::Allow,
+            ),
+            (
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                ClientAction::Terminal,
+                PolicyDecision::Allow,
+            ),
+            (
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsWrite,
+                PolicyDecision::Deny("planning role is not permitted to write files"),
+            ),
+            (
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Supervised,
+                ClientAction::FsRead,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Supervised,
+                ClientAction::Terminal,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Supervised,
+                ClientAction::FsWrite,
+                PolicyDecision::Deny("planning role is not permitted to write files"),
+            ),
+            // WorkItemSplitter：无宿主执行，整表 Deny。
+            (
+                AdapterRole::WorkItemSplitter,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsRead,
+                PolicyDecision::Deny("role is not permitted to use kimi client services"),
+            ),
+            (
+                AdapterRole::WorkItemSplitter,
+                ProviderPermissionMode::Supervised,
+                ClientAction::Terminal,
+                PolicyDecision::Deny("role is not permitted to use kimi client services"),
+            ),
+            (
+                AdapterRole::WorkItemSplitter,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsWrite,
+                PolicyDecision::Deny("role is not permitted to use kimi client services"),
+            ),
+            // Reviewer：terminal/fs写恒 Deny（不分权限档），fs读随权限档。
+            (
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsRead,
+                PolicyDecision::Allow,
+            ),
+            (
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Auto,
+                ClientAction::Terminal,
+                PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes"),
+            ),
+            (
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsWrite,
+                PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes"),
+            ),
+            (
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Supervised,
+                ClientAction::FsWrite,
+                PolicyDecision::Deny("reviewer role is read-only for terminal and fs writes"),
+            ),
+            // Executor（Coder 档）：三动作均随权限档（Auto=Allow/Supervised=审批）。
+            (
+                AdapterRole::Executor,
+                ProviderPermissionMode::Auto,
+                ClientAction::Terminal,
+                PolicyDecision::Allow,
+            ),
+            (
+                AdapterRole::Executor,
+                ProviderPermissionMode::Auto,
+                ClientAction::FsWrite,
+                PolicyDecision::Allow,
+            ),
+            (
+                AdapterRole::Executor,
+                ProviderPermissionMode::Supervised,
+                ClientAction::FsWrite,
+                PolicyDecision::RequireApproval,
+            ),
+        ] {
+            let policy = ClientServicePolicy::new(role.clone(), permission_mode.clone());
+            assert_eq!(
+                policy.evaluate(action),
+                expected,
+                "{role:?} x {permission_mode:?} x {action:?}"
+            );
+        }
+    }
 }
