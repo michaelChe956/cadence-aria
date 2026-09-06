@@ -334,6 +334,9 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
         }
         Ok(HumanGateCloseOutcome::Confirmed) => None,
         Ok(HumanGateCloseOutcome::Abandoned) => None,
+        // F7 项 2：先到者已关门，迟到 confirm 幂等 no-op；可见提示事件由 engine
+        // 发出（HUMAN_GATE_ALREADY_CLOSED），此处不重复发送。
+        Ok(HumanGateCloseOutcome::AlreadyClosed { .. }) => None,
         Err(message) => {
             // F7 项 1（历史观察项族 12）：confirm 后 compile 失败的 validator
             // findings 经 ProtocolError.context 上抛给 WS 客户端；其余错误维持

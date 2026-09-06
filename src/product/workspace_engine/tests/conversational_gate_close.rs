@@ -474,3 +474,156 @@ async fn conversational_gate_approve_success_leaves_no_compile_failure_context()
         "successful approval must not surface stale compile failure findings"
     );
 }
+
+// —— F7 项 2（地雷 2，F3 run1d）：gate close 竞态幂等化（先到者赢、后到者幂等友好） ——
+
+/// 模拟另一个 worker 赢得关门竞态后的 durable 状态漂移；engine 内存会话保持
+/// 陈旧（HumanConfirm/WaitingForHuman），复刻迟到者视角。
+fn drift_gate_session(
+    lifecycle: &LifecycleStore,
+    engine: &WorkspaceEngine,
+    mutate: impl FnOnce(&mut WorkspaceSessionRecord),
+) -> WorkspaceSessionRecord {
+    let mut record = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("gate session");
+    mutate(&mut record);
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_lifecycle_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist drifted gate session");
+    record
+}
+
+#[tokio::test]
+async fn late_confirm_after_durable_confirmed_is_idempotent_already_closed() {
+    let (_root, lifecycle, mut engine, mut event_rx) =
+        super::conversational_gate::gate_fixture_with_event_rx(1);
+    let drifted = drift_gate_session(&lifecycle, &engine, |record| {
+        record.status = WorkspaceSessionStatus::Confirmed;
+        record.single_candidate_phase = Some(SingleCandidatePhase::Completed);
+        record.human_gate_snapshot = None;
+    });
+
+    let outcome = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(HumanGateCloseOutcome::AlreadyClosed {
+            status: WorkspaceSessionStatus::Confirmed
+        }),
+        "late confirm after the winner closed must be an idempotent no-op"
+    );
+    // durable 零改写；会话不 abort
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(engine.session().session_id.as_str())
+            .expect("durable session"),
+        drifted
+    );
+    // 事件：无第二个 HumanGateClosed；恰好一条幂等提示
+    let mut already_closed_notices = 0;
+    let mut closed_events = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            EngineEvent::HumanGateClosed { .. } => closed_events += 1,
+            EngineEvent::ProtocolError { code, .. } if code == "HUMAN_GATE_ALREADY_CLOSED" => {
+                already_closed_notices += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(closed_events, 0, "idempotent no-op must not close again");
+    assert_eq!(already_closed_notices, 1, "visible notice event required");
+    // in-memory 会话状态同步到 durable
+    assert_eq!(
+        engine.session().session_status,
+        WorkspaceSessionStatus::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn late_confirm_after_durable_running_is_idempotent_already_closed() {
+    let (_root, lifecycle, mut engine, _event_rx) =
+        super::conversational_gate::gate_fixture_with_event_rx(1);
+    let drifted = drift_gate_session(&lifecycle, &engine, |record| {
+        record.status = WorkspaceSessionStatus::Running;
+    });
+    let outcome = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(HumanGateCloseOutcome::AlreadyClosed {
+            status: WorkspaceSessionStatus::Running
+        })
+    );
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(engine.session().session_id.as_str())
+            .expect("durable session"),
+        drifted
+    );
+}
+
+#[tokio::test]
+async fn late_confirm_after_terminate_gets_explicit_terminated_error() {
+    let (_root, lifecycle, mut engine, mut event_rx) =
+        super::conversational_gate::gate_fixture_with_event_rx(1);
+    let drifted = drift_gate_session(&lifecycle, &engine, |record| {
+        record.status = WorkspaceSessionStatus::Terminated;
+    });
+    let error = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .await
+        .expect_err("late confirm on a terminated gate must be an explicit error");
+    assert!(error.contains("already terminated"), "{error}");
+    assert!(!error.contains("conflict"), "{error}");
+    assert_eq!(
+        lifecycle
+            .get_workspace_session(engine.session().session_id.as_str())
+            .expect("durable session"),
+        drifted
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "terminated translation must not emit gate events"
+    );
+}
+
+#[tokio::test]
+async fn late_terminate_after_terminate_gets_explicit_terminated_error() {
+    let (_root, _lifecycle, mut engine, _event_rx) =
+        super::conversational_gate::gate_fixture_with_event_rx(1);
+    drift_gate_session(&_lifecycle, &engine, |record| {
+        record.status = WorkspaceSessionStatus::Terminated;
+    });
+    let error = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+        .await
+        .expect_err("late terminate must be an explicit terminated error");
+    assert!(error.contains("already terminated"), "{error}");
+    assert!(!error.contains("conflict"), "{error}");
+}
+
+#[tokio::test]
+async fn late_confirm_with_waiting_phase_drift_keeps_conflict() {
+    // 真冲突（状态漂移而非先到者关门）：durable 仍 WaitingForHuman 但 phase 不在
+    // Approval（如 Evaluate 门），compare_and_save 前置 Conflict 必须原样保持。
+    let (_root, _lifecycle, mut engine) = super::conversational_gate::gate_fixture(1);
+    drift_gate_session(&_lifecycle, &engine, |record| {
+        record.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
+    });
+    let error = engine
+        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .await
+        .expect_err("phase drift outside Approval must stay a conflict");
+    assert!(error.contains("product_store_conflict"), "{error}");
+    assert!(error.contains("human_gate_close"), "{error}");
+}

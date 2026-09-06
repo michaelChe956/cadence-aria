@@ -2,6 +2,8 @@ use chrono::Utc;
 
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::PlanAmendmentContext;
+use crate::product::json_store::ProductStoreError;
+use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
     WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemSplitFinding,
@@ -50,7 +52,14 @@ pub(crate) enum HumanGateCommandOutcome {
 pub(crate) enum HumanGateCloseOutcome {
     Confirmed,
     Abandoned,
-    Busy { turn_id: String },
+    Busy {
+        turn_id: String,
+    },
+    /// 地雷 2（F3 run1d 实证）：另一 worker 已先行关门（durable Running/Confirmed），
+    /// 迟到 confirm 的幂等 no-op 结果——不 abort 会话，可见提示事件由 engine 发出。
+    AlreadyClosed {
+        status: WorkspaceSessionStatus,
+    },
 }
 
 /// confirm 后 compile 失败的结构化详情：engine 层 Err 文本与 web 层
@@ -791,7 +800,19 @@ impl super::WorkspaceEngine {
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| error.to_string())?;
         if expected.status != WorkspaceSessionStatus::WaitingForHuman {
-            return Err("human gate close requires a waiting_for_human session".to_string());
+            // 地雷 2（先到者赢）：durable 已非 WaitingForHuman 说明另一 worker 已
+            // 关门/推进；迟到 Confirm/Terminate 重读 durable 翻译（幂等 AlreadyClosed
+            // /明确已终止错误），不再把迟到者当噪音 Err 上抛（曾致 session aborted）。
+            if matches!(decision, HumanConfirmDecision::RequestChange) {
+                return Err("human gate close requires a waiting_for_human session".to_string());
+            }
+            return self
+                .translate_lost_human_gate_close_race(
+                    &lifecycle,
+                    decision,
+                    "human gate close requires a waiting_for_human session".to_string(),
+                )
+                .await;
         }
         if let Some(turn) = lifecycle
             .list_human_gate_turns(&self.session.session_id)
@@ -806,12 +827,17 @@ impl super::WorkspaceEngine {
 
         match decision {
             HumanConfirmDecision::Confirm => {
-                let saved = lifecycle
-                    .compare_and_save_human_gate_close(
-                        &expected,
-                        WorkspaceSessionStatus::Running,
-                    )
-                    .map_err(|error| error.to_string())?;
+                let saved = match lifecycle.compare_and_save_human_gate_close(
+                    &expected,
+                    WorkspaceSessionStatus::Running,
+                ) {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        return self
+                            .translate_human_gate_close_cas_error(&lifecycle, decision, error)
+                            .await;
+                    }
+                };
                 self.session.session_status = saved.status;
                 self.session.human_gate_snapshot = saved.human_gate_snapshot;
                 self.enter_policy_valid_work_item_plan_compile().await;
@@ -838,12 +864,17 @@ impl super::WorkspaceEngine {
                 Ok(HumanGateCloseOutcome::Confirmed)
             }
             HumanConfirmDecision::Terminate => {
-                let saved = lifecycle
-                    .compare_and_save_human_gate_close(
-                        &expected,
-                        WorkspaceSessionStatus::Terminated,
-                    )
-                    .map_err(|error| error.to_string())?;
+                let saved = match lifecycle.compare_and_save_human_gate_close(
+                    &expected,
+                    WorkspaceSessionStatus::Terminated,
+                ) {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        return self
+                            .translate_human_gate_close_cas_error(&lifecycle, decision, error)
+                            .await;
+                    }
+                };
                 self.session.session_status = saved.status;
                 self.session.human_gate_snapshot = saved.human_gate_snapshot;
                 let terminal_stage = super::WorkspaceStage::Completed;
@@ -874,6 +905,78 @@ impl super::WorkspaceEngine {
                 "single-candidate human gate does not support request-change; submit feedback through HumanGateFeedback"
                     .to_string(),
             ),
+        }
+    }
+
+    /// close CAS 错误的 engine 层翻译（地雷 2）：store 的 expected 快照单飞
+    /// 原子性一字不动；仅在 Conflict 时重读 durable 把迟到者翻译成幂等结果/明确
+    /// 错误，其余错误与非幂等真冲突维持既有上抛。
+    async fn translate_human_gate_close_cas_error(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        decision: HumanConfirmDecision,
+        error: ProductStoreError,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        let fallback = error.to_string();
+        if !matches!(error, ProductStoreError::Conflict { .. }) {
+            return Err(fallback);
+        }
+        self.translate_lost_human_gate_close_race(lifecycle, decision, fallback)
+            .await
+    }
+
+    /// 迟到 close 命令的 durable 重读翻译：先到者赢、后到者幂等友好。
+    /// - durable 已 Terminated → 明确「gate 已终止」错误（非 conflict 噪音）
+    /// - durable 已 Running/Confirmed 且本命令为 confirm 方向 → 幂等
+    ///   AlreadyClosed（no-op + 可见提示事件，不 abort 会话）
+    /// - 其余（含 Evaluate 等阶段漂移真冲突）→ 维持既有 conflict 上抛
+    async fn translate_lost_human_gate_close_race(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        decision: HumanConfirmDecision,
+        fallback: String,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        let durable = match lifecycle.get_workspace_session(&self.session.session_id) {
+            Ok(durable) => durable,
+            Err(_) => return Err(fallback),
+        };
+        let direction = match decision {
+            HumanConfirmDecision::Confirm => "confirm",
+            HumanConfirmDecision::Terminate => "terminate",
+            HumanConfirmDecision::RequestChange => "request-change",
+        };
+        match (&durable.status, decision) {
+            (WorkspaceSessionStatus::Terminated, _) => Err(format!(
+                "single-candidate human gate already terminated; late {direction} is rejected (session {})",
+                self.session.session_id
+            )),
+            (
+                status @ (WorkspaceSessionStatus::Running | WorkspaceSessionStatus::Confirmed),
+                HumanConfirmDecision::Confirm,
+            ) => {
+                // 先到者已赢：迟到 confirm 是幂等 no-op。同步 in-memory 会话状态并
+                // 发一条可见提示事件；不产生第二个 HumanGateClosed，也不 abort。
+                self.session.session_status = status.clone();
+                self.session.single_candidate_phase = durable.single_candidate_phase.clone();
+                self.session.human_gate_snapshot = durable.human_gate_snapshot.clone();
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::ProtocolError {
+                        code: "HUMAN_GATE_ALREADY_CLOSED".to_string(),
+                        message: "single-candidate human gate already closed by an earlier confirm; this late confirm is an idempotent no-op"
+                            .to_string(),
+                        context: Some(serde_json::json!({
+                            "session_id": self.session.session_id,
+                            "decision": "confirm",
+                            "durable_status": serde_json::to_value(status).unwrap_or_default(),
+                        })),
+                    })
+                    .await;
+                Ok(HumanGateCloseOutcome::AlreadyClosed {
+                    status: status.clone(),
+                })
+            }
+            _ => Err(fallback),
         }
     }
 
