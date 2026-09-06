@@ -9,6 +9,10 @@ struct PolicySinkQueuedProvider {
     starts: Arc<AtomicUsize>,
     sink_seen: Arc<Mutex<Vec<bool>>>,
     policy_seen: Arc<Mutex<Vec<bool>>>,
+    /// Task 4.1：捕获 engine 实际注入的 run-bound sink（审计通道分离回归用）。
+    captured_sinks: Arc<
+        Mutex<Vec<Option<Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>>>,
+    >,
 }
 
 impl PolicySinkQueuedProvider {
@@ -18,6 +22,7 @@ impl PolicySinkQueuedProvider {
             starts: Arc::new(AtomicUsize::new(0)),
             sink_seen: Arc::new(Mutex::new(Vec::new())),
             policy_seen: Arc::new(Mutex::new(Vec::new())),
+            captured_sinks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -38,6 +43,10 @@ impl StreamingProviderAdapter for PolicySinkQueuedProvider {
             .lock()
             .unwrap()
             .push(input.audit_sink.is_some());
+        self.captured_sinks
+            .lock()
+            .unwrap()
+            .push(input.audit_sink.clone());
         let template = self
             .outputs
             .lock()
@@ -182,4 +191,157 @@ async fn workspace_revision_policy_run_receives_durable_audit_sink() {
         probe.sink_seen.lock().unwrap().iter().all(|seen| *seen),
         "revision policy inputs must carry the run-bound durable audit sink"
     );
+}
+
+// ---- F3 Task 4.1（REQ-ENV-09/GC10）：workspace 侧审计通道严格分离回归 ----
+
+/// 策略角色的 canonical 事件只落 `tool-policy-run-audit/` 分区；非策略
+/// （Executor/Coder 档）input 幂等跳过 sink 接线，不产生任何 durable 策略
+/// 记录；分区之外的既有 lifecycle/execution 产物不含 tool-policy 事件。
+#[tokio::test]
+async fn workspace_policy_and_non_policy_audit_channels_stay_separated() {
+    use crate::cross_cutting::tool_policy_audit::{
+        DurableToolPolicyEvent, ProviderStartAudit,
+    };
+
+    let (root, mut engine) = persistent_policy_engine("sess_audit_isolation").await;
+    engine.start_review().await;
+
+    let pass_json = r#"{
+        "verdict": "pass",
+        "summary": "通过",
+        "findings": []
+    }"#;
+    let probe = Arc::new(PolicySinkQueuedProvider::new(vec![
+        missing_json_nonce_output(pass_json),
+        valid_structured_output(pass_json),
+    ]));
+    engine
+        .drive_review_session(probe.clone(), empty_provider_commands())
+        .await;
+    assert!(
+        probe.starts.load(Ordering::SeqCst) >= 1,
+        "review drive must start the policy provider"
+    );
+    let sinks = probe.captured_sinks.lock().unwrap().clone();
+    assert!(
+        sinks.iter().all(|sink| sink.is_some()),
+        "policy review starts must carry the engine-attached durable sink"
+    );
+
+    // 经 engine 注入的 run-bound sink 写 canonical 事件（adapter 语义：首行
+    // provider_start，随后其余三类），验证只落 durable 分区。
+    let sink = sinks
+        .into_iter()
+        .find_map(|sink| sink)
+        .expect("captured durable sink");
+    sink.append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
+        provider: "codex".to_string(),
+        role: "reviewer".to_string(),
+        workspace_session_id: "sess_audit_isolation".to_string(),
+        provider_session_id: "thread-isolation-1".to_string(),
+        tool_policy_canonical_digest: "digest-isolation".to_string(),
+        argv: Vec::new(),
+        sandbox: Some("read-only".to_string()),
+        approval_policy: Some("on-request".to_string()),
+        provider_version: "codex 0.153.4".to_string(),
+        adapter_dialect: "codex-app-server-rpc".to_string(),
+    }))
+    .expect("provider_start append via engine sink");
+    sink.append_bound(DurableToolPolicyEvent::SessionTerminated(
+        crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
+            reason_code: "completed".to_string(),
+        },
+    ))
+    .expect("session_terminated append via engine sink");
+
+    let aria_root = root.path().join(".aria");
+    let partition_dir = aria_root.join("tool-policy-run-audit");
+    let partition_file =
+        partition_dir.join("sess_audit_isolation").join("0.jsonl");
+    let content = std::fs::read_to_string(&partition_file)
+        .unwrap_or_else(|error| panic!("partition file {}: {error}", partition_file.display()));
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("partition jsonl line"))
+        .collect();
+    assert_eq!(lines[0]["event_type"], "provider_start");
+    assert_eq!(
+        lines[0]["workspace_session_id"], "sess_audit_isolation",
+        "LifecycleStore must stamp the file-key workspace id"
+    );
+    assert_eq!(lines[1]["event_type"], "session_terminated");
+    for line in &lines {
+        assert!(
+            matches!(
+                line["event_type"].as_str(),
+                Some(
+                    "provider_start"
+                        | "approval_decision"
+                        | "protocol_warning"
+                        | "session_terminated"
+                )
+            ),
+            "tool-policy partition must carry only canonical events: {line}"
+        );
+    }
+
+    // 非策略（Executor 档）input：幂等跳过 sink 接线，不产生任何策略通道记录。
+    let executor_input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        tool_policy: None,
+        audit_sink: None,
+        provider_type: crate::protocol::contracts::ProviderType::Codex,
+        role: crate::protocol::contracts::AdapterRole::Executor,
+        prompt: "executor non-policy".to_string(),
+        working_dir: std::env::temp_dir(),
+        workspace_session_id: Some("sess_audit_isolation".to_string()),
+        resume_provider_session_id: None,
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: Default::default(),
+        timeout_secs: 30,
+    };
+    let untouched = engine.attach_tool_policy_audit(executor_input);
+    assert_eq!(untouched.tool_policy, None);
+    assert!(
+        untouched.audit_sink.is_none(),
+        "non-policy executor input must never receive a tool-policy audit sink"
+    );
+
+    // 全 .aria 树（排除 tool-policy 分区自身）不含任何 tool-policy 事件标记。
+    fn collect_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files_recursive(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut all_files = Vec::new();
+    collect_files_recursive(&aria_root, &mut all_files);
+    assert!(!all_files.is_empty());
+    for file in &all_files {
+        if file.starts_with(&partition_dir) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(file) {
+            for marker in [
+                "\"tool_policy_canonical_digest\"",
+                "\"event_type\":\"approval_decision\"",
+                "\"event_type\":\"protocol_warning\"",
+                "\"event_type\":\"session_terminated\"",
+            ] {
+                assert!(
+                    !content.contains(marker),
+                    "non-policy lifecycle artifacts must not carry tool-policy events: {} has {marker}",
+                    file.display()
+                );
+            }
+        }
+    }
 }

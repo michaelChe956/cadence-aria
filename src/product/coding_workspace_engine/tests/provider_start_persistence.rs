@@ -908,3 +908,239 @@ async fn coding_policy_review_input_carries_run_bound_durable_audit_sink() {
     );
     assert!(result.is_ok(), "review flow must not regress: {result:?}");
 }
+
+// ---- F3 Task 4.1（REQ-ENV-09/GC10）：审计通道严格分离回归 ----
+
+/// 递归收集目录下全部文件路径。
+fn collect_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// Coder（非策略）run 的执行审计只落既有 role-run-events（execution_event_audit
+/// 通道）；策略 reviewer run（真实 CodexProvider + wire fixture）的四类 canonical
+/// 事件只落 `tool-policy-run-audit/` 分区。两通道无交叉记录。
+#[tokio::test]
+async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
+    use crate::cross_cutting::codex_provider::CodexProvider;
+    use crate::cross_cutting::streaming_provider::ProviderVersionSupplier;
+
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let aria_root = root.path().join(".aria");
+    let tool_policy_partition = aria_root.join("tool-policy-run-audit");
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let event_drain = tokio::spawn(async move {
+        while event_rx.recv().await.is_some() {}
+    });
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+
+    // —— Coder（非策略）run：完整 provider 调用，execution 审计照常落盘 ——
+    let coder_role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("audit_isolation_coder".to_string()),
+        )
+        .expect("coder role run");
+    let provider = CompletedInvocationProvider;
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "audit_isolation_coder",
+            role_run: Some(&coder_role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+            validated_input: None,
+        })
+        .await;
+    assert!(
+        matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "coder run must complete: {outcome:?}"
+    );
+    assert_role_run_raw_output(&store, &attempt, &coder_role_run, "completed invocation evidence");
+    // Coder run 不得产生任何 tool-policy durable 记录（分区目录不存在）。
+    assert!(
+        !tool_policy_partition.exists(),
+        "non-policy coder runs must never create the tool-policy-run-audit partition"
+    );
+
+    // —— 策略 reviewer run：真实 CodexProvider（wire fixture）走 engine 接线 ——
+    let reviewer_role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("audit_isolation_policy_reviewer".to_string()),
+        )
+        .expect("reviewer role run");
+    let fixture = {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions)
+                .unwrap_or_else(|error| panic!("chmod fixture: {error}"));
+        }
+        path
+    };
+    let supplier: ProviderVersionSupplier =
+        std::sync::Arc::new(|| Ok("codex 0.124.0-isolation-fixture".to_string()));
+    let policy_provider = CodexProvider::new(fixture).with_version_supplier(supplier);
+    let worktree = attempt.worktree_path.clone().expect("worktree path");
+    let policy_input = StreamingProviderInput {
+        tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+        audit_sink: None,
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Reviewer,
+        prompt: "audit isolation policy prompt".to_string(),
+        working_dir: worktree,
+        workspace_session_id: Some("ws-coding-audit-isolation".to_string()),
+        resume_provider_session_id: None,
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: BTreeMap::new(),
+        timeout_secs: 60,
+    };
+    let policy_legacy_input = AdapterInput {
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Reviewer,
+        worktree_path: policy_input.working_dir.clone().to_str().map(str::to_string),
+        provider_stream_log_dir: None,
+        prompt: policy_input.prompt.clone(),
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_markdown".to_string(),
+        timeout: 60,
+        max_retries: 0,
+    };
+    let (_policy_command_tx, mut policy_command_rx) = mpsc::channel(1);
+    let policy_outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "audit_isolation_policy_reviewer",
+            role_run: Some(&reviewer_role_run),
+            provider: &policy_provider,
+            legacy_input: &policy_legacy_input,
+            input: policy_input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::CodeReviewer,
+            command_rx: &mut policy_command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+            validated_input: None,
+        })
+        .await;
+    assert!(
+        matches!(policy_outcome, ProviderInvocationOutcome::Completed(ref outcome)
+            if outcome.full_output == "policy approvals done"),
+        "policy reviewer run must complete via the wire fixture: {policy_outcome:?}"
+    );
+
+    // 策略通道：分区文件存在，首行 provider_start，含 approval_decision。
+    // （`role-run-seq.jsonl` 是 seq 分配高水位 marker，不是事件文件，排除。）
+    let partition_dir = tool_policy_partition.join("ws-coding-audit-isolation");
+    let mut partition_files = Vec::new();
+    collect_files_recursive(&partition_dir, &mut partition_files);
+    let run_files: Vec<_> = partition_files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name != "role-run-seq.jsonl")
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        run_files.len(),
+        1,
+        "policy run must land in exactly one durable partition run file: {run_files:?}"
+    );
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&run_files[0])
+        .expect("partition file")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("partition jsonl line"))
+        .collect();
+    assert_eq!(
+        lines[0]["event_type"], "provider_start",
+        "provider_start must be the first durable event"
+    );
+    assert_eq!(lines[0]["provider"], "codex");
+    assert!(lines[0]["provider_session_id"] == "codex-thread-policy");
+    let event_types: Vec<&str> = lines
+        .iter()
+        .map(|line| line["event_type"].as_str().expect("event_type"))
+        .collect();
+    assert!(
+        event_types.iter().any(|kind| *kind == "approval_decision"),
+        "wire fixture approvals must persist as approval_decision: {event_types:?}"
+    );
+    for kind in &event_types {
+        assert!(
+            matches!(
+                *kind,
+                "provider_start" | "approval_decision" | "protocol_warning" | "session_terminated"
+            ),
+            "tool-policy partition must contain only canonical events, saw `{kind}`"
+        );
+    }
+
+    // 执行通道：role-run-events（execution_event_audit）不含任何 tool-policy
+    // durable canonical 事件（策略事件不串入执行审计）。注意执行通道有既有的
+    // 生命周期事件 `"event_type":"provider_start"`（CodingRoleRunEventType），与
+    // durable 分区同名不同载体；用 tool-policy DTO 独有键与专属事件类型作标记。
+    let events_root = store.role_run_events_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+    let mut execution_files = Vec::new();
+    collect_files_recursive(&events_root, &mut execution_files);
+    assert!(
+        !execution_files.is_empty(),
+        "coder run must keep producing execution_event_audit records"
+    );
+    for file in &execution_files {
+        if let Ok(content) = std::fs::read_to_string(file) {
+            for marker in [
+                "\"tool_policy_canonical_digest\"",
+                "\"event_type\":\"approval_decision\"",
+                "\"event_type\":\"protocol_warning\"",
+                "\"event_type\":\"session_terminated\"",
+            ] {
+                assert!(
+                    !content.contains(marker),
+                    "execution audit channel must not carry tool-policy events: {} contains {marker}",
+                    file.display()
+                );
+            }
+        }
+    }
+    drop(engine);
+    event_drain.await.expect("event drain");
+}
