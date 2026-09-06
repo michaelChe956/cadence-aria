@@ -2,8 +2,6 @@
 // 服务器成功出站 = 连接健康：静默客户端（auto 流 driver 只收不发）在
 // current_run=None 窗口不得被误掐；服务器也静默后才按既有语义回收。
 use super::*;
-
-use super::*;
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::task::{Context, Poll};
