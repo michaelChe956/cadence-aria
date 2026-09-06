@@ -16,7 +16,9 @@ use crate::cross_cutting::structured_output::{StructuredOutputContract, Structur
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::CodexProvider;
+use super::is_turn_completed;
 use super::parse_codex_usage;
+use super::parse_failure;
 use super::session::codex_launch_params;
 
 mod approval_policy;
@@ -1075,6 +1077,61 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
     assert!(
         saw_protocol_error,
         "expected request_user_input_unresolved protocol error when JSON-RPC response write fails"
+    );
+}
+
+// 组 2：turn/completed 状态门控的显式断言（既有 completed/缺省轮不受 429 修复影响）。
+#[test]
+fn codex_turn_completed_status_gate_keeps_completed_and_default_turns_as_completed() {
+    // status="completed"（新协议实测形态）仍是完成轮。
+    let completed = json!({
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turn": { "id": "turn-1", "items": [], "status": "completed" }
+        }
+    });
+    assert!(is_turn_completed(&completed));
+    assert!(parse_failure(&completed).is_none());
+
+    // 缺省 status（既有 resume/sandbox/persistent_thread fixtures 形态）仍是完成轮。
+    let no_status = json!({
+        "method": "turn/completed",
+        "params": { "threadId": "thread-1", "turnId": "turn-1" }
+    });
+    assert!(is_turn_completed(&no_status));
+    assert!(parse_failure(&no_status).is_none());
+
+    // legacy codex/event 的 turn_completed 不受影响。
+    let legacy = json!({
+        "method": "codex/event",
+        "params": { "msg": { "type": "turn_completed" } }
+    });
+    assert!(is_turn_completed(&legacy));
+
+    // status:"failed" 不再命中完成分支，改走失败解析且文案原样透传。
+    let failed = json!({
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turn": {
+                "id": "turn-1",
+                "items": [],
+                "status": "failed",
+                "error": {
+                    "message": "exceeded retry limit, last status: 429 Too Many Requests",
+                    "codexErrorInfo": {
+                        "responseTooManyFailedAttempts": { "httpStatusCode": 429 }
+                    }
+                }
+            }
+        }
+    });
+    assert!(!is_turn_completed(&failed));
+    let failure = parse_failure(&failed).expect("failed turn should parse as failure");
+    assert_eq!(
+        failure, "exceeded retry limit, last status: 429 Too Many Requests",
+        "failure message must be passed through verbatim"
     );
 }
 

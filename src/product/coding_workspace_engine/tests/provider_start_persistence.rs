@@ -26,6 +26,36 @@ use crate::product::coding_models::CodingChoiceGateStatus;
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use tokio::sync::Notify;
 
+// 组 3：429 失败轮经引擎分类为 attempt 级可重试（upstream 429/5xx 类）。
+// 错误取组 1 透传形态：adapter 以 parse_error 原样携带上游 429 文案（
+// "exceeded retry limit, last status: 429 Too Many Requests"，spike T2-resume-writes）。
+#[test]
+fn provider_retry_classifier_maps_turn_failed_429_to_retryable_upstream() {
+    let error = CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError::parse_error(
+        "exceeded retry limit, last status: 429 Too Many Requests",
+        "",
+        "",
+    ));
+    let classification = classify_provider_failure(&error);
+    assert!(
+        classification.is_retryable(),
+        "429 turn failure must be attempt-level retryable: {classification:?}"
+    );
+    match classification {
+        crate::product::coding_workspace_engine::provider_retry::ProviderFailureClassification::Retryable {
+            failure,
+            ..
+        } => assert!(
+            matches!(
+                failure,
+                crate::product::coding_workspace_engine::provider_retry::RetryableProviderFailure::Upstream5xx { status: 429 }
+            ),
+            "expected upstream 429 classification, got {failure:?}"
+        ),
+        other => panic!("expected retryable classification, got {other:?}"),
+    }
+}
+
 #[derive(Default)]
 struct ProviderStartProbe {
     cancelled: AtomicBool,

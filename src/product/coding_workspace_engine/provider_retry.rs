@@ -1084,7 +1084,9 @@ fn upstream_status(message: &str) -> Option<u16> {
 
     tokens.iter().enumerate().find_map(|(index, token)| {
         let status = token.parse::<u16>().ok()?;
-        if !matches!(status, 503 | 504) {
+        // 429 为瞬态限流，与 503/504 一并归入可重试 upstream 类（F1 Ruling：
+        // reason_code 沿用 provider_upstream_5xx 属兼容命名，不改名）。
+        if !matches!(status, 429 | 503 | 504) {
             return None;
         }
         let context = &tokens[index.saturating_sub(5)..index];
