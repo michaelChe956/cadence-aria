@@ -292,7 +292,7 @@ impl StreamingProviderAdapter for CodexProvider {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 return Err(ProviderAdapterError::parse_error(
-                    "codex policy session: thread/start response missing thread id",
+                    "codex policy session: thread/start response missing or blank thread id",
                     String::new(),
                     String::new(),
                 ));

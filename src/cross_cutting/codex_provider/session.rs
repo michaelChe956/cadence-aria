@@ -209,12 +209,27 @@ where
 /// codex 的 adapter dialect 常量（GC9 冻结：`codex-app-server-rpc`）。
 pub const CODEX_POLICY_DIALECT: &str = "codex-app-server-rpc";
 
-/// 会话握手结果：resume 原生 thread id 语义 + 协商出的 thread id（协议未返回
-/// id 时为 `None`，与非策略历史行为一致；策略路径要求必得 id，否则 fail-closed）。
+/// 会话握手结果：resume 原生 thread id 语义 + 协商出的 thread id。fresh
+/// `thread/start` 协议未返回非空 id 时为 `None`（与非策略历史行为一致；策略路径
+/// 要求必得 id，否则 fail-closed）；resume 则必须由 `thread/resume` 应答确认
+/// 与请求一致的 id，否则握手直接失败（F1 最终审：不得田请求 id 冒充确认）。
 #[derive(Debug, Clone)]
 pub(crate) struct CodexSessionHandshake {
     pub(crate) resume_session_id: Option<String>,
     pub(crate) thread_id: Option<String>,
+}
+
+/// 握手应答中的原生 thread id（F1 最终审）：仅当应答明确返回非空字符串 id
+/// （`/thread/id` 或 `/id`）时为 `Some`；缺失/全空白/类型错误（非字符串）均为
+/// `None`——请求方携带的旧 id 不得回退冒充应答确认。
+fn response_thread_id(response: &Value) -> Option<String> {
+    response
+        .pointer("/thread/id")
+        .or_else(|| response.pointer("/id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
 }
 
 /// codex 会话握手：`initialize`/`initialized` + `thread/resume`|`thread/start`，
@@ -272,12 +287,18 @@ where
                 CODEX_RPC_REQUEST_TIMEOUT,
             )
             .await?;
-        resume_response
-            .pointer("/thread/id")
-            .or_else(|| resume_response.pointer("/id"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .or_else(|| Some(session_id.to_string()))
+        // F1（最终审）：resume 的原生 thread id 只能来自 provider 应答本身——
+        // 缺失/全空白/类型错误，或与请求 id 不一致，均为握手失败（调用侧沿
+        // kill 链同步终止子进程）；不得回退请求中的旧 session id 冒充确认。
+        match response_thread_id(&resume_response) {
+            Some(id) if id == session_id => Some(id),
+            _ => {
+                return Err(provider_error(format!(
+                    "codex thread/resume response did not confirm the requested thread id \
+                     {session_id} (missing, blank, non-string, or mismatched thread id)"
+                )));
+            }
+        }
     } else {
         let thread_response = peer
             .request_with_timeout(
@@ -289,11 +310,9 @@ where
                 CODEX_RPC_REQUEST_TIMEOUT,
             )
             .await?;
-        thread_response
-            .pointer("/thread/id")
-            .or_else(|| thread_response.pointer("/id"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
+        // fresh：仅当应答明确返回非空合法 id 时为 Some；策略路径的必得 id 由
+        // `CodexProvider::start` 兜底 fail-closed（非策略历史行为保持 None）。
+        response_thread_id(&thread_response)
     };
     Ok(CodexSessionHandshake {
         resume_session_id,

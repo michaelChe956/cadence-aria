@@ -840,6 +840,209 @@ async fn codex_policy_start_without_sink_fails_closed_before_handshake_events() 
     );
 }
 
+// ---- F1（最终审）：codex resume 握手不得回退请求 id 冒充确认 ----
+
+/// F1 fixture：应答 initialize 与 thread/resume，但 thread/resume 应答不确认
+/// 请求的 thread id（`missing`=应答缺 id；`mismatch`=应答给出不同 id），随后
+/// 保持存活等待 kill 链终止（marker 登记子进程 pid）。
+#[cfg(unix)]
+fn resume_without_thread_confirmation_fixture(
+    marker: &std::path::Path,
+    mode: &str,
+) -> std::path::PathBuf {
+    let resume_result = if mode == "missing" {
+        "{}"
+    } else {
+        "{\\\"thread\\\":{\\\"id\\\":\\\"codex-other-thread\\\"}}"
+    };
+    let body = r#"#!/usr/bin/env bash
+echo $$ > __MARKER__
+while IFS= read -r line; do
+  if [[ "$line" == *'"method":"initialize"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-0}\",\"result\":{\"capabilities\":{}}}"
+  elif [[ "$line" == *'"method":"thread/resume"'* ]]; then
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-aria-1}\",\"result\":__RESUME_RESULT__}"
+  fi
+done
+"#
+    .replace("__MARKER__", &marker.display().to_string())
+    .replace("__RESUME_RESULT__", resume_result);
+    let fixture = marker
+        .parent()
+        .unwrap_or_else(|| panic!("marker must have a parent dir"))
+        .join(format!("codex-resume-no-confirm-{mode}.sh"));
+    std::fs::write(&fixture, body).expect("write fixture");
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(&fixture).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fixture, permissions).expect("chmod fixture");
+    fixture
+}
+
+/// kill 链断言辅助：轮询读取 fixture 登记的子进程 pid（握手应答前写入）。
+#[cfg(unix)]
+fn wait_for_child_pid_marker(marker: &std::path::Path) -> Option<u32> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if let Ok(content) = std::fs::read_to_string(marker)
+            && let Ok(pid) = content.trim().parse::<u32>()
+        {
+            return Some(pid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    None
+}
+
+/// kill 链断言辅助：marker 登记的子进程必须已被终止。
+#[cfg(unix)]
+fn assert_child_terminated(pid: u32, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "codex child (pid {pid}) must be terminated after {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// F1（最终审，红→绿）：thread/resume 应答缺 thread id 时，旧实现回退请求中
+/// 的旧 session_id 并返回 Some——旧 id 冒充握手确认。修复后：策略会话 start
+/// fail-closed（握手错误）、返回前同步终止子进程，且不落任何 provider_start
+/// （未确认的 id 不得进入 durable 审计）。
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_policy_resume_response_missing_thread_id_fails_closed_and_kills_child() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let marker = temp.path().join("codex-resume-missing-id.pid");
+    let fixture = resume_without_thread_confirmation_fixture(&marker, "missing");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    sink.with_stored_provider_start(matching_resume_record("codex-thread-resume-policy"));
+    let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
+    let Err(error) = provider
+        .start(input, CancellationToken::new())
+        .await
+    else {
+        panic!("thread/resume response missing thread id must fail the policy handshake");
+    };
+    assert!(
+        error.details.contains("thread/resume") && error.details.contains("thread id"),
+        "unexpected error: {}",
+        error.details
+    );
+    assert!(
+        sink.events().is_empty(),
+        "no provider_start may be written for a resume id the provider never confirmed"
+    );
+    if let Some(pid) = wait_for_child_pid_marker(&marker) {
+        assert_child_terminated(pid, "unconfirmed thread/resume handshake");
+    }
+}
+
+/// F1（最终审，红→绿）：resume 应答给出了 thread id 但与请求 id 不一致——
+/// 应答 id 与请求 id 关系不一致即无效，同样握手失败 fail-closed（不得采用
+/// 应答中的陌生 id 绕过 resume 冻结记录比对链）。
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_policy_resume_response_mismatched_thread_id_fails_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let marker = temp.path().join("codex-resume-mismatched-id.pid");
+    let fixture = resume_without_thread_confirmation_fixture(&marker, "mismatched");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    sink.with_stored_provider_start(matching_resume_record("codex-thread-resume-policy"));
+    let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
+    let Err(error) = provider
+        .start(input, CancellationToken::new())
+        .await
+    else {
+        panic!("thread/resume response with a mismatched thread id must fail the handshake");
+    };
+    assert!(
+        error.details.contains("thread/resume") && error.details.contains("thread id"),
+        "unexpected error: {}",
+        error.details
+    );
+    assert!(
+        sink.events().is_empty(),
+        "no durable event may be written for a mismatched resume confirmation"
+    );
+    if let Some(pid) = wait_for_child_pid_marker(&marker) {
+        assert_child_terminated(pid, "mismatched thread/resume handshake");
+    }
+}
+
+/// F1（最终审，红→绿）：非策略（Coder/legacy）resume 路径同样不得以请求 id
+/// 冒充握手确认——thread/resume 应答缺 id 时会话以握手错误失败（既有 provider
+/// task kill 链终止子进程），而非携旧 id 继续 turn。
+#[tokio::test]
+async fn codex_resume_response_missing_thread_id_fails_handshake_not_impersonating() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_resume_missing_thread_id_fixture.sh",
+    );
+    let provider = CodexProvider::new(fixture);
+    let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    input.resume_provider_session_id = Some("codex-thread-123".to_string());
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should fail the unconfirmed resume")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("thread/resume") && message.contains("thread id"),
+                    "unexpected failure message: {message}"
+                );
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
+                panic!("unconfirmed resume must not complete: {full_output}")
+            }
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn codex_policy_start_append_failure_kills_child_and_fails_closed() {
