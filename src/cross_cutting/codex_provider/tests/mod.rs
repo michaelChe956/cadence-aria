@@ -844,6 +844,75 @@ async fn codex_provider_empty_turn_output_fails_with_provider_empty_output_after
     }
 }
 
+// E1 定因回放（spike T2-resume-writes.jsonl）：上游 429 限流时 app-server 发送
+// turn/completed{turn.status:"failed"}，error.message 含原始 429 文案、零 agent 输出。
+// 失败轮必须以原始 429 文案失败；绝不落入空输出 guard（provider_empty_output 吞错误），
+// 也不得触发 in-session 空输出重试（重试只服务真实空输出场景）。
+#[tokio::test]
+async fn codex_provider_turn_failed_429_surfaces_upstream_error_not_empty_output() {
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_turn_failed_429_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut saw_empty_output_retry = false;
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit terminal failure")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("exceeded retry limit, last status: 429 Too Many Requests"),
+                    "failed turn must surface the verbatim upstream 429 message: {message}"
+                );
+                assert!(
+                    !message.contains("provider_empty_output"),
+                    "failed turn must not be misrouted to the empty-output guard: {message}"
+                );
+                assert!(
+                    !saw_empty_output_retry,
+                    "failed turn must not consume the in-session empty-output retry"
+                );
+                return;
+            }
+            ProviderEvent::Execution(event)
+                if event.kind == ProviderExecutionEventKind::Turn
+                    && event.status == ProviderExecutionEventStatus::Running
+                    && event.title.contains("retry") =>
+            {
+                saw_empty_output_retry = true;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
+                panic!("failed turn must not complete: {full_output:?}");
+            }
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn codex_provider_nonempty_turn_output_completes_without_retry() {
     let fixture = executable_fixture(

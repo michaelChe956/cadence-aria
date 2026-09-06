@@ -481,15 +481,47 @@ pub(crate) fn parse_codex_usage(value: &Value, role: &'static str) -> Option<Usa
     report.has_any_tokens().then_some(report)
 }
 
+/// codex `turn/completed` 的轮次状态。新协议实测在 `params.turn.status`
+/// （spike T2-resume-writes.jsonl），兼容读取顶层 `params.status`；缺省视为完成
+/// （旧版 wire 与 legacy 形态不携带 status）。
+fn turn_status(value: &Value) -> Option<&str> {
+    value
+        .pointer("/params/turn/status")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/params/status").and_then(Value::as_str))
+}
+
 pub(crate) fn is_turn_completed(value: &Value) -> bool {
-    value.get("method").and_then(Value::as_str) == Some("turn/completed")
+    let turn_completed = value.get("method").and_then(Value::as_str) == Some("turn/completed")
         || value
             .pointer("/params/msg/type")
             .and_then(Value::as_str)
-            .is_some_and(|event_type| event_type == "turn_completed")
+            .is_some_and(|event_type| event_type == "turn_completed");
+    // status:"failed" 的 turn/completed 是失败轮（如上游 429 限流），不是完成轮；
+    // 仅 status 为 completed/缺省才命中完成分支。
+    turn_completed && turn_status(value).is_none_or(|status| status == "completed")
 }
 
 pub(crate) fn parse_failure(value: &Value) -> Option<String> {
+    // 新协议失败轮：turn/completed{turn.status:"failed"}（上游 429/5xx 等）。
+    // error.message 原样透传，不得改写（下游引擎靠文案分类 attempt 级重试）。
+    if value.get("method").and_then(Value::as_str) == Some("turn/completed")
+        && turn_status(value) == Some("failed")
+    {
+        let message = value
+            .pointer("/params/turn/error/message")
+            .or_else(|| value.pointer("/params/error/message"))
+            .and_then(Value::as_str);
+        let code = value
+            .pointer("/params/turn/error/code")
+            .or_else(|| value.pointer("/params/error/code"))
+            .map(|code| code.to_string());
+        return match (message, code) {
+            (Some(message), _) => Some(message.to_string()),
+            (None, Some(code)) => Some(code),
+            (None, None) => Some("Codex turn failed".to_string()),
+        };
+    }
     let event_type = value.pointer("/params/msg/type").and_then(Value::as_str)?;
     if event_type == "turn_failed" || event_type == "error" {
         return value
