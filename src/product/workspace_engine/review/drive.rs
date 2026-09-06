@@ -269,6 +269,7 @@ impl WorkspaceEngine {
         let input = self.attach_tool_policy_audit(input);
         let first_session = start_review_session_via_gateway(
             &gateway,
+            &reviewer,
             input.clone(),
             project_id.clone(),
             self.cancel.clone(),
@@ -322,6 +323,7 @@ impl WorkspaceEngine {
                 let repair_input = self.attach_tool_policy_audit(repair_input);
                 let repair_session = start_review_session_via_gateway(
                     &gateway,
+                    &reviewer,
                     repair_input,
                     project_id,
                     self.cancel.clone(),
@@ -902,17 +904,22 @@ fn provider_allows_review_repair(provider: &ProviderName) -> bool {
 }
 
 /// 逻辑 review 会话经 gateway 启动:组装 `ReviewReadOnly` launch → `validate` →
-/// `start_streaming`。gateway 错误映射为 `ProviderAdapterError`(与
-/// `drive_reviewer_provider_session_once` 的 `Start` 失败路径对齐)。
+/// `start_streaming`。launch 的 provider ref 由调用方传入的 reviewer
+/// (`session.reviewer_provider`)经集中映射 `ProviderRef::from_provider_name` 派生
+/// (C-2:不再硬编码 ClaudeCode;不支持的 provider 显式失败)。gateway 错误映射为
+/// `ProviderAdapterError`(与 `drive_reviewer_provider_session_once` 的 `Start`
+/// 失败路径对齐)。
 async fn start_review_session_via_gateway(
     gateway: &Arc<LogicalCodebaseProviderGateway>,
+    reviewer: &ProviderName,
     input: StreamingProviderInput,
     project_id: String,
     cancel: CancellationToken,
 ) -> Result<ProviderSession, ProviderAdapterError> {
     let request = SessionLaunchRequest {
         project_id,
-        provider: ProviderRef::claude_code("cap_managed_snapshot"),
+        provider: ProviderRef::from_provider_name(reviewer, "cap_managed_snapshot")
+            .map_err(map_gateway_error_to_adapter)?,
         action: SessionPolicyAction::ReviewReadOnly,
         target: PolicyTarget::aggregate_root(input.working_dir.clone()),
         readable_roots: vec![input.working_dir.clone()],

@@ -22,6 +22,7 @@ use crate::product::lifecycle_store::{
     CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
     CreateWorkspaceSessionInput,
 };
+use crate::product::logical_codebase::policy::ProviderDialect;
 use crate::product::logical_codebase::{
     LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
 };
@@ -214,13 +215,25 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
 }
 
 fn workspace_engine(fixture: &GatewayFixture, with_gateway: bool) -> WorkspaceEngine {
+    workspace_engine_with_author(fixture, with_gateway, ProviderName::ClaudeCode)
+}
+
+/// C-2:构造指定 author provider 的 engine(其余与 `workspace_engine` 一致),
+/// 供 provider 身份透传/失败关闭测试驱动 session 配置。
+fn workspace_engine_with_author(
+    fixture: &GatewayFixture,
+    with_gateway: bool,
+    author: ProviderName,
+) -> WorkspaceEngine {
     let (event_tx, _event_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
+    let mut session = workspace_session(fixture.aggregate_root.clone());
+    session.author_provider = author;
     let engine = WorkspaceEngine::new(
         Arc::new(CheckpointStore::new(
             fixture.paths.root().join("checkpoints"),
         )),
         event_tx,
-        workspace_session(fixture.aggregate_root.clone()),
+        session,
     );
     if with_gateway {
         engine.with_logical_provider_gateway(fixture.gateway.clone())
@@ -252,6 +265,60 @@ async fn start_work_item_plan_author_routes_logical_through_gateway_and_records_
         session.as_ref().err()
     );
     assert_eq!(audit.stream_launches(), 1);
+}
+
+/// C-2(组1):logical author 配置 Claude 时,launch 必须携带 session 配置的
+/// author provider 身份,validated envelope 冻结 ClaudeCode dialect——不得由
+/// 启动点硬编码推定。
+#[tokio::test]
+async fn logical_plan_launch_carries_session_author_provider_identity() {
+    let fixture = gateway_fixture();
+    let engine = workspace_engine_with_author(&fixture, true, ProviderName::ClaudeCode);
+
+    let plan_launch = resolve_plan_author_launch(&engine, None, None)
+        .expect("claude author must resolve a logical launch");
+    let PlanAuthorLaunch::Logical(plan) = &plan_launch else {
+        panic!("logical session must resolve a Logical launch");
+    };
+    assert_eq!(
+        plan.launch.author_provider,
+        ProviderName::ClaudeCode,
+        "launch must carry the session-configured author provider"
+    );
+    assert_eq!(
+        plan.validated.envelope().provider_dialect,
+        ProviderDialect::ClaudeCodeCliV1,
+        "validated envelope must freeze the ClaudeCode dialect"
+    );
+}
+
+/// C-2(组3):author 配置 Pi/Kimi 时,logical 启动必须在集中映射处显式失败
+/// (判别码 + provider 名),gateway 零启动。回归锁定:修复前该配置会静默以
+/// ClaudeCode 身份跑完整 planning run。
+#[tokio::test]
+async fn logical_plan_launch_fails_closed_for_unsupported_author_provider() {
+    for author in [ProviderName::Pi, ProviderName::KimiCode] {
+        let fixture = gateway_fixture();
+        let audit = fixture.gateway.audit();
+        let engine = workspace_engine_with_author(&fixture, true, author.clone());
+
+        let error = resolve_plan_author_launch(&engine, None, None)
+            .err()
+            .unwrap_or_else(|| panic!("{author:?} author must not silently launch as Claude"));
+        assert!(
+            error
+                .details
+                .contains("provider_unsupported_for_gateway_launch"),
+            "expected provider_unsupported_for_gateway_launch, got: {}",
+            error.details
+        );
+        assert!(
+            error.details.contains(&format!("{author:?}")),
+            "error must name the configured author provider, got: {}",
+            error.details
+        );
+        assert_eq!(audit.stream_launches(), 0, "no gateway session may start");
+    }
 }
 
 #[tokio::test]

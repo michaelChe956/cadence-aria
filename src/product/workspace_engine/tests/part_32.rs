@@ -39,8 +39,20 @@ impl ProviderAdapter for ReviewStubSyncAdapter {
 }
 
 /// 测试用 capability source:返回固定 capability,resume 证据恒为 `Confirmed`,
-/// 使 review repair 的 resume 启动也能通过 spawn 前复验。
-struct ReviewStaticCapabilitySource;
+/// 使 review repair 的 resume 启动也能通过 spawn 前复验。同时记录每次
+/// `require_supported` 收到的 `ProviderRef`,供断言「launch request 的 provider
+/// ref 随 session.reviewer_provider 透传」(C-2 身份契约)。
+#[derive(Default)]
+struct ReviewStaticCapabilitySource {
+    seen: Arc<Mutex<Vec<ProviderRef>>>,
+}
+
+impl ReviewStaticCapabilitySource {
+    /// 已收到的 provider ref 快照(启动身份审计用)。
+    fn seen_provider_refs(&self) -> Vec<ProviderRef> {
+        self.seen.lock().unwrap().clone()
+    }
+}
 
 impl ProviderCapabilitySource for ReviewStaticCapabilitySource {
     fn require_supported(
@@ -48,6 +60,7 @@ impl ProviderCapabilitySource for ReviewStaticCapabilitySource {
         provider: &ProviderRef,
         _action: SessionPolicyAction,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
+        self.seen.lock().unwrap().push(provider.clone());
         let adapter_dialect = match provider.provider_type {
             ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
             ProviderRefType::Codex => ProviderDialect::CodexCliV1,
@@ -115,6 +128,7 @@ struct ReviewGatewayFixture {
     _root: tempfile::TempDir,
     paths: ProductAppPaths,
     gateway: Arc<LogicalCodebaseProviderGateway>,
+    capabilities: Arc<ReviewStaticCapabilitySource>,
     audit: Arc<GatewayRunAudit>,
     worktree: std::path::PathBuf,
 }
@@ -142,10 +156,11 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
         }),
     );
 
+    let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
     let audit = Arc::new(GatewayRunAudit::new());
     let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
         policy_store,
-        Arc::new(ReviewStaticCapabilitySource),
+        capabilities.clone(),
         Arc::new(ReviewPassThroughTargetResolver),
         Arc::new(registry),
         Arc::new(ReviewStubSyncAdapter),
@@ -158,6 +173,7 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
         _root: root,
         paths,
         gateway,
+        capabilities,
         audit,
         worktree,
     }
@@ -195,6 +211,18 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
         1,
         "logical review session must start via gateway once"
     );
+    // C-2 身份契约:launch request 的 provider ref 必须随 session.reviewer_provider
+    // (此处为 ClaudeCode)透传到 gateway validate,不得硬编码别的 provider。
+    // (validate/spawn 复验会多次咨询 capability source,故断言「全部一致」而非次数。)
+    let seen = fixture.capabilities.seen_provider_refs();
+    assert!(
+        !seen.is_empty(),
+        "gateway must consult capability for the session-configured reviewer provider"
+    );
+    assert!(
+        seen.iter().all(|r| r == &ProviderRef::claude_code("cap_managed_snapshot")),
+        "every gateway validate/revalidate must use the session-configured reviewer, got {seen:?}"
+    );
     assert_eq!(
         engine.session().stage,
         WorkspaceStage::AuthorConfirm,
@@ -207,6 +235,70 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
                 && node.summary.as_deref() == Some("Review 完成，报告已进入对话流")
         }),
         "Story/Design reviewer run must complete before its report returns to author confirmation"
+    );
+}
+
+/// C-2(组3):reviewer 配置 Kimi 时不得静默回退 Claude。logical review 启动必须
+/// 在集中映射处 fail-closed:错误事件含判别码与 provider 名、gateway audit 零启动、
+/// capability source 零调用(映射失败发生在 gateway validate 之前)。回归锁定:
+/// 修复前该配置会静默用 ClaudeCode 跑完整 review。
+#[tokio::test]
+async fn drive_review_session_via_gateway_fails_closed_for_unsupported_reviewer() {
+    let fixture = review_gateway_fixture();
+    let audit = fixture.audit.clone();
+    assert_eq!(audit.stream_launches(), 0);
+
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_review_kimi_via_gateway");
+    session.review_rounds = 2;
+    session.reviewer_provider = Some(ProviderName::KimiCode);
+    session.artifact = Some(artifact_payload("# Artifact\n\n可以确认"));
+    session.repository_path = Some(fixture.worktree.clone());
+
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+
+    engine.start_review_or_skip().await;
+    engine
+        .drive_review_session_via_gateway(empty_provider_commands())
+        .await;
+
+    let mut start_failure = None;
+    while let Ok(event) = event_rx.try_recv() {
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            start_failure = Some(message);
+        }
+    }
+    let message = start_failure.expect("unsupported reviewer must surface an error event");
+    assert!(
+        message.contains("provider_unsupported_for_gateway_launch"),
+        "expected provider_unsupported_for_gateway_launch, got: {message}"
+    );
+    assert!(
+        message.contains("KimiCode"),
+        "error must name the configured reviewer provider, got: {message}"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        0,
+        "unsupported reviewer must not start any gateway session"
+    );
+    // 集中映射失败发生在 review launch request 组装处:KimiCode 不存在对应的
+    // `ProviderRefType`,绝不可能出现在 capability 咨询记录里(记录中只允许
+    // author 侧路由投影的 ClaudeCode)。
+    assert!(
+        fixture
+            .capabilities
+            .seen_provider_refs()
+            .iter()
+            .all(|r| r.provider_type == ProviderRefType::ClaudeCode),
+        "KimiCode must never reach gateway validate as a provider ref"
     );
 }
 
@@ -259,7 +351,7 @@ fn routing_context_gateway<T: PolicyTargetResolver + 'static>(
 
     let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
         policy_store,
-        Arc::new(ReviewStaticCapabilitySource),
+        Arc::new(ReviewStaticCapabilitySource::default()),
         Arc::new(resolver),
         Arc::new(ProviderRegistry::new()),
         Arc::new(ReviewStubSyncAdapter),

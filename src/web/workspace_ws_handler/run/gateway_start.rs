@@ -17,6 +17,12 @@
 //! 之前 resolve(`resolve_plan_author_launch`),使 work_item_split_engine 的 outline/
 //! draft prompt 能按 `RoutingReferenceContext` 注入 Logical 路由引用;已 resolve 的
 //! policy 原样透传给 `start_work_item_plan_author` 复用,避免二次 validate。
+//!
+//! C-2:launch request 的 `ProviderRef` 由 `session.author_provider` 经集中映射
+//! `ProviderRef::from_provider_name` 派生(fail-closed:Pi/KimiCode 等无 gateway
+//! 真实 dialect 的 provider 在此显式失败,不再硬编码 ClaudeCode 静默替换)。
+//! `cap_managed_snapshot` capability ref 约定不变;Codex 的 REQ-ENV-05 路由阻断
+//! 仍由 gateway 路由级硬门施加。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +41,7 @@ use crate::product::logical_codebase::{
     LogicalCodebaseProviderGateway, PolicyTarget, ProviderGatewayError, ProviderRef,
     SessionLaunchRequest, SessionPolicyAction, ValidatedSessionLaunchPolicy,
 };
+use crate::product::models::ProviderName;
 use crate::product::workspace_engine::WorkspaceEngine;
 
 /// 逻辑会话经 gateway 启动所需的已解析 launch 信息。
@@ -46,11 +53,16 @@ pub(crate) struct LogicalPlanLaunch {
     /// resolved 逻辑仓库身份(可选)。两者都有时用 checkout target,否则 aggregate_root。
     pub logical_repository_id: Option<String>,
     pub checkout_id: Option<String>,
+    /// session 配置的 author provider(C-2:launch request provider ref 的唯一
+    /// 来源,勿从 input.provider_type 或 UI 默认推导)。
+    pub author_provider: ProviderName,
 }
 
 impl LogicalPlanLaunch {
-    /// 组装 planning 只读 `SessionLaunchRequest`。target 语义见文件头说明。
-    pub(crate) fn planning_request(&self) -> SessionLaunchRequest {
+    /// 组装 planning 只读 `SessionLaunchRequest`。target 语义见文件头说明;
+    /// provider ref 由 `author_provider` 经集中映射派生,不支持的 provider 显式
+    /// 返回 `UnsupportedCapability` 而非静默回退 Claude(C-2)。
+    pub(crate) fn planning_request(&self) -> Result<SessionLaunchRequest, ProviderGatewayError> {
         let target = match (&self.logical_repository_id, &self.checkout_id) {
             (Some(logical_repository_id), Some(checkout_id)) => PolicyTarget::checkout(
                 logical_repository_id.clone(),
@@ -60,20 +72,23 @@ impl LogicalPlanLaunch {
             _ => PolicyTarget::aggregate_root(self.working_dir.clone()),
         };
 
-        SessionLaunchRequest {
+        Ok(SessionLaunchRequest {
             project_id: self.project_id.clone(),
-            provider: ProviderRef::claude_code("cap_managed_snapshot"),
+            provider: ProviderRef::from_provider_name(
+                &self.author_provider,
+                "cap_managed_snapshot",
+            )?,
             action: SessionPolicyAction::PlanningReadOnly,
             target,
             readable_roots: vec![self.working_dir.clone()],
             writable_roots: Vec::new(),
             config_artifact_ref: "sha256:managed-config-artifact".to_string(),
-        }
+        })
     }
 
     /// 经 gateway 校验并冻结为 `ValidatedSessionLaunchPolicy`。
     pub(crate) fn validate(&self) -> Result<ValidatedSessionLaunchPolicy, ProviderGatewayError> {
-        self.gateway.validate(self.planning_request())
+        self.gateway.validate(self.planning_request()?)
     }
 }
 
@@ -118,6 +133,8 @@ pub(crate) fn logical_plan_launch_for(
                 working_dir,
                 logical_repository_id,
                 checkout_id,
+                // C-2:provider 身份唯一来源于 session 配置。
+                author_provider: engine.session().author_provider.clone(),
             })
     })
 }
