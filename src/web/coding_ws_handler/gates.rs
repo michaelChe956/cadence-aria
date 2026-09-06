@@ -12,10 +12,41 @@ use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorks
 use crate::product::coding_workspace_runner::{
     CodingRunnerCommand, coding_provider_role_for_stage,
 };
+use crate::web::workspace_ws_types::{
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+};
 
 use super::{CodingWsOutMessage, build_coding_session_state, update_provider_selection};
 
 const STAGE_GATE_COUNTDOWN_SECONDS: u64 = 5;
+
+/// 「过期自动继续」观测标记（3.6 F7-B 项 2）：倒计时耗尽自动放行时补发一条
+/// 独立可观测事件，含 gate id/阶段/倒计时耗尽原因，供 driver 与报告按 status
+/// 分列 confirmed vs expired_continue（3.5 台账遗留观察：两路径下游无差别、
+/// 审计口径混同）。
+///
+/// 载体刻意选用 `coding_execution_event`（title=`stage_gate_auto_continue`）而
+/// 非新增顶层消息类型：driver（abdddb41 起 stage_gate 豁免）对 coding_execution_event
+/// 不解析 payload（case break），不会触发 unknown_ws_message 停机；倒计时与
+/// 自动继续控制流零变化（发送失败不阻断，后续 session_state 快照行为不变）。
+fn stage_gate_auto_continue_event(gate: &CodingStageGateState) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: format!("stage_gate_auto_continue_{}", gate.gate_id),
+        node_id: None,
+        agent: None,
+        kind: WsExecutionEventKind::Turn,
+        status: WsExecutionEventStatus::Completed,
+        title: "stage_gate_auto_continue".to_string(),
+        detail: Some(format!(
+            "stage gate {} for {:?} countdown exhausted after {}s; auto-continue",
+            gate.gate_id, gate.stage, STAGE_GATE_COUNTDOWN_SECONDS
+        )),
+        command: None,
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
 
 pub(crate) async fn await_stage_gate(
     command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
@@ -59,6 +90,15 @@ pub(crate) async fn await_stage_gate(
                     &gate.gate_id,
                     CodingStageGateStatus::Expired,
                 )?;
+                // 观测标记（仅可观测，不改控制流）：失败不阻断，后续快照行为不变
+                let _ = send_event(
+                    engine,
+                    event_tx,
+                    CodingWsOutMessage::CodingExecutionEvent {
+                        event: stage_gate_auto_continue_event(&gate),
+                    },
+                )
+                .await;
                 let snapshot = build_coding_session_state(coding_store, current.clone())?;
                 send_event(engine, event_tx, snapshot).await?;
                 return Ok(Some(current));
@@ -78,6 +118,16 @@ pub(crate) async fn await_stage_gate(
                         &gate.gate_id,
                         CodingStageGateStatus::Expired,
                     )?;
+                    // 观测标记（仅可观测，不改控制流）：command 通道关闭后仍按期
+                    // 过期自动继续，同样发标记保持 confirmed vs expired 分列
+                    let _ = send_event(
+                        engine,
+                        event_tx,
+                        CodingWsOutMessage::CodingExecutionEvent {
+                            event: stage_gate_auto_continue_event(&gate),
+                        },
+                    )
+                    .await;
                     let snapshot = build_coding_session_state(coding_store, current.clone())?;
                     send_event(engine, event_tx, snapshot).await?;
                     return Ok(Some(current));

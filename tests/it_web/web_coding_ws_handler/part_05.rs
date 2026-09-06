@@ -430,6 +430,64 @@ async fn wait_for_timeline_node(
     panic!("expected timeline node for {stage:?}");
 }
 
+// —— stage_gate 「确认 vs 过期自动继续」观测口径（3.6 F7-B 项 2） ——
+// 过期自动继续补发独立观测标记（coding_execution_event，title=stage_gate_auto_continue，
+// 含 gate id/阶段/倒计时耗尽原因）；确认路径不得发。载体不新增顶层消息类型：
+// driver（abdddb41 起豁免 stage_gate）对 coding_execution_event payload 不解析，
+// 不会触发 unknown_ws_message 停机。
+async fn wait_for_stage_gate_auto_continue(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    gate_id: &str,
+) -> cadence_aria::web::workspace_ws_types::WsExecutionEvent {
+    for _ in 0..50 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingExecutionEvent { event }
+                if event.title == "stage_gate_auto_continue" =>
+            {
+                assert_eq!(
+                    event.event_id, format!("stage_gate_auto_continue_{gate_id}"),
+                    "auto-continue marker must carry the gate id"
+                );
+                return event;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected stage_gate_auto_continue marker for gate {gate_id}");
+}
+
+async fn wait_for_stage_start_without_auto_continue(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    stage: CodingExecutionStage,
+) -> CodingTimelineNode {
+    for _ in 0..50 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingTimelineNodeCreated { node } if node.stage == stage => {
+                return node;
+            }
+            CodingWsOutMessage::CodingExecutionEvent { event }
+                if event.title == "stage_gate_auto_continue" =>
+            {
+                panic!(
+                    "confirmed stage gate must not emit auto-continue marker: {event:?}"
+                );
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected timeline node for {stage:?} without auto-continue marker");
+}
+
 async fn wait_for_provider_config_update(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,

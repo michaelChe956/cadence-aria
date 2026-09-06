@@ -213,7 +213,9 @@ async fn coding_ws_start_coding_waits_at_stage_gate_and_confirm_resumes_runner()
     )
     .await;
 
-    let node = wait_for_timeline_node(&mut ws, CodingExecutionStage::Coding).await;
+    // 「确认放行」路径不得发过期自动继续标记：阶段启动前无 auto-continue 事件
+    let node =
+        wait_for_stage_start_without_auto_continue(&mut ws, CodingExecutionStage::Coding).await;
     assert_eq!(node.status, CodingTimelineNodeStatus::Running);
 
     ws.close(None).await.expect("close ws");
@@ -422,8 +424,26 @@ async fn coding_ws_stage_gate_timeout_auto_starts_stage() {
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    // 「过期自动继续」观测口径：倒计时耗尽自动放行时补发独立标记事件
+    // （含 gate id/阶段/倒计时耗尽原因），供 driver/报告与「确认放行」分列；
+    // 标记先于阶段启动（时间线节点）到达
+    let marker = wait_for_stage_gate_auto_continue(&mut ws, &gate.gate_id).await;
     let node = wait_for_timeline_node(&mut ws, CodingExecutionStage::Coding).await;
     assert_eq!(node.status, CodingTimelineNodeStatus::Running);
+    assert_eq!(
+        marker.status,
+        cadence_aria::web::workspace_ws_types::WsExecutionEventStatus::Completed
+    );
+    let detail = marker.detail.expect("auto-continue detail");
+    assert!(detail.contains(&gate.gate_id), "detail carries gate id: {detail}");
+    assert!(
+        detail.contains(&format!("{:?}", CodingExecutionStage::Coding)),
+        "detail carries stage: {detail}"
+    );
+    assert!(
+        detail.contains("countdown exhausted"),
+        "detail carries countdown-exhausted reason: {detail}"
+    );
     let gates = store
         .list_stage_gates("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("list stage gates");
