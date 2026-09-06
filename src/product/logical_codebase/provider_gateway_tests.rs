@@ -1102,5 +1102,43 @@ mod task13_gateway_hardening {
         );
     }
 
+    /// C-2 集中映射:session/role 配置的 `ProviderName` → gateway `ProviderRef`。
+    /// ClaudeCode/Codex 是仅有的两个 gateway 真实 dialect;其余 provider 必须显式
+    /// `UnsupportedCapability` 失败,🔴 禁止静默回退 ClaudeCode(用户配置的 provider
+    /// 不允许被悄悄换成 Claude 启动)。
+    #[test]
+    fn provider_ref_from_provider_name_maps_supported_providers() {
+        let claude =
+            ProviderRef::from_provider_name(&ProviderName::ClaudeCode, "cap_managed_snapshot")
+                .expect("ClaudeCode must map to a gateway provider ref");
+        assert_eq!(claude.provider_type, ProviderRefType::ClaudeCode);
+        assert_eq!(claude.capability_snapshot_ref, "cap_managed_snapshot");
+
+        let codex = ProviderRef::from_provider_name(&ProviderName::Codex, "cap_managed_snapshot")
+            .expect("Codex must map to a gateway provider ref");
+        assert_eq!(codex.provider_type, ProviderRefType::Codex);
+        assert_eq!(codex.capability_snapshot_ref, "cap_managed_snapshot");
+    }
+
+    /// C-2 集中映射 fail-closed:Pi/KimiCode/Fake 一律显式 unsupported,错误信息
+    /// 含稳定判别码与 provider 名,绝不回退 Claude。
+    #[test]
+    fn provider_ref_from_provider_name_fails_closed_for_unsupported_providers() {
+        for provider in [ProviderName::Pi, ProviderName::KimiCode, ProviderName::Fake] {
+            let error = ProviderRef::from_provider_name(&provider, "cap_managed_snapshot")
+                .err()
+                .unwrap_or_else(|| panic!("{provider:?} must not map to a gateway provider ref"));
+            assert!(
+                matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                    if reason.contains(PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH)),
+                "expected {PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH}, got {error:?}"
+            );
+            assert!(
+                error.to_string().contains(&format!("{provider:?}")),
+                "error must name the configured provider, got {error}"
+            );
+        }
+    }
+
     include!("provider_gateway_tests/audit.inc.rs");
 }

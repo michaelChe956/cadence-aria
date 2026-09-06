@@ -79,7 +79,7 @@ impl CodingWorkspaceEngine {
         };
         let request = SessionLaunchRequest {
             project_id: attempt.project_id.clone(),
-            provider: provider_ref_for_name(&provider_name),
+            provider: provider_ref_for_name(&provider_name)?,
             action,
             // CodingTargetWrite 的 single writable root 与 target worktree 都是当前 coding
             // 嵌套 worktree（C-1 行为：checkout/.worktrees/aria-issues/{issue}），主 checkout

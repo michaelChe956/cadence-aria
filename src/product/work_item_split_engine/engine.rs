@@ -340,7 +340,8 @@ pub(crate) fn prepare_sync_launch(
         checkout_id.0.to_string(),
         repository.path.clone(),
     );
-    let provider_ref = provider_ref_for_name(author_provider);
+    let provider_ref =
+        provider_ref_for_name(author_provider).map_err(map_provider_gateway_error)?;
     let request = SessionLaunchRequest::planning(
         project_id.to_string(),
         provider_ref,
@@ -355,15 +356,16 @@ pub(crate) fn prepare_sync_launch(
 }
 
 /// 把 registry/availability gate 使用的 `ProviderName` 映射到 gateway 的 `ProviderRef`。
-/// `Fake`/`Pi` 不经 gateway(测试/内置路径不走逻辑代码库真实启动),这里仅在
-/// ClaudeCode/Codex 间分发;其它 provider 映射到 ClaudeCode 占位(逻辑代码库只
-/// 支持这两个真实 dialect,CapabilitySource 会在 validate 阶段拒掉不支持者)。
+/// 经 `ProviderRef::from_provider_name` 集中 fail-closed:仅 ClaudeCode/Codex 有
+/// gateway 真实 dialect;Pi/KimiCode/Fake(及未来 provider)返回显式
+/// unsupported 错误,🔴 禁止静默回退 ClaudeCode——配置的 provider 不允许被
+/// 悄悄换成 Claude 启动(C-2)。Codex 的 danger-full-access 路由阻断(REQ-ENV-05)
+/// 由 gateway 路由级硬门施加,与本映射正交。
 pub(crate) fn provider_ref_for_name(
     provider: &ProviderName,
-) -> crate::product::logical_codebase::provider_gateway::ProviderRef {
-    use crate::product::logical_codebase::provider_gateway::ProviderRef;
-    match provider {
-        ProviderName::Codex => ProviderRef::codex("cap_managed_snapshot"),
-        _ => ProviderRef::claude_code("cap_managed_snapshot"),
-    }
+) -> Result<crate::product::logical_codebase::provider_gateway::ProviderRef, ProviderGatewayError> {
+    crate::product::logical_codebase::provider_gateway::ProviderRef::from_provider_name(
+        provider,
+        "cap_managed_snapshot",
+    )
 }

@@ -126,6 +126,29 @@ impl ProviderRef {
             capability_snapshot_ref: capability_snapshot_ref.into(),
         }
     }
+
+    /// 由 session/role 配置的 `ProviderName` 派生 gateway 启动 ref(C-2 集中映射)。
+    ///
+    /// 仅 ClaudeCode/Codex 有 gateway 真实 dialect;Pi/KimiCode/Fake(及未来
+    /// provider)一律 fail-closed 返回 `UnsupportedCapability`(错误信息含稳定
+    /// 判别码 `PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH` 与 provider 名)。🔴 禁止
+    /// `_ => claude_code` 之类的静默回退:用户配置的 provider 不允许被悄悄换成
+    /// Claude 启动。Codex 的 danger-full-access 路由阻断(REQ-ENV-05)由 gateway
+    /// 路由级硬门施加,与本映射正交——Codex 配置=显式阻断错误而非被改成 Claude。
+    pub fn from_provider_name(
+        provider: &ProviderName,
+        capability_snapshot_ref: impl Into<String>,
+    ) -> Result<Self, ProviderGatewayError> {
+        match provider {
+            ProviderName::ClaudeCode => Ok(Self::claude_code(capability_snapshot_ref)),
+            ProviderName::Codex => Ok(Self::codex(capability_snapshot_ref)),
+            ProviderName::Pi | ProviderName::KimiCode | ProviderName::Fake => {
+                Err(ProviderGatewayError::UnsupportedCapability(format!(
+                    "{PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH}:{provider:?}"
+                )))
+            }
+        }
+    }
 }
 
 /// gateway 知晓的真实 provider 类型。Fake/测试路径不经此 gateway,故此处不含 Fake。
@@ -1081,6 +1104,11 @@ pub const CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE: &str = "danger-full-access";
 
 /// gateway 路由阻断码:Codex 在 danger-full-access sandbox 下不被支持。
 pub const CODEX_DANGER_FULL_ACCESS_UNSUPPORTED: &str = "codex_danger_full_access_unsupported";
+
+/// C-2 集中映射的 fail-closed 判别码:`ProviderName` 不属于 gateway 支持的
+/// ClaudeCode/Codex 真实 dialect 时,`ProviderRef::from_provider_name` 返回的
+/// `UnsupportedCapability` 错误以此为前缀,后接 provider 名。
+pub const PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH: &str = "provider_unsupported_for_gateway_launch";
 
 /// gateway 对 `ensure_bootstrap` 的桥接:暴露给需要在 gateway 之外触发 bootstrap
 /// 的调用方(如 migration)。实际实现复用 `AggregatePolicyArtifactStore::ensure_bootstrap`。
