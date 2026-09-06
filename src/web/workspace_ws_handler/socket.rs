@@ -37,6 +37,80 @@ pub(crate) async fn send_json_outbound<T: serde::Serialize>(
     }
 }
 
+/// 出站写泵：socket 侧唯一的出站写入点。
+///
+/// 所有 `OutboundControl::Text` 都经此写向客户端（`send_json_outbound` 只投递到
+/// channel，真正的 socket 写出发生在这里）。
+pub(crate) async fn pump_outbound_controls<S>(
+    mut outbound_rx: mpsc::Receiver<OutboundControl>,
+    mut ws_sender: S,
+    last_client_message_at: Arc<Mutex<tokio::time::Instant>>,
+) where
+    S: futures_util::Sink<Message> + Unpin + Send + 'static,
+    S::Error: Send + 'static,
+{
+    while let Some(control) = outbound_rx.recv().await {
+        match control {
+            OutboundControl::Text(msg) => {
+                let diag_type = serde_json::from_str::<serde_json::Value>(&msg)
+                    .ok()
+                    .and_then(|value| {
+                        let message_type = value.get("type")?.as_str()?.to_string();
+                        let id = value
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToString::to_string);
+                        Some((message_type, id))
+                    });
+                if let Some((message_type, id)) = diag_type.as_ref() {
+                    eprintln!(
+                        "[aria-choice-diag] ws send_task sending outbound type={} id={} bytes={}",
+                        message_type,
+                        id.as_deref().unwrap_or("<none>"),
+                        msg.len()
+                    );
+                }
+                if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                    if let Some((message_type, id)) = diag_type.as_ref() {
+                        eprintln!(
+                            "[aria-choice-diag] ws send_task failed outbound type={} id={}",
+                            message_type,
+                            id.as_deref().unwrap_or("<none>")
+                        );
+                    }
+                    break;
+                }
+                // 双向活性（3.6 F7 项 1）：服务器成功出站 = 连接健康，刷新连接活跃
+                // 时间——静默客户端（auto 流 driver 只收不发）在 current_run=None
+                // 窗口不被误掐。写失败不刷新（对端不可达不是「成功出站」）；只有
+                // 服务器与客户端同时静默超过 idle 阈值才进入回收计时（真死连接
+                // 语义保持）。
+                *last_client_message_at.lock().await = tokio::time::Instant::now();
+                if let Some((message_type, id)) = diag_type.as_ref() {
+                    eprintln!(
+                        "[aria-choice-diag] ws send_task sent outbound type={} id={}",
+                        message_type,
+                        id.as_deref().unwrap_or("<none>")
+                    );
+                }
+            }
+            OutboundControl::CloseDueToIdleTimeout => {
+                let _ = ws_sender.close().await;
+                break;
+            }
+            OutboundControl::CloseForTestDrop => {
+                let _ = ws_sender
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::AWAY,
+                        reason: "test drop".into(),
+                    })))
+                    .await;
+                break;
+            }
+        }
+    }
+}
+
 pub(crate) fn spawn_idle_timeout_task(
     last_client_message_at: Arc<Mutex<tokio::time::Instant>>,
     outbound_tx: mpsc::Sender<OutboundControl>,
@@ -354,69 +428,21 @@ pub(crate) async fn handle_workspace_socket(
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
 
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
     state
         .test_controls
         .register_workspace_socket(session_id.clone(), socket_control_tx)
         .await;
 
-    let send_task = tokio::spawn(async move {
-        while let Some(control) = outbound_rx.recv().await {
-            match control {
-                OutboundControl::Text(msg) => {
-                    let diag_type = serde_json::from_str::<serde_json::Value>(&msg)
-                        .ok()
-                        .and_then(|value| {
-                            let message_type = value.get("type")?.as_str()?.to_string();
-                            let id = value
-                                .get("id")
-                                .and_then(serde_json::Value::as_str)
-                                .map(ToString::to_string);
-                            Some((message_type, id))
-                        });
-                    if let Some((message_type, id)) = diag_type.as_ref() {
-                        eprintln!(
-                            "[aria-choice-diag] ws send_task sending outbound type={} id={} bytes={}",
-                            message_type,
-                            id.as_deref().unwrap_or("<none>"),
-                            msg.len()
-                        );
-                    }
-                    if ws_sender.send(Message::Text(msg.into())).await.is_err() {
-                        if let Some((message_type, id)) = diag_type.as_ref() {
-                            eprintln!(
-                                "[aria-choice-diag] ws send_task failed outbound type={} id={}",
-                                message_type,
-                                id.as_deref().unwrap_or("<none>")
-                            );
-                        }
-                        break;
-                    }
-                    if let Some((message_type, id)) = diag_type.as_ref() {
-                        eprintln!(
-                            "[aria-choice-diag] ws send_task sent outbound type={} id={}",
-                            message_type,
-                            id.as_deref().unwrap_or("<none>")
-                        );
-                    }
-                }
-                OutboundControl::CloseDueToIdleTimeout => {
-                    let _ = ws_sender.close().await;
-                    break;
-                }
-                OutboundControl::CloseForTestDrop => {
-                    let _ = ws_sender
-                        .send(Message::Close(Some(CloseFrame {
-                            code: close_code::AWAY,
-                            reason: "test drop".into(),
-                        })))
-                        .await;
-                    break;
-                }
-            }
-        }
-    });
+    // 双向活性口径：last_client_message_at 同时记录「客户端最近入站」与「服务器
+    // 最近成功出站」（出站写泵在写出成功后刷新），两者任一活跃即视为连接健康。
+    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let send_task = tokio::spawn(pump_outbound_controls(
+        outbound_rx,
+        ws_sender,
+        last_client_message_at.clone(),
+    ));
 
     let outbound_for_socket_controls = outbound_tx.clone();
     let socket_control_task = tokio::spawn(async move {
@@ -501,7 +527,6 @@ pub(crate) async fn handle_workspace_socket(
         }
     }
 
-    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let current_run_for_idle = current_run.clone();
     let idle_timeout_task = spawn_idle_timeout_task(
         last_client_message_at.clone(),
