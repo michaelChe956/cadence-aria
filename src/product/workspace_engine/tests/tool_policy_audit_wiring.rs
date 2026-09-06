@@ -3,6 +3,11 @@
 // engine（lifecycle_store 存在）下 probe 记录每次 start 的 policy/sink 携带。
 // 本文件经 include! 进入 tests 模块，直接共享 part 文件的作用域与 helpers。
 
+/// Task 4.1：捕获 engine 注入的 run-bound durable sink（审计通道分离回归用）。
+type CapturedAuditSinks = Arc<
+    Mutex<Vec<Option<Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>>>,
+>;
+
 /// 记录每次 start 是否携带 tool_policy/audit_sink 的队列输出探针。
 struct PolicySinkQueuedProvider {
     outputs: Arc<Mutex<VecDeque<String>>>,
@@ -10,9 +15,7 @@ struct PolicySinkQueuedProvider {
     sink_seen: Arc<Mutex<Vec<bool>>>,
     policy_seen: Arc<Mutex<Vec<bool>>>,
     /// Task 4.1：捕获 engine 实际注入的 run-bound sink（审计通道分离回归用）。
-    captured_sinks: Arc<
-        Mutex<Vec<Option<Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>>>,
-    >,
+    captured_sinks: CapturedAuditSinks,
 }
 
 impl PolicySinkQueuedProvider {

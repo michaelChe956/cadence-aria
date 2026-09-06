@@ -1108,7 +1108,7 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         .map(|line| line["event_type"].as_str().expect("event_type"))
         .collect();
     assert!(
-        event_types.iter().any(|kind| *kind == "approval_decision"),
+        event_types.contains(&"approval_decision"),
         "wire fixture approvals must persist as approval_decision: {event_types:?}"
     );
     for kind in &event_types {
