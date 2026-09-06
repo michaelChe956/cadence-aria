@@ -329,3 +329,92 @@ async fn coding_ws_attach_with_live_runner_never_respawns_and_keeps_snapshot_onl
     second_ws.close(None).await.expect("close second ws");
     server.abort();
 }
+
+/// 组 3（spawn 失败转人工兜底）：注入注册表拒止（retired——insert_cancellable
+/// 拒绝的双启守卫路径）→ attach 后 attempt 转 AwaitingManualRecovery，带
+/// reason 的 protocol error 事件可见、不发静默快照；随后仅 AbortAttempt
+/// 白名单（ContextNote 被拒、Abort 正常中止）。
+#[tokio::test]
+async fn coding_ws_semi_started_attach_spawn_refusal_moves_attempt_to_manual_recovery() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let (app, state, _worktree) =
+        app_with_coding_ws_resume_fixture(root.path(), true, true, true);
+    let attempt_key = CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001");
+    // 复现 spawn 准入拒绝：retire 注册表（无 runner，触发条件仍命中，
+    // insert_cancellable 对 retired key 一律拒绝）。
+    state.coding_runs.abort_attempt(&attempt_key).await;
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial_snapshot = recv_json(&mut ws).await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingProtocolError { code, message } => {
+            assert_eq!(code, "coding_runner_restart_failed");
+            assert!(
+                message.contains("runner_restart_spawn_refused"),
+                "restart failure must carry the stable reason, got: {message}"
+            );
+        }
+        other => panic!("expected runner restart failure event, got {other:?}"),
+    }
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { status, .. } => {
+            assert_eq!(status, CodingAttemptStatus::AwaitingManualRecovery);
+        }
+        other => panic!("expected fresh manual-recovery snapshot, got {other:?}"),
+    }
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt after restart failure");
+    assert_eq!(persisted.status, CodingAttemptStatus::AwaitingManualRecovery);
+    assert_eq!(
+        persisted.manual_recovery_reason.as_deref(),
+        Some("runner_restart_spawn_refused"),
+        "stable reason must be persisted for triage"
+    );
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+
+    // 人工恢复态白名单：ContextNote 拒绝、AbortAttempt 可用（既有语义）。
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ContextNote {
+            content: "为什么停了".to_string(),
+        },
+    )
+    .await;
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingProtocolError { code, .. } => {
+            assert_eq!(code, "coding_message_not_allowed");
+        }
+        other => panic!("expected context note rejection, got {other:?}"),
+    }
+    send_json(&mut ws, &CodingWsInMessage::AbortAttempt).await;
+    let mut saw_aborted = false;
+    for _ in 0..50 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingSessionState { status, .. } => {
+                if status == CodingAttemptStatus::Aborted {
+                    saw_aborted = true;
+                    break;
+                }
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_aborted, "manual recovery attempt must stay abortable");
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
