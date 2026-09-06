@@ -360,25 +360,44 @@ async fn run_terminal(
     let anchor: Option<OwnedFd> = open_dir_no_follow_inherit(&command.cwd, Path::new("")).ok();
     let env = terminal_environment(&command.root);
     let mut builder = build_terminal_command(&command, &env, &command.isolation, anchor.as_ref());
-    let mut child = match builder.spawn() {
-        Ok(child) => {
-            let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
-            TerminalChild { child, pgid }
-        }
-        Err(error) => {
-            tracing::debug!(target: "kimi_code_provider", %error, "terminal spawn failed");
-            let mut result = entry.result.lock().expect("terminal result lock");
-            *result = Some(TerminalResult {
-                exit_code: None,
-                timed_out: false,
-                killed: false,
-                truncated: false,
-                duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-            });
-            entry.done.notify_waiters();
-            let mut state = entry.state.lock().expect("terminal state lock");
-            *state = TerminalState::Finished;
-            return;
+    // ETXTBSY（目标正被写打开，含并发「写脚本→exec」压力与异步句柄释放
+    // 延迟）是瞬态错误：有界退避重试，而不是把 spawn 失败伪装成
+    // 「exit_code=None 的正常完成」——那会让调用方无法区分真实完成。
+    const SPAWN_ETXTBSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
+    let mut spawn_backoff = Duration::from_millis(5);
+    let mut child = loop {
+        match builder.spawn() {
+            Ok(child) => {
+                let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
+                break TerminalChild { child, pgid };
+            }
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && started.elapsed() + spawn_backoff < SPAWN_ETXTBSY_RETRY_BUDGET =>
+            {
+                tracing::debug!(
+                    target: "kimi_code_provider",
+                    attempt_after_ms = started.elapsed().as_millis(),
+                    "terminal spawn hit transient ETXTBSY; backing off and retrying"
+                );
+                tokio::time::sleep(spawn_backoff).await;
+                spawn_backoff = (spawn_backoff * 2).min(Duration::from_millis(100));
+            }
+            Err(error) => {
+                tracing::debug!(target: "kimi_code_provider", %error, "terminal spawn failed");
+                let mut result = entry.result.lock().expect("terminal result lock");
+                *result = Some(TerminalResult {
+                    exit_code: None,
+                    timed_out: false,
+                    killed: false,
+                    truncated: false,
+                    duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                });
+                entry.done.notify_waiters();
+                let mut state = entry.state.lock().expect("terminal state lock");
+                *state = TerminalState::Finished;
+                return;
+            }
         }
     };
 
@@ -707,6 +726,39 @@ mod tests {
         .expect("terminal output test timed out");
         assert!(result.truncated);
         assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_retries_transient_etxtbsy_until_writer_releases() {
+        let dir = tempfile::tempdir().expect("dir");
+        // ETXTBSY（目标正被写打开）是瞬态错误：并发「写脚本→ exec」
+        // 压力（实测定制内核/btrfs 组合下偶发）或异步句柄释放延迟都
+        // 会命中。用真实写句柄确定性构造该状态，150ms 后异步释放；
+        // run_terminal 必须退避重试到 spawn 成功，而不是把瞬态失败
+        // 静默吞成「exit_code=None 的正常完成」。
+        let bin = write_executable(dir.path(), "busy", "exit 0");
+        let hold = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("hold writer open on script");
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drop(hold);
+        });
+        let manager = manager(Duration::from_secs(30));
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let result = manager.wait_for_exit(&id).await.expect("wait");
+        release.await.expect("release task");
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "transient ETXTBSY must be retried, not swallowed: {result:?}"
+        );
     }
 
     #[cfg(unix)]
