@@ -3,19 +3,12 @@
 // engine（lifecycle_store 存在）下 probe 记录每次 start 的 policy/sink 携带。
 // 本文件经 include! 进入 tests 模块，直接共享 part 文件的作用域与 helpers。
 
-/// Task 4.1：捕获 engine 注入的 run-bound durable sink（审计通道分离回归用）。
-type CapturedAuditSinks = Arc<
-    Mutex<Vec<Option<Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>>>,
->;
-
 /// 记录每次 start 是否携带 tool_policy/audit_sink 的队列输出探针。
 struct PolicySinkQueuedProvider {
     outputs: Arc<Mutex<VecDeque<String>>>,
     starts: Arc<AtomicUsize>,
     sink_seen: Arc<Mutex<Vec<bool>>>,
     policy_seen: Arc<Mutex<Vec<bool>>>,
-    /// Task 4.1：捕获 engine 实际注入的 run-bound sink（审计通道分离回归用）。
-    captured_sinks: CapturedAuditSinks,
 }
 
 impl PolicySinkQueuedProvider {
@@ -25,7 +18,6 @@ impl PolicySinkQueuedProvider {
             starts: Arc::new(AtomicUsize::new(0)),
             sink_seen: Arc::new(Mutex::new(Vec::new())),
             policy_seen: Arc::new(Mutex::new(Vec::new())),
-            captured_sinks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -46,10 +38,6 @@ impl StreamingProviderAdapter for PolicySinkQueuedProvider {
             .lock()
             .unwrap()
             .push(input.audit_sink.is_some());
-        self.captured_sinks
-            .lock()
-            .unwrap()
-            .push(input.audit_sink.clone());
         let template = self
             .outputs
             .lock()
@@ -127,8 +115,7 @@ async fn persistent_policy_engine(session_id: &str) -> (TempDir, WorkspaceEngine
 
 #[tokio::test]
 async fn workspace_review_and_repair_policy_runs_receive_durable_audit_sink() {
-    let (_tmp, mut engine) =
-        persistent_policy_engine("sess_review_repair_policy_sink").await;
+    let (_tmp, mut engine) = persistent_policy_engine("sess_review_repair_policy_sink").await;
     engine.start_review().await;
 
     let revise_json = r#"{
@@ -196,122 +183,54 @@ async fn workspace_revision_policy_run_receives_durable_audit_sink() {
     );
 }
 
-// ---- F3 Task 4.1（REQ-ENV-09/GC10）：workspace 侧审计通道严格分离回归 ----
+/// Task 4.1 修复轮（I2）：真实事件链 wire fixture 的路径（chmod 后便给真实
+/// CodexProvider 策略会话使用；首次 run thread/start、修复 run thread/resume）。
+fn workspace_policy_audit_fixture() -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/provider/codex_app_server_workspace_policy_audit_fixture.sh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions)
+            .unwrap_or_else(|error| panic!("chmod fixture: {error}"));
+    }
+    path
+}
 
-/// 策略角色的 canonical 事件只落 `tool-policy-run-audit/` 分区；非策略
-/// （Executor/Coder 档）input 幂等跳过 sink 接线，不产生任何 durable 策略
-/// 记录；分区之外的既有 lifecycle/execution 产物不含 tool-policy 事件。
+// ---- F3 Task 4.1 修复轮（REQ-ENV-09/GC10）：workspace 侧审计通道严格分离回归 ----
+
+/// I2（真实事件链证明）：策略 reviewer run 用真实 CodexProvider + wire fixture
+/// 经 engine `drive_review_session` 走真实 start 路径——provider 在握手成功后、
+/// `start` 返回前写 `provider_start`，审批即时决策落 `approval_decision`，全部
+/// 经 engine 注入的 run-bound sink 落到 `tool-policy-run-audit/` 分区；分区外
+/// 的既有 lifecycle 产物不含任何 tool-policy 事件标记。（手动 append 属
+/// LifecycleStore 单元测试用途，由 lifecycle_store/tests/tool_policy_audit.rs
+/// 覆盖，本 wiring 测试不再伪造事件。）
 #[tokio::test]
-async fn workspace_policy_and_non_policy_audit_channels_stay_separated() {
-    use crate::cross_cutting::tool_policy_audit::{
-        DurableToolPolicyEvent, ProviderStartAudit,
-    };
+async fn workspace_policy_review_run_writes_canonical_events_via_real_provider_chain() {
+    use crate::cross_cutting::codex_provider::CodexProvider;
+    use crate::cross_cutting::streaming_provider::ProviderVersionSupplier;
 
-    let (root, mut engine) = persistent_policy_engine("sess_audit_isolation").await;
+    let (root, mut engine) = persistent_policy_engine("sess_audit_real_chain").await;
     engine.start_review().await;
 
-    let pass_json = r#"{
-        "verdict": "pass",
-        "summary": "通过",
-        "findings": []
-    }"#;
-    let probe = Arc::new(PolicySinkQueuedProvider::new(vec![
-        missing_json_nonce_output(pass_json),
-        valid_structured_output(pass_json),
-    ]));
+    let supplier: ProviderVersionSupplier =
+        std::sync::Arc::new(|| Ok("codex 0.124.0-ws-audit-fixture".to_string()));
+    let provider = Arc::new(
+        CodexProvider::new(workspace_policy_audit_fixture()).with_version_supplier(supplier),
+    );
     engine
-        .drive_review_session(probe.clone(), empty_provider_commands())
+        .drive_review_session(provider, empty_provider_commands())
         .await;
-    assert!(
-        probe.starts.load(Ordering::SeqCst) >= 1,
-        "review drive must start the policy provider"
-    );
-    let sinks = probe.captured_sinks.lock().unwrap().clone();
-    assert!(
-        sinks.iter().all(|sink| sink.is_some()),
-        "policy review starts must carry the engine-attached durable sink"
-    );
-
-    // 经 engine 注入的 run-bound sink 写 canonical 事件（adapter 语义：首行
-    // provider_start，随后其余三类），验证只落 durable 分区。
-    let sink = sinks
-        .into_iter()
-        .find_map(|sink| sink)
-        .expect("captured durable sink");
-    sink.append_bound(DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
-        provider: "codex".to_string(),
-        role: "reviewer".to_string(),
-        workspace_session_id: "sess_audit_isolation".to_string(),
-        provider_session_id: "thread-isolation-1".to_string(),
-        tool_policy_canonical_digest: "digest-isolation".to_string(),
-        argv: Vec::new(),
-        sandbox: Some("read-only".to_string()),
-        approval_policy: Some("on-request".to_string()),
-        provider_version: "codex 0.153.4".to_string(),
-        adapter_dialect: "codex-app-server-rpc".to_string(),
-    }))
-    .expect("provider_start append via engine sink");
-    sink.append_bound(DurableToolPolicyEvent::SessionTerminated(
-        crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
-            reason_code: "completed".to_string(),
-        },
-    ))
-    .expect("session_terminated append via engine sink");
 
     let aria_root = root.path().join(".aria");
-    let partition_dir = aria_root.join("tool-policy-run-audit");
-    let partition_file =
-        partition_dir.join("sess_audit_isolation").join("0.jsonl");
-    let content = std::fs::read_to_string(&partition_file)
-        .unwrap_or_else(|error| panic!("partition file {}: {error}", partition_file.display()));
-    let lines: Vec<serde_json::Value> = content
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("partition jsonl line"))
-        .collect();
-    assert_eq!(lines[0]["event_type"], "provider_start");
-    assert_eq!(
-        lines[0]["workspace_session_id"], "sess_audit_isolation",
-        "LifecycleStore must stamp the file-key workspace id"
-    );
-    assert_eq!(lines[1]["event_type"], "session_terminated");
-    for line in &lines {
-        assert!(
-            matches!(
-                line["event_type"].as_str(),
-                Some(
-                    "provider_start"
-                        | "approval_decision"
-                        | "protocol_warning"
-                        | "session_terminated"
-                )
-            ),
-            "tool-policy partition must carry only canonical events: {line}"
-        );
-    }
-
-    // 非策略（Executor 档）input：幂等跳过 sink 接线，不产生任何策略通道记录。
-    let executor_input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
-        tool_policy: None,
-        audit_sink: None,
-        provider_type: crate::protocol::contracts::ProviderType::Codex,
-        role: crate::protocol::contracts::AdapterRole::Executor,
-        prompt: "executor non-policy".to_string(),
-        working_dir: std::env::temp_dir(),
-        workspace_session_id: Some("sess_audit_isolation".to_string()),
-        resume_provider_session_id: None,
-        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
-        structured_output_contract: None,
-        env_vars: Default::default(),
-        timeout_secs: 30,
-    };
-    let untouched = engine.attach_tool_policy_audit(executor_input);
-    assert_eq!(untouched.tool_policy, None);
-    assert!(
-        untouched.audit_sink.is_none(),
-        "non-policy executor input must never receive a tool-policy audit sink"
-    );
-
-    // 全 .aria 树（排除 tool-policy 分区自身）不含任何 tool-policy 事件标记。
+    let partition_dir = aria_root
+        .join("tool-policy-run-audit")
+        .join("sess_audit_real_chain");
     fn collect_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -325,6 +244,81 @@ async fn workspace_policy_and_non_policy_audit_channels_stay_separated() {
             }
         }
     }
+    let mut partition_files = Vec::new();
+    collect_files_recursive(&partition_dir, &mut partition_files);
+    // `role-run-seq.jsonl` 是 seq 分配高水位 marker，不是事件文件，排除。
+    let run_files: Vec<_> = partition_files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name != "role-run-seq.jsonl")
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !run_files.is_empty(),
+        "real policy review runs must land durable files in the tool-policy partition"
+    );
+
+    let mut all_event_types: Vec<String> = Vec::new();
+    for run_file in &run_files {
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(run_file)
+            .unwrap_or_else(|error| panic!("partition file {}: {error}", run_file.display()))
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("partition jsonl line"))
+            .collect();
+        // 真实 provider_start 首行不变量 + D7 冻结字段（engine 注入的 sink 以
+        // 文件 key 盖章 workspace_session_id，真实 adapter 写入其余字段）。
+        assert_eq!(
+            lines[0]["event_type"],
+            "provider_start",
+            "provider_start must be the first durable event in {}",
+            run_file.display()
+        );
+        assert_eq!(lines[0]["provider"], "codex");
+        assert_eq!(lines[0]["role"], "reviewer");
+        assert_eq!(
+            lines[0]["workspace_session_id"], "sess_audit_real_chain",
+            "LifecycleStore must stamp the file-key workspace id"
+        );
+        assert_eq!(lines[0]["provider_session_id"], "codex-thread-ws-audit");
+        assert_eq!(lines[0]["sandbox"], "read-only");
+        assert_eq!(lines[0]["approval_policy"], "on-request");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line["event_type"] == "provider_start")
+                .count(),
+            1,
+            "each durable run file carries exactly one provider_start"
+        );
+        for line in &lines {
+            let event_type = line["event_type"].as_str().expect("event_type");
+            assert!(
+                matches!(
+                    event_type,
+                    "provider_start"
+                        | "approval_decision"
+                        | "protocol_warning"
+                        | "session_terminated"
+                ),
+                "tool-policy partition must carry only canonical events: {line}"
+            );
+            all_event_types.push(event_type.to_string());
+        }
+    }
+    // wire fixture 的三类审批（fileChange/commandExecution decline + MCP accept）
+    // 必须经真实 adapter 决策链落盘为 approval_decision。
+    assert!(
+        all_event_types
+            .iter()
+            .any(|kind| kind == "approval_decision"),
+        "real codex approvals must persist as approval_decision: {all_event_types:?}"
+    );
+
+    // 分区之外的既有 lifecycle 产物不含任何 tool-policy 事件标记（通道分离）。
     let mut all_files = Vec::new();
     collect_files_recursive(&aria_root, &mut all_files);
     assert!(!all_files.is_empty());
@@ -347,4 +341,41 @@ async fn workspace_policy_and_non_policy_audit_channels_stay_separated() {
             }
         }
     }
+}
+
+/// I3（非策略侧收窄为 sink wiring only）：workspace 引擎没有 Executor/Coder
+/// 真实 drive 入口——聚合初始化 provider turns 属 logical_codebase 层（经 gateway
+/// 启动），因此这里无法做非策略 run 的 execution audit 正向断言；该正向断言
+/// 由 coding 侧 `coding_coder_and_policy_runs_keep_audit_channels_strictly_
+/// separated`（真实 Coder invocation + role-run-events 产物扫描）覆盖。本测试
+/// 只锁定 workspace 侧的非策略 input 永不接收 tool-policy sink（幂等跳过）。
+#[tokio::test]
+async fn workspace_non_policy_input_never_receives_tool_policy_sink_wiring_only() {
+    let (root, engine) = persistent_policy_engine("sess_audit_non_policy_wiring").await;
+
+    let executor_input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        tool_policy: None,
+        audit_sink: None,
+        provider_type: crate::protocol::contracts::ProviderType::Codex,
+        role: crate::protocol::contracts::AdapterRole::Executor,
+        prompt: "executor non-policy".to_string(),
+        working_dir: std::env::temp_dir(),
+        workspace_session_id: Some("sess_audit_non_policy_wiring".to_string()),
+        resume_provider_session_id: None,
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: Default::default(),
+        timeout_secs: 30,
+    };
+    let untouched = engine.attach_tool_policy_audit(executor_input);
+    assert_eq!(untouched.tool_policy, None);
+    assert!(
+        untouched.audit_sink.is_none(),
+        "non-policy executor input must never receive a tool-policy audit sink"
+    );
+    // 该会话从未跑过策略 run：分区目录不得因非策略 input 的接线尝试而产生。
+    assert!(
+        !root.path().join(".aria/tool-policy-run-audit").exists(),
+        "non-policy input must not create the tool-policy-run-audit partition"
+    );
 }
