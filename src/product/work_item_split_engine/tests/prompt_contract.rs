@@ -1109,8 +1109,8 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
 
     let clamp_block = &prompt[clamp_pos..output_pos];
     assert!(
-        clamp_block.len() <= 250,
-        "尾部钳制块必须 ≤250 字节，实测 {}: {clamp_block}",
+        clamp_block.len() <= 360,
+        "尾部钳制块必须 ≤360 字节（F2-C 反前导语行 ~109B 并入后 250→360），实测 {}: {clamp_block}",
         clamp_block.len()
     );
     for required in [

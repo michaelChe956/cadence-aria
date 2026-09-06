@@ -11,6 +11,11 @@ mod prompt_contract_sc_revision {
 
     include!("tests/prompt_contract_sc_revision.rs");
 }
+mod prompt_contract_sc_anti_preamble {
+    use super::*;
+
+    include!("tests/prompt_contract_sc_anti_preamble.rs");
+}
 include!("tests/part_02.rs");
 include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");

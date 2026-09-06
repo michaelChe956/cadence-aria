@@ -67,6 +67,8 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 /// 2026-09-03 P1-A 按红线先上调至 20,000（第 7 次提额，先例 14,400→19,000 共 6 次），
 /// 同批追加尾部 [format_clamp] 钳制块与标题正反例 few-shot；实测 19,324/余 676B，
 /// 断言见 prompt_contract::sc_author_prompt_tail_clamps_heading_language_and_raises_budget。
+/// 2026-09-06 F2-C 在 [format_clamp] 尾、[output] 前增反前导语教学行（~109B）；预算
+/// 维持 20,000（已达整百级，余量足够），实测见 prompt_contract_sc_anti_preamble。
 /// 依据：openspec/changes/archive/2026-08-31-rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
 #[cfg(test)]
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 20_000;
@@ -356,6 +358,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          {few_shot}\n\
          [format_clamp]\n\
          重申：结构标题必须逐字照抄 [markdown_grammar]/[minimum_legal_source] 的英文原文（含 `# Work Item Plan` 与全部 `###` 标题）；仅自由文本值用中文；禁止翻译、改写或加中文括号。\n\
+         禁止任何前言、寒暄、说明性开场或路由回执；输出的第一个字符必须是文档标题。\n\
          {output_directive}",
         issue_title = issue.title,
         issue_description = issue.description.as_deref().unwrap_or("无"),
