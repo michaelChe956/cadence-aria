@@ -1334,3 +1334,4 @@ test('coding protocol error tolerates coding_runner_already_started and stays fa
   assert.deepEqual(codingProtocolErrorPlan({ type: 'coding_protocol_error' }), { kind: 'fail' });
   assert.deepEqual(codingProtocolErrorPlan(null), { kind: 'fail' });
 });
+

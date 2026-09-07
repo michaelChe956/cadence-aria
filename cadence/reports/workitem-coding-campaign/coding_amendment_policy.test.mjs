@@ -1021,13 +1021,14 @@ test('stage_gate 识别纯函数：kind=stage_gate 或 gate_id 前缀 coding_sta
     pendingGatesPartition([{ kind: 'stage_gate', gate_id: 'coding_stage_gate_0001' }, { kind: 'mystery_gate', gate_id: 'gate_x' }]),
     {
       stageGates: [{ kind: 'stage_gate', gate_id: 'coding_stage_gate_0001' }],
+      blockedGates: [],
       unknownGates: [{ kind: 'mystery_gate', gate_id: 'gate_x' }],
     },
-    'pending_gates 必须拆分：stage_gate 豁免，其余门保持未知门语义',
+    'pending_gates 必须拆分：stage_gate 豁免，blocked 快速失败，其余门保持未知门语义',
   );
-  assert.deepEqual(pendingGatesPartition(undefined), { stageGates: [], unknownGates: [] });
-  assert.deepEqual(pendingGatesPartition('not-array'), { stageGates: [], unknownGates: [] });
-  assert.deepEqual(pendingGatesPartition([]), { stageGates: [], unknownGates: [] });
+  assert.deepEqual(pendingGatesPartition(undefined), { stageGates: [], blockedGates: [], unknownGates: [] });
+  assert.deepEqual(pendingGatesPartition('not-array'), { stageGates: [], blockedGates: [], unknownGates: [] });
+  assert.deepEqual(pendingGatesPartition([]), { stageGates: [], blockedGates: [], unknownGates: [] });
 });
 
 // 独立锚点：上方正例同时满足 kind=stage_gate 与 gate_id 前缀两判据，删掉 kind 判据仍绿；
@@ -1396,3 +1397,18 @@ test('pending_gates 混排 [stage_gate, 未知门]：stage_gate 审计照记后�
     server.close();
   }
 }, { timeout: 45_000 });
+
+// —— 3.6 矩阵 driver 补丁：kind=blocked 门快速失败（不再哑等硬超时）——
+// 现场证据 /tmp/aria-36-matrix/pi-heavy-v2/rep2：coder 输出非法枚举变体 → 服务器
+// blocked 门（expires_at=null 永不自愈，coding_output_human_triage）→ driver
+// automation_stopped_for_unknown_gate 干等 90min 硬超时，纯浪费钟。blocked 门
+// 服务端 attempt 留存可分诊，driver 应立即失败并带出门信息。
+test('pending gates partition separates permanently blocked gates from stage and unknown gates', () => {
+  const stage = { kind: 'stage_gate', gate_id: 'coding_stage_gate_0001' };
+  const blocked = { kind: 'blocked', gate_id: 'coding_blocked_gate_0001', title: 'Coder 输出需要人工分诊', expires_at: null };
+  const unknown = { kind: 'something_new', gate_id: 'x' };
+  const parts = pendingGatesPartition([stage, blocked, unknown, null]);
+  assert.deepEqual(parts.stageGates, [stage]);
+  assert.deepEqual(parts.blockedGates, [blocked]);
+  assert.deepEqual(parts.unknownGates, [unknown, null]); // null 非法形态沿用既有语义落入 unknown
+});

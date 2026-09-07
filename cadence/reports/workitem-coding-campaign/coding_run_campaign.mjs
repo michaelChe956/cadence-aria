@@ -235,15 +235,24 @@ function isAutoReleasedStageGate(gate) {
   return typeof gate.gate_id === 'string' && gate.gate_id.startsWith(STAGE_GATE_ID_PREFIX);
 }
 
+// kind=blocked 门（expires_at=null 无自动放行，人工分诊语义）永不自愈：driver 干等只会哑到
+// 硬超时；blocked attempt 在服务端留存可后续分诊，driver 应立即失败并带出门信息。
+function isPermanentlyBlockedGate(gate) {
+  if (!gate || typeof gate !== 'object') return false;
+  return gate.kind === 'blocked';
+}
+
 function pendingGatesPartition(pendingGates) {
   const gates = Array.isArray(pendingGates) ? pendingGates : [];
   const stageGates = [];
+  const blockedGates = [];
   const unknownGates = [];
   for (const gate of gates) {
     if (isAutoReleasedStageGate(gate)) stageGates.push(gate);
+    else if (isPermanentlyBlockedGate(gate)) blockedGates.push(gate);
     else unknownGates.push(gate);
   }
-  return { stageGates, unknownGates };
+  return { stageGates, blockedGates, unknownGates };
 }
 
 // —— Task 5.1 amendment 模式（ARIA_AMENDMENT_SCRIPT，8.4a 形态）——
@@ -1138,10 +1147,19 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
       finish(0);
       return;
     }
-    const { unknownGates, stageGates } = pendingGatesPartition(message.pending_gates);
+    const { unknownGates, stageGates, blockedGates } = pendingGatesPartition(message.pending_gates);
     // 混排 [stage_gate, 未知门] 同批到达时，必须先记完 stage_gate 审计再对未知门停机，
     // 否则 unknownGates 先检即 return 会丢失 stage_gate_observed 审计事件。
     for (const gate of stageGates) observeStageGate(gate, `${source}:pending_gates`);
+    if (blockedGates.length) {
+      const gate = blockedGates[0];
+      writeLog({ event: 'blocked_gate_fail_fast', source: `${source}:pending_gates`, gate });
+      fail(
+        'blocked_gate_awaiting_triage',
+        `${gate.title ?? gate.gate_id ?? 'blocked gate'}：kind=blocked 门无自动放行（expires_at=${gate.expires_at ?? 'null'}），attempt 留存服务端待人工分诊`,
+      );
+      return;
+    }
     if (unknownGates.length) {
       waitForUnknownGate(unknownGates, `${source}:pending_gates`);
       return;
@@ -1347,6 +1365,13 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
           const gate = message.gate ?? message;
           if (isAutoReleasedStageGate(gate)) {
             observeStageGate(gate, message.type);
+          } else if (isPermanentlyBlockedGate(gate)) {
+            // blocked 门永不自愈：立即失败携门信息，不再哑等硬超时（attempt 服务端留存可分诊）。
+            writeLog({ event: 'blocked_gate_fail_fast', source: message.type, gate });
+            fail(
+              'blocked_gate_awaiting_triage',
+              `${gate.title ?? gate.gate_id ?? 'blocked gate'}：kind=blocked 门无自动放行（expires_at=${gate.expires_at ?? 'null'}），attempt 留存服务端待人工分诊`,
+            );
           } else {
             waitForUnknownGate(gate, message.type);
           }
