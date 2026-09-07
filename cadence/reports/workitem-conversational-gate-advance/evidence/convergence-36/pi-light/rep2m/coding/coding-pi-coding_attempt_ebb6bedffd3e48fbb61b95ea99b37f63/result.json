@@ -1,0 +1,234 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0143",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "pi",
+  "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+  "outDir": "/tmp/aria-36-matrix/pi-light/rep2m/coding/coding-pi-coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+  "startedAt": "2026-09-07T16:34:47.000Z",
+  "finishedAt": "2026-09-07T16:41:25.368Z",
+  "elapsedSec": 398.369,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.082,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.119,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 289.274,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "review_request",
+      "elapsedSec": 394.026,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "final_confirm",
+      "elapsedSec": 398.29,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.189,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 289.274,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "实现与验收标准 AC-001 一致：server.js 新增 GET /api/hello 接口，人工核查返回 200 且 body 逐字节匹配预期 JSON；非 GET 方法与未知路径均人工核查返回 404 且 body 逐字节匹配错误 JSON，满足输出契约 CT-001。diff 仅触及专属范围内的 server.js 与 test/hello.test.js，未越过禁改范围。验证命令 node --test test/hello.test.js 实际执行 1 个测试，1 通过 0 失败，退出码 0，满足非零测试执行要求。测试通过 t.after 正确回收服务端口，实现导出 server 与 start 便于测试，代码质量无问题。无阻塞问题，批准合入。",
+      "created_at": "2026-09-07T16:41:20.946225376+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "实现与验收标准 AC-001 一致：server.js 新增 GET /api/hello 接口，人工核查返回 200 且 body 逐字节匹配预期 JSON；非 GET 方法与未知路径均人工核查返回 404 且 body 逐字节匹配错误 JSON，满足输出契约 CT-001。diff 仅触及专属范围内的 server.js 与 test/hello.test.js，未越过禁改范围。验证命令 node --test test/hello.test.js 实际执行 1 个测试，1 通过 0 失败，退出码 0，满足非零测试执行要求。测试通过 t.after 正确回收服务端口，实现导出 server 与 start 便于测试，代码质量无问题。无阻塞问题，批准合入。",
+      "created_at": "2026-09-07T16:41:20.946225376+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "review_request_0001",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "kind": "git_branch_only",
+      "remote_kind": "github",
+      "remote": "origin",
+      "base_branch": "main",
+      "branch_name": "aria/issues/issue_0143",
+      "commit_sha": "8e2a01279ac989b7702ad522c6323883cd5673da",
+      "push_status": "pushed",
+      "external_url": null,
+      "manual_instructions": [
+        "基于远端 origin/aria/issues/issue_0143 发起代码审查"
+      ],
+      "push_error": null,
+      "owner_kind": "attempt",
+      "pointer_publication_id": null,
+      "revoked": false,
+      "created_at": "2026-09-07T16:41:25.255435704+00:00",
+      "updated_at": "2026-09-07T16:41:25.255435704+00:00"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "实现与验收标准 AC-001 一致：server.js 新增 GET /api/hello 接口，人工核查返回 200 且 body 逐字节匹配预期 JSON；非 GET 方法与未知路径均人工核查返回 404 且 body 逐字节匹配错误 JSON，满足输出契约 CT-001。diff 仅触及专属范围内的 server.js 与 test/hello.test.js，未越过禁改范围。验证命令 node --test test/hello.test.js 实际执行 1 个测试，1 通过 0 失败，退出码 0，满足非零测试执行要求。测试通过 t.after 正确回收服务端口，实现导出 server 与 start 便于测试，代码质量无问题。无阻塞问题，批准合入。",
+      "created_at": "2026-09-07T16:41:20.946225376+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "实现与验收标准 AC-001 一致：server.js 新增 GET /api/hello 接口，人工核查返回 200 且 body 逐字节匹配预期 JSON；非 GET 方法与未知路径均人工核查返回 404 且 body 逐字节匹配错误 JSON，满足输出契约 CT-001。diff 仅触及专属范围内的 server.js 与 test/hello.test.js，未越过禁改范围。验证命令 node --test test/hello.test.js 实际执行 1 个测试，1 通过 0 失败，退出码 0，满足非零测试执行要求。测试通过 t.after 正确回收服务端口，实现导出 server 与 start 便于测试，代码质量无问题。无阻塞问题，批准合入。",
+      "created_at": "2026-09-07T16:41:20.946225376+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0143",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0143",
+    "head_commit": "8e2a01279ac989b7702ad522c6323883cd5673da",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 1078,
+    "output_tokens": 2690,
+    "cache_read_tokens": 52096
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 543,
+      "output_tokens": 942,
+      "cache_read_tokens": 30464,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 535,
+      "output_tokens": 1748,
+      "cache_read_tokens": 21632,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-07T16:34:47.116267704+00:00",
+      "completed_at": "2026-09-07T16:34:47.143528961+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-07T16:34:52.187449898+00:00",
+      "completed_at": "2026-09-07T16:39:36.227162325+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-07T16:39:41.278714889+00:00",
+      "completed_at": "2026-09-07T16:41:20.953603790+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "stage": "review_request",
+      "title": "发起 review request",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "review request 已创建",
+      "started_at": "2026-09-07T16:41:21.023419738+00:00",
+      "completed_at": "2026-09-07T16:41:25.259923587+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_ebb6bedffd3e48fbb61b95ea99b37f63",
+      "stage": "final_confirm",
+      "title": "等待人工最终确认",
+      "status": "completed",
+      "agent_role": "system",
+      "summary": "用户已确认完成",
+      "started_at": "2026-09-07T16:41:25.277772688+00:00",
+      "completed_at": "2026-09-07T16:41:25.319645494+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": null,
+  "error": null,
+  "completed": true
+}
