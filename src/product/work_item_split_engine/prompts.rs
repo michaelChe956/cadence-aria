@@ -69,6 +69,10 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 /// 断言见 prompt_contract::sc_author_prompt_tail_clamps_heading_language_and_raises_budget。
 /// 2026-09-06 F2-C 在 [format_clamp] 尾、[output] 前增反前导语教学行（~109B）；预算
 /// 维持 20,000（已达整百级，余量足够），实测见 prompt_contract_sc_anti_preamble。
+/// 2026-09-07 3.6 弱模型基线加固：[weak_model_precision] 精度教学两段（+537B，紧随
+/// [cross_reference_discipline] 之后）；预算维持 20,000（整百级、余量足够），实测
+/// 19,966/最小 fixture 余 34B（另一 fixture 19,974/余 26B），见
+/// prompt_contract::work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline。
 /// 依据：openspec/changes/archive/2026-08-31-rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
 #[cfg(test)]
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 20_000;
@@ -219,6 +223,21 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
     )
 }
 
+/// 3.6 弱模型基线加固：面向 flash 级基线的精度教学（rep1b/rep1c 两连败实证：
+/// AC 缺 reviewer check、幻觉引用不存在的 REQ-002）。字段名、错误码与判定语义
+/// 必须与 `work_item_contract::validation.rs` 的 IR 校验逐字对齐（对齐断言见
+/// prompt_contract::weak_model_precision_teaching_matches_contract_validator_judgement）。
+/// 🔴 不删不改既有教学段；预算红线见 WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+/// 批注（+537B，维持 20,000 整百级，最小 fixture 余 34B）。
+const WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE: &str = "\
+[weak_model_precision]
+\
+AC 纪律：每个 `- criterion_id: AC-xxx` 必须在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`；正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`；漏写 → acceptance_criterion_without_reviewer_check 拒绝。
+\
+引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*）；task 的 requirement_refs 必须逐字取自 [design_requirements] 清单。反例：引用清单没有的 REQ-002 → unknown_requirement_ref 拒绝。
+\
+";
+
 fn work_item_plan_dependency_syntax_rules() -> String {
     let dependencies_key = grammar::DEPENDENCIES_KEY;
     let item_id_prefix = grammar::ITEM_ID_PREFIX;
@@ -353,6 +372,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
          Verification.command 直接声明，将按声明执行；命令证据不足写 manual_instruction 或 blocker，禁止臆造。不要 JSON、私有协议、私有 draft、classifier 字段、code fence 或解释。\n\
          {dependency_syntax_rules}\n\n\
          {reference_discipline}
+         {weak_model_discipline}
          {grammar}\
          [minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n{minimum_source}\n\
          {few_shot}\n\
@@ -374,6 +394,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
         reference_discipline = reference_discipline,
+        weak_model_discipline = WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE,
         grammar = work_item_plan_markdown_grammar(),
         dependency_syntax_rules = dependency_syntax_rules,
         minimum_source = work_item_plan_minimum_legal_source(),

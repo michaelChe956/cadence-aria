@@ -6,6 +6,11 @@ mod prompt_contract {
 
     include!("tests/prompt_contract.rs");
 }
+mod prompt_contract_weak_model {
+    use super::*;
+
+    include!("tests/prompt_contract_weak_model.rs");
+}
 mod prompt_contract_sc_revision {
     use super::*;
 
