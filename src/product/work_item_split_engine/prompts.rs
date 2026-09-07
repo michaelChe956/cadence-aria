@@ -69,9 +69,9 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 /// 断言见 prompt_contract::sc_author_prompt_tail_clamps_heading_language_and_raises_budget。
 /// 2026-09-06 F2-C 在 [format_clamp] 尾、[output] 前增反前导语教学行（~109B）；预算
 /// 维持 20,000（已达整百级，余量足够），实测见 prompt_contract_sc_anti_preamble。
-/// 2026-09-07 3.6 弱模型基线加固：[weak_model_precision] 精度教学两段（+537B，紧随
+/// 2026-09-07 3.6 弱模型基线加固：[weak_model_precision] 精度教学两段（净增 547B，紧随
 /// [cross_reference_discipline] 之后）；预算维持 20,000（整百级、余量足够），实测
-/// 19,966/最小 fixture 余 34B（另一 fixture 19,974/余 26B），见
+/// 19,976/余 24B 与 19,984/余 16B（两 fixture），见
 /// prompt_contract::work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline。
 /// 依据：openspec/changes/archive/2026-08-31-rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
 #[cfg(test)]
@@ -228,7 +228,7 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
 /// 必须与 `work_item_contract::validation.rs` 的 IR 校验逐字对齐（对齐断言见
 /// prompt_contract::weak_model_precision_teaching_matches_contract_validator_judgement）。
 /// 🔴 不删不改既有教学段；预算红线见 WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
-/// 批注（+537B，维持 20,000 整百级，最小 fixture 余 34B）。
+/// 批注（净增 547B，维持 20,000 整百级，实测余 24/16B）。
 const WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE: &str = "\
 [weak_model_precision]
 \
