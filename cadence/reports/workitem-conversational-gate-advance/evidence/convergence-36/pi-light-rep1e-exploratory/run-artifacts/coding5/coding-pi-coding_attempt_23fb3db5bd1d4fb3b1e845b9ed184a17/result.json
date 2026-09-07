@@ -1,0 +1,179 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0140",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "pi",
+  "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+  "outDir": "/tmp/aria-36-matrix/pi-light/rep1e/coding5/coding-pi-coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+  "startedAt": "2026-09-07T11:43:51.933Z",
+  "finishedAt": "2026-09-07T13:13:52.032Z",
+  "elapsedSec": 5400.101,
+  "stageTimeline": [
+    {
+      "stage": "coding",
+      "elapsedSec": 0.305,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.305,
+      "source": "coding_session_state:pending_gates",
+      "gate": [
+        {
+          "gate_id": "coding_blocked_gate_0001",
+          "kind": "blocked",
+          "title": "Coder 输出需要人工分诊",
+          "description": "Coder 完成报告中的 plan_defect_findings 未通过契约校验，流程已暂停并等待人工分诊: coding_provider_stream_failed: plan_defect_finding_invalid: unknown variant `operational_defect`, expected one of `implementation_defect`, `verification_incomplete`, `current_work_item_invalid`, `upstream_contract_invalid`, `dependency_graph_invalid`, `design_amendment_required`, `story_amendment_required`, `operational_blocker`",
+          "stage": "coding",
+          "role": "coder",
+          "expires_at": null,
+          "provider_snapshot": null,
+          "available_actions": [
+            {
+              "action_id": "retry_coding",
+              "label": "重新启动 Coder",
+              "action_type": "retry_coding"
+            },
+            {
+              "action_id": "abort",
+              "label": "终止",
+              "action_type": "abort"
+            }
+          ],
+          "reason_code": "coding_output_human_triage",
+          "evidence_refs": [],
+          "raw_provider_output_ref": "provider-raw/coding/coder_output_0003.txt",
+          "diagnostic": null
+        }
+      ],
+      "action": "no_response_wait_for_hard_timeout"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过：变更限定在 server、data/levels.json 与 tests/backend；GET /api/levels、数据校验、错误响应、未知路径与不允许方法、静态文件安全边界、生命周期与默认端口契约均有实现与测试覆盖。新鲜验证在允许网络监听的环境中按 CHECK-001 原文执行，7 个测试全部通过、0 失败；diff --check 无问题。沙箱内监听 127.0.0.1 被 EPERM 拦截属运行环境限制，不作为实现缺陷。",
+      "created_at": "2026-09-07T11:15:36.327363925+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过：本工作项仅新增 web/index.html、web/level-select.js 与 tests/frontend/level-select.test.js，未越过禁止写入门禁。入口页包含 loading、level-list、error-message 容器并引入前端脚本；脚本使用 /api/levels，导出 initLevelSelect 并注入 document 与 fetchImpl；渲染、锁定状态、网络失败、非 2xx、非法 payload 和容器保持均有测试覆盖，且与上游 GET /api/levels 的 5 项数据约束和错误契约兼容。CHECK-002 新鲜执行 8 个测试全部通过、0 失败；额外组合执行前后端 15 个测试全部通过；diff 检查无问题。",
+      "created_at": "2026-09-07T11:22:34.990896967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0140",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0140",
+    "head_commit": "6fd1fcc80467a7cb7c3c804b9eeb0291759fadf1",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "usage_unavailable": true
+  },
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-07T11:03:11.475598848+00:00",
+      "completed_at": "2026-09-07T11:03:11.506046804+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-07T11:03:16.631368215+00:00",
+      "completed_at": "2026-09-07T11:13:05.680700262+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-07T11:13:10.878710928+00:00",
+      "completed_at": "2026-09-07T11:15:36.337979123+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-07T11:15:41.819764104+00:00",
+      "completed_at": "2026-09-07T11:21:29.575025365+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-07T11:21:34.756964940+00:00",
+      "completed_at": "2026-09-07T11:22:35.003191465+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0006",
+      "attempt_id": "coding_attempt_23fb3db5bd1d4fb3b1e845b9ed184a17",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-07T11:22:40.538164856+00:00",
+      "completed_at": "2026-09-07T11:23:21.774842819+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "unknown_gate_timeout",
+  "error": "未知/不可理解 Coding gate 后等待至硬超时 5400000ms",
+  "completed": false
+}

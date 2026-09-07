@@ -1,0 +1,515 @@
+{
+  "type": "artifact_update",
+  "version": 5,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_6de4a66a7101cd2d3c6b3ec3",
+    "work_item_revision_id": "work_item_revision_6de4a66a7101cd2d3c6b3ec3",
+    "canonical_contract_hash": "51d234f51c1991718e9277dfeaf548bde0d064c0cb003b4e1bfd68a941508f1a",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "关卡选择页与 DOM 替身渲染",
+      "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生 HTML 与 JavaScript 请求 /api/levels 渲染关卡名称与难度及锁定态并在失败时保留页面框架展示可读错误",
+      "non_goals": [
+        "不实现关卡玩法与选中关卡后的行为",
+        "不启动浏览器或引入浏览器自动化与 npm 依赖",
+        "不修改 server/** 与 data/levels.json 及 tests/backend/** 与 tests/integration/**"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/levels"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且恰为 5 项"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "关卡字段约束为 id 非空字符串且文件内唯一 且 name 非空字符串 且 difficulty 属于枚举{简单 普通 困难} 且 unlocked 为布尔值"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "contract_id": "CT-006",
+          "capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象"
+          ],
+          "source_refs": [
+            "CT-006"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-017",
+          "capabilities": [
+            "web/index.html 为关卡选择页入口"
+          ],
+          "source_refs": [
+            "CT-017"
+          ]
+        },
+        {
+          "contract_id": "CT-018",
+          "capabilities": [
+            "web/index.html 含 id=loading 容器标记"
+          ],
+          "source_refs": [
+            "CT-018"
+          ]
+        },
+        {
+          "contract_id": "CT-019",
+          "capabilities": [
+            "web/index.html 含 id=level-list 容器标记"
+          ],
+          "source_refs": [
+            "CT-019"
+          ]
+        },
+        {
+          "contract_id": "CT-020",
+          "capabilities": [
+            "web/index.html 含 id=error-message 容器标记"
+          ],
+          "source_refs": [
+            "CT-020"
+          ]
+        },
+        {
+          "contract_id": "CT-021",
+          "capabilities": [
+            "web/index.html 引入 web/level-select.js 脚本"
+          ],
+          "source_refs": [
+            "CT-021"
+          ]
+        },
+        {
+          "contract_id": "CT-022",
+          "capabilities": [
+            "web/level-select.js 引用相对路径 /api/levels"
+          ],
+          "source_refs": [
+            "CT-022"
+          ]
+        },
+        {
+          "contract_id": "CT-023",
+          "capabilities": [
+            "web/level-select.js 导出 initLevelSelect 且注入 document 与 fetchImpl"
+          ],
+          "source_refs": [
+            "CT-023"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 审视 web/index.html 页面骨架 THE SYSTEM SHALL 提供 id=loading 与 id=level-list 与 id=error-message 容器标记并引入 web/level-select.js",
+        "WHEN initLevelSelect 以 DOM 替身与返回合规数组的 fetch 替身执行 THE SYSTEM SHALL 先呈现加载态再将 5 项渲染为含名称与难度的列表且 unlocked=false 项呈锁定态且不可选择",
+        "WHEN fetch 替身请求失败或返回非 200 或返回违反关卡字段约束的响应 THE SYSTEM SHALL 保留页面框架并在错误容器展示可读提示且不白屏",
+        "WHEN 前端测试套件以 node --test 执行 THE SYSTEM SHALL 全部通过且测试以 DOM 替身执行而不启动浏览器"
+      ],
+      "source_refs": [
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "AC-010",
+        "CHECK-002",
+        "CT-001",
+        "CT-002",
+        "CT-004",
+        "CT-006",
+        "CT-017",
+        "CT-018",
+        "CT-019",
+        "CT-020",
+        "CT-021",
+        "CT-022",
+        "CT-023",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-011",
+        "TASK-012",
+        "TASK-013",
+        "TASK-014",
+        "TASK-015",
+        "TASK-016"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_6de4a66a7101cd2d3c6b3ec3",
+      "objective": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生 HTML 与 JavaScript 请求 /api/levels 渲染关卡名称与难度及锁定态并在失败时保留页面框架展示可读错误",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且恰为 5 项"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "关卡字段约束为 id 非空字符串且文件内唯一 且 name 非空字符串 且 difficulty 属于枚举{简单 普通 困难} 且 unlocked 为布尔值"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-006",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-011",
+        "TASK-012",
+        "TASK-013",
+        "TASK-014",
+        "TASK-015",
+        "TASK-016"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-011",
+          "statement": "WHEN 开始实现前端渲染逻辑 THE SYSTEM SHALL 先在 tests/frontend/ 以 DOM 替身与可注入 fetch 替身编写失败测试断言加载态与关卡名称与难度渲染及 unlocked=false 锁定态不可选择",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-008"
+          ]
+        },
+        {
+          "task_id": "TASK-012",
+          "statement": "WHEN 开始实现前端异常逻辑 THE SYSTEM SHALL 先在 tests/frontend/ 以 DOM 替身编写失败测试断言请求失败与非 200 响应与违反关卡字段约束响应均进入错误提示分支且保留页面容器不白屏",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-009"
+          ]
+        },
+        {
+          "task_id": "TASK-013",
+          "statement": "WHEN 开始实现页面骨架 THE SYSTEM SHALL 先在 tests/frontend/ 编写读取 web/index.html 的失败测试断言三个容器标记与 web/level-select.js 脚本引用",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-007"
+          ]
+        },
+        {
+          "task_id": "TASK-014",
+          "statement": "WHEN 编写页面骨架 THE SYSTEM SHALL 在 web/index.html 提供 id=loading 与 id=level-list 与 id=error-message 容器标记并引入 web/level-select.js",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-007"
+          ]
+        },
+        {
+          "task_id": "TASK-015",
+          "statement": "WHEN 实现页面脚本 THE SYSTEM SHALL 在 web/level-select.js 导出 initLevelSelect({ document, fetchImpl }) 并以相对路径请求 /api/levels 实现加载态与列表渲染与锁定态及错误提示",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-009"
+          ]
+        },
+        {
+          "task_id": "TASK-016",
+          "statement": "WHEN 前端实现完成 THE SYSTEM SHALL 以限定 tests/frontend 的 node --test 套件运行至全部通过且测试以 DOM 替身执行而不启动浏览器",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-010"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-007",
+          "statement": "WHEN 审视 web/index.html 页面骨架 THE SYSTEM SHALL 提供 id=loading 与 id=level-list 与 id=error-message 容器标记并引入 web/level-select.js",
+          "required_evidence": [
+            "source_diff"
+          ]
+        },
+        {
+          "criterion_id": "AC-008",
+          "statement": "WHEN initLevelSelect 以 DOM 替身与返回合规数组的 fetch 替身执行 THE SYSTEM SHALL 先呈现加载态再将 5 项渲染为含名称与难度的列表且 unlocked=false 项呈锁定态且不可选择",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-009",
+          "statement": "WHEN fetch 替身请求失败或返回非 200 或返回违反关卡字段约束的响应 THE SYSTEM SHALL 保留页面框架并在错误容器展示可读提示且不白屏",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-010",
+          "statement": "WHEN 前端测试套件以 node --test 执行 THE SYSTEM SHALL 全部通过且测试以 DOM 替身执行而不启动浏览器",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "find tests/frontend -name '*.test.js' -print -quit | grep -q . && node --test \"tests/frontend/**/*.test.js\"",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "page_entry_path=web/index.html",
+          "script_entry_path=web/level-select.js",
+          "container_marker_loading=id=loading",
+          "container_marker_list=id=level-list",
+          "container_marker_error=id=error-message",
+          "api_path=/api/levels",
+          "testable_interface=initLevelSelect 注入 document 与 fetchImpl",
+          "rendering_ownership=运行时渲染与失败降级断言由前端测试以 DOM 替身负责且集成仅验证 HTTP 可观测证据"
+        ],
+        "provided_contract_refs": [
+          "CT-017",
+          "CT-018",
+          "CT-019",
+          "CT-020",
+          "CT-021",
+          "CT-022"
+        ],
+        "reviewer_check_refs": [
+          "AC-007",
+          "AC-008",
+          "AC-009",
+          "AC-010"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_6de4a66a7101cd2d3c6b3ec3",
+      "criterion_refs": [
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "AC-010"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-007",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "source_diff"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-008",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-009",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-010",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且恰为 5 项"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "关卡字段约束为 id 非空字符串且文件内唯一 且 name 非空字符串 且 difficulty 属于枚举{简单 普通 困难} 且 unlocked 为布尔值"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-006",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-017",
+          "capabilities": [
+            "web/index.html 为关卡选择页入口"
+          ]
+        },
+        {
+          "contract_id": "CT-018",
+          "capabilities": [
+            "web/index.html 含 id=loading 容器标记"
+          ]
+        },
+        {
+          "contract_id": "CT-019",
+          "capabilities": [
+            "web/index.html 含 id=level-list 容器标记"
+          ]
+        },
+        {
+          "contract_id": "CT-020",
+          "capabilities": [
+            "web/index.html 含 id=error-message 容器标记"
+          ]
+        },
+        {
+          "contract_id": "CT-021",
+          "capabilities": [
+            "web/index.html 引入 web/level-select.js 脚本"
+          ]
+        },
+        {
+          "contract_id": "CT-022",
+          "capabilities": [
+            "web/level-select.js 引用相对路径 /api/levels"
+          ]
+        },
+        {
+          "contract_id": "CT-023",
+          "capabilities": [
+            "web/level-select.js 导出 initLevelSelect 且注入 document 与 fetchImpl"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "find tests/frontend -name '*.test.js' -print -quit | grep -q . && node --test \"tests/frontend/**/*.test.js\"",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "0e3a331c10c2127ad19f56c68883629d20f2f068a43ed56031361cdbedf2d308",
+    "coder_projection_hash": "700e2df1ce116f517846501bb54ec73c473986b8343eb2868e2f206ac5e9d947",
+    "reviewer_projection_hash": "084cb7e58bec920eb60548a4a34ac0f97b4f34ec3d873350b909813d4fcc5d4f",
+    "created_at": "2026-09-07T09:02:37.450643954+00:00"
+  }
+}

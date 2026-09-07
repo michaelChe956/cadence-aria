@@ -1,0 +1,130 @@
+{
+  "id": "coding_group_initialization_issue_work_item_plan_0001",
+  "project_id": "project_0001",
+  "issue_id": "issue_0140",
+  "plan_id": "issue_work_item_plan_0001",
+  "lock_work_item_id": "WI-001",
+  "worktree_lease_id": "issue_worktree_lease_970cf20657de4a8d8f1703216c6404fd",
+  "attempt": {
+    "id": "coding_attempt_a65e621e1b064eff92349382b58d1b38",
+    "project_id": "project_0001",
+    "issue_id": "issue_0140",
+    "work_item_id": "WI-001",
+    "attempt_no": 1,
+    "scope": "work_item_group",
+    "status": "created",
+    "version": 0,
+    "admission_kind": "legacy_group",
+    "stage": "prepare_context",
+    "base_branch": "main",
+    "branch_name": "aria/issues/issue_0140",
+    "worktree_path": null,
+    "provider_config_snapshot": {
+      "author": "codex",
+      "reviewer": "codex",
+      "review_rounds": 1,
+      "permission_modes": {
+        "author": "auto",
+        "reviewer": "auto"
+      }
+    },
+    "rework_count": 0,
+    "max_auto_rework": 2,
+    "work_item_group_id": "issue_work_item_plan_0001",
+    "current_work_item_id": "WI-001",
+    "active_unit_id": "coding_unit_0001",
+    "head_commit": null,
+    "pushed_remote": null,
+    "review_request_id": null,
+    "provider_conversations": [],
+    "created_at": "2026-09-07T13:20:37.732749660+00:00",
+    "updated_at": "2026-09-07T13:20:37.732749660+00:00",
+    "completed_at": null
+  },
+  "provider_config": {
+    "coder": "codex",
+    "code_reviewer": "codex",
+    "internal_reviewer": "codex",
+    "review_rounds": 1,
+    "permission_modes": {
+      "coder": "auto",
+      "code_reviewer": "auto",
+      "internal_reviewer": "auto"
+    }
+  },
+  "plan_binding": {
+    "attempt_id": "coding_attempt_a65e621e1b064eff92349382b58d1b38",
+    "plan_id": "issue_work_item_plan_0001",
+    "bound_plan_revision_id": "plan_revision_5116a321354ccca0039e20df",
+    "applied_amendment_ids": [],
+    "updated_at": "2026-09-07T13:20:37.732749660+00:00"
+  },
+  "units": [
+    {
+      "id": "coding_unit_0001",
+      "attempt_id": "coding_attempt_a65e621e1b064eff92349382b58d1b38",
+      "project_id": "project_0001",
+      "issue_id": "issue_0140",
+      "plan_id": "issue_work_item_plan_0001",
+      "logical_work_item_id": "WI-001",
+      "work_item_revision_id": "work_item_revision_34ebd7d3dd2dec9412ffe423",
+      "dependency_logical_work_item_ids": [],
+      "order_index": 0,
+      "status": "running",
+      "started_at": "2026-09-07T13:20:37.732749660+00:00",
+      "completed_at": null,
+      "latest_handoff_revision_id": null,
+      "completion_commit": null,
+      "summary": null,
+      "created_at": "2026-09-07T13:20:37.732749660+00:00",
+      "updated_at": "2026-09-07T13:20:37.732749660+00:00"
+    },
+    {
+      "id": "coding_unit_0002",
+      "attempt_id": "coding_attempt_a65e621e1b064eff92349382b58d1b38",
+      "project_id": "project_0001",
+      "issue_id": "issue_0140",
+      "plan_id": "issue_work_item_plan_0001",
+      "logical_work_item_id": "WI-002",
+      "work_item_revision_id": "work_item_revision_6de4a66a7101cd2d3c6b3ec3",
+      "dependency_logical_work_item_ids": [
+        "WI-001"
+      ],
+      "order_index": 1,
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "latest_handoff_revision_id": null,
+      "completion_commit": null,
+      "summary": null,
+      "created_at": "2026-09-07T13:20:37.732749660+00:00",
+      "updated_at": "2026-09-07T13:20:37.732749660+00:00"
+    },
+    {
+      "id": "coding_unit_0003",
+      "attempt_id": "coding_attempt_a65e621e1b064eff92349382b58d1b38",
+      "project_id": "project_0001",
+      "issue_id": "issue_0140",
+      "plan_id": "issue_work_item_plan_0001",
+      "logical_work_item_id": "WI-003",
+      "work_item_revision_id": "work_item_revision_1d41f286d4e936903ec60e34",
+      "dependency_logical_work_item_ids": [
+        "WI-001",
+        "WI-002"
+      ],
+      "order_index": 2,
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "latest_handoff_revision_id": null,
+      "completion_commit": null,
+      "summary": null,
+      "created_at": "2026-09-07T13:20:37.732749660+00:00",
+      "updated_at": "2026-09-07T13:20:37.732749660+00:00"
+    }
+  ],
+  "phase": "completed",
+  "error": null,
+  "created_at": "2026-09-07T13:20:37.732749660+00:00",
+  "updated_at": "2026-09-07T13:20:37.786069606+00:00"
+}
