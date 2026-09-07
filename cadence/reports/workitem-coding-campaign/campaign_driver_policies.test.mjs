@@ -46,7 +46,7 @@ import {
 } from './workitem_run_campaign.mjs';
 
 const CAMPAIGN_DIR = path.dirname(fileURLToPath(import.meta.url));
-import { preflightFailureOutDir } from './coding_run_campaign.mjs';
+import { codingProtocolErrorPlan, preflightFailureOutDir } from './coding_run_campaign.mjs';
 
 const EXPECTED_FLOW_KIND = process.env.ARIA_EXPECTED_FLOW_KIND ?? 'legacy';
 
@@ -1315,4 +1315,22 @@ test('stage3 门未回位时 confirm 保持有界等待不报错；INVALID_MESSA
     '错误文本含阶段错误形态即可消化',
   );
   assert.equal(textOnly.noteGateCloseConflict('product_store_conflict: human_gate_close ws_0001'), false, '消化一次后不再消化');
+});
+
+// —— 3.6 矩阵 driver 补丁：coding_protocol_error 对存活 runner 相撞容忍 ——
+// 现场证据 /tmp/aria-36-matrix/pi-light/rep1e/coding6：review_request 阶段 driver 重发
+// start_coding 撞存活 runner → 服务器回 coding_runner_already_started → driver 以
+// protocol_error 自杀，而 runner 实际自走完到 final_confirm。容忍该既知形态=记录并
+// 继续等；其余 protocol_error 维持 fail-closed 零变化。
+test('coding protocol error tolerates coding_runner_already_started and stays fail-closed otherwise', () => {
+  assert.deepEqual(
+    codingProtocolErrorPlan({ type: 'coding_protocol_error', code: 'coding_runner_already_started', message: 'runner alive' }),
+    { kind: 'tolerate' },
+  );
+  assert.deepEqual(
+    codingProtocolErrorPlan({ type: 'coding_protocol_error', code: 'other_protocol_error' }),
+    { kind: 'fail' },
+  );
+  assert.deepEqual(codingProtocolErrorPlan({ type: 'coding_protocol_error' }), { kind: 'fail' });
+  assert.deepEqual(codingProtocolErrorPlan(null), { kind: 'fail' });
 });

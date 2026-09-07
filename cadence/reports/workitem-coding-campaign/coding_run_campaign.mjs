@@ -285,6 +285,14 @@ function codingControlMessagePlan({ amendmentActions }) {
   return { kind: 'amendment' };
 }
 
+// coding 协议错误的容忍分派：review_request 阶段 driver 重发 start_coding 会撞存活
+// runner（服务器回 coding_runner_already_started，F7 族既知形态）——runner 会自走完，
+// driver 记录后继续等待；其余 protocol_error 一律 fail-closed 零变化。
+function codingProtocolErrorPlan(message) {
+  if (message?.code === 'coding_runner_already_started') return { kind: 'tolerate' };
+  return { kind: 'fail' };
+}
+
 // 线①：amendment command_id 由 (attemptId, actionIndex) 确定性生成；重连/重复发送/进程重启
 // （同 attempt）都复用同值——服务端以 (session_id, command_id) durable 查重，重发回 Replayed+
 // 同 turn turn_open，不启 provider、预算不重复扣。非空且远小于 256 bytes 上限。
@@ -1344,9 +1352,15 @@ async function runCampaign({ handoff, outRoot, amendmentActions = null }) {
           }
           break;
         }
-        case 'coding_protocol_error':
+        case 'coding_protocol_error': {
+          // 撞存活 runner 属既知形态：记录并继续等（runner 自走完），其余维持 fail-closed。
+          if (codingProtocolErrorPlan(message).kind === 'tolerate') {
+            writeLog({ event: 'coding_protocol_error_tolerated', code: message.code ?? null, message: message.message ?? null });
+            break;
+          }
           if (!automationStoppedForGate) fail('protocol_error', `${message.code ?? 'coding_protocol_error'}: ${message.message ?? ''}`);
           break;
+        }
         case 'plan_repair_required':
         case 'plan_amendment_updated': {
           // 未设 ARIA_AMENDMENT_SCRIPT 时保持既有 fail-closed 零变化（回归锚点）。
@@ -1440,6 +1454,7 @@ export {
   amendmentResumeJudgment,
   amendmentScriptFromEnv,
   codingControlMessagePlan,
+  codingProtocolErrorPlan,
   codingUsageResult,
   createAmendmentRuntime,
   isAutoReleasedStageGate,
