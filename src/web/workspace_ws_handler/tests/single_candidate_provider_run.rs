@@ -56,21 +56,21 @@ async fn provider_session_with_output(
     })
 }
 
-struct ProviderRunFixture {
+pub(super) struct ProviderRunFixture {
     root: tempfile::TempDir,
     repository_root: tempfile::TempDir,
-    app_paths: ProductAppPaths,
-    lifecycle: LifecycleStore,
-    record: WorkspaceSessionRecord,
-    engine: Arc<Mutex<WorkspaceEngine>>,
+    pub(super) app_paths: ProductAppPaths,
+    pub(super) lifecycle: LifecycleStore,
+    pub(super) record: WorkspaceSessionRecord,
+    pub(super) engine: Arc<Mutex<WorkspaceEngine>>,
     current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
     workspace_runs: WorkspaceRunRegistry,
-    story_id: String,
-    design_id: String,
+    pub(super) story_id: String,
+    pub(super) design_id: String,
 }
 
 impl ProviderRunFixture {
-    fn new(flow_kind: WorkItemPlanFlowKind) -> Self {
+    pub(super) fn new(flow_kind: WorkItemPlanFlowKind) -> Self {
         let root = tempfile::tempdir().expect("temporary workspace root");
         let repository_root = tempfile::tempdir().expect("temporary repository root");
         std::fs::create_dir_all(repository_root.path().join(".claude/rules"))
@@ -271,7 +271,7 @@ fn legacy_outline_output(story_id: &str, design_id: &str) -> String {
     structured_output_sentinel("legacy-flow", &output)
 }
 
-fn single_candidate_context(
+pub(super) fn single_candidate_context(
     fixture: &ProviderRunFixture,
     provider: Arc<dyn StreamingProviderAdapter>,
 ) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
@@ -305,7 +305,7 @@ fn single_candidate_context(
     )
 }
 
-fn single_candidate_markdown(story_id: &str, design_id: &str) -> String {
+pub(super) fn single_candidate_markdown(story_id: &str, design_id: &str) -> String {
     format!(
         "# Work Item Plan\n\
          ## Work Item WI-001: Backend API\n\n\
@@ -737,7 +737,7 @@ async fn single_candidate_full_plan_parse_failure_is_fatal_after_one_teaching_re
     .await;
 }
 
-async fn wait_for_single_candidate_phase(
+pub(super) async fn wait_for_single_candidate_phase(
     fixture: &ProviderRunFixture,
     expected: crate::product::models::SingleCandidatePhase,
 ) {
@@ -759,7 +759,7 @@ async fn wait_for_single_candidate_phase(
     .expect("provider run must reach expected single-candidate phase");
 }
 
-async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expected: WorkspaceStage) {
+pub(super) async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expected: WorkspaceStage) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if engine.lock().await.session().stage == expected {
@@ -778,10 +778,10 @@ async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expected: Workspac
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct SequenceOutputProvider {
-    outputs: Vec<String>,
-    inputs: mpsc::UnboundedSender<StreamingProviderInput>,
-    next: AtomicUsize,
+pub(super) struct SequenceOutputProvider {
+    pub(super) outputs: Vec<String>,
+    pub(super) inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+    pub(super) next: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -830,7 +830,7 @@ fn markdown_with_unknown_structured_key(story_id: &str, design_id: &str) -> Stri
     )
 }
 
-async fn next_provider_input(
+pub(super) async fn next_provider_input(
     input_rx: &mut mpsc::UnboundedReceiver<StreamingProviderInput>,
 ) -> StreamingProviderInput {
     tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
@@ -839,7 +839,9 @@ async fn next_provider_input(
         .expect("provider input channel open")
 }
 
-async fn no_more_provider_inputs(input_rx: &mut mpsc::UnboundedReceiver<StreamingProviderInput>) {
+pub(super) async fn no_more_provider_inputs(
+    input_rx: &mut mpsc::UnboundedReceiver<StreamingProviderInput>,
+) {
     assert!(
         !matches!(
             tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
@@ -849,7 +851,9 @@ async fn no_more_provider_inputs(input_rx: &mut mpsc::UnboundedReceiver<Streamin
     );
 }
 
-async fn next_error_message(outbound_rx: &mut mpsc::Receiver<OutboundControl>) -> String {
+pub(super) async fn next_error_message(
+    outbound_rx: &mut mpsc::Receiver<OutboundControl>,
+) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let outbound = outbound_rx.recv().await.expect("outbound control expected");

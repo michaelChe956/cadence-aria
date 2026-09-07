@@ -113,6 +113,125 @@ fn format_compile_failure_reasons(
         .collect()
 }
 
+/// 3.6 弱模型基线加固：IR 预校验——在持久化前跑与
+/// `complete_single_candidate_work_item_plan_author` 内部同源的
+/// `validate_plan_candidate_ir`（上下文组装同源：plan 的 source spec ids 与
+/// repository profile），使 IR 校验失败（unknown_requirement_ref /
+/// acceptance_criterion_without_reviewer_check 等）可在 handler 分类并享有
+/// 恰一次教学重驱。仅当预校验确定性失败时返回 Some(reasons)；上下文装载
+/// 失败返回 None（不阻断流程），由 complete_... 权威路径以既有终态形态兜底。
+fn prevalidate_plan_candidate_ir(
+    engine: &WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    request: &crate::web::types::GenerateWorkItemsRequest,
+    ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+) -> Option<Vec<String>> {
+    let session = engine.session();
+    let plan = lifecycle
+        .get_issue_work_item_plan(&session.project_id, &session.issue_id, &session.entity_id)
+        .ok()?;
+    let repository_profile = plan
+        .repository_profile_ref
+        .as_deref()
+        .and_then(|profile_id| {
+            lifecycle
+                .get_repository_profile(&session.project_id, &session.issue_id, profile_id)
+                .ok()
+        });
+    let validation_now = chrono::Utc::now().to_rfc3339();
+    let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
+        ir,
+        &crate::product::work_item_plan_compiler::PlanCandidateValidationContext {
+            project_id: &session.project_id,
+            issue_id: &session.issue_id,
+            plan_id: &session.entity_id,
+            source_story_spec_ids: &request.story_spec_ids,
+            source_design_spec_ids: &request.design_spec_ids,
+            repository_profile: repository_profile.as_ref(),
+            now: &validation_now,
+        },
+    );
+    match validation {
+        Ok(_) => None,
+        Err(diagnostics) => Some(format_compile_failure_reasons(&diagnostics)),
+    }
+}
+
+/// 3.6 弱模型基线加固：IR 校验失败的教学重驱 prompt。复用 F2-B 既有 compile
+/// 重驱模板（错误原文已逐条回灌 + 立即输出完整 source 指令），附加「修正引用/
+/// 补齐字段后重新输出完整 plan」的 IR 修复指令。
+fn build_work_item_plan_ir_reredrive_prompt(blocking_reasons: &[String]) -> String {
+    let mut prompt =
+        crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
+            blocking_reasons,
+        );
+    prompt.push_str(
+        "上述为 IR 校验失败（引用或字段不符合契约）。\n\
+         修正引用/补齐字段：requirement_refs、done_when_refs、reviewer_check_refs 只能逐字引用本计划已定义 id；\
+         每个 criterion_id 必须有配对的 reviewer_check_refs 行。\n\
+         修正后重新输出完整 plan，第一行即 `# Work Item Plan`，不要输出解释。\n",
+    );
+    prompt
+}
+
+/// F2-B/3.6：教学重驱共用驱动——同 node 再驱一次 provider，返回归一化后的
+/// markdown source。驱动中断（会话失败/取消）时已按既有终态形态持久化 Failed
+/// 并返回 AlreadyFinished，与首轮驱动失败处理一致。
+#[allow(clippy::too_many_arguments)]
+async fn drive_single_candidate_reredrive(
+    engine: &mut WorkspaceEngine,
+    launch: &crate::web::workspace_ws_handler::run::gateway_start::PlanAuthorLaunch,
+    provider_for_run: Arc<dyn StreamingProviderAdapter>,
+    run_cancel: &CancellationToken,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    node_id: &str,
+    author_provider: &crate::product::models::ProviderName,
+    reredrive_prompt: &str,
+    repository_path: &std::path::Path,
+) -> Result<String, SingleCandidateProviderRunError> {
+    let reredrive_input = engine.build_work_item_plan_streaming_input(
+        crate::product::work_item_split_engine::types::provider_name_to_type(author_provider),
+        reredrive_prompt.to_string(),
+        repository_path.to_string_lossy().to_string(),
+        author_provider.clone(),
+    );
+    let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
+    let reredrive_session = start_work_item_plan_author(
+        launch.clone(),
+        Arc::clone(&provider_for_run),
+        reredrive_input,
+        run_cancel.clone(),
+    )
+    .await;
+    let reredrive_output = match engine
+        .drive_work_item_plan_provider_session_to_output(
+            reredrive_session,
+            command_rx,
+            node_id.to_string(),
+            author_provider.clone(),
+        )
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => {
+            engine.persist_single_candidate_terminal_phase(
+                crate::product::models::SingleCandidatePhase::Failed,
+            );
+            return Err(SingleCandidateProviderRunError::AlreadyFinished);
+        }
+    };
+    let reredrive_delivery = prepare_author_delivery_for_compile(&reredrive_output);
+    emit_author_heading_normalized_event(
+        engine,
+        node_id,
+        &reredrive_output,
+        &reredrive_delivery,
+        author_provider,
+    )
+    .await;
+    Ok(reredrive_delivery.source)
+}
+
 pub(crate) async fn run_single_candidate_author(
     engine: &mut WorkspaceEngine,
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
@@ -326,6 +445,13 @@ pub(crate) async fn run_single_candidate_author(
     // complete_... 内部编译同源同果），命中则同 node 发送教学重驱 prompt（含
     // compile 错误原文）再驱一次 provider；重驱仍败→维持终态失败（错误含两轮
     // 信息）；非 missing_section 错误不触发重驱，保持既有终态错误形态。
+    // 3.6 弱模型基线加固：IR 校验失败（validate plan candidate IR failed 类，
+    // 如 unknown_requirement_ref / acceptance_criterion_without_reviewer_check）
+    // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
+    // 分类，重驱 prompt 附错误原文与修正引用/补齐字段指令；重驱再败→终态含
+    // 两轮；非 IR/非 missing_section 的其他失败（如内部错误）不触发重驱。
+    // 重驱机会在 compile/IR 两类间共享（first_round_failure 单槽）：每 candidate
+    // 至多一次额外 provider 驱动。
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
     };
@@ -336,7 +462,64 @@ pub(crate) async fn run_single_candidate_author(
             &compile_source,
             &compile_context,
         ) {
-            Ok(_) => {
+            Ok(ir) => {
+                // 3.6：持久化前 IR 预校验——与 complete_... 内部同源同果；仅确定性
+                // IR 校验失败才触发重驱/终态，装载失败交给权威路径兜底。
+                if let Some(reasons) =
+                    prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir)
+                {
+                    if first_round_failure.is_none() {
+                        first_round_failure = Some(reasons.join("; "));
+                        let reredrive_prompt = build_work_item_plan_ir_reredrive_prompt(&reasons);
+                        engine
+                            .emit_execution_event(
+                                ProviderExecutionEvent {
+                                    event_id: format!("{node_id}_prompt_ir_reredrive"),
+                                    kind: ProviderExecutionEventKind::Output,
+                                    status: ProviderExecutionEventStatus::Started,
+                                    title: "SC IR 校验失败教学重驱提示词".to_string(),
+                                    detail: Some(
+                                        "IR 校验失败（unknown_requirement_ref / \
+                                         acceptance_criterion_without_reviewer_check 等）的\
+                                         教学重驱（含错误原文与修正指令），恰一次"
+                                            .to_string(),
+                                    ),
+                                    command: None,
+                                    cwd: None,
+                                    output: Some(reredrive_prompt.clone()),
+                                    exit_code: None,
+                                },
+                                Some(node_id.clone()),
+                                Some(author_provider.clone()),
+                            )
+                            .await;
+                        compile_source = drive_single_candidate_reredrive(
+                            engine,
+                            &launch,
+                            Arc::clone(&provider_for_run),
+                            &run_cancel,
+                            command_rx,
+                            &node_id,
+                            &author_provider,
+                            &reredrive_prompt,
+                            &repository.path,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    let detail = reasons.join("; ");
+                    let message = match first_round_failure.as_deref() {
+                        Some(first_round) => format!(
+                            "validate plan candidate IR failed (after one teaching re-drive): \
+                             first round: {first_round}; re-drive round: {detail}"
+                        ),
+                        None => format!("validate plan candidate IR failed: {detail}"),
+                    };
+                    engine.persist_single_candidate_terminal_phase(
+                        crate::product::models::SingleCandidatePhase::Failed,
+                    );
+                    return Err(SingleCandidateProviderRunError::Message(message));
+                }
                 break match engine
                     .complete_single_candidate_work_item_plan_author(
                         compile_source,
@@ -385,49 +568,19 @@ pub(crate) async fn run_single_candidate_author(
                             Some(author_provider.clone()),
                         )
                         .await;
-                    let reredrive_input = engine.build_work_item_plan_streaming_input(
-                        crate::product::work_item_split_engine::types::provider_name_to_type(
-                            &author_provider,
-                        ),
-                        reredrive_prompt,
-                        repository.path.to_string_lossy().to_string(),
-                        author_provider.clone(),
-                    );
-                    let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
-                    let reredrive_session = start_work_item_plan_author(
-                        launch.clone(),
-                        Arc::clone(&provider_for_run),
-                        reredrive_input,
-                        run_cancel.clone(),
-                    )
-                    .await;
-                    let reredrive_output = match engine
-                        .drive_work_item_plan_provider_session_to_output(
-                            reredrive_session,
-                            command_rx,
-                            node_id.clone(),
-                            author_provider.clone(),
-                        )
-                        .await
-                    {
-                        Ok(output) => output,
-                        Err(_) => {
-                            engine.persist_single_candidate_terminal_phase(
-                                crate::product::models::SingleCandidatePhase::Failed,
-                            );
-                            return Err(SingleCandidateProviderRunError::AlreadyFinished);
-                        }
-                    };
-                    let reredrive_delivery = prepare_author_delivery_for_compile(&reredrive_output);
-                    emit_author_heading_normalized_event(
+                    // 3.6：抽共用驱动 helper（与 IR 重驱同源），行为与原内联块一致。
+                    compile_source = drive_single_candidate_reredrive(
                         engine,
+                        &launch,
+                        Arc::clone(&provider_for_run),
+                        &run_cancel,
+                        command_rx,
                         &node_id,
-                        &reredrive_output,
-                        &reredrive_delivery,
                         &author_provider,
+                        &reredrive_prompt,
+                        &repository.path,
                     )
-                    .await;
-                    compile_source = reredrive_delivery.source;
+                    .await?;
                     continue;
                 }
                 let detail = reasons.join("; ");
