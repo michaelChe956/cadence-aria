@@ -1,0 +1,7 @@
+{
+  "type": "artifact_update",
+  "version": 10,
+  "projection_validation": {
+    "findings": []
+  }
+}

@@ -1,0 +1,322 @@
+{
+  "type": "artifact_update",
+  "version": 10,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_b20bafe24cbce05fcccbf825",
+    "work_item_revision_id": "work_item_revision_b20bafe24cbce05fcccbf825",
+    "canonical_contract_hash": "27104faed661186168223b7cf2a51281204d5fe3611f6c85f2e42364c8870f5f",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "前端关卡选择页",
+      "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 以原生 HTML 与 JavaScript 经相对路径调用 GET /api/levels 渲染关卡名称与难度并呈现加载与可读错误状态。",
+      "non_goals": [
+        "不实现关卡玩法与选中关卡后的行为。",
+        "不引入 npm 依赖、框架或浏览器自动化。",
+        "不修改 server/、data/levels.json、tests/backend/ 与 tests/integration/。"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "contract_id": "CT-005",
+          "capabilities": [
+            "frontend tests exercise initLevelSelect with DOM stubs without a browser"
+          ],
+          "source_refs": [
+            "CT-005"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 打开页面产物 THE SYSTEM SHALL 在 web/index.html 提供 id=loading、id=level-list、id=error-message 容器并以 script 加载 web/level-select.js 且该脚本以相对路径引用 /api/levels。",
+        "WHEN initLevelSelect 以 DOM 替身与 fetch 替身收到合法响应 THE SYSTEM SHALL 在 id=level-list 渲染每项名称与难度且 unlocked=false 项呈锁定不可选状态。",
+        "WHEN fetch 替身模拟请求失败、非 200 状态或结构非法响应 THE SYSTEM SHALL 在 id=error-message 呈现可读错误提示且保留页面基本框架不白屏。",
+        "WHEN 运行 node --test tests/frontend/ THE SYSTEM SHALL 以 DOM 替身不启动浏览器完成全部用例且在零测试时判定失败。"
+      ],
+      "source_refs": [
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "AC-010",
+        "CHECK-003",
+        "CHECK-004",
+        "CT-001",
+        "CT-004",
+        "CT-005",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-006",
+        "TASK-007",
+        "TASK-008"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_b20bafe24cbce05fcccbf825",
+      "objective": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 以原生 HTML 与 JavaScript 经相对路径调用 GET /api/levels 渲染关卡名称与难度并呈现加载与可读错误状态。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-006",
+        "TASK-007",
+        "TASK-008"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-006",
+          "statement": "WHEN 编写 web/index.html 页面骨架 THE SYSTEM SHALL 提供 id=loading、id=level-list、id=error-message 三个容器并以 script 引入 web/level-select.js。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-007"
+          ]
+        },
+        {
+          "task_id": "TASK-007",
+          "statement": "WHEN 实现 web/level-select.js THE SYSTEM SHALL 导出 initLevelSelect({ document, fetchImpl }) 并实现加载态展示、响应形状校验、名称与难度渲染、锁定不可选与错误分支降级。",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-008"
+          ]
+        },
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN 编写 tests/frontend 测试 THE SYSTEM SHALL 先写失败测试并以 DOM 替身与 fetch 替身驱动 initLevelSelect 验证渲染、锁定态与错误分支且不启动浏览器。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-010"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-007",
+          "statement": "WHEN 打开页面产物 THE SYSTEM SHALL 在 web/index.html 提供 id=loading、id=level-list、id=error-message 容器并以 script 加载 web/level-select.js 且该脚本以相对路径引用 /api/levels。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-008",
+          "statement": "WHEN initLevelSelect 以 DOM 替身与 fetch 替身收到合法响应 THE SYSTEM SHALL 在 id=level-list 渲染每项名称与难度且 unlocked=false 项呈锁定不可选状态。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-009",
+          "statement": "WHEN fetch 替身模拟请求失败、非 200 状态或结构非法响应 THE SYSTEM SHALL 在 id=error-message 呈现可读错误提示且保留页面基本框架不白屏。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-010",
+          "statement": "WHEN 运行 node --test tests/frontend/ THE SYSTEM SHALL 以 DOM 替身不启动浏览器完成全部用例且在零测试时判定失败。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/frontend/",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "null",
+          "manual_instruction": "人工审查 web/ 目录不含任何 npm 依赖与外部资源引用。",
+          "required": true,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "page_entry_path=web/index.html; script_path=web/level-select.js; 容器标记为 id=loading、id=level-list、id=error-message; api_path=/api/levels"
+        ],
+        "provided_contract_refs": [
+          "CT-004"
+        ],
+        "reviewer_check_refs": [
+          "AC-007",
+          "AC-008",
+          "AC-009",
+          "AC-010"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_b20bafe24cbce05fcccbf825",
+      "criterion_refs": [
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "AC-010"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-007",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-008",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-009",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-010",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ]
+        },
+        {
+          "contract_id": "CT-005",
+          "capabilities": [
+            "frontend tests exercise initLevelSelect with DOM stubs without a browser"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/frontend/",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "null",
+          "manual_instruction": "人工审查 web/ 目录不含任何 npm 依赖与外部资源引用。",
+          "required": true,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "7f16ab681eea1dd07218f0dfa9bd122ebdfe611fbb2778916ca6f1e06ea5227f",
+    "coder_projection_hash": "731a771712f4e86191f315efc9fd11075fc49cce1d4d5f01016e1efe06cdc42b",
+    "reviewer_projection_hash": "083e06df1943dfa2d7a4ea244ca055dfba648770d8dc097538617548f5f03e55",
+    "created_at": "2026-09-08T09:58:34.037662715+00:00"
+  }
+}

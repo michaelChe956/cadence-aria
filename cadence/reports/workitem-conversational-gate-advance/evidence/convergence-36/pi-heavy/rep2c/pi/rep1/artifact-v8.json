@@ -1,0 +1,309 @@
+{
+  "type": "artifact_update",
+  "version": 8,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_e3f621e8f7743d01ba5cd482",
+    "work_item_revision_id": "work_item_revision_e3f621e8f7743d01ba5cd482",
+    "canonical_contract_hash": "a1e30a79e2f34c71143410ce33bc138f98bf35f3651bb65e1cf6e824b77740fd",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "关卡选择页前端",
+      "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 调用 GET /api/levels 校验响应并渲染关卡名称、难度与锁定状态，在请求失败或响应非法时展示可读错误且不白屏。",
+      "non_goals": [
+        "不实现关卡玩法逻辑与选中关卡后的行为。",
+        "不引入前端框架、构建工具或任何 npm 依赖。",
+        "不启动浏览器且不引入浏览器自动化。",
+        "不修改 server/**、data/levels.json 与 tests/backend/**、tests/integration/**。"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "data failure 500 LEVEL_DATA_UNAVAILABLE"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "failure renders readable error without blank page"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 查看 web/index.html 源文件 THE SYSTEM SHALL 包含 id 为 loading、level-list、error-message 的容器标记与 web/level-select.js 的脚本引用。",
+        "WHEN 查看 web/level-select.js 源文件 THE SYSTEM SHALL 暴露 initLevelSelect({document, fetchImpl}) 接口并以相对路径引用 /api/levels。",
+        "WHEN 注入的 fetchImpl 返回合法五项数据 THE SYSTEM SHALL 在列表容器渲染每项名称与难度，且 unlocked 为 false 的项呈锁定不可选状态。",
+        "WHEN 注入的 fetchImpl 失败、返回非成功状态或响应结构非法 THE SYSTEM SHALL 进入错误提示分支并保留页面框架不白屏。"
+      ],
+      "source_refs": [
+        "AC-006",
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "CHECK-002",
+        "CT-001",
+        "CT-003",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-006",
+        "TASK-007",
+        "TASK-008",
+        "TASK-009"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_e3f621e8f7743d01ba5cd482",
+      "objective": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 调用 GET /api/levels 校验响应并渲染关卡名称、难度与锁定状态，在请求失败或响应非法时展示可读错误且不白屏。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "data failure 500 LEVEL_DATA_UNAVAILABLE"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-006",
+        "TASK-007",
+        "TASK-008",
+        "TASK-009"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-006",
+          "statement": "WHEN 构建关卡选择页骨架 THE SYSTEM SHALL 在 web/index.html 提供 id 为 loading、level-list、error-message 的三个容器标记并引用 web/level-select.js。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-006"
+          ]
+        },
+        {
+          "task_id": "TASK-007",
+          "statement": "WHEN 页面脚本实现数据消费 THE SYSTEM SHALL 导出 initLevelSelect({document, fetchImpl}) 接口并以相对路径调用 GET /api/levels，在校验响应为五项且字段合法后渲染名称与难度，并将 unlocked 为 false 的项渲染为锁定不可选。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-008"
+          ]
+        },
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN 页面脚本实现异常分支 THE SYSTEM SHALL 在请求失败、非成功状态或响应结构非法时于错误容器展示可读提示并保留页面框架不白屏。",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-009"
+          ]
+        },
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN 编写前端测试 THE SYSTEM SHALL 仅以 node --test 在 tests/frontend 运行，通过注入 document 与 fetchImpl 替身验证渲染、锁定态与错误分支，且不启动浏览器。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-009"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-006",
+          "statement": "WHEN 查看 web/index.html 源文件 THE SYSTEM SHALL 包含 id 为 loading、level-list、error-message 的容器标记与 web/level-select.js 的脚本引用。",
+          "required_evidence": [
+            "source_diff"
+          ]
+        },
+        {
+          "criterion_id": "AC-007",
+          "statement": "WHEN 查看 web/level-select.js 源文件 THE SYSTEM SHALL 暴露 initLevelSelect({document, fetchImpl}) 接口并以相对路径引用 /api/levels。",
+          "required_evidence": [
+            "source_diff"
+          ]
+        },
+        {
+          "criterion_id": "AC-008",
+          "statement": "WHEN 注入的 fetchImpl 返回合法五项数据 THE SYSTEM SHALL 在列表容器渲染每项名称与难度，且 unlocked 为 false 的项呈锁定不可选状态。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-009",
+          "statement": "WHEN 注入的 fetchImpl 失败、返回非成功状态或响应结构非法 THE SYSTEM SHALL 进入错误提示分支并保留页面框架不白屏。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "page_entry_path",
+          "container_ids",
+          "script_path",
+          "init_level_select_interface"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-006",
+          "AC-007",
+          "AC-008",
+          "AC-009"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_e3f621e8f7743d01ba5cd482",
+      "criterion_refs": [
+        "AC-006",
+        "AC-007",
+        "AC-008",
+        "AC-009"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-006",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "source_diff"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-007",
+          "requirement_refs": [],
+          "required_evidence": [
+            "source_diff"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-008",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-009",
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "data failure 500 LEVEL_DATA_UNAVAILABLE"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "failure renders readable error without blank page"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "5cd37bc39c502df08bbbae6e28712c523c88a8f8dfb16048b2557242b0f602fa",
+    "coder_projection_hash": "09f12b32fb07ffb68737a9026fb58d2a9fafa13ca975b971945eeddc8dd3c6c6",
+    "reviewer_projection_hash": "adbce26190136ca3a3eebb5802ee272351e46cc5b238fd4d8a7474a70fe19d28",
+    "created_at": "2026-09-08T11:19:46.330845900+00:00"
+  }
+}

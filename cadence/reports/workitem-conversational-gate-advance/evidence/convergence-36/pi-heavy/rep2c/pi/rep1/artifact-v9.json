@@ -1,0 +1,277 @@
+{
+  "type": "artifact_update",
+  "version": 9,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_9b70ad7c8405c811184ca531",
+    "work_item_revision_id": "work_item_revision_9b70ad7c8405c811184ca531",
+    "canonical_contract_hash": "b85b4790c9b8d642a1b871188fe04922facd35b40acdacaeee58efb3bb16547e",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-003",
+      "title": "前后端集成验证",
+      "goal": "WHEN 前后端产物就绪 THE SYSTEM SHALL 在同一 HTTP origin 上以 node --test 验证页面入口、关卡 API 的可观测契约与错误分支证据，且不修改实现。",
+      "non_goals": [
+        "不修改 server/**、web/**、data/levels.json 与 tests/backend/**、tests/frontend/** 既有内容。",
+        "不引入浏览器自动化或任何 npm 依赖。",
+        "不断言页面动态渲染后的可视结果，该断言归属前端工作项。"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "API error Content-Type application/json; charset=utf-8"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "error branch output example GET /api/levels returns 500 application/json; charset=utf-8 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"level data unavailable\"}}"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 对运行中服务的同一 origin 发起 GET / 与 GET /api/levels THE SYSTEM SHALL 分别观测到 200 的页面入口响应与恰含五项完整记录的 200 数组响应。",
+        "WHEN 检查同源可观测页面结构 THE SYSTEM SHALL 观测到 id 为 loading、level-list、error-message 的容器标记、web/level-select.js 脚本引用及脚本源中相对路径 /api/levels。",
+        "WHEN 以注入 dataPath 指向不存在数据路径的实例请求 GET /api/levels THE SYSTEM SHALL 观测到 500、LEVEL_DATA_UNAVAILABLE 错误信封与 Content-Type application/json; charset=utf-8。"
+      ],
+      "source_refs": [
+        "AC-010",
+        "AC-011",
+        "AC-012",
+        "CHECK-003",
+        "CT-002",
+        "CT-004",
+        "NFR-001",
+        "REQ-002",
+        "REQ-004",
+        "REQ-005",
+        "TASK-010",
+        "TASK-011",
+        "TASK-012"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_9b70ad7c8405c811184ca531",
+      "objective": "WHEN 前后端产物就绪 THE SYSTEM SHALL 在同一 HTTP origin 上以 node --test 验证页面入口、关卡 API 的可观测契约与错误分支证据，且不修改实现。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API error Content-Type application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-010",
+        "TASK-011",
+        "TASK-012"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-010",
+          "statement": "WHEN 编写集成测试 THE SYSTEM SHALL 以 createServer 与 start({port:0}) 启动服务并对返回 origin 发起 GET / 与 GET /api/levels，结束后调用 stop 释放端口。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-010"
+          ]
+        },
+        {
+          "task_id": "TASK-011",
+          "statement": "WHEN 集成测试检查同源页面证据 THE SYSTEM SHALL 断言 GET / 返回含三个容器标记与脚本引用的 HTML，且脚本静态响应包含相对路径 /api/levels，不断言动态渲染结果。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-011"
+          ]
+        },
+        {
+          "task_id": "TASK-012",
+          "statement": "WHEN 集成测试以 dataPath 指向不存在的数据路径启动独立实例 THE SYSTEM SHALL 断言 GET /api/levels 返回 500、含 LEVEL_DATA_UNAVAILABLE 的错误信封与 Content-Type application/json; charset=utf-8，且不修改 data/levels.json。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-012"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-010",
+          "statement": "WHEN 对运行中服务的同一 origin 发起 GET / 与 GET /api/levels THE SYSTEM SHALL 分别观测到 200 的页面入口响应与恰含五项完整记录的 200 数组响应。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 检查同源可观测页面结构 THE SYSTEM SHALL 观测到 id 为 loading、level-list、error-message 的容器标记、web/level-select.js 脚本引用及脚本源中相对路径 /api/levels。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "statement": "WHEN 以注入 dataPath 指向不存在数据路径的实例请求 GET /api/levels THE SYSTEM SHALL 观测到 500、LEVEL_DATA_UNAVAILABLE 错误信封与 Content-Type application/json; charset=utf-8。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/integration",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "integration_evidence_contract_ref",
+          "scoped_verification_command"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-010",
+          "AC-011",
+          "AC-012"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_9b70ad7c8405c811184ca531",
+      "criterion_refs": [
+        "AC-010",
+        "AC-011",
+        "AC-012"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-010",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-012",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API error Content-Type application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "error branch output example GET /api/levels returns 500 application/json; charset=utf-8 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"level data unavailable\"}}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/integration",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "77acd1c169450fbbf31879e6a743ffc48735979e051e6fa8a92e5e416476804f",
+    "coder_projection_hash": "afc410679539d9ee013070303c48901bb11112a497bed53c24e085846420b28e",
+    "reviewer_projection_hash": "2da5a5999f802368d0c883db27e515fd80114b30175ee2c50ea3dc025877d974",
+    "created_at": "2026-09-08T11:19:46.330845900+00:00"
+  }
+}

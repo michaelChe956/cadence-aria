@@ -1,0 +1,499 @@
+{
+  "type": "artifact_update",
+  "version": 9,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_7f39d31e5f2df30dd4de199a",
+    "work_item_revision_id": "work_item_revision_7f39d31e5f2df30dd4de199a",
+    "canonical_contract_hash": "b657173a706544e67698f3a303e506a2584217306f01456663d60313454a7615",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-003",
+      "title": "前后端同源集成联调验收",
+      "goal": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 经同一服务同源完成页面入口、API 契约与脚本引用的 HTTP 可观测验证并产出集成验收证据。",
+      "non_goals": [
+        "不修改 server/**、web/**、data/levels.json 及 tests/backend/**、tests/frontend/** 既有内容",
+        "不断言前端运行时渲染与错误分支行为（归 WI-002 测试覆盖）",
+        "不引入浏览器自动化、npm 依赖或外部服务"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-009",
+          "capabilities": [
+            "server/server.js 导出 createServer(options) 且 options 支持 dataPath（默认 data/levels.json）与 staticRoot（默认 web/）注入"
+          ],
+          "source_refs": [
+            "CT-009"
+          ]
+        },
+        {
+          "contract_id": "CT-010",
+          "capabilities": [
+            "server/server.js 导出 start({port}) 且支持 port:0 且 resolve 为 origin（http://127.0.0.1:<实际端口>）与 port 与 stop 且 stop() 释放监听"
+          ],
+          "source_refs": [
+            "CT-010"
+          ]
+        },
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/levels 成功响应返回 200 且响应体为顶层数组且长度恰为 5"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-006",
+          "capabilities": [
+            "GET /api/levels 数组元素满足字段约束（id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值为 简单/普通/困难 之一、unlocked 为布尔值）"
+          ],
+          "source_refs": [
+            "CT-006"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节），错误响应示例如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"关卡数据暂不可用，请稍后重试\"}}"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "contract_id": "CT-007",
+          "capabilities": [
+            "未知 API 路径返回 JSON 404 且不支持的 HTTP 方法返回 JSON 405 且 API 错误响应响应头 Content-Type 为 application/json; charset=utf-8，错误响应示例如 {\"error\":{\"code\":\"NOT_FOUND\"",
+            "\"message\":\"资源不存在\"}} 与 {\"error\":{\"code\":\"METHOD_NOT_ALLOWED\"",
+            "\"message\":\"不支持该请求方法\"}}"
+          ],
+          "source_refs": [
+            "CT-007"
+          ]
+        },
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "GET / 返回页面入口文件（默认 web/index.html）"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "静态托管将 staticRoot 下资源按请求路径返回且按扩展名映射 Content-Type"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "contract_id": "CT-011",
+          "capabilities": [
+            "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记且以 script 引用 web/level-select.js 且 web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "source_refs": [
+            "CT-011"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-013",
+          "capabilities": [
+            "tests/integration/levels-http.test.js 产出同源联调证据（GET / 返回含三容器与脚本引用的 HTML、经 HTTP 获取的 /level-select.js 引用 /api/levels、GET /api/levels 满足成功契约、数据错误分支返回满足契约的 500 统一错误结构），联调验证步骤输入输出示例如 输入 start({port:0}) 后请求 GET http://127.0.0.1:<实际端口>/ 输出含 id=loading、id=level-list、id=error-message 与 web/level-select.js 引用的 HTML 文本；输入请求 GET http://127.0.0.1:<实际端口>/level-select.js 输出含 /api/levels 引用的 JS 文本；输入请求 GET http://127.0.0.1:<实际端口>/api/levels 输出 200 且响应体形如 [{\"id\":\"level-1\"",
+            "\"name\":\"第一关\"",
+            "\"difficulty\":\"简单\"",
+            "\"unlocked\":true}",
+            "...] 的顶层数组恰 5 项；输入 createServer({dataPath:\"tests/integration/fixtures/levels-invalid.json\"}) 后请求 GET /api/levels 输出 500 与 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"关卡数据暂不可用，请稍后重试\"}}"
+          ],
+          "source_refs": [
+            "CT-013"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 以 port:0 启动同源服务并请求页面入口与静态脚本 THE SYSTEM SHALL 使 GET / 返回含三容器标记与 web/level-select.js 引用的 HTML 且经 HTTP 获取的 /level-select.js 内容引用 /api/levels。",
+        "WHEN 同源请求 GET /api/levels 及经 createServer({dataPath}) 注入数据错误夹具的分支 THE SYSTEM SHALL 分别断言顶层数组恰 5 项且字段完整、500 统一错误结构与响应头 Content-Type 为 application/json; charset=utf-8。",
+        "WHEN 执行集成验证命令 THE SYSTEM SHALL 仅以 node --test 限定 tests/integration/** 运行且全部通过、不重复断言前端运行时渲染与错误分支行为。"
+      ],
+      "source_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "CHECK-003",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "CT-006",
+        "CT-007",
+        "CT-009",
+        "CT-010",
+        "CT-011",
+        "CT-013",
+        "NFR-001",
+        "REQ-002",
+        "REQ-005",
+        "TASK-012",
+        "TASK-013",
+        "TASK-014"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_7f39d31e5f2df30dd4de199a",
+      "objective": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 经同一服务同源完成页面入口、API 契约与脚本引用的 HTTP 可观测验证并产出集成验收证据。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-009",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "server/server.js 导出 createServer(options) 且 options 支持 dataPath（默认 data/levels.json）与 staticRoot（默认 web/）注入"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-010",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "server/server.js 导出 start({port}) 且支持 port:0 且 resolve 为 origin（http://127.0.0.1:<实际端口>）与 port 与 stop 且 stop() 释放监听"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 成功响应返回 200 且响应体为顶层数组且长度恰为 5"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-006",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 数组元素满足字段约束（id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值为 简单/普通/困难 之一、unlocked 为布尔值）"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节），错误响应示例如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"关卡数据暂不可用，请稍后重试\"}}"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-007",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "未知 API 路径返回 JSON 404 且不支持的 HTTP 方法返回 JSON 405 且 API 错误响应响应头 Content-Type 为 application/json; charset=utf-8，错误响应示例如 {\"error\":{\"code\":\"NOT_FOUND\"",
+            "\"message\":\"资源不存在\"}} 与 {\"error\":{\"code\":\"METHOD_NOT_ALLOWED\"",
+            "\"message\":\"不支持该请求方法\"}}"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回页面入口文件（默认 web/index.html）"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "静态托管将 staticRoot 下资源按请求路径返回且按扩展名映射 Content-Type"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-011",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记且以 script 引用 web/level-select.js 且 web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-012",
+        "TASK-013",
+        "TASK-014"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-012",
+          "statement": "WHEN 集成测试被编写 THE SYSTEM SHALL 先在 tests/integration/levels-http.test.js 以 start({port:0}) 编写失败测试断言 GET / 返回含三容器标记与 web/level-select.js 引用的 HTML 且经 HTTP 获取的 /level-select.js 内容引用 /api/levels。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-011"
+          ]
+        },
+        {
+          "task_id": "TASK-013",
+          "statement": "WHEN API 集成断言被编写 THE SYSTEM SHALL 对同源 GET /api/levels 断言顶层数组、恰 5 项与字段约束，并以 createServer({dataPath}) 注入 tests/integration/fixtures/** 夹具断言 500 统一错误结构与响应头 Content-Type 为 application/json; charset=utf-8。",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "done_when_refs": [
+            "AC-012"
+          ]
+        },
+        {
+          "task_id": "TASK-014",
+          "statement": "WHEN 集成验证被执行 THE SYSTEM SHALL 以 node --test 限定 tests/integration/** 运行全部测试、零测试时判定失败且不重复断言前端运行时渲染与错误分支行为。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-013"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 以 port:0 启动同源服务并请求页面入口与静态脚本 THE SYSTEM SHALL 使 GET / 返回含三容器标记与 web/level-select.js 引用的 HTML 且经 HTTP 获取的 /level-select.js 内容引用 /api/levels。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "statement": "WHEN 同源请求 GET /api/levels 及经 createServer({dataPath}) 注入数据错误夹具的分支 THE SYSTEM SHALL 分别断言顶层数组恰 5 项且字段完整、500 统一错误结构与响应头 Content-Type 为 application/json; charset=utf-8。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-013",
+          "statement": "WHEN 执行集成验证命令 THE SYSTEM SHALL 仅以 node --test 限定 tests/integration/** 运行且全部通过、不重复断言前端运行时渲染与错误分支行为。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "find tests/integration -name '*.test.js' | grep -q . && node --test \"tests/integration/**/*.test.js\"",
+          "manual_instruction": null,
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "integration_test_path=tests/integration/levels-http.test.js",
+          "evidence_scope=同源页面入口、API 契约、脚本引用与错误结构断言全部通过"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-011",
+          "AC-012",
+          "AC-013"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_7f39d31e5f2df30dd4de199a",
+      "criterion_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-012",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-013",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-009",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "server/server.js 导出 createServer(options) 且 options 支持 dataPath（默认 data/levels.json）与 staticRoot（默认 web/）注入"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-010",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "server/server.js 导出 start({port}) 且支持 port:0 且 resolve 为 origin（http://127.0.0.1:<实际端口>）与 port 与 stop 且 stop() 释放监听"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 成功响应返回 200 且响应体为顶层数组且长度恰为 5"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-006",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 数组元素满足字段约束（id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值为 简单/普通/困难 之一、unlocked 为布尔值）"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节），错误响应示例如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"关卡数据暂不可用，请稍后重试\"}}"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-007",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "未知 API 路径返回 JSON 404 且不支持的 HTTP 方法返回 JSON 405 且 API 错误响应响应头 Content-Type 为 application/json; charset=utf-8，错误响应示例如 {\"error\":{\"code\":\"NOT_FOUND\"",
+            "\"message\":\"资源不存在\"}} 与 {\"error\":{\"code\":\"METHOD_NOT_ALLOWED\"",
+            "\"message\":\"不支持该请求方法\"}}"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回页面入口文件（默认 web/index.html）"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "静态托管将 staticRoot 下资源按请求路径返回且按扩展名映射 Content-Type"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-011",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记且以 script 引用 web/level-select.js 且 web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-013",
+          "capabilities": [
+            "tests/integration/levels-http.test.js 产出同源联调证据（GET / 返回含三容器与脚本引用的 HTML、经 HTTP 获取的 /level-select.js 引用 /api/levels、GET /api/levels 满足成功契约、数据错误分支返回满足契约的 500 统一错误结构），联调验证步骤输入输出示例如 输入 start({port:0}) 后请求 GET http://127.0.0.1:<实际端口>/ 输出含 id=loading、id=level-list、id=error-message 与 web/level-select.js 引用的 HTML 文本；输入请求 GET http://127.0.0.1:<实际端口>/level-select.js 输出含 /api/levels 引用的 JS 文本；输入请求 GET http://127.0.0.1:<实际端口>/api/levels 输出 200 且响应体形如 [{\"id\":\"level-1\"",
+            "\"name\":\"第一关\"",
+            "\"difficulty\":\"简单\"",
+            "\"unlocked\":true}",
+            "...] 的顶层数组恰 5 项；输入 createServer({dataPath:\"tests/integration/fixtures/levels-invalid.json\"}) 后请求 GET /api/levels 输出 500 与 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"",
+            "\"message\":\"关卡数据暂不可用，请稍后重试\"}}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "find tests/integration -name '*.test.js' | grep -q . && node --test \"tests/integration/**/*.test.js\"",
+          "manual_instruction": null,
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "23ec6ee032c533ada3a112ceae9560aba58f3db09b79eb09bb523286d3fec0e0",
+    "coder_projection_hash": "fe2e0b0bfc1c054ce3f942214d52a6fdc17fd494afbe075e8f3fda48377c7051",
+    "reviewer_projection_hash": "554d86216ae165c5ccd20534b2f52a6f8e72a214f5d4c010b1c7fe1223cb0c9f",
+    "created_at": "2026-09-08T12:31:28.977009081+00:00"
+  }
+}

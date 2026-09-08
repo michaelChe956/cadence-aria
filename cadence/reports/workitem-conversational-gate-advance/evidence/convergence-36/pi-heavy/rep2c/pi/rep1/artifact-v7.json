@@ -1,0 +1,329 @@
+{
+  "type": "artifact_update",
+  "version": 7,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_d46bae7fc5f2e5d05ac5688d",
+    "work_item_revision_id": "work_item_revision_d46bae7fc5f2e5d05ac5688d",
+    "canonical_contract_hash": "201306b099f54356c37adaece949bff5163f64655fed72193c3552f84ad555ed",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "后端关卡列表 API 服务",
+      "goal": "WHEN 后端服务启动并接收 HTTP 请求 THE SYSTEM SHALL 以 Node 内置模块提供 GET /api/levels 关卡数据契约、静态页面托管与可注入可启停的服务生命周期。",
+      "non_goals": [
+        "不实现关卡玩法逻辑、用户认证与选中关卡后的行为。",
+        "不引入数据库、外部服务或任何 npm 依赖。",
+        "不编写 web/** 页面与 tests/frontend/**、tests/integration/** 测试。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "data failure 500 LEVEL_DATA_UNAVAILABLE"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "API error Content-Type application/json; charset=utf-8"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 对运行中的服务发起 GET /api/levels 且数据有效 THE SYSTEM SHALL 返回 200 与 Content-Type 为 application/json; charset=utf-8 的顶层数组，且恰含五项字段完整且合法的记录。",
+        "WHEN 关卡数据文件缺失、不可解析或字段结构不合法 THE SYSTEM SHALL 返回 500 与含 code 为 LEVEL_DATA_UNAVAILABLE 的错误信封。",
+        "WHEN 请求未知 API 路径或对 /api/levels 使用不支持的 HTTP 方法 THE SYSTEM SHALL 分别返回 404 与 405 的 JSON 错误响应。",
+        "WHEN 以 createServer 与 start({port:0}) 启动服务 THE SYSTEM SHALL 返回含 origin、实际端口与 stop 的句柄且 stop 调用后释放端口。",
+        "WHEN 请求静态根内资源、越界路径或缺失资源 THE SYSTEM SHALL 分别返回正确 Content-Type 的文件内容、拒绝越界访问与 404 文本响应。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "AC-002",
+        "AC-003",
+        "AC-004",
+        "AC-005",
+        "CHECK-001",
+        "CT-001",
+        "CT-002",
+        "NFR-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "TASK-001",
+        "TASK-002",
+        "TASK-003",
+        "TASK-004",
+        "TASK-005"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_d46bae7fc5f2e5d05ac5688d",
+      "objective": "WHEN 后端服务启动并接收 HTTP 请求 THE SYSTEM SHALL 以 Node 内置模块提供 GET /api/levels 关卡数据契约、静态页面托管与可注入可启停的服务生命周期。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002",
+        "TASK-003",
+        "TASK-004",
+        "TASK-005"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 服务读取 dataPath 指向的关卡数据文件 THE SYSTEM SHALL 解析 JSON 并校验记录恰为五项、id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于简单、普通、困难，unlocked 为布尔值。",
+          "requirement_refs": [
+            "REQ-003"
+          ],
+          "done_when_refs": [
+            "AC-002"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 服务实现请求路由 THE SYSTEM SHALL 将 GET /api/levels 映射为成功返回五项顶层数组，并将数据错误、未知 API 路径与不支持方法分别映射为 500、404、405 的 JSON 错误响应。",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "done_when_refs": [
+            "AC-003"
+          ]
+        },
+        {
+          "task_id": "TASK-003",
+          "statement": "WHEN 服务模块实现生命周期 THE SYSTEM SHALL 导出 createServer(options) 工厂与 start({port})，并在 port 为 0 时返回含 origin、实际端口与 stop 的句柄且 stop 调用后释放监听。",
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "done_when_refs": [
+            "AC-004"
+          ]
+        },
+        {
+          "task_id": "TASK-004",
+          "statement": "WHEN 服务实现静态托管 THE SYSTEM SHALL 以 staticRoot 为根用 node:path 规范化请求路径并拒绝越界访问，对根内资源返回正确 Content-Type，对缺失资源返回 404 文本响应。",
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "done_when_refs": [
+            "AC-005"
+          ]
+        },
+        {
+          "task_id": "TASK-005",
+          "statement": "WHEN 编写后端测试 THE SYSTEM SHALL 仅以 node --test 在 tests/backend 运行并用 tests/backend/fixtures 自有夹具覆盖成功响应、数据缺失、JSON 解析失败、结构校验失败、404 与 405、静态托管路径安全及生命周期启停，且不读取 web/**。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-005"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 对运行中的服务发起 GET /api/levels 且数据有效 THE SYSTEM SHALL 返回 200 与 Content-Type 为 application/json; charset=utf-8 的顶层数组，且恰含五项字段完整且合法的记录。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-002",
+          "statement": "WHEN 关卡数据文件缺失、不可解析或字段结构不合法 THE SYSTEM SHALL 返回 500 与含 code 为 LEVEL_DATA_UNAVAILABLE 的错误信封。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-003",
+          "statement": "WHEN 请求未知 API 路径或对 /api/levels 使用不支持的 HTTP 方法 THE SYSTEM SHALL 分别返回 404 与 405 的 JSON 错误响应。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-004",
+          "statement": "WHEN 以 createServer 与 start({port:0}) 启动服务 THE SYSTEM SHALL 返回含 origin、实际端口与 stop 的句柄且 stop 调用后释放端口。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-005",
+          "statement": "WHEN 请求静态根内资源、越界路径或缺失资源 THE SYSTEM SHALL 分别返回正确 Content-Type 的文件内容、拒绝越界访问与 404 文本响应。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/backend",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "api_path",
+          "default_port",
+          "port_env"
+        ],
+        "provided_contract_refs": [
+          "CT-001",
+          "CT-002"
+        ],
+        "reviewer_check_refs": [
+          "AC-001",
+          "AC-002",
+          "AC-003",
+          "AC-004",
+          "AC-005"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_d46bae7fc5f2e5d05ac5688d",
+      "criterion_refs": [
+        "AC-001",
+        "AC-002",
+        "AC-003",
+        "AC-004",
+        "AC-005"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-002",
+          "requirement_refs": [
+            "REQ-003"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-003",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-004",
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-005",
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-004"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "data failure 500 LEVEL_DATA_UNAVAILABLE"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "API error Content-Type application/json; charset=utf-8"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/backend",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "af1228a45edda7c34ef75c8e9e4f479ce544d719ae597df39bec91310047aa16",
+    "coder_projection_hash": "8c4b5d90c8d01c8952047536eb098a64cf86e8a2d2156dba461d73772df408ed",
+    "reviewer_projection_hash": "1a78409a5f1a17c341b3543ff298d518fdf6ec4524c45d0fad43cc0dcfb110e0",
+    "created_at": "2026-09-08T11:19:46.330845900+00:00"
+  }
+}

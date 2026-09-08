@@ -1,0 +1,410 @@
+{
+  "type": "artifact_update",
+  "version": 14,
+  "plan_projection": {
+    "id": "plan_projection_bundle_1c65d6a66027c0b1d40946e1",
+    "plan_revision_id": "plan_revision_1c65d6a66027c0b1d40946e1",
+    "dependency_graph_revision_id": "dependency_graph_revision_1c65d6a66027c0b1d40946e1",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_2ffc5106417c165433975561",
+      "work_item_projection_bundle_b20bafe24cbce05fcccbf825",
+      "work_item_projection_bundle_ac4ae280917c28025ea25629"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "后端关卡 API 与静态托管服务",
+          "goal": "WHEN 服务进程启动 THE SYSTEM SHALL 以仅含 Node 内置模块的单进程同时提供 GET /api/levels 关卡数据接口与 web/ 静态页面托管。",
+          "depends_on": [],
+          "provides": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ],
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "title": "前端关卡选择页",
+          "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 以原生 HTML 与 JavaScript 经相对路径调用 GET /api/levels 渲染关卡名称与难度并呈现加载与可读错误状态。",
+          "depends_on": [
+            "WI-001"
+          ],
+          "provides": [
+            "CT-004",
+            "CT-005"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "title": "前后端集成联调验证",
+          "goal": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 经同一 Node 服务以真实 HTTP 同源请求验证页面入口结构、API 契约形状与错误语义。",
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "provides": [
+            "CT-006"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "tests/integration/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "provided_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "provided_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-002",
+          "required_capabilities": [
+            "port 0 binds an ephemeral port for parallel test isolation"
+          ],
+          "provided_capabilities": [
+            "port 0 binds an ephemeral port for parallel test isolation"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-003",
+          "required_capabilities": [
+            "static file not found returns HTTP 404 with plain text response"
+          ],
+          "provided_capabilities": [
+            "static file not found returns HTTP 404 with plain text response"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "contract_id": "CT-004",
+          "required_capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ],
+          "provided_capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ],
+          "missing_capabilities": []
+        }
+      ],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "port 0 binds an ephemeral port for parallel test isolation"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "static file not found returns HTTP 404 with plain text response"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js references relative path /api/levels"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004",
+            "AC-005",
+            "AC-006"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "criterion_refs": [
+            "AC-007",
+            "AC-008",
+            "AC-009",
+            "AC-010"
+          ],
+          "input_contract_refs": [
+            "CT-001"
+          ],
+          "output_contract_refs": [
+            "CT-004",
+            "CT-005"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "criterion_refs": [
+            "AC-011",
+            "AC-012",
+            "AC-013",
+            "AC-014"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003",
+            "CT-004"
+          ],
+          "output_contract_refs": [
+            "CT-006"
+          ]
+        }
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "port 0 binds an ephemeral port for parallel test isolation"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "static file not found returns HTTP 404 with plain text response"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js references relative path /api/levels"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "NFR-001"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-002"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-003"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-004"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-005"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-006"
+        }
+      ]
+    },
+    "human_group_projection_hash": "69ea3cefd27301c62278b371c7012e38d51f70193b2e241d77dc3ecae8712aa4",
+    "coder_group_context_hash": "ee28ed3611b402c38ae6a617f56cb189f5c4980a1fab3dab813f25781568aef3",
+    "reviewer_group_matrix_hash": "57ed61689a1c077a8d2e1484d85df4aa1c9ce7ebc0619608932cdf3da1e4017d",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-08T09:58:34.037662715+00:00"
+  }
+}

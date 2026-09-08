@@ -1,0 +1,33 @@
+{
+  "type": "artifact_update",
+  "version": 6,
+  "compile_report": {
+    "compile_id": "f02b6ce346c5eb8def37a53b93fc7bb5d115ee5156a4fb8315255c0d83a02fc6",
+    "generation_round_id": "single_candidate_f02b6ce346c5eb8def37a53b93fc7bb5d115ee5156a4fb8315255c0d83a02fc6",
+    "status": "committed",
+    "plan_commit_state": "committed",
+    "work_item_ids": [
+      "WI-001",
+      "WI-002",
+      "WI-003"
+    ],
+    "verification_plan_ids": [
+      "verification_plan_revision_2f25d765e35460b5561bb77c",
+      "verification_plan_revision_cd4135cc36ae087613dec238",
+      "verification_plan_revision_7f39d31e5f2df30dd4de199a"
+    ],
+    "child_session_ids": [
+      "workspace_session_0227",
+      "workspace_session_0228",
+      "workspace_session_0229"
+    ],
+    "validator_findings": [
+      {
+        "severity": "warning",
+        "code": "integration_or_e2e_skipped_risk",
+        "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+        "work_item_ids": []
+      }
+    ]
+  }
+}
