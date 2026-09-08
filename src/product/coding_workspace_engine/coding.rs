@@ -1,5 +1,11 @@
 use super::*;
 
+/// B-③教学重驱 timeline node 标题。节点存在性即 attempt 级持久「恰一次」闸门
+/// （仿 workspace_engine provider_drive 的 artifact_retry_attempted bool 语义，
+/// 但选最小持久化面：不新增 store 字段，直接以 timeline node 为准；先建后跑，
+/// 崩溃/重入后闸门仍在，绝不会对同一 attempt 二次重驱）。
+pub(crate) const CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE: &str = "Coding 输出结构化教学重驱";
+
 pub(crate) struct CoderExecutionOutcome {
     pub(crate) attempt: CodingExecutionAttempt,
     pub(crate) plan_defect_decision: Option<CodeReviewFlowDecision>,
@@ -180,29 +186,56 @@ impl CodingWorkspaceEngine {
                 provider_name: &coder_provider,
                 worktree_path,
                 initial_prompt: prompt,
-                fresh_prompt: full_prompt,
+                fresh_prompt: full_prompt.clone(),
                 initial_prompt_mode: prompt_mode,
                 initial_resume_provider_session_id: resume_provider_session_id,
-                command_rx,
+                command_rx: &mut *command_rx,
             })
             .await?;
-        let full_output = retry_success.outcome.full_output;
-        let role_run = retry_success.role_run;
-        let node = retry_success.node;
-        let (plan_defect_report, plan_defect_decision, plan_defect_error) =
-            match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
-                Ok(report) if report.findings.is_empty() => (None, None, None),
-                Ok(report) => {
-                    let projection = self.reviewer_projection_for_attempt(&attempt)?;
-                    let decision = execution_plan_defect_flow_decision(&report, &projection);
-                    (Some(report), Some(decision), None)
-                }
-                Err(error) => (
-                    None,
-                    Some(CodeReviewFlowDecision::StopForHumanTriage),
-                    Some(error.to_string()),
-                ),
-            };
+        let mut full_output = retry_success.outcome.full_output;
+        let mut role_run = retry_success.role_run;
+        let mut node = retry_success.node;
+        let mut plan_defect_parse =
+            parse_execution_plan_defects(PlanDefectSource::Coder, &full_output);
+        // B-③（3.6 矩阵族③）：解析失败先做恰一次教学重驱（错误原文回灌 +
+        // 共享单源契约），仍失败才落既有 blocked 门；重驱轮的输出与 run/node
+        // 成为本次 coding 的最终状态，后续保存/完成/gate 逻辑不变。
+        if plan_defect_parse.is_err()
+            && !self.coding_output_teaching_reredrive_attempted(&attempt)?
+            && let Err(parse_error) = plan_defect_parse.as_ref()
+            && let Some(reredrive) = self
+                .run_coding_output_teaching_reredrive(
+                    &attempt,
+                    provider,
+                    &coder_provider,
+                    worktree_path,
+                    &node,
+                    &role_run,
+                    parse_error,
+                    &full_prompt,
+                    command_rx,
+                )
+                .await?
+        {
+            full_output = reredrive.outcome.full_output;
+            role_run = reredrive.role_run;
+            node = reredrive.node;
+            plan_defect_parse = parse_execution_plan_defects(PlanDefectSource::Coder, &full_output);
+        }
+        let (plan_defect_report, plan_defect_decision, plan_defect_error) = match plan_defect_parse
+        {
+            Ok(report) if report.findings.is_empty() => (None, None, None),
+            Ok(report) => {
+                let projection = self.reviewer_projection_for_attempt(&attempt)?;
+                let decision = execution_plan_defect_flow_decision(&report, &projection);
+                (Some(report), Some(decision), None)
+            }
+            Err(error) => (
+                None,
+                Some(CodeReviewFlowDecision::StopForHumanTriage),
+                Some(error.to_string()),
+            ),
+        };
         let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,
@@ -295,6 +328,124 @@ impl CodingWorkspaceEngine {
                     && run.role == CodingProviderRole::Coder
                     && started_at_or_after(&run.started_at, unit_started_at)
             }))
+    }
+
+    /// B-③：教学重驱是否已在本 attempt 触发过（持久恰一次闸门：以
+    /// `CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE` timeline node 存在性为准，
+    /// 崩溃/重入后闸门仍在）。
+    fn coding_output_teaching_reredrive_attempted(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<bool, CodingWorkspaceEngineError> {
+        Ok(self
+            .store
+            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .any(|node| node.title == CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE))
+    }
+
+    /// B-③（3.6 矩阵族③）：coder 完成报告 plan_defect_findings 解析失败的
+    /// 「恰一次教学重驱」。流程：
+    /// 1. 按正常路径终态关闭第一轮 role run/node（role run=Completed，
+    ///    失败由门/重驱轮携带，语义与既有 parse 失败路径一致）；
+    /// 2. 先落教学重驱 timeline node（审计留痕 + 恰一次闸门，先建后跑
+    ///    fail-closed），再刷新 attempt 拿第一轮落地的 provider session id；
+    /// 3. 复用 run_coder_with_retry_cycle 跑一次错误原文回灌的教学续跑
+    ///    （有 session 时 delta 续会话，无 session 时 fresh 全量 prompt 尾接
+    ///    教学段）；传输层重试/取消等失败语义复用既有周期机制。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_coding_output_teaching_reredrive(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        coder_provider: &ProviderName,
+        worktree_path: &Path,
+        previous_node: &CodingTimelineNode,
+        previous_role_run: &CodingRoleRun,
+        parse_error: &CodingWorkspaceEngineError,
+        full_prompt: &str,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<Option<ProviderRetryCycleSuccess>, CodingWorkspaceEngineError> {
+        let error_summary = truncate_prompt_section(&parse_error.to_string(), 2_000);
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &previous_role_run.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )?;
+        self.complete_timeline_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &previous_node.id,
+            CodingTimelineNodeStatus::Completed,
+            Some(format!(
+                "输出未通过 plan_defect 契约解析，转教学重驱: {error_summary}"
+            )),
+        )
+        .await?;
+
+        let existing =
+            self.store
+                .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let node = CodingTimelineNode {
+            id: format!("coding_node_{:04}", existing.len() + 1),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Coding,
+            title: CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE.to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::Author),
+            summary: Some(error_summary),
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        };
+        self.store.save_timeline_node(attempt, node.clone())?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
+            .await;
+
+        let refreshed =
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &refreshed,
+            &CodingProviderRole::Coder,
+            coder_provider,
+        );
+        let teaching_prompt =
+            build_coding_output_teaching_reredrive_prompt(&parse_error.to_string());
+        let fresh_prompt = format!("{full_prompt}\n\n{teaching_prompt}");
+        let role_run = self.store.create_role_run(
+            &refreshed,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::AutomaticRetry,
+            Some(node.id.clone()),
+        )?;
+        let success = self
+            .run_coder_with_retry_cycle(CoderRetryCycleInput {
+                attempt: &refreshed,
+                initial_node: node,
+                initial_role_run: role_run,
+                provider,
+                provider_name: coder_provider,
+                worktree_path,
+                initial_prompt: teaching_prompt,
+                fresh_prompt,
+                initial_prompt_mode: if resume_provider_session_id.is_some() {
+                    CodingPromptMode::DeltaOnly
+                } else {
+                    CodingPromptMode::FullConversation
+                },
+                initial_resume_provider_session_id: resume_provider_session_id,
+                command_rx: &mut *command_rx,
+            })
+            .await?;
+        Ok(Some(success))
     }
 
     pub(crate) async fn emit_coder_output_chat_entry(&self, input: CoderOutputChatEntryInput<'_>) {

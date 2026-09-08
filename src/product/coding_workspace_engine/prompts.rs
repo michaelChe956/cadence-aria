@@ -230,6 +230,26 @@ pub(crate) fn build_coding_prompt(
     prompt
 }
 
+/// B-③（3.6 矩阵族③）：coder 完成报告 plan_defect_findings 解析失败后的
+/// 「恰一次教学重驱」prompt。仿 workspace_engine 的
+/// `build_work_item_plan_compile_reredrive_prompt` 模板（「上一轮已结束，但
+/// 没有…不要继续调研，不要只解释…立即重新输出完整…」）+ 解析错误原文
+/// 逐字回灌 + 共享单源契约（A 件后含 defect_class 8 取值逐字枚举，教学不
+/// 另设副本，与 schema 单源对齐）。经 resume session 续跑时作为 delta prompt
+/// 注入；无 session 时作为 fresh prompt 的尾段注入（见 coding.rs 重驱接线）。
+pub(crate) fn build_coding_output_teaching_reredrive_prompt(parse_error: &str) -> String {
+    let mut prompt = format!(
+        "上一轮已结束，但你没有输出合法的 plan_defect_findings 完成报告，结论已被结构化解析拒绝。\n\
+         不要继续调研，不要修改代码，不要只解释，不要输出任何前言或路由回执。\n\
+         具体解析错误（原文回灌）:\n- {parse_error}\n\
+         请基于已有上下文，立即重新输出完整完成报告；结论必须是一个顶层 JSON 对象，\n\
+         包含 plan_defect_findings 数组（普通成功输出使用 plan_defect_findings: []），\n\
+         defect_class 必须逐字使用 8 个合法取值之一，禁止发明、合并或概括取值。\n"
+    );
+    prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
+    prompt
+}
+
 pub(crate) fn build_coding_delta_prompt(
     attempt: &CodingExecutionAttempt,
     context: &CodingExecutionContext,

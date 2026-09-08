@@ -517,6 +517,7 @@ pub(crate) mod campaign_stage3_amendment;
 mod campaign_stage3_dependency;
 mod code_review_triage;
 mod coder_resume_recovery;
+mod coding_output_teaching_reredrive;
 mod gate_coder_feedback;
 mod gate_rework;
 mod gates_worktree_routing;
