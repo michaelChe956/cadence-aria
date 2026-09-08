@@ -859,7 +859,29 @@ function createStage3GateController({
   const onGateWaiting = ({ reconnect = false } = {}) => {
     if (inFlightTurn) return null;
     const action = actionAt(actionIndex);
-    if (action?.decision === 'advance') return null;
+    if (action?.decision === 'advance') {
+      // 8.6 resume 断点恢复：门快照（session_state/stage_change → 人工门阶段）落在
+      // 脚本指针已越过 confirm（已消费但未落地）且无 in-flight turn 时，补发一次裸
+      // confirm——confirm 无 command_id 天然幂等：门开着→关它；门已关/会话已过门→
+      // 服务端按阶段校验拒绝，由 noteGateCloseConflict 既有三态翻译消化，不死循环。
+      // 防双发复用 awaitingAccept 闩：同一 gate 停留期内只补发一次，终态/冲突回报后
+      // 才重置。现场：/tmp/aria-36-matrix/pi-heavy/rep2(pi/rep1) confirm 撞
+      // product_store_conflict(human_gate_close) 后 95s 零出站被 idle 关连；rep2b
+      // 续跑（ARIA_EXISTING_SESSION=workspace_session_0184）重连后只剩 session_state
+      // 快照，不重发 confirm → 会话卡死在等门。
+      const previous = actionAt(actionIndex - 1);
+      if (actionIndex > 0 && previous?.decision === 'confirm' && !awaitingAccept) {
+        awaitingAccept = { actionIndex: actionIndex - 1, kind: 'confirm', commandId: null };
+        recoveryChecks.push({ check: 'confirm_resume_resent', action_index: actionIndex - 1 });
+        return {
+          message: stage3HumanMessage({ decision: 'confirm' }, { commandId: null }),
+          actionIndex: actionIndex - 1,
+          commandId: null,
+          source: 'stage3_confirm_resume_resend',
+        };
+      }
+      return null;
+    }
     if (!action) {
       if (exhaustedEpisodeOpen) return null;
       exhaustedEpisodeOpen = true;
@@ -974,6 +996,30 @@ function createStage3GateController({
     confirmedPlan = false,
   } = {}) => {
     const consumed = [];
+    // 8.6 resume 断点恢复：重连后服务端只回 session_state 快照，不重放 turn 终态
+    // 事件；若 durable turn 记录已终态，必须释放 in-flight 单飞，否则 onGateWaiting
+    // 永远短路零出站（现场 /tmp/aria-36-matrix/pi-heavy/rep2b：重复 feedback 使服务端
+    // 回放同一 turn_open，inFlightTurn 挂在服务端已 completed 的 turn 上，95s 零出站
+    // 被 idle 关连×4 → ws_closed 失败）。非终态 turn 维持 in-flight 等位。
+    if (inFlightTurn) {
+      const durableInFlight = replayedTurns.find((entry) => entry?.command_id === inFlightTurn.commandId
+        && (entry?.status === 'completed' || entry?.status === 'failed'));
+      if (durableInFlight) {
+        const staleRecord = turns.find((turn) => turn.command_id === inFlightTurn.commandId);
+        if (staleRecord) {
+          staleRecord.status = durableInFlight.status;
+          if (durableInFlight.status === 'completed') staleRecord.artifact_ref = durableInFlight.artifact_ref ?? null;
+          else staleRecord.failure_class = durableInFlight.failure_class ?? null;
+          staleRecord.turn_id ??= durableInFlight.turn_id ?? null;
+        }
+        recoveryChecks.push({
+          check: 'durable_inflight_turn_terminal_released',
+          command_id: inFlightTurn.commandId,
+          turn_status: durableInFlight.status,
+        });
+        inFlightTurn = null;
+      }
+    }
     const current = currentWithCommand();
     // 8.2c：重连后由驱动把 durable turn 记录喂进来。终态 turn（completed/failed）
     // 直接收敛回合状态并释放单飞；非终态 turn 恢复为 in-flight 等待服务端恢复。
@@ -1881,6 +1927,14 @@ async function runCampaign({
   const deliverStage3Submission = (submission) => {
     if (!submission?.message || ended) return;
     const { message, source } = submission;
+    // 8.6：resume 补发 confirm 落独立审计事件（现场取证用，与 human_gate_action 互补）。
+    if (source === 'stage3_confirm_resume_resend') {
+      writeLog({
+        event: 'stage3_confirm_resume_resend',
+        action_index: submission.actionIndex ?? null,
+        command_id: submission.commandId ?? null,
+      });
+    }
     const gateSequence = result.humanGateActions.length + 1;
     const gateAction = humanGateActionAudit({
       sequence: gateSequence,

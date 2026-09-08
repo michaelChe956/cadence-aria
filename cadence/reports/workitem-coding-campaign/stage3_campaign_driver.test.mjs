@@ -611,6 +611,120 @@ test('campaign_stage3_confirm_conflict_waits_for_gate_reopen', () => {
   assert.ok(controller.resultFields().durable_recovery_checks.some((entry) => entry.check === 'confirm_conflict_awaiting_gate'));
 });
 
+// —— 8.6 resume 断点恢复：门快照落在人工门而脚本指针已越过 confirm ——
+// 现场 /tmp/aria-36-matrix/pi-heavy/rep2/pi/rep1（confirm 撞 product_store_conflict:
+// human_gate_close 被 F7-A 消化后 95s 零出站 idle 关连）与 rep2b 续跑
+// （ARIA_EXISTING_SESSION=workspace_session_0184）：重连后服务端只回
+// session_state(stage=human_confirm) 快照、不重放 turn 事件，而已消费但未落地的
+// confirm 不再重发 → 会话卡死在等门。语义：门快照 + 指针已越过 confirm + 无
+// in-flight turn → 补发一次裸 confirm（幂等，无 command_id）。
+test('campaign_stage3_confirm_resume_resend_when_gate_snapshot_lands_after_consumed_confirm', () => {
+  const { controller } = newController({ actions: parseHumanScript('request-change:合成反馈 1 号;confirm;advance') });
+  // 推进脚本指针到 advance（confirm 已消费）：rc@0 → turn 开/终态；confirm@1 → human_gate_closed。
+  const first = controller.onGateWaiting();
+  controller.onInbound(stage3TurnOpen(first.commandId, 'turn-1', 1));
+  controller.onInbound(stage3TurnCompleted('turn-1'));
+  controller.onInbound(stage3GateClosed('confirm'));
+  assert.equal(controller.currentAction()?.decision, 'advance');
+
+  // resume/重连后门快照（session_state/stage_change → human gate）落回：补发一次裸 confirm。
+  const resend = controller.onGateWaiting();
+  assert.ok(resend, '已消费未落地的 confirm 必须可补发，否则会话卡死在等门');
+  assert.deepEqual(resend.message, { type: 'confirm' });
+  assert.equal(resend.source, 'stage3_confirm_resume_resend');
+  assert.equal(resend.actionIndex, 1, '补发指向已消费的 confirm 槽位');
+  assert.equal(resend.commandId, null, 'confirm 无 command_id，天然幂等');
+
+  // 防双发：同一 gate 停留期内（未收到终态/冲突回报）不再重复产出。
+  assert.equal(controller.onGateWaiting(), null);
+  assert.equal(controller.onGateWaiting({ reconnect: true }), null);
+
+  // 补发的 confirm 被服务端接受（human_gate_closed confirm）→ 释放防双发闩。
+  controller.onInbound(stage3GateClosed('confirm'));
+  assert.ok(controller.resultFields().durable_recovery_checks.some(
+    (entry) => entry.check === 'confirm_resume_resent' && entry.action_index === 1,
+  ));
+});
+
+test('campaign_stage3_confirm_resume_resend_digests_gate_close_and_stage_errors', () => {
+  const { controller } = newController({ actions: parseHumanScript('request-change:合成反馈 1 号;confirm;advance') });
+  const first = controller.onGateWaiting();
+  controller.onInbound(stage3TurnOpen(first.commandId, 'turn-1', 1));
+  controller.onInbound(stage3TurnCompleted('turn-1'));
+  controller.onInbound(stage3GateClosed('confirm'));
+  assert.equal(controller.onGateWaiting().source, 'stage3_confirm_resume_resend');
+
+  // 门已关/会话已过门：product_store_conflict(human_gate_close) 按既有 F7-A 三态翻译消化。
+  assert.equal(
+    controller.noteGateCloseConflict('product_store_conflict: human_gate_close workspace_session_0184'),
+    true,
+    '补发 confirm 撞门未回位必须被消化而不是终态',
+  );
+  // 消化即重置闩：下一次门快照才补发（有界：由门信号驱动，不自发重发、不死循环）。
+  assert.equal(controller.onGateWaiting().source, 'stage3_confirm_resume_resend');
+  // 阶段错误（INVALID_MESSAGE_FOR_STAGE / not allowed in stage）同样按门未回位消化。
+  assert.equal(controller.noteGateCloseConflict('confirm not allowed in stage', 'INVALID_MESSAGE_FOR_STAGE'), true);
+  assert.equal(controller.onGateWaiting().source, 'stage3_confirm_resume_resend');
+  // 无关错误不消化（driver 侧按失败关闭处理），等待期不得再产出。
+  assert.equal(controller.noteGateCloseConflict('totally unrelated error'), false);
+  assert.equal(controller.onGateWaiting(), null);
+  const checks = controller.resultFields().durable_recovery_checks.map((entry) => entry.check);
+  assert.ok(checks.includes('confirm_resume_resent'));
+  assert.ok(checks.includes('confirm_conflict_awaiting_gate'));
+  assert.ok(checks.includes('confirm_invalid_stage_awaiting_gate'));
+});
+
+test('campaign_stage3_durable_replay_releases_stale_inflight_turn_for_consumed_feedback', () => {
+  // 现场 rep2b：resume 后 onGateWaiting 从 checkpoint command_id 重发 rc@0，服务端对
+  // 已 completed 的 durable turn 回放同一 turn_open → onInbound 消费 rc@0 并把
+  // inFlightTurn 挂在该 turn 上；重连后只有 session_state 快照（无 turn 终态事件），
+  // onGateWaiting 被单飞短路 → 95s 零出站被 idle 关连(1005)×4 → ws_closed 失败。
+  const { controller } = newController({ actions: parseHumanScript('request-change:合成反馈 1 号;confirm;advance') });
+  const first = controller.onGateWaiting();
+  const dupOpen = controller.onInbound(stage3TurnOpen(first.commandId, 'durable-turn-1', 3));
+  assert.deepEqual(dupOpen.consumed, [{ actionIndex: 0, kind: 'human_gate_feedback', via: 'human_gate_turn_open' }]);
+  assert.equal(controller.onGateWaiting(), null, 'in-flight 期间门快照不得发下一动作');
+
+  // ws 关闭后的 durable 对账：turn 已终态 → 释放 in-flight 单飞，且不重复消费 rc@0。
+  const replay = controller.onDurableState({
+    replayedCommandIds: [first.commandId],
+    replayedTurns: [{
+      command_id: first.commandId,
+      turn_id: 'durable-turn-1',
+      status: 'completed',
+      artifact_ref: 'artifact_version_004',
+      failure_class: null,
+    }],
+  });
+  assert.deepEqual(replay.consumed, [], 'rc@0 已消费过，durable 对账不得重复消费');
+  const confirmSend = controller.onGateWaiting();
+  assert.equal(confirmSend.message.type, 'confirm', 'durable 终态回放释放单飞后门回到 Waiting 可投递 confirm');
+  assert.equal(confirmSend.source, 'human_script');
+  assert.equal(confirmSend.actionIndex, 1);
+  const turn = controller.resultFields().human_gate_turns[0];
+  assert.equal(turn.status, 'completed');
+  assert.equal(turn.artifact_ref, 'artifact_version_004');
+  assert.ok(controller.resultFields().durable_recovery_checks.some(
+    (entry) => entry.check === 'durable_inflight_turn_terminal_released',
+  ));
+
+  // durable turn 仍是非终态（open/running）时不释放，维持 in-flight 等位。
+  const { controller: pending } = newController({ actions: parseHumanScript('request-change:合成反馈 1 号;confirm') });
+  const pendingFirst = pending.onGateWaiting();
+  pending.onInbound(stage3TurnOpen(pendingFirst.commandId, 'durable-turn-2', 2));
+  pending.onDurableState({
+    replayedCommandIds: [pendingFirst.commandId],
+    replayedTurns: [{
+      command_id: pendingFirst.commandId,
+      turn_id: 'durable-turn-2',
+      status: 'running',
+      artifact_ref: null,
+      failure_class: null,
+    }],
+  });
+  assert.equal(pending.onGateWaiting(), null, 'durable 非终态 turn 维持 in-flight 等位');
+});
+
 // —— 阶段 3 Task 8.3 —— advance 完成后的 group snapshot readback ——
 test('campaign_stage3_group_snapshot_readback_after_advance_completed', async () => {
   const {
