@@ -1,0 +1,234 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0157",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "codex",
+  "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+  "outDir": "/tmp/aria-36-matrix/codex-light/rep4c/coding/coding-codex-coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+  "startedAt": "2026-09-08T04:02:32.281Z",
+  "finishedAt": "2026-09-08T04:11:04.972Z",
+  "elapsedSec": 512.692,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.087,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.122,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 344.481,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "review_request",
+      "elapsedSec": 508.19,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "final_confirm",
+      "elapsedSec": 512.61,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.172,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 344.481,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。变更仅新增 server.js 与 test/hello.test.js，符合独占范围且未触碰禁止范围。GET /api/hello 覆盖 HTTP 200 与精确 JSON 响应体，满足 AC-001 和 REQ-002 的当前可观测结果要求。node --test test/hello.test.js 实际执行 1 个测试并通过，输出为 tests 1、pass 1、fail 0。initial sandboxed execution 因 EPERM listening on port 3000 被环境拦截，后续授权执行提供了有效非零测试证据。",
+      "created_at": "2026-09-08T04:11:00.384289263+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。变更仅新增 server.js 与 test/hello.test.js，符合独占范围且未触碰禁止范围。GET /api/hello 覆盖 HTTP 200 与精确 JSON 响应体，满足 AC-001 和 REQ-002 的当前可观测结果要求。node --test test/hello.test.js 实际执行 1 个测试并通过，输出为 tests 1、pass 1、fail 0。initial sandboxed execution 因 EPERM listening on port 3000 被环境拦截，后续授权执行提供了有效非零测试证据。",
+      "created_at": "2026-09-08T04:11:00.384289263+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "review_request_0001",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "kind": "git_branch_only",
+      "remote_kind": "github",
+      "remote": "origin",
+      "base_branch": "main",
+      "branch_name": "aria/issues/issue_0157",
+      "commit_sha": "76ae1d9d141bdd36dabaaf1bc13989af4d931935",
+      "push_status": "pushed",
+      "external_url": null,
+      "manual_instructions": [
+        "基于远端 origin/aria/issues/issue_0157 发起代码审查"
+      ],
+      "push_error": null,
+      "owner_kind": "attempt",
+      "pointer_publication_id": null,
+      "revoked": false,
+      "created_at": "2026-09-08T04:11:04.843992974+00:00",
+      "updated_at": "2026-09-08T04:11:04.843992974+00:00"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。变更仅新增 server.js 与 test/hello.test.js，符合独占范围且未触碰禁止范围。GET /api/hello 覆盖 HTTP 200 与精确 JSON 响应体，满足 AC-001 和 REQ-002 的当前可观测结果要求。node --test test/hello.test.js 实际执行 1 个测试并通过，输出为 tests 1、pass 1、fail 0。initial sandboxed execution 因 EPERM listening on port 3000 被环境拦截，后续授权执行提供了有效非零测试证据。",
+      "created_at": "2026-09-08T04:11:00.384289263+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。变更仅新增 server.js 与 test/hello.test.js，符合独占范围且未触碰禁止范围。GET /api/hello 覆盖 HTTP 200 与精确 JSON 响应体，满足 AC-001 和 REQ-002 的当前可观测结果要求。node --test test/hello.test.js 实际执行 1 个测试并通过，输出为 tests 1、pass 1、fail 0。initial sandboxed execution 因 EPERM listening on port 3000 被环境拦截，后续授权执行提供了有效非零测试证据。",
+      "created_at": "2026-09-08T04:11:00.384289263+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0157",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0157",
+    "head_commit": "76ae1d9d141bdd36dabaaf1bc13989af4d931935",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 53186,
+    "output_tokens": 1217,
+    "cache_read_tokens": 52480
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 29444,
+      "output_tokens": 970,
+      "cache_read_tokens": 29056,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 23742,
+      "output_tokens": 247,
+      "cache_read_tokens": 23424,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-08T04:02:32.400342928+00:00",
+      "completed_at": "2026-09-08T04:02:32.426143891+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-08T04:02:37.457235747+00:00",
+      "completed_at": "2026-09-08T04:08:16.715348314+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-08T04:08:21.767562247+00:00",
+      "completed_at": "2026-09-08T04:11:00.392274032+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "stage": "review_request",
+      "title": "发起 review request",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "review request 已创建",
+      "started_at": "2026-09-08T04:11:00.468157573+00:00",
+      "completed_at": "2026-09-08T04:11:04.848436266+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_d797f0cb64ea42e6b1ef3fdc198935a5",
+      "stage": "final_confirm",
+      "title": "等待人工最终确认",
+      "status": "completed",
+      "agent_role": "system",
+      "summary": "用户已确认完成",
+      "started_at": "2026-09-08T04:11:04.867786317+00:00",
+      "completed_at": "2026-09-08T04:11:04.923257415+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": null,
+  "error": null,
+  "completed": true
+}

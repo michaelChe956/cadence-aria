@@ -1,0 +1,43 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0155",
+  "plan_id": "issue_work_item_plan_0001",
+  "work_item_ids": [
+    "WI-001"
+  ],
+  "repository_id": "repository_0001",
+  "provider": "codex",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": false,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": false,
+    "require_execution_plan_confirm": false
+  },
+  "plan_confirmation_status": "confirmed",
+  "execution_plan_confirm_required": false,
+  "outDir": "/tmp/aria-36-matrix/codex-light/rep2c/codex/rep1",
+  "coding_attempt_id": "coding_attempt_6f3b0639d7694eaea7d20d10b9389f08",
+  "coding_attempt_status": "completed",
+  "coding_outDir": "/tmp/aria-36-matrix/codex-light/rep2c/coding/coding-codex-coding_attempt_6f3b0639d7694eaea7d20d10b9389f08",
+  "coding_failure_class": null,
+  "worktree": {
+    "branch_name": "aria/issues/issue_0155",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0155",
+    "head_commit": "9f2e6684a9150bcc94b92537f4dcfd55e410bb07",
+    "push_status": null,
+    "review_request_url": null
+  }
+}
