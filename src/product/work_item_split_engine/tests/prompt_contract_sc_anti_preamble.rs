@@ -53,7 +53,7 @@ fn sc_author_prompt_carries_anti_preamble_line_right_before_output_directive() {
     );
     assert!(prompt.ends_with("[output] 现在仅输出完整 markdown source。"));
 
-    // 红线：教学增行后仍须低于质量预算（20,000，P1-A 第 7 次提额）。
+    // 红线：教学增行后仍须低于质量预算（第 9 次提额后 21,000）。
     let budget =
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES;
     assert!(

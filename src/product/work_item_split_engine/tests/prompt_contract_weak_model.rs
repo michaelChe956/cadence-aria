@@ -69,7 +69,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "增补教学后仍必须低于质量预算红线（第 8 次提额后 20,500），实测 {} bytes",
+        "增补教学后仍必须低于质量预算红线（第 9 次提额后 21,000），实测 {} bytes",
         prompt.len()
     );
 }

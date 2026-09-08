@@ -1161,7 +1161,7 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
         21_000,
-        "第 8 次提额：codex×重 输出契约 capabilities 逐字覆盖教学要求预算上调至整百级 20,500"
+        "第 9 次提额：codex×重 输出契约 capabilities 逐字覆盖教学要求预算上调至整百级 20,500"
     );
     assert!(
         prompt.len()
