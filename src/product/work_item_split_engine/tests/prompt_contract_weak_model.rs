@@ -69,7 +69,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "增补教学后仍必须低于 20,000 质量预算红线，实测 {} bytes",
+        "增补教学后仍必须低于质量预算红线（第 8 次提额后 20,500），实测 {} bytes",
         prompt.len()
     );
 }
@@ -216,5 +216,225 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
                 && diagnostic.message.contains("AC-001 has no handoff reviewer check")),
         "教学 AC 纪律必须与校验器实际判定逐字一致：{:?}",
         reviewer_diagnostics
+    );
+}
+
+/// 3.6 矩阵 codex×重 三连败根因教学（issue_0166/0167/0168：上游 Outputs capabilities
+/// 未逐字覆盖下游 Inputs require_all 消费 → required_capability_missing approval
+/// 编译拒）：SC author prompt 增补 [weak_model_precision] 第三条「输出契约纪律」。
+/// 既有两条教学逐字保留；本测试逐句钉住新教学，并重申段序与预算红线。
+#[test]
+fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_coverage() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let design_requirement_ids = vec!["REQ-001".to_string()];
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &design_requirement_ids,
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                routing_context: &RoutingReferenceContext::Legacy,
+            },
+        )
+        .expect("markdown author prompt");
+
+    for required in [
+        "输出契约纪律：SC 计划由你在同一文档先后写出",
+        "下游 Inputs required_capabilities 写什么，被 (provider_logical_work_item_id, contract_id) 指向的上游 Outputs capabilities 就逐字复制什么，require_all 逐项覆盖",
+        "正例：下游 `- required_capabilities: [数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE]` → 上游 `capabilities:` 逐字同串",
+        "反例：改写/概括/漏一项 → required_capability_missing 拒绝（approval 编译阻塞）",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "输出契约纪律教学必须包含 {required}: {prompt}"
+        );
+    }
+    // 段序不破：新教学条仍在 [weak_model_precision] 段内，位于交叉引用纪律之后、grammar 之前。
+    let discipline_pos = prompt
+        .find("[cross_reference_discipline]")
+        .expect("cross reference discipline");
+    let weak_pos = prompt
+        .find("[weak_model_precision]")
+        .expect("weak model precision discipline");
+    let grammar_pos = prompt.find("[markdown_grammar]").expect("grammar block");
+    assert!(
+        discipline_pos < weak_pos && weak_pos < grammar_pos,
+        "输出契约教学追加后段序必须保持：交叉引用纪律 → 弱模型精度 → grammar"
+    );
+    assert!(
+        prompt.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "第三条教学追加后仍必须低于质量预算红线，实测 {} bytes",
+        prompt.len()
+    );
+    eprintln!(
+        "codex×重 SC author prompt bytes={} margin={}",
+        prompt.len(),
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+            - prompt.len()
+    );
+}
+
+/// 教学↔dependency 校验器逐字对齐（codex×重）：输出契约纪律点名的错误码、消息片段
+/// 与匹配机制必须逐字存在于 `work_item_contract::dependency.rs` 判定源码；教学字段必须
+/// 与 grammar 白名单 key 一致。行为级复用 work_item_contract/tests/dependency.rs 的
+/// canonical 契约 fixture 场景：按教学反例（改写/概括/漏一项）构造的最小 plan 必须被
+/// canonical 契约校验以 required_capability_missing 拒绝，逐字回填则通过。
+#[test]
+fn output_contract_capability_teaching_matches_dependency_validator_judgement() {
+    let dependency_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_contract/dependency.rs"
+    ));
+    for aligned in [
+        "required_capability_missing",
+        "lacks capability",
+        "missing_capabilities_for_policy",
+        "provider_logical_work_item_id",
+        "required_capabilities",
+    ] {
+        assert!(
+            dependency_source.contains(aligned),
+            "dependency.rs 判定源码必须包含教学对齐片段 {aligned}，否则教学已与校验器漂移"
+        );
+    }
+    for structured_key in [
+        "capabilities",
+        "required_capabilities",
+        "provider_logical_work_item_id",
+        "contract_id",
+    ] {
+        assert!(
+            crate::product::work_item_plan_compiler::grammar::STRUCTURED_KEYS
+                .contains(&structured_key),
+            "教学字段 {structured_key} 必须与 grammar 白名单 key 逐字一致"
+        );
+    }
+    assert!(
+        crate::product::work_item_plan_compiler::grammar::ALLOWED_COMPATIBILITY_POLICIES
+            .contains(&"require_all"),
+        "教学点名的 require_all 必须是 grammar 允许的 compatibility_policy 值"
+    );
+
+    // 教学侧闭环：prompt 中的输出契约教学必须逐字携带与 dependency.rs 对齐的片段，
+    // 与判定源码两侧同时断言才构成漂移防线。
+    let (request, issue, repository) = split_prompt_fixture();
+    let design_requirement_ids = vec!["REQ-001".to_string()];
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &design_requirement_ids,
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                routing_context: &RoutingReferenceContext::Legacy,
+            },
+        )
+        .expect("markdown author prompt");
+    for taught in [
+        "required_capability_missing",
+        "(provider_logical_work_item_id, contract_id)",
+        "require_all",
+        "数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE",
+    ] {
+        assert!(
+            prompt.contains(taught),
+            "输出契约教学必须逐字携带与校验器对齐的片段 {taught}: {prompt}"
+        );
+    }
+
+    // 行为级对齐：教学正反例对应的最小 canonical plan 必须触发教学点名的错误码与消息。
+    let capability = "数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE";
+    let second_capability = "GET /api/levels 返回 200 与五条关卡记录";
+    let provider_with = |capabilities: &[&str]| {
+        let mut provider =
+            crate::product::work_item_contract::canonical_contract_fixture("WI-001");
+        provider.input_contracts.clear();
+        provider.output_contracts =
+            vec![crate::product::work_item_contract::PromisedOutputContract {
+                contract_id: "CT-LEVELS-API-V1".to_string(),
+                capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
+            }];
+        provider.handoff_contract.provided_contract_refs =
+            vec!["CT-LEVELS-API-V1".to_string()];
+        provider
+    };
+    let consumer_with = |required: &[&str]| {
+        let mut consumer =
+            crate::product::work_item_contract::canonical_contract_fixture("WI-002");
+        consumer.input_contracts =
+            vec![crate::product::work_item_contract::RequiredInputContract {
+                contract_id: "CT-LEVELS-API-V1".to_string(),
+                provider_logical_work_item_id: "WI-001".to_string(),
+                required_capabilities: required.iter().map(|c| (*c).to_string()).collect(),
+                compatibility_policy:
+                    crate::product::work_item_contract::ContractCompatibilityPolicy::RequireAll,
+            }];
+        consumer.output_contracts.clear();
+        consumer.handoff_contract.provided_contract_refs.clear();
+        consumer
+    };
+    let validate = |provider, consumer| {
+        let graph = crate::product::work_item_contract::build_dependency_contract_graph(&[
+            provider, consumer,
+        ])
+        .expect("dependency graph");
+        crate::product::work_item_contract::validate_dependency_contract_graph(&graph)
+    };
+
+    // 反例 1（改写/概括）：上游 capabilities 语义概括下游 required 能力串。
+    let paraphrase_report = validate(
+        provider_with(&["数据错误统一返回结构化错误体"]),
+        consumer_with(&[capability]),
+    );
+    assert!(
+        paraphrase_report.findings.iter().any(|finding| {
+            finding.code == "required_capability_missing"
+                && finding.logical_work_item_id.as_deref() == Some("WI-002")
+                && finding.contract_ref.as_deref() == Some("CT-LEVELS-API-V1")
+                && finding.capability_ref.as_deref() == Some(capability)
+                && finding
+                    .message
+                    .contains(&format!("lacks capability {capability} required by WI-002"))
+        }),
+        "教学反例（改写/概括）必须与 dependency 校验器实际判定逐字一致：{:?}",
+        paraphrase_report.findings
+    );
+
+    // 反例 2（漏一项）：require_all 下缺第二项能力同样逐项拒绝。
+    let partial_report = validate(
+        provider_with(&[capability]),
+        consumer_with(&[capability, second_capability]),
+    );
+    assert!(
+        partial_report.findings.iter().any(|finding| {
+            finding.code == "required_capability_missing"
+                && finding.capability_ref.as_deref() == Some(second_capability)
+        }),
+        "require_all 必须每项逐一覆盖（漏一项拒绝）：{:?}",
+        partial_report.findings
+    );
+
+    // 正例：上游逐字回填全部 required 能力串 → 无 required_capability_missing finding。
+    let verbatim_report = validate(
+        provider_with(&[capability, second_capability]),
+        consumer_with(&[capability, second_capability]),
+    );
+    assert!(
+        verbatim_report
+            .findings
+            .iter()
+            .all(|finding| finding.code != "required_capability_missing"),
+        "逐字回填后不得再出现 required_capability_missing：{:?}",
+        verbatim_report.findings
     );
 }

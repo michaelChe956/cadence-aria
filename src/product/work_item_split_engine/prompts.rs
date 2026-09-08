@@ -73,9 +73,15 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 /// [cross_reference_discipline] 之后）；预算维持 20,000（整百级、余量足够），实测
 /// 19,976/余 24B 与 19,984/余 16B（两 fixture），见
 /// prompt_contract::work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline。
+/// 2026-09-08 3.6 矩阵 codex×重 三连败根因（issue_0166/0167/0168：上游 WI 输出契约
+/// capabilities 未逐字覆盖下游 Inputs require_all 消费 → required_capability_missing
+/// approval 编译拒）：按红线先上调至 20,500（第 8 次提额），同批追加
+/// [weak_model_precision] 第三条「输出契约纪律」（净增 498B，含分隔换行）；实测
+/// 20,474/余 26B 与 20,482/余 18B（两 fixture），见
+/// prompt_contract_weak_model::work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_coverage。
 /// 依据：openspec/changes/archive/2026-08-31-rearch-workitem-plan-pipeline/design.md「SC author 预算余量红线」节。
 #[cfg(test)]
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 20_000;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 20_500;
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
 /// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，
@@ -227,14 +233,20 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
 /// AC 缺 reviewer check、幻觉引用不存在的 REQ-002）。字段名、错误码与判定语义
 /// 必须与 `work_item_contract::validation.rs` 的 IR 校验逐字对齐（对齐断言见
 /// prompt_contract::weak_model_precision_teaching_matches_contract_validator_judgement）。
+/// 2026-09-08 3.6 矩阵 codex×重 三连败（issue_0166/0167/0168：上游 Outputs
+/// capabilities 未逐字覆盖下游 require_all 消费）追加第三条「输出契约纪律」，错误码
+/// 与消息片段与 `work_item_contract::dependency.rs` 逐字对齐（对齐断言见
+/// prompt_contract_weak_model::output_contract_capability_teaching_matches_dependency_validator_judgement）。
 /// 🔴 不删不改既有教学段；预算红线见 WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
-/// 批注（净增 547B，维持 20,000 整百级，实测余 24/16B）。
+/// 批注（前两条净增 547B；第三条净增 498B，第 8 次提额 20,500 后实测余 26/18B）。
 const WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE: &str = "\
 [weak_model_precision]
 \
 AC 纪律：每个 `- criterion_id: AC-xxx` 必须在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`；正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`；漏写 → acceptance_criterion_without_reviewer_check 拒绝。
 \
 引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*）；task 的 requirement_refs 必须逐字取自 [design_requirements] 清单。反例：引用清单没有的 REQ-002 → unknown_requirement_ref 拒绝。
+\
+输出契约纪律：SC 计划由你在同一文档先后写出——下游 Inputs required_capabilities 写什么，被 (provider_logical_work_item_id, contract_id) 指向的上游 Outputs capabilities 就逐字复制什么，require_all 逐项覆盖。正例：下游 `- required_capabilities: [数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE]` → 上游 `capabilities:` 逐字同串。反例：改写/概括/漏一项 → required_capability_missing 拒绝（approval 编译阻塞）。
 \
 ";
 
