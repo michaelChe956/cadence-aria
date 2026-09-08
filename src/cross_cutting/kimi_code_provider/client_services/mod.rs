@@ -12,7 +12,7 @@ mod policy;
 mod sandbox;
 mod terminal;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -341,7 +341,10 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
 
 /// Resolve a terminal cwd inside the authorized root (or the root itself),
 /// rejecting symlinks via `openat` + `O_NOFOLLOW` and returning the canonical
-/// path of the anchored directory fd.
+/// path of the anchored directory fd. Absolute paths are tolerated when they
+/// lexically point beneath the root (the fs_service anchoring pattern), then
+/// re-anchored through the same no-follow walk; anything outside the root, or
+/// trying to climb back with `..`, is rejected without echoing the path.
 fn resolve_cwd(
     state: &ClientServiceState,
     cwd: Option<&str>,
@@ -349,13 +352,23 @@ fn resolve_cwd(
     let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
         return Ok(state.root.clone());
     };
-    let rel = Path::new(cwd);
-    if rel.is_absolute() || cwd.split('/').any(|component| component == "..") {
-        return Err(ClientServiceError::Rejected(
-            "terminal cwd must stay inside the authorized root".to_string(),
-        ));
-    }
-    let fd = open_dir_no_follow(&state.root, rel)
+    let rel: PathBuf = if Path::new(cwd).is_absolute() {
+        let rel = Path::new(cwd)
+            .strip_prefix(&state.root)
+            .map_err(|_| ClientServiceError::Rejected(cwd_usage_hint(state)))?;
+        if rel
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            return Err(ClientServiceError::Rejected(cwd_usage_hint(state)));
+        }
+        rel.to_path_buf()
+    } else if cwd.split('/').any(|component| component == "..") {
+        return Err(ClientServiceError::Rejected(cwd_usage_hint(state)));
+    } else {
+        PathBuf::from(cwd)
+    };
+    let fd = open_dir_no_follow(&state.root, &rel)
         .map_err(|error| ClientServiceError::Rejected(format!("terminal cwd rejected: {error}")))?;
     let canonical = canonical_path_of_fd(&fd)
         .map_err(|error| ClientServiceError::Rejected(format!("terminal cwd: {error}")))?;
@@ -365,6 +378,17 @@ fn resolve_cwd(
         ));
     }
     Ok(canonical)
+}
+
+/// Rejection message for a terminal cwd that cannot be anchored inside the
+/// authorized root. It names the root and teaches the correct usage, but
+/// never echoes the rejected path (outside-root paths must not leak back).
+fn cwd_usage_hint(state: &ClientServiceState) -> String {
+    format!(
+        "terminal cwd must stay inside the authorized root {}; point an absolute cwd at a \
+         subdirectory beneath it, or use a relative path without ..",
+        state.root.display()
+    )
 }
 
 async fn handle_terminal_create(
@@ -943,6 +967,137 @@ mod tests {
             .await
             .expect_err("args rejected");
         assert!(error.to_string().contains("single -c script"));
+    }
+
+    fn cwd_state(root: PathBuf) -> Arc<ClientServiceState> {
+        let (event_tx, _events) = mpsc::channel(32);
+        Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root,
+            policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
+            permission_mode: ProviderPermissionMode::Auto,
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(),
+            bwrap: None,
+            cleanup_cancel: CancellationToken::new().child_token(),
+        })
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_tolerates_absolute_path_inside_root() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
+        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
+
+        // Absolute cwd equal to the root itself anchors at the root.
+        let resolved = resolve_cwd(&state, Some(state.root.to_str().expect("utf-8 root")))
+            .expect("absolute cwd at root accepted");
+        assert_eq!(resolved, state.root);
+
+        // Absolute cwd pointing at a subdirectory beneath the root.
+        let absolute = state.root.join("nested/dir");
+        let resolved = resolve_cwd(&state, Some(absolute.to_str().expect("utf-8 path")))
+            .expect("absolute cwd inside root accepted");
+        assert_eq!(resolved, absolute.canonicalize().expect("canonical subdir"));
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_rejects_absolute_path_outside_root_without_echoing_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let outside = tempfile::tempdir().expect("outside");
+        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
+        let escapes = [
+            "/etc".to_string(),
+            outside
+                .path()
+                .canonicalize()
+                .expect("canonical outside")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        for escape in &escapes {
+            let error =
+                resolve_cwd(&state, Some(escape)).expect_err("absolute cwd outside root rejected");
+            let message = error.to_string();
+            assert!(message.contains("authorized root"), "{message}");
+            // The rejection teaches the correct usage and names the root.
+            assert!(
+                message.contains(state.root.to_str().expect("utf-8 root")),
+                "rejection must name the authorized root: {message}"
+            );
+            // Paths outside the root are never echoed back.
+            assert!(!message.contains(escape.as_str()), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_rejects_relative_parent_traversal_unchanged() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
+        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
+
+        let error = resolve_cwd(&state, Some("nested/../../escape"))
+            .expect_err("relative parent traversal rejected");
+        assert!(error.to_string().contains("authorized root"));
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_rejects_absolute_parent_traversal_after_root_strip() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
+        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
+
+        let escape = state.root.join("nested/../../escape");
+        let error = resolve_cwd(&state, Some(escape.to_str().expect("utf-8 path")))
+            .expect_err("absolute parent traversal rejected");
+        assert!(error.to_string().contains("authorized root"));
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_rejects_prefix_confusion_sibling() {
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("xxx_root");
+        let evil = parent.path().join("xxx_root_evil");
+        std::fs::create_dir_all(&root).expect("root mkdir");
+        std::fs::create_dir_all(&evil).expect("evil mkdir");
+        let state = cwd_state(root.canonicalize().expect("canonical root"));
+
+        let error = resolve_cwd(&state, Some(evil.to_str().expect("utf-8 path")))
+            .expect_err("prefix-confusion sibling rejected");
+        assert!(error.to_string().contains("authorized root"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_cwd_rejects_symlink_escape_and_internal_symlink() {
+        let dir = tempfile::tempdir().expect("dir");
+        let outside = tempfile::tempdir().expect("outside");
+        let state = cwd_state(dir.path().canonicalize().expect("canonical root"));
+
+        // Symlink inside the root pointing outside: rejected by the
+        // `openat` + `O_NOFOLLOW` walk even though the lexical prefix check
+        // passes.
+        std::os::unix::fs::symlink(
+            outside.path().canonicalize().expect("canonical outside"),
+            state.root.join("leak"),
+        )
+        .expect("symlink");
+        let escape = state.root.join("leak");
+        let error = resolve_cwd(&state, Some(escape.to_str().expect("utf-8 path")))
+            .expect_err("symlink escape rejected");
+        assert!(error.to_string().contains("terminal cwd"));
+
+        // Symlink pointing inside the root is also rejected (no-follow).
+        std::fs::create_dir_all(state.root.join("nested/dir")).expect("mkdir nested");
+        std::os::unix::fs::symlink("nested", state.root.join("link")).expect("symlink");
+        let internal = state.root.join("link");
+        let error = resolve_cwd(&state, Some(internal.to_str().expect("utf-8 path")))
+            .expect_err("internal symlink rejected");
+        assert!(error.to_string().contains("terminal cwd"));
     }
 
     async fn read_reply(
