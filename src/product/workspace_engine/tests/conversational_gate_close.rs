@@ -614,16 +614,164 @@ async fn late_terminate_after_terminate_gets_explicit_terminated_error() {
 
 #[tokio::test]
 async fn late_confirm_with_waiting_phase_drift_keeps_conflict() {
-    // 真冲突（状态漂移而非先到者关门）：durable 仍 WaitingForHuman 但 phase 不在
-    // Approval（如 Evaluate 门），compare_and_save 前置 Conflict 必须原样保持。
-    let (_root, _lifecycle, mut engine) = super::conversational_gate::gate_fixture(1);
-    drift_gate_session(&_lifecycle, &engine, |record| {
-        record.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
+    // 被推翻的旧假设（3.6 矩阵族⑤ / oracle 裁决 A）：本测试曾断言「Evaluate
+    // 相位漂移 = 真冲突」，即门只允许 Approval 相位关门——这正是 Evaluate 进门
+    // × Approval 关门死锁的根因。修复后 close 前置接受 phase∈{Approval,Evaluate}
+    // 并在 confirm 时人工权威升级，Evaluate 漂移不再冲突（改由
+    // conversational_gate_confirm_at_evaluate_gate_* 系列守卫）。仍应 conflict 的
+    // 漂移形态改为：漂到 Generate（非门相位）或清空门快照（反伪造判据——
+    // update_workspace_session_status 只在终态清快照、从不创建快照）。
+    {
+        let (_root, _lifecycle, mut engine) = super::conversational_gate::gate_fixture(1);
+        drift_gate_session(&_lifecycle, &engine, |record| {
+            record.single_candidate_phase = Some(SingleCandidatePhase::Generate);
+        });
+        let error = engine
+            .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+            .await
+            .expect_err("phase drift to a non-gate phase must stay a conflict");
+        assert!(error.contains("product_store_conflict"), "{error}");
+        assert!(error.contains("human_gate_close"), "{error}");
+    }
+    {
+        let (_root, _lifecycle, mut engine) = super::conversational_gate::gate_fixture(1);
+        drift_gate_session(&_lifecycle, &engine, |record| {
+            record.human_gate_snapshot = None;
+        });
+        let error = engine
+            .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+            .await
+            .expect_err("snapshot-less gate drift must stay a conflict (anti-forgery)");
+        assert!(error.contains("product_store_conflict"), "{error}");
+        assert!(error.contains("human_gate_close"), "{error}");
+    }
+}
+
+/// Evaluate 相位人工门 fixture（与 conversational_gate_revision 的
+/// `evaluate_gate_revision_fixture` 同构种子）：accepted contract drafts 基座
+/// （批准链 compile 可真实走通）+ 真实 handoff-clean rep4 候选三 refs +
+/// Evaluate 相位 WaitingForHuman 门快照，复刻 request-change 修订后
+/// repeated_fingerprint 门保持 Evaluate 进门的 durable 形态
+/// （routing_scope 的 EnterHumanGate 不提升相位）。
+fn evaluate_gate_fixture(
+    session_id: &str,
+    budget: u32,
+) -> (tempfile::TempDir, LifecycleStore, WorkspaceEngine) {
+    let (root, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    super::single_candidate_recovery::single_candidate_recovery_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    let gate_refs =
+        super::single_candidate_recovery::single_candidate_recovery_persist_candidate_artifacts(
+            &lifecycle,
+            &engine,
+            "evaluate-gate-close",
+            &super::conversational_gate_revision::handoff_clean_rep4(),
+        );
+    super::single_candidate_recovery::single_candidate_recovery_update_refs(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        gate_refs,
+    );
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("evaluate gate session record");
+    record.review_rounds = 0;
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: budget,
+        trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+        resumable: true,
     });
-    let error = engine
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist evaluate gate session");
+    let mut session = WorkspaceSession::from_record(record);
+    session.stage = WorkspaceStage::HumanConfirm;
+    session.session_status = WorkspaceSessionStatus::WaitingForHuman;
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: super::conversational_gate_revision::handoff_clean_rep4(),
+        diff: None,
+    });
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(
+            root.path().join(format!("{session_id}-checkpoints")),
+        )),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+    (root, lifecycle, engine)
+}
+
+#[tokio::test]
+async fn conversational_gate_confirm_at_evaluate_gate_completes_approval_chain() {
+    // 3.6 矩阵族⑤（oracle 裁决 A）：request-change 修订后 repeated_fingerprint
+    // 门保持 Evaluate 进门（EnterHumanGate 不提升相位），confirm 的 close CAS
+    // 前置若硬要求 Approval 即死锁。修复 = close 时人工权威升级：confirm 在
+    // close CAS 内原子提升 durable phase→Approval 再走既有 compile 链。本测试
+    // 同时守卫 CAS 成功后的内存相位同步——缺失时 compile 链以内存 phase 判
+    // auto_confirm，compile 会成功但不落 Confirmed 而回 enter_human_confirm。
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine) = evaluate_gate_fixture("evaluate_gate_confirm", 1);
+    let session_id = engine.session().session_id.clone();
+
+    let outcome = engine
         .handle_human_gate_termination(HumanConfirmDecision::Confirm)
         .await
-        .expect_err("phase drift outside Approval must stay a conflict");
-    assert!(error.contains("product_store_conflict"), "{error}");
-    assert!(error.contains("human_gate_close"), "{error}");
+        .expect("confirm at an Evaluate gate must unlock the close deadlock");
+    assert_eq!(outcome, HumanGateCloseOutcome::Confirmed);
+
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("closed session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Confirmed);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed)
+    );
+}
+
+#[tokio::test]
+async fn conversational_gate_terminate_at_evaluate_gate_abandons_durably() {
+    // Evaluate 门 terminate：关门成功但不提升相位（terminate 不是批准权威），
+    // 终态 Terminated + 快照/reservation 清空，不进 compile。
+    let (_tmp, lifecycle, mut engine) = evaluate_gate_fixture("evaluate_gate_terminate", 1);
+    let session_id = engine.session().session_id.clone();
+
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .await
+            .expect("terminate at an Evaluate gate must close without promotion"),
+        HumanGateCloseOutcome::Abandoned
+    );
+
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("terminated session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Evaluate),
+        "terminate 不得提升相位"
+    );
+    assert_eq!(durable.human_gate_snapshot, None);
+    assert_eq!(durable.human_gate_reservation, None);
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
 }

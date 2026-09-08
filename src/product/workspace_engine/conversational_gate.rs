@@ -568,9 +568,11 @@ impl super::WorkspaceEngine {
             self.session.artifact = Some(current_version.payload.clone());
         }
         // 人工修订与初始 author 同构：候选落盘后必须重走 Evaluate policy route。
-        // 缺失这一步时 session 停留 Evaluate，confirm 的 `compare_and_save_human_gate_close`
-        // 前置(WaitingForHuman+Approval)永久冲突，门死锁。无 reviewer 走本地
-        // synthetic Pass 路由进 Approval；有 reviewer 重启评审，不让 close 绕过 Approval。
+        // Evaluate 路由仍是进 Approval 的主路径；close 时的人工权威升级（confirm
+        // 视为批准权威，在 close CAS 内原子提升 phase→Approval）是兜底，二者不
+        // 互相替代：路由负责让门以 Approval 相位等待，升级负责解开路由缺席/评审
+        // 再次 must_fix 时 Evaluate 进门 × Approval 关门的死锁。无 reviewer 走本地
+        // synthetic Pass 路由进 Approval；有 reviewer 重启评审，不让 close 绕过评审。
         if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
             self.route_single_candidate_evaluate_without_reviewer()
                 .await;
@@ -839,6 +841,11 @@ impl super::WorkspaceEngine {
                     }
                 };
                 self.session.session_status = saved.status;
+                // 人工权威升级后的内存同步：close CAS 已把 durable phase 原子提升
+                // 为 Approval，内存相位必须同步，否则 compile 链以内存 phase 判
+                // auto_confirm 时 compile 会成功但不落 Confirmed 而回
+                // enter_human_confirm。
+                self.session.single_candidate_phase = saved.single_candidate_phase.clone();
                 self.session.human_gate_snapshot = saved.human_gate_snapshot;
                 self.enter_policy_valid_work_item_plan_compile().await;
 
@@ -929,7 +936,7 @@ impl super::WorkspaceEngine {
     /// - durable 已 Terminated → 明确「gate 已终止」错误（非 conflict 噪音）
     /// - durable 已 Running/Confirmed 且本命令为 confirm 方向 → 幂等
     ///   AlreadyClosed（no-op + 可见提示事件，不 abort 会话）
-    /// - 其余（含 Evaluate 等阶段漂移真冲突）→ 维持既有 conflict 上抛
+    /// - 其余（Generate 等非门相位漂移、门快照缺席等真冲突）→ 维持既有 conflict 上抛
     async fn translate_lost_human_gate_close_race(
         &mut self,
         lifecycle: &LifecycleStore,

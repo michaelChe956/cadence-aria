@@ -575,6 +575,17 @@ impl LifecycleStore {
     /// Atomically claims the human-gate close operation.  The expected record
     /// check is the single-flight boundary between a stale websocket and the
     /// worker that already closed or advanced this gate.
+    ///
+    /// 人工权威升级（3.6 矩阵族⑤，oracle 裁决 A）：门以 Evaluate 相位开门时
+    /// （request-change 修订后 repeated_fingerprint 门经 EnterHumanGate 保持
+    /// Evaluate），confirm 是人工批准权威，在锁内判等通过后原子提升
+    /// phase→Approval 再走既有 compile 链——compile 链三处 Approval 前置靠满足
+    /// 而非削弱；terminate 关门成功但不提升相位。前置接受 phase∈{Approval,
+    /// Evaluate}，但 `human_gate_snapshot` 必须在场：这是反伪造判据——
+    /// `update_workspace_session_status` 只在终态清快照、从不创建快照，没有
+    /// 快照在场的 Evaluate 记录不是本 CAS 应当关闭的门；Completed 相位继续拒
+    /// （amendment 重开门不得流经 approval compile）。禁止 trigger/resumable
+    /// 判据：NativeHumanRequired 跨两族复用、resumable 是策略派生值。
     pub fn compare_and_save_human_gate_close(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -590,8 +601,12 @@ impl LifecycleStore {
             });
         }
         if expected.status != WorkspaceSessionStatus::WaitingForHuman
-            || expected.single_candidate_phase
-                != Some(crate::product::models::SingleCandidatePhase::Approval)
+            || !matches!(
+                expected.single_candidate_phase,
+                Some(crate::product::models::SingleCandidatePhase::Approval)
+                    | Some(crate::product::models::SingleCandidatePhase::Evaluate)
+            )
+            || expected.human_gate_snapshot.is_none()
         {
             return Err(ProductStoreError::Conflict {
                 kind: "human_gate_close",
@@ -609,6 +624,12 @@ impl LifecycleStore {
                 });
             }
             stored.status = status.clone();
+            if status == WorkspaceSessionStatus::Running {
+                // confirm（Running）＝人工批准权威：锁内原子提升相位，
+                // Evaluate 进门 × Approval 关门死锁在此解开。
+                stored.single_candidate_phase =
+                    Some(crate::product::models::SingleCandidatePhase::Approval);
+            }
             if matches!(
                 status,
                 WorkspaceSessionStatus::Confirmed | WorkspaceSessionStatus::Terminated
