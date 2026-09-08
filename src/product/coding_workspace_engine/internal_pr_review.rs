@@ -982,13 +982,33 @@ impl CodingWorkspaceEngine {
             let current_head = GitWorkspaceService::new()
                 .git_current_head(worktree_path)
                 .await?;
+            // 兜底 commit 可达性（provider 无关）：agent 未 commit（current_head ==
+            // before_head）但仍有 staged 改动时，由 runner 兜底提交。旧判定把
+            // 「head_commit.is_some()」整体视为「无需提交」，而 sc_advance 建组
+            // 会预置 head_commit=base（lifecycle.rs），使该分支恒真、兜底 commit
+            // 永不可达——staged 未 commit 的交付被记为 commit_sha=base 空推，
+            // 最终撞共享工作树 dirty 门。收窄为「确无可提交内容才沿用当前 head」：
+            // - head_commit 记录了 != before_head 的真实既往 commit（如上一
+            //   unit 的 completion commit，且其后无新 commit）；或
+            // - 无 staged 改动（预置 base 的空观察语义保持：沿用当前 head）。
+            let has_staged_changes_for_commit = match self
+                ._git_service
+                .git_has_staged_changes(worktree_path)
+                .await
+            {
+                Ok(has_staged_changes) => has_staged_changes,
+                Err(GitWorkspaceError::Cancelled { .. }) => {
+                    self.compensate_cancelled_review_commit(&attempt, &journal)
+                        .await?;
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                }
+                Err(error) => return Err(error.into()),
+            };
             let commit_sha = if current_head != journal.before_head {
                 self.confirm_review_commit_identity(&journal, &current_head)
                     .await?;
                 current_head
-            } else if attempt.head_commit.is_some() {
-                current_head
-            } else {
+            } else if has_staged_changes_for_commit {
                 match self
                     ._git_service
                     .git_commit(worktree_path, commit_message)
@@ -1002,6 +1022,8 @@ impl CodingWorkspaceEngine {
                     }
                     Err(error) => return Err(error.into()),
                 }
+            } else {
+                current_head
             };
             journal = self.store.advance_coding_git_operation(
                 &attempt,

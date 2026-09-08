@@ -847,3 +847,4 @@ async fn coding_plan_repair_group_completion_recovers_completed_run_without_new_
 
 include!("group_completion_recovery.rs");
 include!("runtime_handoff_group_completion.rs");
+include!("runner_fallback_commit.rs");
