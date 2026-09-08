@@ -557,6 +557,7 @@ mod provider_rework_context;
 mod provider_start_persistence;
 mod provider_usage_event;
 mod retry_push;
+mod reviewer_retry_diagnostic_teaching;
 mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;
 mod runtime_handoff_impact;

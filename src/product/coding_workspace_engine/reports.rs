@@ -5,6 +5,14 @@ use crate::product::coding_models::{
 use crate::product::models::work_item_revision::HandoffRevision;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
+/// B-④：blocked_review_payload 三类结构化解析失败前缀（与 review_parser 的
+/// prefix 逐字对齐；教学只针对解析失败，普通 blocked 不注入）。
+const REVIEW_PARSE_FAILURE_SUMMARY_PREFIXES: [&str; 3] = [
+    "review 输出不是有效 JSON",
+    "review JSON Schema 校验失败",
+    "review JSON 解析失败",
+];
+
 impl CodingWorkspaceEngine {
     /// 已完成 unit 及其 `HandoffRevision`（若已发布）。
     ///
@@ -149,14 +157,81 @@ impl CodingWorkspaceEngine {
         let Some(previous_run_id) = role_run.supersedes_run_id.as_deref() else {
             return Ok(None);
         };
-        self.store
+        let summary = self
+            .store
             .role_run_retry_diagnostic_summary(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 previous_run_id,
             )
-            .map_err(CodingWorkspaceEngineError::Store)
+            .map_err(CodingWorkspaceEngineError::Store)?;
+        // B-④（3.6 矩阵族④）：上一轮 reviewer 输出被结构化解析阻塞时，
+        // 把 serde 错误原文 + 结构化输出教学句注入 retry 诊断通道，
+        // 使 retry_review 门动作触发的新 review prompt 自动携带错误原文教学
+        // （选 engine 侧生成点而非 prompts.rs 两个 builder：一处注入覆盖
+        // CodeReviewer/InternalReviewer/GroupFinalReview 三条链路，代价最小）。
+        let teaching =
+            self.previous_reviewer_structured_output_teaching(attempt, previous_run_id)?;
+        Ok(match (summary, teaching) {
+            (Some(summary), Some(teaching)) => Some(format!("{summary}\n{teaching}")),
+            (None, Some(teaching)) => Some(teaching),
+            (summary, None) => summary,
+        })
+    }
+
+    /// B-④：查上一轮 reviewer run 的 review 报告，若 verdict=Blocked 且
+    /// summary 携带 blocked_review_payload 的结构化解析失败前缀，返回教学段
+    /// （错误原文回灌 + 教学句；丢弃「原始输出:」全文保持诊断有界）。
+    fn previous_reviewer_structured_output_teaching(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        previous_run_id: &str,
+    ) -> Result<Option<String>, CodingWorkspaceEngineError> {
+        let previous_run = self.store.get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            previous_run_id,
+        )?;
+        let blocked_summary = match previous_run.stage {
+            CodingExecutionStage::CodeReview => self
+                .store
+                .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .into_iter()
+                .rev()
+                .find(|report| report.role_run_id.as_deref() == Some(previous_run_id))
+                .filter(|report| report.verdict == ReviewVerdict::Blocked)
+                .map(|report| report.summary),
+            CodingExecutionStage::InternalPrReview => self
+                .store
+                .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .into_iter()
+                .rev()
+                .find(|review| review.role_run_id.as_deref() == Some(previous_run_id))
+                .filter(|review| review.verdict == ReviewVerdict::Blocked)
+                .map(|review| review.summary),
+            _ => None,
+        };
+        let Some(blocked_summary) = blocked_summary else {
+            return Ok(None);
+        };
+        let is_parse_failure = REVIEW_PARSE_FAILURE_SUMMARY_PREFIXES
+            .iter()
+            .any(|prefix| blocked_summary.starts_with(prefix));
+        if !is_parse_failure {
+            return Ok(None);
+        }
+        let error_part = blocked_summary
+            .split("; 原始输出: ")
+            .next()
+            .unwrap_or(blocked_summary.as_str());
+        let error_part = truncate_prompt_section(error_part, 1_000);
+        Ok(Some(format!(
+            "[previous_run_structured_output_teaching]\n\
+             上一轮 review 最终结论未通过结构化解析: {error_part}\n\
+             最终结论必须是只含一个 JSON 对象、以 {{ 开头 }} 结尾、verdict∈approve|request_changes|blocked；必须包含 verdict 字段；除最终结论 JSON 外不要输出 Markdown 代码块、解释或自然语言总结。"
+        )))
     }
 
     pub(crate) fn work_item_markdown_for_attempt(
