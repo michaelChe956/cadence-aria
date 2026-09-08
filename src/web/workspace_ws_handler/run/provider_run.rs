@@ -45,6 +45,14 @@ pub(crate) async fn spawn_provider_run_from_handler(
     // for the engine mutex, which the stream owner holds while driving its
     // provider session. Duplicate engine-originated requests are filtered by
     // `spawn_provider_run_from_event` before reaching this handler.
+    //
+    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：新 run 接替取消旧 run
+    // （workitem 重试/新阶段启动时若旧 runner 仍在注册表，其 token 在此被取消——
+    // workspace 版 H1 候选：接替误杀在途握手）。
+    eprintln!(
+        "[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id={}",
+        session_id
+    );
     abort_active_run(&current_run, &workspace_runs, &session_id).await;
 
     let target_node_id = {

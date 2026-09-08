@@ -360,6 +360,55 @@ async fn reviewer_provider_session_forwards_tool_call_and_result_events() {
     assert_tool_call_and_result_events(&events, Some(node_id.as_str()), ProviderName::Codex);
 }
 
+/// 诊断直通（claude×轻 握手谜团第 2 轮）：reviewer provider 启动失败时，adapter
+/// error 的 stderr 字段尾部（有界）必须随 EngineEvent::Error（即 WS error 消息的
+/// 直接前体，mapping.rs 原样透传）上浮——claude D③ 快照未并入 details 的时刻
+/// （如 kimi/codex 直启失败、claude stderr 在 kill 后才落袋）不再被 drive 层丢弃。
+#[tokio::test]
+async fn reviewer_start_failure_error_message_carries_bounded_stderr_tail() {
+    let (_tmp, store) = setup();
+    let (tx, mut rx) = mpsc::channel(64);
+    let session = make_session("sess_007_start_err_stderr_tail");
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    let _node_id = create_reviewer_run_node(&mut engine).await;
+
+    let stderr_head = "NOISE_HEAD_MARKER".to_string() + &"a".repeat(700);
+    let stderr = format!("{stderr_head}\nSENTINEL_STDERR_TAIL_MARKER");
+    let start_error = ProviderAdapterError::parse_error(
+        "claude policy session: handshake failed: claude policy handshake cancelled",
+        String::new(),
+        stderr,
+    );
+    engine
+        .drive_reviewer_provider_session(
+            Err(start_error),
+            empty_provider_commands(),
+            ProviderName::ClaudeCode,
+        )
+        .await;
+
+    let events = drain_engine_events(&mut rx);
+    let error_message = events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::Error { message } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("reviewer start failure should emit an engine error event");
+    assert!(
+        error_message.contains("claude policy session: handshake failed"),
+        "error message should keep the original details, got: {error_message}"
+    );
+    assert!(
+        error_message.contains("SENTINEL_STDERR_TAIL_MARKER"),
+        "error message (WS error 前体) should carry the provider stderr tail, got: {error_message}"
+    );
+    assert!(
+        !error_message.contains("NOISE_HEAD_MARKER"),
+        "stderr passthrough should be bounded to the tail, got: {error_message}"
+    );
+}
+
 #[tokio::test]
 async fn handle_user_message_from_human_confirm_reenters_running_stage() {
     let (_tmp, store) = setup();

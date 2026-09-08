@@ -1,5 +1,7 @@
 use super::*;
-use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_adapter::{
+    PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
+};
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::product::logical_codebase::{
     LogicalCodebaseProviderGateway, PolicyTarget, ProviderGatewayError, ProviderRef,
@@ -578,9 +580,16 @@ impl WorkspaceEngine {
         let mut session = match session {
             Ok(session) => session,
             Err(error) => {
-                return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Start(
-                    error.details,
-                ));
+                // 诊断直通（claude×轻 握手谜团第 2 轮）：provider 启动失败的 stderr
+                // 尾部（有界）并入消息——claude D③ 快照未并入 details 的时刻不再
+                // 被驱动层丢弃，随 Start 失败 → EngineEvent::Error → WS error 上浮。
+                let mut message = error.details;
+                ProviderAdapterError::append_bounded_stderr_tail(
+                    &mut message,
+                    &error.stderr,
+                    PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                );
+                return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Start(message));
             }
         };
 
@@ -595,6 +604,13 @@ impl WorkspaceEngine {
         while events_open {
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：reviewer 驱动
+                    // 循环观察到 engine/run token 被外部取消（workitem reviewer 启动
+                    // 窗口被杀的观察点）。
+                    eprintln!(
+                        "[aria-cancellation] workspace review_drive select_cancelled trigger=engine_cancelled_observed session_id={} role=reviewer agent={reviewer:?}",
+                        self.session.session_id
+                    );
                     if let Some(node_id) = node_id.as_deref() {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
@@ -604,6 +620,11 @@ impl WorkspaceEngine {
                 command = command_rx.recv(), if commands_open => {
                     match command {
                         Some(ProviderCommand::Abort) => {
+                            // 诊断打点：Abort 命令到达 reviewer 驱动循环。
+                            eprintln!(
+                                "[aria-cancellation] workspace review_drive abort_command trigger=abort_command session_id={} role=reviewer agent={reviewer:?}",
+                                self.session.session_id
+                            );
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
                             if let Some(node_id) = node_id.as_deref() {
@@ -879,6 +900,11 @@ impl WorkspaceEngine {
         }
 
         if cancel.is_cancelled() {
+            // 诊断打点：reviewer 事件流自然结束后的取消后置检查（防竞态分支）。
+            eprintln!(
+                "[aria-cancellation] workspace review_drive post_loop_cancelled trigger=engine_cancelled_observed session_id={} role=reviewer agent={reviewer:?}",
+                self.session.session_id
+            );
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
@@ -938,8 +964,24 @@ async fn start_review_session_via_gateway(
 
 /// gateway 错误到 adapter 错误的桥接:使调用点后续对 `Err` 的处理与直接
 /// `provider.start` 完全一致(`ReviewProviderRunFailure::Start`)。
+/// 诊断直通（claude×轻 握手谜团第 2 轮）:Adapter 变体不再丢弃 stderr 字段
+/// ——stderr 尾部（有界）并入 details（随 Start 失败 → EngineEvent::Error →
+/// WS error 消息上浮），stderr 字段同源保留；其余 gateway 校验错误维持 Display
+/// 文案不变（零变化）。
 fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterError {
-    ProviderAdapterError::provider_unavailable(error.to_string())
+    match &error {
+        ProviderGatewayError::Adapter(inner) => {
+            let mut mapped = ProviderAdapterError::provider_unavailable(error.to_string());
+            ProviderAdapterError::append_bounded_stderr_tail(
+                &mut mapped.details,
+                &inner.stderr,
+                PROVIDER_ERROR_STDERR_TAIL_BYTES,
+            );
+            mapped.stderr = inner.stderr.clone();
+            mapped
+        }
+        _ => ProviderAdapterError::provider_unavailable(error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -951,5 +993,40 @@ mod tests {
         assert!(provider_allows_review_repair(&ProviderName::KimiCode));
         assert!(!provider_allows_review_repair(&ProviderName::Pi));
         assert!(provider_allows_review_repair(&ProviderName::Codex));
+    }
+
+    /// 诊断直通（claude×轻 握手谜团第 2 轮）：gateway 错误映射不得丢弃 adapter
+    /// error 的 stderr——Adapter 变体的 stderr 尾部（有界）需并入新错误的
+    /// details（驱动 result/WS error 消息的上游），stderr 字段同源保留。
+    #[test]
+    fn gateway_adapter_error_mapping_carries_bounded_stderr_tail() {
+        let stderr_head = "NOISE_HEAD_MARKER".to_string() + &"b".repeat(700);
+        let stderr = format!("{stderr_head}\nSENTINEL_GW_STDERR_TAIL");
+        let inner = ProviderAdapterError::parse_error(
+            "claude policy session: handshake failed: claude policy handshake cancelled",
+            String::new(),
+            stderr,
+        );
+        let mapped = map_gateway_error_to_adapter(ProviderGatewayError::Adapter(inner));
+        assert!(
+            mapped.details.contains("provider_gateway_adapter"),
+            "gateway 映射应保留既有 Display 前缀文案，got: {}",
+            mapped.details
+        );
+        assert!(
+            mapped.details.contains("SENTINEL_GW_STDERR_TAIL"),
+            "gateway 映射应携带 adapter stderr 尾部，got: {}",
+            mapped.details
+        );
+        assert!(
+            !mapped.details.contains("NOISE_HEAD_MARKER"),
+            "stderr 尾部应有界（丢头保尾），got: {}",
+            mapped.details
+        );
+        assert!(
+            mapped.stderr.contains("SENTINEL_GW_STDERR_TAIL"),
+            "stderr 字段应同源保留，got: {}",
+            mapped.stderr
+        );
     }
 }

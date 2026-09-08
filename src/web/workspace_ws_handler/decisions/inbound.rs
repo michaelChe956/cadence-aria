@@ -150,6 +150,11 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
             }
         }
         WsInMessage::Rollback { checkpoint_id } => {
+            // 诊断打点：Rollback 入口先取消 active run（engine/run token）。
+            eprintln!(
+                "[aria-cancellation] workspace ws_rollback_message trigger=ws_rollback_message session_id={} checkpoint_id={checkpoint_id}",
+                session_id
+            );
             abort_active_run(&current_run, &workspace_runs, &session_id).await;
             let mut engine = engine.lock().await;
             if let Err(e) = engine.handle_rollback(&checkpoint_id).await {
@@ -569,6 +574,11 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
             let _ = send_json_outbound(&outbound_tx, &message).await;
         }
         WsInMessage::Abort => {
+            // 诊断打点：显式 Abort 消息（driver/前端）取消 active run。
+            eprintln!(
+                "[aria-cancellation] workspace ws_abort_message trigger=ws_abort_message session_id={}",
+                session_id
+            );
             if abort_active_run(&current_run, &workspace_runs, &session_id).await {
                 let _ = send_json_outbound(
                     &outbound_tx,

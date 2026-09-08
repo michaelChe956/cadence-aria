@@ -204,6 +204,12 @@ impl WorkspaceEngine {
     }
 
     pub fn handle_abort(&mut self) {
+        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：engine 级 abort API
+        // （当前 workspace web 流未接入，保留位点以防未来接入时不可见）。
+        eprintln!(
+            "[aria-cancellation] workspace engine_handle_abort trigger=engine_handle_abort session_id={} role=none",
+            self.session.session_id
+        );
         self.cancel.cancel();
     }
 

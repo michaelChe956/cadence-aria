@@ -175,6 +175,14 @@ pub(crate) async fn active_run(
 }
 
 pub(crate) async fn abort_workspace_run(run: &WorkspaceActiveRun) {
+    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：workspace runner token 的
+    // 唯一 cancel 漏斗——所有触发源（断连清理/Abort 消息/Rollback/新 run 接替）
+    // 在各自调用点带 trigger 打点，此行确认取消真正执行（含向 provider 会话
+    // 转发 Abort 命令）。
+    eprintln!(
+        "[aria-cancellation] workspace abort_workspace_run cancelling runner token trigger=abort_workspace_run run_id=run-{} run_token={} node_id={:?}",
+        run.id, run.token, run.node_id
+    );
     let _ = run.command_tx.send(ProviderCommand::Abort).await;
     run.cancel.cancel();
 }

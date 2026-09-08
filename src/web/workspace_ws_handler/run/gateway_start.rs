@@ -29,7 +29,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_adapter::{
+    PROVIDER_ERROR_STDERR_TAIL_BYTES, ProviderAdapterError,
+};
 use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
@@ -191,5 +193,55 @@ pub(crate) async fn start_work_item_plan_author(
 }
 
 fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterError {
-    ProviderAdapterError::provider_unavailable(error.to_string())
+    // 诊断直通（claude×轻 握手谜团第 2 轮）:Adapter 变体不再丢弃 stderr 字段——
+    // stderr 尾部（有界）并入 details（随驱动 Err → EngineEvent::Error → WS error
+    // 消息上浮），stderr 字段同源保留；其余 gateway 校验错误维持 Display 文案不变。
+    match &error {
+        ProviderGatewayError::Adapter(inner) => {
+            let mut mapped = ProviderAdapterError::provider_unavailable(error.to_string());
+            ProviderAdapterError::append_bounded_stderr_tail(
+                &mut mapped.details,
+                &inner.stderr,
+                PROVIDER_ERROR_STDERR_TAIL_BYTES,
+            );
+            mapped.stderr = inner.stderr.clone();
+            mapped
+        }
+        _ => ProviderAdapterError::provider_unavailable(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 诊断直通（claude×轻 握手谜团第 2 轮）：workitem author 启动路径的 gateway
+    /// 错误映射同样不得丢弃 adapter stderr——stderr 尾部（有界）并入 details，
+    /// stderr 字段同源保留（随驱动 Err → EngineEvent::Error → WS error 消息上浮）。
+    #[test]
+    fn gateway_error_mapping_carries_bounded_stderr_tail() {
+        let stderr_head = "NOISE_HEAD_MARKER".to_string() + &"c".repeat(700);
+        let stderr = format!("{stderr_head}\nSENTINEL_WS_GW_STDERR_TAIL");
+        let inner = ProviderAdapterError::parse_error(
+            "claude policy session: handshake failed: claude policy handshake cancelled",
+            String::new(),
+            stderr,
+        );
+        let mapped = map_gateway_error_to_adapter(ProviderGatewayError::Adapter(inner));
+        assert!(
+            mapped.details.contains("SENTINEL_WS_GW_STDERR_TAIL"),
+            "gateway 映射应携带 adapter stderr 尾部，got: {}",
+            mapped.details
+        );
+        assert!(
+            !mapped.details.contains("NOISE_HEAD_MARKER"),
+            "stderr 尾部应有界（丢头保尾），got: {}",
+            mapped.details
+        );
+        assert!(
+            mapped.stderr.contains("SENTINEL_WS_GW_STDERR_TAIL"),
+            "stderr 字段应同源保留，got: {}",
+            mapped.stderr
+        );
+    }
 }

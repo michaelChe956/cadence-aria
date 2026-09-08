@@ -218,8 +218,11 @@ impl WorkspaceEngine {
         let session = gateway
             .start_streaming(validated_input, self.cancel.clone())
             .await
-            .map_err(
-                |error| crate::cross_cutting::provider_adapter::ProviderAdapterError {
+            .map_err(|error| {
+                // 诊断直通（claude×轻 握手谜团第 2 轮）：不丢弃 adapter stderr——
+                // 尾部（有界）并入 details，stderr 字段同源保留（其余 gateway 校验
+                // 错误维持 Display 文案）。同 review/drive.rs 的映射约定。
+                let mut mapped = crate::cross_cutting::provider_adapter::ProviderAdapterError {
                     code: crate::protocol::provider_errors::ProviderErrorCode::ProviderUnavailable,
                     details: error.to_string(),
                     stdout: String::new(),
@@ -227,8 +230,19 @@ impl WorkspaceEngine {
                     exit_code: None,
                     timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
                     duration_ms: 0,
-                },
-            );
+                };
+                if let crate::product::logical_codebase::ProviderGatewayError::Adapter(inner) =
+                    &error
+                {
+                    crate::cross_cutting::provider_adapter::ProviderAdapterError::append_bounded_stderr_tail(
+                        &mut mapped.details,
+                        &inner.stderr,
+                        crate::cross_cutting::provider_adapter::PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                    );
+                    mapped.stderr = inner.stderr.clone();
+                }
+                mapped
+            });
         self.drive_provider_session(ProviderSessionDriveInput {
             session,
             command_rx,
@@ -264,10 +278,18 @@ impl WorkspaceEngine {
         let mut session = match session {
             Ok(session) => session,
             Err(error) => {
+                // 诊断直通（claude×轻 握手谜团第 2 轮）：provider 启动失败的 stderr
+                // 尾部（有界）并入消息，随 EngineEvent::Error → WS error 消息上浮。
+                let mut message = error.details.clone();
+                crate::cross_cutting::provider_adapter::ProviderAdapterError::append_bounded_stderr_tail(
+                    &mut message,
+                    &error.stderr,
+                    crate::cross_cutting::provider_adapter::PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                );
                 let _ = self
                     .event_tx
                     .send(EngineEvent::Error {
-                        message: error.details.clone(),
+                        message: message.clone(),
                     })
                     .await;
                 self.finish_failed_run().await;
@@ -287,6 +309,12 @@ impl WorkspaceEngine {
         while events_open {
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：驱动循环观察到
+                    // engine/run token 被外部取消（谁取消见 ws 侧 trigger 打点）。
+                    eprintln!(
+                        "[aria-cancellation] workspace provider_drive select_cancelled trigger=engine_cancelled_observed session_id={} role={role:?}",
+                        self.session.session_id
+                    );
                     if let Some(node_id) = node_id.as_deref() {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
@@ -296,6 +324,12 @@ impl WorkspaceEngine {
                 command = command_rx.recv(), if commands_open => {
                     match command {
                         Some(ProviderCommand::Abort) => {
+                            // 诊断打点：Abort 命令到达驱动循环（来源：ws abort/断连
+                            // 清理/新 run 接替的 command_tx.send(Abort)）。
+                            eprintln!(
+                                "[aria-cancellation] workspace provider_drive abort_command trigger=abort_command session_id={} role={role:?}",
+                                self.session.session_id
+                            );
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
                             if let Some(node_id) = node_id.as_deref() {
@@ -601,11 +635,17 @@ impl WorkspaceEngine {
                                         continue;
                                     }
                                     Err(error) => {
+                                        // 诊断直通：同入口臂——retry 启动失败的 stderr
+                                        // 尾部（有界）并入消息后再上浮 WS error。
+                                        let mut message = error.details.clone();
+                                        crate::cross_cutting::provider_adapter::ProviderAdapterError::append_bounded_stderr_tail(
+                                            &mut message,
+                                            &error.stderr,
+                                            crate::cross_cutting::provider_adapter::PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                                        );
                                         let _ = self
                                             .event_tx
-                                            .send(EngineEvent::Error {
-                                                message: error.details.clone(),
-                                            })
+                                            .send(EngineEvent::Error { message })
                                             .await;
                                         if let Some(node_id) = node_id.as_deref() {
                                             self.update_timeline_node(
@@ -682,11 +722,17 @@ impl WorkspaceEngine {
                                         continue;
                                     }
                                     Err(error) => {
+                                        // 诊断直通：同入口臂——resume 回退重启失败的
+                                        // stderr 尾部（有界）并入消息后再上浮 WS error。
+                                        let mut message = error.details.clone();
+                                        crate::cross_cutting::provider_adapter::ProviderAdapterError::append_bounded_stderr_tail(
+                                            &mut message,
+                                            &error.stderr,
+                                            crate::cross_cutting::provider_adapter::PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                                        );
                                         let _ = self
                                             .event_tx
-                                            .send(EngineEvent::Error {
-                                                message: error.details.clone(),
-                                            })
+                                            .send(EngineEvent::Error { message })
                                             .await;
                                         if let Some(node_id) = node_id.as_deref() {
                                             self.update_timeline_node(
@@ -742,6 +788,11 @@ impl WorkspaceEngine {
         }
 
         if cancel.is_cancelled() {
+            // 诊断打点：事件流自然结束后的取消后置检查（防竞态分支）。
+            eprintln!(
+                "[aria-cancellation] workspace provider_drive post_loop_cancelled trigger=engine_cancelled_observed session_id={} role={role:?}",
+                self.session.session_id
+            );
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
@@ -770,6 +821,12 @@ impl WorkspaceEngine {
         artifact_retry_attempted: bool,
     ) {
         if self.cancel.is_cancelled() {
+            // 诊断打点：assistant 消息完成前的取消后置检查（complete_assistant_message，
+            // 无角色上下文——由调用方 drive 循环的位点打点补充角色）。
+            eprintln!(
+                "[aria-cancellation] workspace provider_drive complete_cancelled trigger=engine_cancelled_observed session_id={} role=author",
+                self.session.session_id
+            );
             self.finish_aborted_run().await;
             return;
         }

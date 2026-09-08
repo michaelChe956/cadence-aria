@@ -128,6 +128,12 @@ impl WorkspaceEngine {
         node_id: Option<String>,
     ) {
         tracing::warn!(permission_id = %permission_id, "permission timed out; aborting active run");
+        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：权限超时是 engine 自取消
+        // 位点之一（会取消在途 provider 握手/流）。
+        eprintln!(
+            "[aria-cancellation] workspace permission_timeout trigger=permission_timeout session_id={} role=none permission_id={permission_id}",
+            self.session.session_id
+        );
         if let Some(node_id) = node_id.as_deref() {
             let _ = self
                 .persist_permission_timeout(node_id, permission_id.clone())

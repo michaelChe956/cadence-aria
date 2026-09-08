@@ -14,7 +14,15 @@ impl WorkspaceEngine {
         let mut session = match session {
             Ok(session) => session,
             Err(error) => {
-                let message = error.details.clone();
+                // 诊断直通（claude×轻 握手谜团第 2 轮）：workitem author 启动失败的
+                // stderr 尾部（有界）并入消息——随 EngineEvent::Error → WS error
+                // 消息上浮，并在驱动 result（Err 返回值）中同源携带。
+                let mut message = error.details.clone();
+                crate::cross_cutting::provider_adapter::ProviderAdapterError::append_bounded_stderr_tail(
+                    &mut message,
+                    &error.stderr,
+                    crate::cross_cutting::provider_adapter::PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                );
                 let _ = self
                     .event_tx
                     .send(EngineEvent::Error {
@@ -43,6 +51,12 @@ impl WorkspaceEngine {
         while events_open {
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：workitem author
+                    // 驱动循环观察到 engine/run token 被外部取消。
+                    eprintln!(
+                        "[aria-cancellation] workspace work_item_plan_drive select_cancelled trigger=engine_cancelled_observed session_id={} role=author agent={agent:?}",
+                        self.session.session_id
+                    );
                     let display_content = display_filter.finish();
                     self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                     let _ = self.flush_stream_buffer(&node_id).await;
@@ -52,6 +66,11 @@ impl WorkspaceEngine {
                 command = command_rx.recv(), if commands_open => {
                     match command {
                         Some(ProviderCommand::Abort) => {
+                            // 诊断打点：Abort 命令到达 workitem author 驱动循环。
+                            eprintln!(
+                                "[aria-cancellation] workspace work_item_plan_drive abort_command trigger=abort_command session_id={} role=author agent={agent:?}",
+                                self.session.session_id
+                            );
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
                             let display_content = display_filter.finish();

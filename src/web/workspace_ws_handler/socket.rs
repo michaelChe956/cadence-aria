@@ -720,6 +720,13 @@ pub(crate) async fn handle_workspace_socket(
             .workspace_runs
             .remove_if_token(&session_id, run.token)
             .await;
+        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：WS 读循环退出（客户端
+        // Close/网络断开/idle 关闭后对端回收）→ 无条件取消本 socket 的 active run。
+        // 这是「断连必取消 workspace runner」的确认点（最强假说验证入口）。
+        eprintln!(
+            "[aria-cancellation] workspace ws_disconnect_cleanup trigger=ws_disconnect_cleanup session_id={} run_id={last_active_run_id} owned_registry_run={owned_registry_run}",
+            session_id
+        );
         abort_workspace_run(&run).await;
         if owned_registry_run {
             let mut engine = engine.lock().await;
