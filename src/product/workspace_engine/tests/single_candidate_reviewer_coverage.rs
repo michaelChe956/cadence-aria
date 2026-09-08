@@ -26,21 +26,28 @@ fn single_candidate_reviewer_prompt_budget_accepts_exact_limit_and_rejects_one_b
     ensure_single_candidate_review_prompt_budget(&exact).expect("exact limit allowed");
     let over = format!("{exact}x");
     let error = ensure_single_candidate_review_prompt_budget(&over).expect_err("over limit fails");
-    assert!(error.contains("73729"));
-    assert!(error.contains("73728"));
+    assert!(error.contains("98305"));
+    assert!(error.contains("98304"));
 }
 
 #[test]
 fn single_candidate_reviewer_prompt_budget_allows_observed_pi_heavy_levels_actual() {
     // 2026-09-07 3.6 矩阵 pi×重 levels 语料多轮修订真跑实测 66018B 触顶旧 64KiB 预算，
-    // 按整百级方针提额至 72KiB（留 ~11% 余量）；此处钉住实测值放行与新上界拒绝。
-    let observed = "x".repeat(66_018);
-    ensure_single_candidate_review_prompt_budget(&observed)
-        .expect("observed 2026-09-07 pi×heavy levels actual must pass under 72KiB budget");
+    // 2026-09-08 pi×重 v4 再次实测 81923B 触顶 72KiB；按整百级方针提额至 96KiB；
+    // 此处钉住两次实测值放行与新上界拒绝。
+    for (label, observed) in [
+        ("2026-09-07 单轮", 66_018usize),
+        ("2026-09-08 多轮", 81_923),
+    ] {
+        let prompt = "x".repeat(observed);
+        ensure_single_candidate_review_prompt_budget(&prompt).unwrap_or_else(|e| {
+            panic!("observed {label} actual must pass under 96KiB budget: {e}")
+        });
+    }
     let over = "x".repeat(SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES + 1);
     let error = ensure_single_candidate_review_prompt_budget(&over).expect_err("over limit fails");
-    assert!(error.contains("73729"));
-    assert!(error.contains("73728"));
+    assert!(error.contains("98305"));
+    assert!(error.contains("98304"));
 }
 
 #[test]

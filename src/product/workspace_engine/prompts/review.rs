@@ -17,9 +17,10 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 // 余量按完整多 WI plan 的增长预留；接近上限时先实测，再放宽至整百级。
+// 实测记录：2026-09-07 pi×重 levels 单轮 66018B（64KiB 触顶→72KiB）；2026-09-08 pi×重 v4 多轮修订 81923B（72KiB 触顶→96KiB）。若第三次触顶应转 history 压缩调优而非继续放宽。
 // 2026-09-07 3.6 矩阵 pi×重 levels 语料多轮修订真跑实测 66018B 触顶旧 64KiB，
 // 按上述方针提额至 72KiB（留 ~11% 余量）。
-pub(crate) const SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES: usize = 72 * 1024;
+pub(crate) const SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES: usize = 96 * 1024;
 
 pub(crate) fn ensure_single_candidate_review_prompt_budget(prompt: &str) -> Result<(), String> {
     if prompt.len() <= SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES {
