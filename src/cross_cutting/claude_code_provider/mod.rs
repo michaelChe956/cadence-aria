@@ -439,6 +439,22 @@ impl ClaudeCodeProvider {
         )
         .await
     }
+
+    /// D③（诊断强化）：失败路径的 stderr 有界快照（≤2000B，UTF-8 字符边界
+    /// 安全截断），供错误 details/stderr 携带 claude 子进程死因（MCP 连接错
+    /// 误、`[claude-code:...]` 日志行等）。只读快照，不影响 stderr 任务回收。
+    async fn bounded_stderr_snapshot(stderr_output: &Arc<Mutex<String>>) -> String {
+        const CLAUDE_POLICY_STDERR_SNAPSHOT_MAX_BYTES: usize = 2000;
+        let snapshot = stderr_output.lock().await.clone();
+        if snapshot.len() <= CLAUDE_POLICY_STDERR_SNAPSHOT_MAX_BYTES {
+            return snapshot;
+        }
+        let mut end = CLAUDE_POLICY_STDERR_SNAPSHOT_MAX_BYTES;
+        while end > 0 && !snapshot.is_char_boundary(end) {
+            end -= 1;
+        }
+        snapshot[..end].to_string()
+    }
 }
 
 /// 会话流收尾（策略与非策略路径共用）：读取 claude 流并处理终态（child
@@ -838,19 +854,42 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
 
             let (reader, native_id) = match outcome {
                 Ok(Ok(prepared)) => prepared,
-                Ok(Err(error)) => {
+                Ok(Err(mut error)) => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                     let _ = tokio::time::timeout(bound, stderr_task).await;
+                    // D③（诊断强化）：失败附 stderr——claude 子进程死因可见，
+                    // 有界快照（≤2000B）同时并入 details 与 stderr 字段。
+                    let stderr_snapshot = Self::bounded_stderr_snapshot(&stderr_output).await;
+                    if !stderr_snapshot.is_empty() {
+                        if error.stderr.is_empty() {
+                            error.stderr = stderr_snapshot.clone();
+                        }
+                        error.details.push_str(&format!(
+                            "\nclaude stderr (last {} bytes): {stderr_snapshot}",
+                            stderr_snapshot.len()
+                        ));
+                    }
                     return Err(error);
                 }
                 Err(_elapsed) => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                     let _ = tokio::time::timeout(bound, stderr_task).await;
-                    return Err(ProviderAdapterError::timeout(
+                    // D③：同上——超时路径也携带 stderr 快照。
+                    let stderr_snapshot = Self::bounded_stderr_snapshot(&stderr_output).await;
+                    let details = if stderr_snapshot.is_empty() {
+                        "provider command timed out".to_string()
+                    } else {
+                        format!(
+                            "provider command timed out\nclaude stderr (last {} bytes): {stderr_snapshot}",
+                            stderr_snapshot.len()
+                        )
+                    };
+                    return Err(ProviderAdapterError::timeout_with_details(
+                        details,
                         String::new(),
-                        String::new(),
+                        stderr_snapshot,
                         stream::CLAUDE_POLICY_HANDSHAKE_TIMEOUT.as_millis() as u64,
                     ));
                 }

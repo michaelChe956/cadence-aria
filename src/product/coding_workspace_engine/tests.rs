@@ -555,6 +555,7 @@ mod provider_failure_recovery;
 mod provider_gateway_validated_input;
 mod provider_rework_context;
 mod provider_start_persistence;
+mod provider_stream_cancellation_diag;
 mod provider_usage_event;
 mod retry_push;
 mod reviewer_retry_diagnostic_teaching;

@@ -47,6 +47,7 @@ mockito = "1"
 serde_yaml = "0.9.34"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.29"
+tracing-subscriber = "0.3"
 
 # 开发/测试构建：用更轻的调试信息以控制 target 体积
 [profile.dev]

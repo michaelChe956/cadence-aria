@@ -206,7 +206,19 @@ impl CodingRunRegistry {
                 .unwrap_or_default()
         };
         let mut sent = 0;
-        for (_, _, cancellation, _) in &runners {
+        for (run_id, _, cancellation, _) in &runners {
+            // D①（诊断打点，不改行为）：指名取消者。registry abort_attempt 对
+            // attempt_key 下每个 runner token 的取消，是握手期 cancel 被
+            // provider_stream 的 biased-select masking 成「handshake cancelled」
+            // 错误文案时，唯一不被掩盖的信号源（H1/H2 勘察确证入口）。
+            tracing::warn!(
+                trigger = "registry_abort_attempt",
+                project_id = %attempt_key.project_id,
+                issue_id = %attempt_key.issue_id,
+                attempt_id = %attempt_key.attempt_id,
+                run_id = %run_id,
+                "cancellation site: coding_run_registry::abort_attempt cancelling runner token"
+            );
             cancellation.cancel();
             sent += 1;
         }
@@ -338,6 +350,39 @@ impl CodingRunRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D①（红→绿）：abort_attempt 取消 runner token 时必须打点名取消者
+    /// （attempt_key + run_id + 触发原因）——biased-select masking 下，这是唯一
+    /// 不被握手错误文案掩盖的信号源。
+    #[tokio::test]
+    async fn abort_attempt_logs_cancellation_site_with_attempt_and_run_ids() {
+        use crate::cross_cutting::tracing_capture::SharedTracingCapture;
+
+        let registry = CodingRunRegistry::default();
+        let attempt = CodingAttemptRunKey::new("project_diag", "issue_diag", "coding_attempt_diag");
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let run_id = registry
+            .insert_cancellable(&attempt, command_tx)
+            .expect("diag runner")
+            .run_id;
+        drop(command_rx); // 接收端关闭：abort 无需等待移除即完成
+
+        let capture = SharedTracingCapture::global();
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            registry.abort_attempt(&attempt),
+        )
+        .await
+        .expect("abort completes with closed receiver");
+
+        assert_eq!(sent, 1);
+        let logs = capture.captured();
+        assert!(logs.contains("registry_abort_attempt"), "logs: {logs}");
+        assert!(logs.contains("project_diag"), "logs: {logs}");
+        assert!(logs.contains("issue_diag"), "logs: {logs}");
+        assert!(logs.contains("coding_attempt_diag"), "logs: {logs}");
+        assert!(logs.contains(&format!("run_id={run_id}")), "logs: {logs}");
+    }
 
     #[tokio::test]
     async fn aborts_all_runs_for_attempt_and_removes_them() {

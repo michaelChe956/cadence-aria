@@ -5,6 +5,14 @@ use std::sync::{Arc, Mutex};
 
 mod persistence;
 
+mod cancellation;
+mod launch;
+#[cfg(test)]
+mod outcome_tests;
+
+use cancellation::warn_cancellation_site;
+use launch::launch_provider_session;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderStreamOutcome {
     pub(crate) full_output: String,
@@ -240,6 +248,12 @@ impl CodingWorkspaceEngine {
                     ) => result,
                     _ = tokio::time::sleep(duration) => {
                         cancel.cancel();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            timeout_reason_code.unwrap_or("provider_stream_timeout"),
+                            "provider_start",
+                        );
                         self.record_role_run_event(
                             attempt,
                             role_run,
@@ -258,6 +272,12 @@ impl CodingWorkspaceEngine {
                     }
                     _ = self.cancellation.cancelled() => {
                         cancel.cancel();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            "engine_cancellation",
+                            "provider_start",
+                        );
                         self.persist_provider_cancellation(attempt, role_run, "provider_start")?;
                         return Err(CodingWorkspaceEngineError::Aborted);
                     }
@@ -274,6 +294,12 @@ impl CodingWorkspaceEngine {
                     ) => result,
                     _ = self.cancellation.cancelled() => {
                         cancel.cancel();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            "engine_cancellation",
+                            "provider_start",
+                        );
                         self.persist_provider_cancellation(attempt, role_run, "provider_start")?;
                         return Err(CodingWorkspaceEngineError::Aborted);
                     }
@@ -291,6 +317,12 @@ impl CodingWorkspaceEngine {
                     ) {
                         let message = error.to_string();
                         cancel.cancel();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            "provider_start_persistence_failure",
+                            "provider_start",
+                        );
                         drop(session);
                         return self
                             .fail_provider_stream_with_ownership(
@@ -366,6 +398,12 @@ impl CodingWorkspaceEngine {
                     _ = self.cancellation.cancelled() => {
                         let _ = session.commands.try_send(ProviderCommand::Abort);
                         cancel.cancel();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            "engine_cancellation",
+                            "provider_stream",
+                        );
                         self.persist_provider_cancellation(attempt, role_run, "provider_stream")?;
                         return Err(CodingWorkspaceEngineError::Aborted);
                     }
@@ -377,6 +415,12 @@ impl CodingWorkspaceEngine {
                         } else {
                             timeout_reason_code.unwrap_or("provider_stream_timeout")
                         };
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            reason_code,
+                            "provider_stream",
+                        );
                         self.record_role_run_event(
                             attempt,
                             role_run,
@@ -400,6 +444,12 @@ impl CodingWorkspaceEngine {
                             CodingRunnerCommand::AbortAttempt => {
                                 let _ = session.commands.try_send(ProviderCommand::Abort);
                                 cancel.cancel();
+                                warn_cancellation_site(
+                                    attempt,
+                                    role_run,
+                                    "runner_abort_attempt_command",
+                                    "provider_stream",
+                                );
                                 let _ = self
                                     .event_tx
                                     .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -921,6 +971,12 @@ impl CodingWorkspaceEngine {
             ) => result?,
             _ = self.cancellation.cancelled() => {
                 cancel.cancel();
+                warn_cancellation_site(
+                    attempt,
+                    role_run,
+                    "engine_cancellation",
+                    "legacy_provider_start",
+                );
                 self.persist_provider_cancellation(attempt, role_run, "legacy_provider_start")?;
                 return Err(CodingWorkspaceEngineError::Aborted);
             }
@@ -936,6 +992,12 @@ impl CodingWorkspaceEngine {
         ) {
             let message = error.to_string();
             cancel.cancel();
+            warn_cancellation_site(
+                attempt,
+                role_run,
+                "provider_start_persistence_failure",
+                "legacy_provider_start",
+            );
             drop(stream);
             return self
                 .fail_provider_stream_with_ownership(
@@ -952,7 +1014,17 @@ impl CodingWorkspaceEngine {
                 biased;
                 _ = self.cancellation.cancelled() => {
                     cancel.cancel();
-                    self.persist_provider_cancellation(attempt, role_run, "legacy_provider_stream")?;
+                    warn_cancellation_site(
+                        attempt,
+                        role_run,
+                        "engine_cancellation",
+                        "legacy_provider_stream",
+                    );
+                    self.persist_provider_cancellation(
+                        attempt,
+                        role_run,
+                        "legacy_provider_stream",
+                    )?;
                     return Err(CodingWorkspaceEngineError::Aborted);
                 }
                 chunk = stream.recv() => chunk,
@@ -1083,99 +1155,10 @@ impl CodingWorkspaceEngine {
     }
 }
 
-/// Task 11:按是否携带 validated input + 是否注入 gateway 选择 provider 启动路径。
-///
-/// - 两者均存在:经 `LogicalCodebaseProviderGateway::start_streaming` 启动,使政策
-///   校验、canonical 复验、resume fail-closed 都在 gateway 内完成并留 audit。
-/// - 否则(传统/非逻辑 issue):直接 `provider.start`,保留既有行为。
-///
-/// 返回 boxed future 以便外层 `tokio::select!` 统一内联。gateway 错误映射为
-/// `ProviderAdapterError`,使其与直接 adapter 错误在 stream 层等价处理。
-fn launch_provider_session<'a>(
-    provider: &'a dyn StreamingProviderAdapter,
-    input: StreamingProviderInput,
-    cancel: CancellationToken,
-    validated: Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
-    gateway: Option<
-        &std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
-    >,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<
-                    crate::cross_cutting::streaming_provider::ProviderSession,
-                    ProviderAdapterError,
-                >,
-            > + Send
-            + 'a,
-    >,
-> {
-    if let (Some(validated), Some(gateway)) = (validated, gateway) {
-        let gateway = gateway.clone();
-        Box::pin(async move {
-            gateway
-                .start_streaming(validated, cancel)
-                .await
-                .map_err(provider_adapter_error_from_gateway)
-        })
-    } else {
-        // 非 gateway 路径(传统/非逻辑 issue):直接 adapter start。逻辑代码库 feature
-        // 在入口处由 `validated_input`/`logical_provider_gateway` 的存在与否分流,
-        // 使旧 API 行为不被本工作包扩大。
-        Box::pin(async move { provider.start(input, cancel).await })
-    }
-}
-
-/// 把 gateway 错误映射为 `ProviderAdapterError`,使 provider stream 层把「政策门/
-/// 复验拒绝」与「adapter 运行失败」统一为 transport 错误。fail-closed 维度保留在
-/// `details` 中供上游诊断。
-fn provider_adapter_error_from_gateway(
-    error: crate::product::logical_codebase::ProviderGatewayError,
-) -> ProviderAdapterError {
-    use crate::protocol::contracts::TimeoutStatus;
-    use crate::protocol::provider_errors::ProviderErrorCode;
-    ProviderAdapterError {
-        code: ProviderErrorCode::ProviderUnavailable,
-        details: error.to_string(),
-        stdout: String::new(),
-        stderr: String::new(),
-        exit_code: None,
-        timeout_status: TimeoutStatus::NotTimedOut,
-        duration_ms: 0,
-    }
-}
-
 fn append_partial_output(observer: Option<&Arc<Mutex<String>>>, content: &str) {
     if let Some(observer) = observer
         && let Ok(mut output) = observer.lock()
     {
         output.push_str(content);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cross_cutting::structured_output::StructuredOutputState;
-    use serde_json::json;
-
-    #[test]
-    fn provider_stream_outcome_keeps_completion_structured_output() {
-        let outcome = ProviderStreamOutcome {
-            full_output: "可读审查回执".to_string(),
-            structured_output: StructuredOutputState::Parsed(json!({
-                "verdict": "approve",
-                "findings": []
-            })),
-        };
-
-        assert_eq!(outcome.full_output, "可读审查回执");
-        assert_eq!(
-            outcome.structured_output,
-            StructuredOutputState::Parsed(json!({
-                "verdict": "approve",
-                "findings": []
-            }))
-        );
     }
 }

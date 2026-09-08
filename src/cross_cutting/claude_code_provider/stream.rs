@@ -414,7 +414,8 @@ fn is_claude_init_event(value: &Value) -> bool {
 }
 
 /// 策略会话有界握手（Task 3.2）：读取首个 `system/init` 事件取原生 session id，
-/// 超时/EOF/坏 JSON 均为握手失败。返回消耗部分输入后的 reader（缓冲区保留，
+/// 超时/EOF 为握手失败；非 JSON 行（含 `[claude-code:...]` 日志行）跳过继续
+/// 等待直到 deadline（D②）。返回消耗部分输入后的 reader（缓冲区保留，
 /// 后续交由 `read_claude_stream` 续读）。
 pub(crate) async fn wait_for_claude_init<R>(
     stdout: R,
@@ -462,13 +463,15 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        let value = serde_json::from_str::<Value>(&line).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("invalid Claude init JSON: {error}"),
-                line.clone(),
-                String::new(),
-            )
-        })?;
+        // D②（latent bug 修复）：非 JSON 行不再立即判 invalid Claude init JSON，
+        // 而是与「非 init 事件行」同样跳过继续等待直到 deadline。claude 2.1.247
+        // 实测 stdout 首行会吐非 JSON 日志行（如 `[claude-code:unrecognized_model]`
+        // 前缀行），system/init 在第二行；若在此 fail-closed，任何一次 claude
+        // 先吐日志行都会以另一种方式挂掉握手。deadline/EOF 仍按既有文案失败，
+        // 行为语义仅放宽「非 JSON 行」这一档。
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         if let Some(session_id) = parse_claude_init_session_id(&value) {
             return Ok((reader, session_id));
         }

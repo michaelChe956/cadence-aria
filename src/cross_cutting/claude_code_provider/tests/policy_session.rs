@@ -43,6 +43,34 @@ fn init_then_result_fixture() -> PathBuf {
     )
 }
 
+/// claude 2.1.247 实测形态：stdout 首行先吐非 JSON 日志行（
+/// `[claude-code:unrecognized_model] ...`），system/init 在第二行。握手必须
+/// 容忍此类行直到 deadline（D② latent bug 回归）。
+fn init_after_log_line_fixture() -> PathBuf {
+    write_fixture(
+        "claude_policy_init_after_log_fixture.sh",
+        "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '[claude-code:unrecognized_model] model=claude-sonnet-4-5 fallback applied'\n    echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-policy-2\"}'\n    echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"policy done\",\"session_id\":\"sess-policy-2\"}'\n    exit 0\n  fi\ndone\n",
+    )
+}
+
+/// D③ fixture：输出一条 stderr 后无 init 即退出（EOF 失败路径，stderr 须随错
+/// 误返回）。
+fn stderr_then_exit_without_init_fixture() -> PathBuf {
+    write_fixture(
+        "claude_policy_stderr_exit_fixture.sh",
+        "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '[claude-code:unrecognized_model] stderr evidence line' >&2\n    exit 7\n  fi\ndone\n",
+    )
+}
+
+/// D③ fixture：写入一条 stderr 后不读 stdin 挂起（外层 bound 超时路径，stderr
+/// 须随超时错误返回）。256KiB prompt 超管道缓冲，初始写入阻塞至外层超时。
+fn stderr_then_block_stdin_fixture() -> PathBuf {
+    write_fixture(
+        "claude_policy_stderr_block_fixture.sh",
+        "#!/usr/bin/env bash\necho '[claude-code:unrecognized_model] blocked stderr evidence' >&2\nexec sleep 300\n",
+    )
+}
+
 /// 挂起 fixture：收到 user 消息后永不输出 init（验证有界握手超时 fail-closed）。
 fn hanging_fixture() -> PathBuf {
     write_fixture(
@@ -99,6 +127,102 @@ async fn claude_policy_start_waits_for_init_writes_provider_start_and_returns_na
 
     // 握手消耗了 init 行，但流式续读不受影响：result 仍可送达。
     assert_eq!(recv_completed(&mut session.events).await, "policy done");
+}
+
+/// D②（红→绿）：握手首行非 JSON 日志行（`[claude-code:...]` 等）不得立即判
+/// invalid Claude init JSON——须跳过继续等待，init 在第二行时握手成功。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_start_tolerates_non_json_log_lines_before_init() {
+    let sink = RecordingToolPolicyAuditSink::new();
+    let provider = ClaudeCodeProvider::new(init_after_log_line_fixture())
+        .with_version_supplier(policy_version_supplier());
+    let mut session = provider
+        .start(
+            policy_claude_input(None, Some(sink.clone().bound())),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude policy handshake must skip non-JSON log lines and accept init");
+
+    assert_eq!(session.native_session_id.as_deref(), Some("sess-policy-2"));
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "only provider_start is written at start");
+    let DurableToolPolicyEvent::ProviderStart(record) = &events[0] else {
+        panic!("expected provider_start");
+    };
+    assert_eq!(record.provider_session_id, "sess-policy-2");
+    assert_eq!(recv_completed(&mut session.events).await, "policy done");
+}
+
+/// D③（红→绿）：握手失败（EOF 无 init）时 stderr 快照须并入错误 details 与
+/// stderr 字段，claude 子进程死因可见。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_handshake_failure_includes_bounded_stderr_snapshot() {
+    let provider = ClaudeCodeProvider::new(stderr_then_exit_without_init_fixture())
+        .with_version_supplier(policy_version_supplier());
+    let sink = RecordingToolPolicyAuditSink::new();
+
+    let Err(error) = provider
+        .start(
+            policy_claude_input(None, Some(sink.clone().bound())),
+            CancellationToken::new(),
+        )
+        .await
+    else {
+        panic!("fixture without init must fail the policy handshake");
+    };
+
+    assert!(
+        error
+            .details
+            .contains("claude stream ended before init event"),
+        "unexpected error: {}",
+        error.details
+    );
+    assert!(
+        error.details.contains("stderr evidence line"),
+        "handshake failure must carry stderr snapshot in details: {}",
+        error.details
+    );
+    assert!(
+        error.stderr.contains("stderr evidence line"),
+        "handshake failure must carry stderr snapshot in stderr field"
+    );
+    // 失败路径不落 durable 事件。
+    assert!(sink.events().is_empty());
+}
+
+/// D③（红→绿）：外层 bound 超时（初始写入阻塞）路径同样携带 stderr 快照。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_policy_bounded_start_timeout_includes_bounded_stderr_snapshot() {
+    let provider = ClaudeCodeProvider::new(stderr_then_block_stdin_fixture())
+        .with_version_supplier(policy_version_supplier());
+    let sink = RecordingToolPolicyAuditSink::new();
+    let mut input = policy_claude_input(None, Some(sink.clone().bound()));
+    input.prompt = "x".repeat(256 * 1024);
+
+    let Err(error) = provider.start(input, CancellationToken::new()).await else {
+        panic!("blocked initial write must fail the policy session");
+    };
+
+    assert!(
+        error.details.contains("timed out"),
+        "unexpected error: {}",
+        error.details
+    );
+    assert!(
+        error.details.contains("blocked stderr evidence"),
+        "bounded start timeout must carry stderr snapshot in details: {}",
+        error.details
+    );
+    assert!(
+        error.stderr.contains("blocked stderr evidence"),
+        "bounded start timeout must carry stderr snapshot in stderr field"
+    );
+    assert!(sink.events().is_empty());
 }
 
 #[cfg(unix)]

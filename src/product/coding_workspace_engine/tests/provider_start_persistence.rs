@@ -62,11 +62,11 @@ struct ProviderStartProbe {
     completion_delivered: AtomicBool,
 }
 
-struct ProviderStartPersistenceFixture {
+pub(super) struct ProviderStartPersistenceFixture {
     _root: tempfile::TempDir,
-    store: CodingAttemptStore,
+    pub(super) store: CodingAttemptStore,
     engine: CodingWorkspaceEngine,
-    attempt: CodingExecutionAttempt,
+    pub(super) attempt: CodingExecutionAttempt,
     reviewer_projection: ReviewerWorkItemProjection,
 }
 
@@ -626,7 +626,7 @@ async fn coding_provider_stream_uses_engine_cancellation_child_token() {
     );
 }
 
-async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture {
+pub(super) async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
