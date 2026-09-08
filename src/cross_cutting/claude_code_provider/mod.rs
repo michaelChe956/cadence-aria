@@ -449,11 +449,12 @@ impl ClaudeCodeProvider {
         if snapshot.len() <= CLAUDE_POLICY_STDERR_SNAPSHOT_MAX_BYTES {
             return snapshot;
         }
-        let mut end = CLAUDE_POLICY_STDERR_SNAPSHOT_MAX_BYTES;
-        while end > 0 && !snapshot.is_char_boundary(end) {
-            end -= 1;
+        // 保留尾部：致命错误（panic/MCP 失败等）通常在 stderr 末尾，超限时丢头部保尾部。
+        let mut start = snapshot.len() - CLAUDE_POLICY_STDERR_SNAPSHOT_MAX_BYTES;
+        while start < snapshot.len() && !snapshot.is_char_boundary(start) {
+            start += 1;
         }
-        snapshot[..end].to_string()
+        snapshot[start..].to_string()
     }
 }
 
