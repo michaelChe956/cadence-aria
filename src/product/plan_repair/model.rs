@@ -7,11 +7,17 @@ use crate::product::models::{
 use crate::product::work_item_contract::{BlockerRoute, ContractValidationReport};
 use crate::product::work_item_projection::ProjectionValidationReport;
 
+// 3.6 矩阵族③根因修复（A 件）：defect_class 逐字枚举行（净增约 408B 渲染字节；
+// coding 侧 prompt 无 MAX_BYTES 预算常量，按惯例只做批注）。取值清单与
+// PlanDefectClass serde 变体名双向逐字对齐，对齐断言见
+// coding_workspace_engine/tests/parser_prompt/plan_defect_prompt.rs
+// （枚举加变体/改名时该测试必红，教学不得与 schema 漂移）。
 pub fn plan_defect_structured_output_contract() -> &'static str {
     "\nPlan Defect structured output contract:\n\
      - Coder 仅在发现计划、Story、Design、依赖契约、验证或运行环境阻塞时输出 plan_defect_findings 数组；普通成功输出或普通 implementation defect 可省略该数组或使用空数组。\n\
      - CodeReviewer/InternalReviewer/GroupFinalReview 在 findings 中使用同一字段；普通 implementation defect 必须显式使用 defect_class=implementation_defect、recommended_route=coder_rework，reason_code=null、contract_refs=[]、capability_refs=[]、repair_target=null、confidence=null。\n\
      - 每个 plan defect finding 必须包含 finding_id、severity、defect_class、reason_code、message、evidence、contract_refs、capability_refs、repair_target、recommended_route、confidence。\n\
+     - defect_class 只能逐字使用以下 8 个取值之一：implementation_defect、verification_incomplete、current_work_item_invalid、upstream_contract_invalid、dependency_graph_invalid、design_amendment_required、story_amendment_required、operational_blocker；禁止发明、合并或概括取值（反例：defect_class=plan_defect → plan_defect_finding_invalid 拒绝并阻塞流程）。\n\
      - severity 只能使用 error、warning；阻塞问题使用 severity=error，不得使用 blocking、blocker 等其他取值。\n\
      - confidence 只能使用 low、medium、high；不得使用 0~1 的小数或百分比。\n\
      - repair_target 必须是对象，包含 kind（current_work_item、upstream_work_item 或 subgraph）、logical_work_item_ids、work_item_revision_ids；没有明确修复目标时使用 repair_target=null，不得使用字符串。\n\
