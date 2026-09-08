@@ -17,7 +17,9 @@
 //! - F5-A 回灌：`complete_review` 注入 `latest_review_verdict`，下一轮 SC author
 //!   重跑由 `single_candidate_pending_revision_verdict` 判定为修订轮，机械
 //!   findings 逐条回灌进返修 prompt（`[review_findings]`，required_action 模板
-//!   指明「provider X 的 contract Y 需逐字补 capability Z」）。
+//!   给出可直接照抄的逐字补丁行「在 provider X 的 Outputs 契约 Y 的
+//!   capabilities 列表追加一行（逐字复制）：- capability Z」，capability 原串
+//!   与 finding 的 capability_ref 逐字同源）。
 //! - 预算/收敛：policy 路由把机械缺口按 `ContractGap`+`Repairable` 分类进
 //!   `TriggerAggregateRepair`（`repairs_used` 计数与 reviewer 返修轮同池），
 //!   自动重驱 SC author；连续 2 轮同指纹（`FindingFingerprint` 与 F5-B 闸门
@@ -221,9 +223,8 @@ fn required_action_text(finding: &ContractValidationFinding, provider: Option<&s
             let provider = provider.unwrap_or("（provider）");
             let contract_ref = contract_ref.unwrap_or("（contract）");
             format!(
-                "provider {provider} 的 contract {contract_ref} 需逐字补 capability {}（覆盖消费方 {} 的 require_all）",
+                "在 {provider} 的 Outputs 契约 {contract_ref} 的 capabilities 列表追加一行（逐字复制）：- {}",
                 capability.unwrap_or("（capability）"),
-                consumer.unwrap_or("（consumer）"),
             )
         }
         "required_contract_missing" => format!(
@@ -361,16 +362,27 @@ mod tests {
                 finding.evidence
             );
         }
+        // 契约前移升级：required_action 必须是逐字补丁行形态
+        // （在 <provider WI> 的 Outputs 契约 <CT-id> 的 capabilities 列表追加
+        // 一行（逐字复制）：- <capability 原串>），capability 原串与 finding
+        // 的 capability_ref（evidence 的 capability= 定位串）逐字同源。
+        assert!(
+            finding.required_action.contains(
+                "在 WI-001 的 Outputs 契约 contract.levels-api 的 capabilities 列表追加一行（逐字复制）：- api.levels.write"
+            ),
+            "required_action must be a verbatim patch line: {}",
+            finding.required_action
+        );
+        let capability = finding
+            .evidence
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("capability="))
+            .expect("evidence must carry the capability locator");
         assert!(
             finding
                 .required_action
-                .contains("provider WI-001 的 contract contract.levels-api"),
-            "required_action must follow the provider/contract template: {}",
-            finding.required_action
-        );
-        assert!(
-            finding.required_action.contains("api.levels.write"),
-            "required_action must name the capability to add: {}",
+                .ends_with(&format!("：- {capability}")),
+            "patch line must quote the capability verbatim from capability_ref: {}",
             finding.required_action
         );
         assert!(

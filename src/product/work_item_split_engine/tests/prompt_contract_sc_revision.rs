@@ -11,7 +11,11 @@ const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
 
 const SC_REVISION_OUTPUT_DIRECTIVE: &str = "[output] 现在仅输出完整 markdown source。";
 
-fn revise_verdict_fixture(comments: &str, summary: &str, findings: Vec<ReviewFinding>) -> ReviewVerdict {
+fn revise_verdict_fixture(
+    comments: &str,
+    summary: &str,
+    findings: Vec<ReviewFinding>,
+) -> ReviewVerdict {
     ReviewVerdict {
         verdict: ReviewVerdictType::Revise,
         comments: comments.to_string(),
@@ -47,7 +51,8 @@ fn suggestion_finding(message: &str) -> ReviewFinding {
     }
 }
 
-fn author_context() -> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static> {
+fn author_context()
+-> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static> {
     crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
         story_context: "story_spec_0001: level selection",
         design_context: "design_spec_0001: levels API",
@@ -72,10 +77,14 @@ fn sc_revision_prompt_injects_findings_and_directives_on_top_of_byte_identical_b
             suggestion_finding("建议补 Traceability 登记行"),
         ],
     );
-    let base = crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
-        &request, &issue, &repository, author_context(),
-    )
-    .expect("first-round markdown author prompt");
+    let base =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+        )
+        .expect("first-round markdown author prompt");
     let revision =
         crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
             &request, &issue, &repository, author_context(), &verdict,
@@ -150,19 +159,31 @@ fn sc_revision_prompt_without_findings_still_carries_comments_and_directives() {
 #[test]
 fn sc_first_round_prompt_stays_byte_identical_and_revision_marker_free() {
     let (request, issue, repository) = split_prompt_fixture();
-    let first = crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
-        &request, &issue, &repository, author_context(),
-    )
-    .expect("first-round markdown author prompt");
-    let second = crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
-        &request, &issue, &repository, author_context(),
-    )
-    .expect("first-round markdown author prompt rebuilt");
+    let first =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+        )
+        .expect("first-round markdown author prompt");
+    let second =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+        )
+        .expect("first-round markdown author prompt rebuilt");
     assert_eq!(
         first, second,
         "首轮 prompt 对相同输入必须逐字节确定（无 verdict 注入路径）"
     );
-    for marker in ["[review_revision]", "[review_findings]", "[revision_directives]"] {
+    for marker in [
+        "[review_revision]",
+        "[review_findings]",
+        "[revision_directives]",
+    ] {
         assert!(
             !first.contains(marker),
             "first-round prompt must never contain revision marker {marker}"
@@ -214,7 +235,7 @@ fn sc_revision_prompt_carries_mechanical_contract_gap_verdict() {
         "1. severity: must_fix",
         "message: required_capability_missing: provider WI-001 contract contract.levels-api lacks capability api.levels.write required by WI-002",
         "evidence: work_item=WI-002 contract=contract.levels-api capability=api.levels.write",
-        "required_action: provider WI-001 的 contract contract.levels-api 需逐字补 capability api.levels.write",
+        "required_action: 在 WI-001 的 Outputs 契约 contract.levels-api 的 capabilities 列表追加一行（逐字复制）：- api.levels.write",
         "[revision_directives]",
         "必须在本轮内逐条修复全部 must_fix/blocking findings",
     ] {

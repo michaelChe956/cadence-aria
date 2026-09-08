@@ -17,6 +17,20 @@ pub(super) fn warn_cancellation_site(
     trigger: &str,
     phase: &str,
 ) {
+    // aria 二进制未安装 tracing subscriber（D① 落地后实测打点进黑洞）；生产构建
+    // 用 aria-choice-diag 同款 eprintln 直写保证可见，测试构建保留 tracing 以
+    // 维持既有捕获断言。
+    #[cfg(not(test))]
+    eprintln!(
+        "[aria-cancellation] provider_stream cancelling child token trigger={} phase={} project_id={} issue_id={} attempt_id={} role_run_id={}",
+        trigger,
+        phase,
+        attempt.project_id,
+        attempt.issue_id,
+        attempt.id,
+        role_run.map(|run| run.id.as_str()).unwrap_or("none")
+    );
+    #[cfg(test)]
     tracing::warn!(
         trigger = trigger,
         phase = phase,

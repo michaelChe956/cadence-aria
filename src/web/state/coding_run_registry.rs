@@ -211,6 +211,13 @@ impl CodingRunRegistry {
             // attempt_key 下每个 runner token 的取消，是握手期 cancel 被
             // provider_stream 的 biased-select masking 成「handshake cancelled」
             // 错误文案时，唯一不被掩盖的信号源（H1/H2 勘察确证入口）。
+            // aria 二进制未安装 tracing subscriber；生产构建 eprintln 直写（同 D① 可见性修正），测试构建保留 tracing 捕获断言。
+            #[cfg(not(test))]
+            eprintln!(
+                "[aria-cancellation] registry abort_attempt cancelling runner token trigger=registry_abort_attempt project_id={} issue_id={} attempt_id={} run_id={}",
+                attempt_key.project_id, attempt_key.issue_id, attempt_key.attempt_id, run_id
+            );
+            #[cfg(test)]
             tracing::warn!(
                 trigger = "registry_abort_attempt",
                 project_id = %attempt_key.project_id,

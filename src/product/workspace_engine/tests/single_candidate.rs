@@ -1051,9 +1051,9 @@ mod contract_prerevision {
             .expect("capability gap finding must ride the verdict");
         assert!(
             gap_finding.required_action.contains(
-                "provider WI-001 的 contract contract.levels-api 需逐字补 capability api.levels.write"
+                "在 WI-001 的 Outputs 契约 contract.levels-api 的 capabilities 列表追加一行（逐字复制）：- api.levels.write"
             ),
-            "required_action must carry the verbatim capability template: {}",
+            "required_action must carry the verbatim patch line: {}",
             gap_finding.required_action
         );
 
