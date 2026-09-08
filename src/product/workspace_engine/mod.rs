@@ -82,6 +82,7 @@ mod artifact_constraints;
 mod author_confirm;
 mod compile;
 mod compile_parse;
+pub(crate) mod contract_prerevision;
 mod controls;
 mod conversational_gate;
 mod conversational_gate_recovery;

@@ -170,3 +170,57 @@ fn sc_first_round_prompt_stays_byte_identical_and_revision_marker_free() {
     }
     assert!(first.ends_with(SC_REVISION_OUTPUT_DIRECTIVE));
 }
+
+/// F5 回灌扩展（契约校验前移）：机械 verdict（canonical 契约缺口适配层输出）
+/// 走同一条返修 prompt 通道——逐条回灌 code 前缀 message/定位 evidence/
+/// required_action 模板，硬性修复指令照常生效；字节预算硬闸不破。
+#[test]
+fn sc_revision_prompt_carries_mechanical_contract_gap_verdict() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let gap_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
+    ))
+    .replace(
+        "- provided_contract_refs: contract.levels-integration",
+        "- provided_contract_refs: []",
+    )
+    .replace(
+        "- required_capabilities: api.levels.read\n",
+        "- required_capabilities: api.levels.read, api.levels.write\n",
+    );
+    let ir = crate::product::work_item_plan_compiler::compile_work_item_plan(
+        &gap_source,
+        &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
+            target_repository_id: "repo_fixture".to_string(),
+        },
+    )
+    .expect("compile gap fixture");
+    let verdict =
+        crate::product::workspace_engine::contract_prerevision::single_candidate_contract_prerevision_verdict(
+            &ir,
+        )
+        .expect("gap fixture must yield a mechanical verdict");
+
+    let revision =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
+            &request, &issue, &repository, author_context(), &verdict,
+        )
+        .expect("revision prompt with mechanical verdict");
+
+    for required in [
+        "[review_revision]",
+        "[review_findings]",
+        "1. severity: must_fix",
+        "message: required_capability_missing: provider WI-001 contract contract.levels-api lacks capability api.levels.write required by WI-002",
+        "evidence: work_item=WI-002 contract=contract.levels-api capability=api.levels.write",
+        "required_action: provider WI-001 的 contract contract.levels-api 需逐字补 capability api.levels.write",
+        "[revision_directives]",
+        "必须在本轮内逐条修复全部 must_fix/blocking findings",
+    ] {
+        assert!(
+            revision.contains(required),
+            "mechanical verdict must reach the revision prompt verbatim: {required}\n{revision}"
+        );
+    }
+}

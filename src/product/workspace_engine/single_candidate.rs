@@ -224,6 +224,14 @@ impl WorkspaceEngine {
         .map_err(|diagnostics| {
             format_compiler_diagnostics("validate plan candidate IR", &diagnostics)
         })?;
+        // F5 回灌扩展（3.6 矩阵 codex×重）：对 IR 既有 canonical 契约跑 Approval
+        // compile 同源机械校验（build/validate_dependency_contract_graph）。
+        // 存在 Error 级缺口时在本轮 Evaluate 即产生机械返修 verdict（经
+        // complete_review 既有 ingestion 驱动 F5-A 修订轮回灌），不再等到
+        // Approval compile 才失败；无 Error 缺口时零变化（不产生 verdict）。
+        // Warning 级 findings 以 Suggestion+Advisory 搭车同一 verdict。
+        let contract_prerevision_verdict =
+            contract_prerevision::single_candidate_contract_prerevision_verdict(&ir_record.ir);
         let report_id = format!("report-{}", &ir_record.ir.source_revision_hash[..16]);
         let mut report_record = PlanCandidateMechanicalReportRecord {
             id: report_id,
@@ -264,7 +272,10 @@ impl WorkspaceEngine {
             "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string(),
         ))
         .await;
-        if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
+        if let Some(verdict) = contract_prerevision_verdict {
+            self.route_single_candidate_contract_prerevision(verdict)
+                .await;
+        } else if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
             self.route_single_candidate_evaluate_without_reviewer()
                 .await;
         } else {
@@ -274,6 +285,37 @@ impl WorkspaceEngine {
             }
         }
         Ok(ir_record.ir.items.len())
+    }
+
+    /// 机械 canonical 契约缺口（Error 级）的返修路由：与 reviewer verdict 完全
+    /// 同一条既有链路——建同一 ReviewerRun 评审轮节点（start_review）、按
+    /// durable 候选 refs 重建 invocation scope（与 drive_review_session 同源），
+    /// 再经 complete_review 既有 ingestion 完成：
+    /// - `latest_review_verdict` 注入 → F5-A 修订轮判定命中，下一轮 SC author
+    ///   重跑回灌机械 findings；
+    /// - verdict 持久化到 ReviewerRun 节点 → 跨轮指纹对比数据源；
+    /// - policy 路由（ContractGap+Repairable）→ TriggerAggregateRepair 重驱
+    ///   SC author（repairs_used 与 reviewer 返修轮同池）；连续 2 轮同指纹
+    ///   由既有 RepeatedFingerprint 人工门兜底，不新增终止逻辑。
+    ///
+    /// Fake reviewer 快速路径（start_review 直接进 HumanConfirm）不叠加
+    /// synthetic verdict，保持其既有语义零变化。
+    pub(crate) async fn route_single_candidate_contract_prerevision(
+        &mut self,
+        verdict: ReviewVerdict,
+    ) {
+        self.start_review().await;
+        if self.session.stage != WorkspaceStage::CrossReview {
+            return;
+        }
+        if let Err(message) = self.ensure_review_invocation_scope().await {
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            self.finish_failed_run().await;
+            return;
+        }
+        let readable = contract_prerevision::contract_prerevision_readable_output(&verdict);
+        self.complete_review(ProviderCompletion::plain(readable, None), verdict)
+            .await;
     }
 }
 

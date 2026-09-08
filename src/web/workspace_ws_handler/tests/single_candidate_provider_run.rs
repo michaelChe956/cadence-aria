@@ -319,7 +319,7 @@ pub(super) fn single_candidate_markdown(story_id: &str, design_id: &str) -> Stri
          ### Write Policy\n- exclusive_scopes: src/backend/**\n- forbidden_scopes: web/**\n\n\
          ### Acceptance Criteria\n- criterion_id: AC-001\n- statement: WHEN a request arrives THE SYSTEM SHALL expose the backend API response.\n- required_evidence: source_diff\n- required_evidence: manual_check\n\n\
          ### Verification\n- check_id: CHECK-001\n- manual_instruction: Inspect the backend API response manually.\n- required: true\n- non_zero_test_execution_required: false\n\n\
-         ### Handoff Schema\n- required_fields: commit_sha\n- provided_contract_refs: contract.backend-api\n- reviewer_check_refs: AC-001\n\n\
+         ### Handoff Schema\n- required_fields: commit_sha\n- provided_contract_refs: []\n- reviewer_check_refs: AC-001\n\n\
          ### Blockers\n- reason_code: no_trusted_command_catalog\n- route: operational_gate\n- target_contract_refs: contract.backend-api\n\n\
          ### Traceability\n- source_type: design_spec\n- source_id: {design_id}\n- requirement_id: REQ-001\n\n\
          ### Notes\nGenerated from Story {story_id}.\n\n\
