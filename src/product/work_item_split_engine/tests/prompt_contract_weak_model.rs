@@ -246,8 +246,11 @@ fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_co
     for required in [
         "输出契约纪律：SC 计划由你在同一文档先后写出",
         "下游 Inputs required_capabilities 写什么，被 (provider_logical_work_item_id, contract_id) 指向的上游 Outputs capabilities 就逐字复制什么，require_all 逐项覆盖",
+        "同一契约全计划只声明一次：多个下游消费同一契约时把全部能力串合并进这唯一一份 capabilities，禁止按下游重复声明契约",
+        "两个下游消费同一 CT-001 → 一份 CT-001 含两者能力串",
         "正例：下游 `- required_capabilities: [数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE]` → 上游 `capabilities:` 逐字同串",
-        "反例：改写/概括/漏一项 → required_capability_missing 拒绝（approval 编译阻塞）",
+        "反例①改写/概括/漏一项 → required_capability_missing 拒绝",
+        "反例②按下游重复声明契约 → duplicate_contract_id 拒绝",
     ] {
         assert!(
             prompt.contains(required),
@@ -303,6 +306,14 @@ fn output_contract_capability_teaching_matches_dependency_validator_judgement() 
             "dependency.rs 判定源码必须包含教学对齐片段 {aligned}，否则教学已与校验器漂移"
         );
     }
+    let validation_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_contract/validation.rs"
+    ));
+    assert!(
+        validation_source.contains("duplicate_contract_id"),
+        "validation.rs 判定源码必须包含教学对齐片段 duplicate_contract_id，否则教学已与校验器漂移"
+    );
     for structured_key in [
         "capabilities",
         "required_capabilities",
