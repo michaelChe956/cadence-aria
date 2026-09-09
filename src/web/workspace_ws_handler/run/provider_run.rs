@@ -109,6 +109,11 @@ pub(crate) async fn spawn_provider_run_from_handler(
     };
     *current_run.lock().await = Some(active_run.clone());
     workspace_runs.insert(session_id.clone(), active_run).await;
+    // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session
+    // 的 idle 守卫都不主动关连接；断连清理不再取消 run 后，该标记覆盖「run 跨
+    // socket 存活」窗口（此时 registry 已摘除、新 socket 无 current_run）。
+    // 守卫 drop（含 panic/abort 展开）即结束标记，不会泄漏压制 idle 回收。
+    let provider_drive_guard = workspace_runs.begin_provider_drive(&session_id);
 
     {
         let mut engine = engine.lock().await;
@@ -130,6 +135,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
         ProviderRunKind::WorkItemPlanOutlineRevision { .. }
     );
     tokio::spawn(async move {
+        // 声明在首位 → 任务体结束时最后 drop：drive 标记覆盖整个 provider 驱动期。
+        let _provider_drive_guard = provider_drive_guard;
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
         // B3：StaleContext 重建携带的 rebuilt planning context（provider run 构造新会话

@@ -178,29 +178,199 @@ async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect(
     .await;
     let _first_chunk = recv_until_stream_chunk(&mut ws).await;
     drop(ws);
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
-    match recv_json(&mut reconnected).await {
-        WsOutMessage::SessionState {
-            stage,
-            timeline_nodes,
-            active_run_id,
-            ..
-        } => {
-            let last = timeline_nodes.last().expect("timeline node");
-            assert_eq!(stage, "prepare_context");
-            assert_eq!(active_run_id, None);
-            assert_eq!(last.node_type, TimelineNodeType::AbortedByDisconnect);
-            assert_eq!(last.status, TimelineNodeStatus::Failed);
-            assert!(
-                last.summary
-                    .as_deref()
-                    .is_some_and(|summary| summary.contains("run-1"))
-            );
+    // 断连清理不再取消 run：fake provider 驱动至自然完成后，断连清理才拿到
+    // engine 锁追加 aborted_by_disconnect 审计节点——轮询重连直至审计节点落盘
+    // （旧行为是取消后立即落盘，两条路径部应收敛到同一审计终态）。
+    let mut verified = false;
+    for _ in 0..100 {
+        let (mut probe, _) = connect_async(url.clone()).await.expect("probe ws");
+        match recv_json(&mut probe).await {
+            WsOutMessage::SessionState {
+                stage,
+                timeline_nodes,
+                active_run_id,
+                ..
+            } => {
+                let last = timeline_nodes.last().expect("timeline node");
+                if last.node_type == TimelineNodeType::AbortedByDisconnect {
+                    assert_eq!(stage, "prepare_context");
+                    assert_eq!(active_run_id, None);
+                    assert_eq!(last.status, TimelineNodeStatus::Failed);
+                    assert!(
+                        last.summary
+                            .as_deref()
+                            .is_some_and(|summary| summary.contains("run-1"))
+                    );
+                    verified = true;
+                }
+            }
+            other => panic!("expected session_state, got {other:?}"),
         }
-        other => panic!("expected session_state, got {other:?}"),
+        drop(probe);
+        if verified {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        verified,
+        "断连后 aborted_by_disconnect 审计节点应在 run 结束后落盘且语义保留"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_disconnect_does_not_cancel_active_provider_run() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("disconnect_survivor"),
+        },
+    )
+    .await;
+    let _first_chunk = recv_until_stream_chunk(&mut ws).await;
+
+    // 断连：旧清理路径会无条件取消 runner token（claude×轻 慢握手被杀的同构链）。
+    drop(ws);
+
+    // 断连后触发 provider 完成：run 未被取消 → 驱动至完成并落盘 assistant 消息。
+    complete.notify_one();
+    let mut survived = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if persisted_workspace_messages(root.path()).iter().any(|message| {
+            message.role == "assistant" && message.content.contains("# Story Spec")
+        }) {
+            survived = true;
+            break;
+        }
+    }
+    assert!(
+        survived,
+        "断连清理不应取消进行中的 workspace run（run 应驱动至完成并落盘 assistant 消息）：messages={:?} nodes={:?}",
+        persisted_workspace_messages(root.path())
+            .iter()
+            .map(|message| (message.role.clone(), message.content.len()))
+            .collect::<Vec<_>>(),
+        LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+            .load_timeline_nodes("workspace_session_0001")
+            .expect("timeline nodes")
+            .iter()
+            .map(|node| (node.node_type.clone(), node.status.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_idle_timeout_holds_reconnect_while_surviving_run_drives() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    state
+        .test_controls
+        .set_server_idle_timeout(Duration::from_millis(30))
+        .await;
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut primary, _) = connect_async(url.clone()).await.expect("connect primary ws");
+    let _initial = recv_json(&mut primary).await;
+
+    send_json(
+        &mut primary,
+        &WsInMessage::UserMessage {
+            content: long_message("idle_hold_survivor"),
+        },
+    )
+    .await;
+    let _first_chunk = recv_until_stream_chunk(&mut primary).await;
+
+    // 断连：run 存活并继续驱动（provider 挂起，不触发完成）。
+    drop(primary);
+
+    // 重连 socket：本 socket 无 current_run、registry 已摘除——provider drive 期
+    // 服务器不得主动 idle 关闭（idle 计时器 tick 粒度 5s，需覆盖首个 5s tick）。
+    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+    let _state = recv_json(&mut reconnected).await;
+    // 排空初始突发后进入静默窗口。
+    for _ in 0..20 {
+        if timeout(Duration::from_millis(100), reconnected.next()).await.is_err() {
+            break;
+        }
+    }
+    let leaked_close = timeout(Duration::from_millis(5500), reconnected.next()).await;
+    assert!(
+        leaked_close.is_err(),
+        "provider drive 进行中，服务器不得对无 current_run 的重连 socket 主动 idle 关闭"
+    );
+
+    // run 结束后 idle 守卫应恢复：下一个 tick 后连接被正常回收（Close 帧）。
+    complete.notify_one();
+    let mut closed = false;
+    for _ in 0..240 {
+        match timeout(Duration::from_millis(100), reconnected.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(_))) | Ok(None) => {
+                closed = true;
+                break;
+            }
+            Err(_) => {}
+        }
+    }
+    assert!(
+        closed,
+        "provider drive 结束后 idle 回收应恢复（连接应被正常关闭）"
+    );
 
     drop(reconnected);
     server.abort();

@@ -133,6 +133,28 @@ pub(crate) fn spawn_idle_timeout_task(
     })
 }
 
+/// idle 关闭守卫（断连终局修复）：除本 socket 的 current_run 外，该 session 的
+/// workspace run 处于 provider drive 期也不主动关连接——断连清理不再取消 run
+/// 后，run 会跨 socket 存活（原 socket 读循环已退出、registry 摘除），重连的
+/// 新 socket 无 current_run，若在 drive 期被 idle 关闭会引发无谓的断连/重连循环。
+/// try_lock 失败按「活跃」处理（保守不关）。
+pub(crate) fn workspace_idle_activity_guard(
+    current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    workspace_runs: WorkspaceRunRegistry,
+    session_id: String,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    Arc::new(move || {
+        if current_run
+            .try_lock()
+            .map(|run| run.is_some())
+            .unwrap_or(true)
+        {
+            return true;
+        }
+        workspace_runs.provider_drive_in_progress(&session_id)
+    })
+}
+
 /// 逻辑代码库分支的规划会话 resume 校验入口（Task 11 / REQ-PLN-03）。
 ///
 /// 在 provider 启动前校验 planning snapshot 指纹：
@@ -290,6 +312,39 @@ mod tests {
                 &WsInMessage::RequestOutlineRevision { feedback: None },
             )
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_idle_activity_guard_covers_current_run_and_provider_drive() {
+        let registry = WorkspaceRunRegistry::default();
+        let current_run: Arc<Mutex<Option<WorkspaceActiveRun>>> = Arc::new(Mutex::new(None));
+        let guard = workspace_idle_activity_guard(
+            current_run.clone(),
+            registry.clone(),
+            "session_a".to_string(),
+        );
+        assert!(
+            !guard(),
+            "无 current_run 且无 provider drive：允许 idle 回收"
+        );
+
+        let drive = registry.begin_provider_drive("session_a");
+        assert!(
+            guard(),
+            "provider drive 进行中（含断连后跨 socket 存活的 run）：不得主动关连接"
+        );
+        drop(drive);
+        assert!(!guard(), "drive 结束后恢复 idle 回收");
+
+        *current_run.lock().await = Some(WorkspaceActiveRun {
+            id: 1,
+            token: 1,
+            node_id: None,
+            cancel: CancellationToken::new(),
+            command_tx: mpsc::channel(1).0,
+            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        });
+        assert!(guard(), "本 socket current_run 进行中：不得主动关连接");
     }
 }
 
@@ -527,16 +582,14 @@ pub(crate) async fn handle_workspace_socket(
         }
     }
 
-    let current_run_for_idle = current_run.clone();
     let idle_timeout_task = spawn_idle_timeout_task(
         last_client_message_at.clone(),
         outbound_tx.clone(),
-        Arc::new(move || {
-            current_run_for_idle
-                .try_lock()
-                .map(|run| run.is_some())
-                .unwrap_or(true)
-        }),
+        workspace_idle_activity_guard(
+            current_run.clone(),
+            state.workspace_runs.clone(),
+            session_id.clone(),
+        ),
         state.test_controls.server_idle_timeout(),
         std::time::Duration::from_secs(5),
     );
@@ -720,14 +773,16 @@ pub(crate) async fn handle_workspace_socket(
             .workspace_runs
             .remove_if_token(&session_id, run.token)
             .await;
-        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：WS 读循环退出（客户端
-        // Close/网络断开/idle 关闭后对端回收）→ 无条件取消本 socket 的 active run。
-        // 这是「断连必取消 workspace runner」的确认点（最强假说验证入口）。
+        // 断连不再取消 run（claude×轻 五连败终局修复，用户已批）：此前这里无条件
+        // abort_workspace_run，慢握手（60-120s 静默）期间客户端断连/重连即杀死
+        // runner token，握手以「cancelled」收口。现在 run 跨断连存活，驱动至自然
+        // 完成（35min 硬超时兜底不变）；run task 全程持有 engine 锁，下方
+        // engine.lock() 会等 run 结束后才追加 aborted_by_disconnect 审计节点
+        //（留痕语义不变，仍记 last_active_run_id）。
         eprintln!(
-            "[aria-cancellation] workspace ws_disconnect_cleanup trigger=ws_disconnect_cleanup session_id={} run_id={last_active_run_id} owned_registry_run={owned_registry_run}",
+            "[aria-disconnect] workspace ws_disconnect_cleanup session_id={} run_id={last_active_run_id} owned_registry_run={owned_registry_run} run_not_cancelled=true",
             session_id
         );
-        abort_workspace_run(&run).await;
         if owned_registry_run {
             let mut engine = engine.lock().await;
             let _ = engine

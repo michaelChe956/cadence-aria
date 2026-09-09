@@ -51,6 +51,68 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
     }
 }
 
+/// 断连不取消修复的测试 provider：先发首个 chunk（驱动测试可确认 run 已启动），
+/// 随后挂起直到外部 `Notify` 触发才发出 Completed——用于验证「断连期间 run
+/// 不被取消、触发完成后仍能驱动至完成并落盘」。
+struct SignalledCompletionStreamingProvider {
+    complete: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SignalledCompletionStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let complete = self.complete.clone();
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "# Draft".to_string(),
+                })
+                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = complete.notified() => {}
+            }
+            // 用合法 story artifact 作为完成输出：避免触发引擎的「artifact 缺失
+            // 自动续写」二回合（那会掩盖本测试要观察的断连存活语义）。
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        VALID_STORY_SPEC.to_string(),
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        mpsc::Receiver<cadence_aria::cross_cutting::streaming_provider::StreamChunk>,
+        ProviderAdapterError,
+    > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
 struct PiHangingStreamingProvider {
     started: Arc<std::sync::atomic::AtomicBool>,
     abort_observed: Arc<Notify>,

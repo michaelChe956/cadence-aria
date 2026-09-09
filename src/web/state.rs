@@ -61,11 +61,67 @@ pub use aggregate_index_rebuild_registry::{
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
     runs: Arc<AsyncMutex<HashMap<String, WorkspaceActiveRun>>>,
+    /// provider drive 期标记（idle 关闭守卫扩展用）：session → 正在驱动 provider
+    /// 会话的 run 计数。断连清理不再取消 run 后，run 会跨 socket 存活（原 socket
+    /// 读循环已退出、registry 摘除），该计数让服务器侧 idle 守卫在「workspace
+    /// run 进行中」也不主动关连接。
+    provider_drive_depth: Arc<StdMutex<HashMap<String, u32>>>,
+}
+
+/// `begin_provider_drive` 返回的 RAII 守卫：drop 时递减该 session 的 drive
+/// 计数（panic/abort 展开也会走 Drop，不会泄漏压制 idle 回收）。
+pub struct WorkspaceProviderDriveGuard {
+    runs: WorkspaceRunRegistry,
+    session_id: String,
+}
+
+impl Drop for WorkspaceProviderDriveGuard {
+    fn drop(&mut self) {
+        self.runs.end_provider_drive(&self.session_id);
+    }
 }
 
 impl WorkspaceRunRegistry {
     pub async fn insert(&self, session_id: String, run: WorkspaceActiveRun) {
         self.runs.lock().await.insert(session_id, run);
+    }
+
+    /// 标记该 session 进入 provider drive 期；返回的守卫 drop 时结束标记。
+    /// 嵌套 begin 会叠加计数，全部 drop 后才视为结束。
+    pub fn begin_provider_drive(&self, session_id: &str) -> WorkspaceProviderDriveGuard {
+        let mut depth = self
+            .provider_drive_depth
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *depth.entry(session_id.to_string()).or_insert(0) += 1;
+        WorkspaceProviderDriveGuard {
+            runs: self.clone(),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    fn end_provider_drive(&self, session_id: &str) {
+        let mut depth = self
+            .provider_drive_depth
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = depth.get_mut(session_id)
+            && *count > 0
+        {
+            *count -= 1;
+            if *count == 0 {
+                depth.remove(session_id);
+            }
+        }
+    }
+
+    /// 该 session 是否有 provider drive 进行中（同步探测，供 idle 关闭守卫的
+    /// 同步闭包使用；锁中毒时保守返回 true——视为活跃，不主动关连接）。
+    pub fn provider_drive_in_progress(&self, session_id: &str) -> bool {
+        match self.provider_drive_depth.lock() {
+            Ok(depth) => depth.contains_key(session_id),
+            Err(_) => true,
+        }
     }
 
     pub async fn take(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
@@ -876,5 +932,35 @@ mod tests {
         assert!(state.test_provider_enabled);
         assert!((state.provider_availability)(&ProviderName::Fake));
         assert!((state.provider_availability)(&ProviderName::Codex));
+    }
+
+    #[test]
+    fn workspace_run_registry_provider_drive_depth_tracks_begin_and_guard_drop() {
+        let runs = WorkspaceRunRegistry::default();
+        assert!(!runs.provider_drive_in_progress("session_a"));
+
+        let drive = runs.begin_provider_drive("session_a");
+        assert!(runs.provider_drive_in_progress("session_a"));
+
+        let second_drive = runs.begin_provider_drive("session_a");
+        drop(drive);
+        assert!(
+            runs.provider_drive_in_progress("session_a"),
+            "嵌套 drive 计数应保留（深度 2 → 1 仍视为进行中）"
+        );
+
+        drop(second_drive);
+        assert!(!runs.provider_drive_in_progress("session_a"));
+    }
+
+    #[test]
+    fn workspace_run_registry_provider_drive_depth_is_per_session() {
+        let runs = WorkspaceRunRegistry::default();
+        let _drive = runs.begin_provider_drive("session_a");
+        assert!(runs.provider_drive_in_progress("session_a"));
+        assert!(
+            !runs.provider_drive_in_progress("session_b"),
+            "其它 session 的 drive 不应压制本 session 的 idle 回收"
+        );
     }
 }
