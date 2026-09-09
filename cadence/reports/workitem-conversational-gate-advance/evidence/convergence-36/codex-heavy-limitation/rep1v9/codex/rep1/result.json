@@ -1,0 +1,95 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1v9/codex/rep1",
+  "startedAt": "2026-09-08T19:57:07.307Z",
+  "finishedAt": "2026-09-08T20:03:02.720Z",
+  "elapsedSec": 355.412,
+  "issue_id": "issue_0177",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0244",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.025,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.088,
+      "source": "session_state"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [],
+  "validator_findings": [],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "Codex resume stalled before provider progress for thread 01a08298-855a-77e1-b403-639d911e9249 (exit status: signal: 9 (SIGKILL)); stderr: \u001b[2m2026-09-08T20:02:02.806062Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:02.814088Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:02.866894Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:03.195285Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:03.199568Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:03.259439Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:04.339132Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:04.341466Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T20:02:04.383223Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [],
+  "human_gate_turns": [],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 355412,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.063,
+    "1:running": 354.324
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1e/codex/rep1",
+  "startedAt": "2026-09-08T15:08:33.730Z",
+  "finishedAt": "2026-09-08T15:18:24.173Z",
+  "elapsedSec": 590.442,
+  "issue_id": "issue_0169",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0233",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.025,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.089,
+      "source": "session_state"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [],
+  "validator_findings": [],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "validate plan candidate IR failed (after one teaching re-drive): first round: duplicate_contract_id:0:duplicate contract id CT-001; duplicate_contract_id:0:duplicate contract id CT-002; duplicate_contract_id:0:duplicate contract id CT-002; duplicate_contract_id:0:duplicate contract id CT-004; unknown_done_when_ref:0:task TASK-009 references unknown acceptance criterion AC-004; unknown_done_when_ref:0:task TASK-012 references unknown acceptance criterion AC-004; re-drive round: duplicate_contract_id:0:duplicate contract id CT-001; duplicate_contract_id:0:duplicate contract id CT-002; duplicate_contract_id:0:duplicate contract id CT-002; duplicate_contract_id:0:duplicate contract id CT-004",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [],
+  "human_gate_turns": [],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 590442,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.064,
+    "1:running": 589.353
+  }
+}

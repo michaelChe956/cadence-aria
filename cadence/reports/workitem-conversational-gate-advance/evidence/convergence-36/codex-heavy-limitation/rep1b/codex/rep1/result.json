@@ -1,0 +1,524 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1b/codex/rep1",
+  "startedAt": "2026-09-08T13:28:46.588Z",
+  "finishedAt": "2026-09-08T13:41:22.942Z",
+  "elapsedSec": 756.353,
+  "issue_id": "issue_0166",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0230",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.011,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.074,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 282.732,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 282.992,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 427.151,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 427.446,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 529.289,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 529.541,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 543.908,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 602.31,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 602.61,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 662.205,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 715.753,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 716.034,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 756.14,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 343.129,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-002 提供 CT-LEVELS-API-V1 所需的 API JSON 错误对象能力。",
+          "evidence": "coverage edge WI-001 -> WI-002, contract_id=CT-LEVELS-API-V1, missing_capabilities=[API errors use JSON error object with readable message]",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract capabilities 中补充该 capability，并保持 WI-002 require_all 匹配。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-003 提供 CT-BACKEND-RUNTIME-V1 所需的根静态页托管能力。",
+          "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-BACKEND-RUNTIME-V1, missing_capabilities=[GET / serves configured staticRoot page entry]",
+          "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 output contract capabilities 中补充该 capability，并保持 WI-003 require_all 匹配。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-003 提供 CT-LEVELS-API-V1 所需的 JSON 错误 Content-Type 能力。",
+          "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-LEVELS-API-V1, missing_capabilities=[API errors use Content-Type application/json; charset=utf-8]",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract capabilities 中补充该 capability，并保持 WI-003 require_all 匹配。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 463.743,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-002 契约覆盖存在缺失能力，require_all 策略下不得通过。",
+          "evidence": "coverage entry from WI-001 -> to WI-002, contract_id CT-LEVELS-API-V1, missing_capabilities: [API errors use JSON error object with readable message]",
+          "required_action": "将 WI-001 的 CT-LEVELS-API-V1 输出能力补齐为包含结构化 JSON 错误对象与可读 message，或调整该依赖的必需能力表述并在双方契约中保持一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 543.908,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 对 WI-002 的 CT-LEVELS-API-V1 契约缺少全部所需能力，当前 supplied capabilities 未覆盖 structured JSON error object with readable message。",
+          "evidence": "coverage edge WI-001 -> WI-002, contract_id CT-LEVELS-API-V1, missing_capabilities: [API errors use structured JSON error object with readable message]",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract 中补充缺失能力，或将 WI-002 的 required capability 与已供给且可验证的契约能力对齐。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 对 WI-003 的 CT-BACKEND-RUNTIME-V1 契约缺少全部所需能力，当前 supplied capabilities 未覆盖 configured staticRoot page entry。",
+          "evidence": "coverage edge WI-001 -> WI-003, contract_id CT-BACKEND-RUNTIME-V1, missing_capabilities: [GET / serves configured staticRoot page entry]",
+          "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 output contract 中补充 GET / serves configured staticRoot page entry 能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 对 WI-003 的 CT-LEVELS-API-V1 契约缺少全部所需能力，当前 supplied capabilities 未覆盖 API JSON 错误响应的 Content-Type。",
+          "evidence": "coverage edge WI-001 -> WI-003, contract_id CT-LEVELS-API-V1, missing_capabilities: [API errors use Content-Type application/json; charset=utf-8]",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract 中补充 API errors use Content-Type application/json; charset=utf-8 能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 662.205,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-002 的 CT-LEVELS-API-V1 缺少必需能力 API errors use structured JSON error object with readable message。",
+          "evidence": "edge WI-001 -> WI-002; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use structured JSON error object with readable message]",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output_contracts.capabilities 中补充并验证结构化 JSON 错误对象与可读 message。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-003 的 CT-BACKEND-RUNTIME-V1 缺少必需能力 GET / serves configured staticRoot page entry。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-BACKEND-RUNTIME-V1; missing_capabilities [GET / serves configured staticRoot page entry]",
+          "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 output_contracts.capabilities 中补充并验证静态入口路由能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-003 的 CT-LEVELS-API-V1 缺少必需能力 API errors use Content-Type application/json; charset=utf-8。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use Content-Type application/json; charset=utf-8]",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output_contracts.capabilities 中补充并验证 API 错误响应 Content-Type。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 756.14,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "依赖边 WI-001 -> WI-002 的 CT-LEVELS-API-V1 缺少必需能力：API errors use structured JSON error object with readable message。",
+          "evidence": "edge WI-001 -> WI-002; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use structured JSON error object with readable message]; compatibility_policy require_all",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 输出契约中声明结构化 JSON 错误对象及可读 message 能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "依赖边 WI-001 -> WI-003 的 CT-BACKEND-RUNTIME-V1 缺少必需能力：GET / serves configured staticRoot page entry。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-BACKEND-RUNTIME-V1; missing_capabilities [GET / serves configured staticRoot page entry]; compatibility_policy require_all",
+          "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 输出契约中声明 GET / 提供 configured staticRoot 页面入口能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "依赖边 WI-001 -> WI-003 的 CT-LEVELS-API-V1 缺少必需能力：API errors use Content-Type application/json; charset=utf-8。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use Content-Type application/json; charset=utf-8]; compatibility_policy require_all",
+          "required_action": "在 WI-001 的 CT-LEVELS-API-V1 输出契约中声明 API 错误响应使用 application/json; charset=utf-8 的能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-002 提供 CT-LEVELS-API-V1 所需的 API JSON 错误对象能力。",
+      "evidence": "coverage edge WI-001 -> WI-002, contract_id=CT-LEVELS-API-V1, missing_capabilities=[API errors use JSON error object with readable message]",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract capabilities 中补充该 capability，并保持 WI-002 require_all 匹配。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-003 提供 CT-BACKEND-RUNTIME-V1 所需的根静态页托管能力。",
+      "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-BACKEND-RUNTIME-V1, missing_capabilities=[GET / serves configured staticRoot page entry]",
+      "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 output contract capabilities 中补充该 capability，并保持 WI-003 require_all 匹配。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-003 提供 CT-LEVELS-API-V1 所需的 JSON 错误 Content-Type 能力。",
+      "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-LEVELS-API-V1, missing_capabilities=[API errors use Content-Type application/json; charset=utf-8]",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract capabilities 中补充该 capability，并保持 WI-003 require_all 匹配。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-002 契约覆盖存在缺失能力，require_all 策略下不得通过。",
+      "evidence": "coverage entry from WI-001 -> to WI-002, contract_id CT-LEVELS-API-V1, missing_capabilities: [API errors use JSON error object with readable message]",
+      "required_action": "将 WI-001 的 CT-LEVELS-API-V1 输出能力补齐为包含结构化 JSON 错误对象与可读 message，或调整该依赖的必需能力表述并在双方契约中保持一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 对 WI-002 的 CT-LEVELS-API-V1 契约缺少全部所需能力，当前 supplied capabilities 未覆盖 structured JSON error object with readable message。",
+      "evidence": "coverage edge WI-001 -> WI-002, contract_id CT-LEVELS-API-V1, missing_capabilities: [API errors use structured JSON error object with readable message]",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract 中补充缺失能力，或将 WI-002 的 required capability 与已供给且可验证的契约能力对齐。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 对 WI-003 的 CT-BACKEND-RUNTIME-V1 契约缺少全部所需能力，当前 supplied capabilities 未覆盖 configured staticRoot page entry。",
+      "evidence": "coverage edge WI-001 -> WI-003, contract_id CT-BACKEND-RUNTIME-V1, missing_capabilities: [GET / serves configured staticRoot page entry]",
+      "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 output contract 中补充 GET / serves configured staticRoot page entry 能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 对 WI-003 的 CT-LEVELS-API-V1 契约缺少全部所需能力，当前 supplied capabilities 未覆盖 API JSON 错误响应的 Content-Type。",
+      "evidence": "coverage edge WI-001 -> WI-003, contract_id CT-LEVELS-API-V1, missing_capabilities: [API errors use Content-Type application/json; charset=utf-8]",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output contract 中补充 API errors use Content-Type application/json; charset=utf-8 能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-002 的 CT-LEVELS-API-V1 缺少必需能力 API errors use structured JSON error object with readable message。",
+      "evidence": "edge WI-001 -> WI-002; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use structured JSON error object with readable message]",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output_contracts.capabilities 中补充并验证结构化 JSON 错误对象与可读 message。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-003 的 CT-BACKEND-RUNTIME-V1 缺少必需能力 GET / serves configured staticRoot page entry。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-BACKEND-RUNTIME-V1; missing_capabilities [GET / serves configured staticRoot page entry]",
+      "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 output_contracts.capabilities 中补充并验证静态入口路由能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-003 的 CT-LEVELS-API-V1 缺少必需能力 API errors use Content-Type application/json; charset=utf-8。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use Content-Type application/json; charset=utf-8]",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 output_contracts.capabilities 中补充并验证 API 错误响应 Content-Type。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "依赖边 WI-001 -> WI-002 的 CT-LEVELS-API-V1 缺少必需能力：API errors use structured JSON error object with readable message。",
+      "evidence": "edge WI-001 -> WI-002; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use structured JSON error object with readable message]; compatibility_policy require_all",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 输出契约中声明结构化 JSON 错误对象及可读 message 能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "依赖边 WI-001 -> WI-003 的 CT-BACKEND-RUNTIME-V1 缺少必需能力：GET / serves configured staticRoot page entry。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-BACKEND-RUNTIME-V1; missing_capabilities [GET / serves configured staticRoot page entry]; compatibility_policy require_all",
+      "required_action": "在 WI-001 的 CT-BACKEND-RUNTIME-V1 输出契约中声明 GET / 提供 configured staticRoot 页面入口能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "依赖边 WI-001 -> WI-003 的 CT-LEVELS-API-V1 缺少必需能力：API errors use Content-Type application/json; charset=utf-8。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-LEVELS-API-V1; missing_capabilities [API errors use Content-Type application/json; charset=utf-8]; compatibility_policy require_all",
+      "required_action": "在 WI-001 的 CT-LEVELS-API-V1 输出契约中声明 API 错误响应使用 application/json; charset=utf-8 的能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 21508,
+      "output_tokens": 699,
+      "cache_read_tokens": 21312,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "single-candidate approval compile failed; human gate remains open",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T13:37:50.497Z",
+      "elapsedSec": 543.909,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_008",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-42aaa376f9",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T13:37:50.498Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T13:39:48.794Z",
+      "elapsedSec": 662.205,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_009",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-9691ec1ba9",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T13:39:48.794Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T13:41:22.729Z",
+      "elapsedSec": 756.14,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_011",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T13:41:22.729Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-42aaa376f9",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_6397dd1f-c59d-4e7c-b198-e98d43b54b39",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_004"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-9691ec1ba9",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_72ae4d38-1d14-4351-a3c8-fecb325d57ca",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_005"
+    }
+  ],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 756353,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.063,
+    "1:running": 281.658,
+    "2:cross_review": 0.26,
+    "3:prepare_context": 144.159,
+    "4:cross_review": 0.295,
+    "5:prepare_context": 101.843,
+    "6:cross_review": 0.252,
+    "7:prepare_context": 14.367,
+    "8:human_confirm": 58.402,
+    "9:cross_review": 0.3,
+    "10:prepare_context": 59.595,
+    "11:human_confirm": 53.548,
+    "12:cross_review": 0.281,
+    "13:prepare_context": 40.106,
+    "14:human_confirm": 0.213
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

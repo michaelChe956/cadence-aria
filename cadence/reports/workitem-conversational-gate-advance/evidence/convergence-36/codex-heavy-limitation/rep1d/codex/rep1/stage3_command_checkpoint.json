@@ -1,0 +1,8 @@
+{
+  "campaign_run_id": "workitem:codex:rep1:issue_0168",
+  "command_ids": {
+    "human_gate_feedback#0": "cmd-human_gate_feedback-0-c11ebd1547",
+    "human_gate_feedback#1": "cmd-human_gate_feedback-1-643c463d02",
+    "human_gate_feedback#2": "cmd-human_gate_feedback-2-a346c19a1a"
+  }
+}
