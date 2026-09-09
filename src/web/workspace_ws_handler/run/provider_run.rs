@@ -75,8 +75,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
     // （workitem 重试/新阶段启动时若旧 runner 仍在注册表，其 token 在此被取消——
     // workspace 版 H1 候选：接替误杀在途握手）。
     eprintln!(
-        "[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id={}",
-        session_id
+        "[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id={} kind={:?}",
+        session_id, run_kind
     );
     abort_active_run(&current_run, &workspace_runs, &session_id).await;
 

@@ -201,7 +201,7 @@ pub struct ArtifactUpdateEvent {
     pub payload: ArtifactPayload,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ProviderRunKind {
     Author {
         content: String,
