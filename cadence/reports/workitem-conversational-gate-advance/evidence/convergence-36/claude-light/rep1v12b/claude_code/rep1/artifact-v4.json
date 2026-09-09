@@ -1,0 +1,174 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_7f93a11d9ca0da3a115c28eb",
+    "work_item_revision_id": "work_item_revision_7f93a11d9ca0da3a115c28eb",
+    "canonical_contract_hash": "e44654cfa43bac258369a4a0bcbad1825069c63cda0828df11f201e24a833d0d",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "最小 Hello API",
+      "goal": "WHEN naruto H5 游戏需要联调冒烟 THE SYSTEM SHALL 提供仅使用 Node 内置 node:http 的最小后端服务并对 GET /api/hello 返回状态码 200 且响应 body 恰为 {\"message\":\"hello\"}。",
+      "non_goals": [
+        "不引入任何第三方依赖，不新增数据库、认证、外部服务或前端页面。",
+        "不实现契约 issue_workitem_0001#api 之外的任何端点，也不编写 issue 要求的唯一测试之外的任何测试。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "内部错误响应示例为 GET /api/hello 返回状态码 500 且响应 body 恰为 {\"error\":\"internal\"}"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "既有文件 package.json、README.md、LICENSE 及仓库其余全部内容",
+          "任何第三方依赖、数据库、认证或前端页面文件"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 对本 Work Item 启动的服务请求 GET /api/hello THE SYSTEM SHALL 返回状态码 200 且响应 body 恰为 {\"message\":\"hello\"}。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "TASK-002",
+        "design_requirement_placeholder"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_7f93a11d9ca0da3a115c28eb",
+      "objective": "WHEN naruto H5 游戏需要联调冒烟 THE SYSTEM SHALL 提供仅使用 Node 内置 node:http 的最小后端服务并对 GET /api/hello 返回状态码 200 且响应 body 恰为 {\"message\":\"hello\"}。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 在仓库根目录运行 node --test THE SYSTEM SHALL 执行唯一测试 test/hello.test.js，由该测试起服务请求 GET /api/hello 并断言状态码 200 与响应 body 恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 收到 GET /api/hello 请求 THE SYSTEM SHALL 由 server.js 使用 Node 内置 node:http 在 127.0.0.1:3000 返回状态码 200 且响应 body 恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "既有文件 package.json、README.md、LICENSE 及仓库其余全部内容",
+          "任何第三方依赖、数据库、认证或前端页面文件"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 对本 Work Item 启动的服务请求 GET /api/hello THE SYSTEM SHALL 返回状态码 200 且响应 body 恰为 {\"message\":\"hello\"}。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_7f93a11d9ca0da3a115c28eb",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "既有文件 package.json、README.md、LICENSE 及仓库其余全部内容",
+          "任何第三方依赖、数据库、认证或前端页面文件"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "内部错误响应示例为 GET /api/hello 返回状态码 500 且响应 body 恰为 {\"error\":\"internal\"}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "c1703b058c92845bd0ba1c2d244474a9ae7707c58b58880bb8a054a00466262e",
+    "coder_projection_hash": "c29ffacdaeb15e0d41e4747e266d57d9a14239a1979720227baf32b05f3f569f",
+    "reviewer_projection_hash": "2153e49893d8d05fb78ce80d85377dff1c07422f60a1c5f8730e6c3b79974c90",
+    "created_at": "2026-09-09T02:54:49.623623733+00:00"
+  }
+}

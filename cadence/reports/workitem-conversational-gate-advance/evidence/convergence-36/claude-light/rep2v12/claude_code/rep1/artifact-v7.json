@@ -1,0 +1,91 @@
+{
+  "type": "artifact_update",
+  "version": 7,
+  "plan_projection": {
+    "id": "plan_projection_bundle_f61eff5d67b4d0a900166410",
+    "plan_revision_id": "plan_revision_f61eff5d67b4d0a900166410",
+    "dependency_graph_revision_id": "dependency_graph_revision_f61eff5d67b4d0a900166410",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_77e5e1386cbbe015f6d02151"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "Hello API",
+          "goal": "WHEN naruto H5 联调冒烟需要最小后端问候接口 THE SYSTEM SHALL 提供仅依赖 Node 内置 node:http 的 GET /api/hello 服务并返回 200 与 body 恰为 {\"message\":\"hello\"}。",
+          "depends_on": [],
+          "provides": [
+            "CT-001"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server.js",
+              "test/hello.test.js"
+            ],
+            "forbidden_scopes": [
+              "package.json"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001"
+      ],
+      "dependency_edges": [],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server.js",
+            "test/hello.test.js"
+          ],
+          "forbidden_scopes": [
+            "package.json"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependency_edges": [],
+      "design_traceability_refs": [
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0001#api",
+          "requirement_id": "design_requirement_placeholder"
+        }
+      ]
+    },
+    "human_group_projection_hash": "ce7f1b96610504877f2bc1bf92e48a628863e3ca2bf953bd84bac1f3b6b32cee",
+    "coder_group_context_hash": "c72fbdac467fa860f50d698ff69894fa46dabfd6d34b3b39d880ab14833d1b63",
+    "reviewer_group_matrix_hash": "c96baac4c081526fc25219e815c5c904a3110f1a5d88b8443b6cf7e2d9e99223",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-09T03:34:37.295919601+00:00"
+  }
+}

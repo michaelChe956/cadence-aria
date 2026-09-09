@@ -1,0 +1,357 @@
+{
+  "provider": "claude_code",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/claude-light/rep6v12/claude_code/rep1",
+  "startedAt": "2026-09-09T05:08:34.028Z",
+  "finishedAt": "2026-09-09T05:16:02.598Z",
+  "elapsedSec": 448.569,
+  "issue_id": "issue_0192",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0267",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "claude_code",
+    "reviewer_provider": "claude_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": false,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": false,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "1e6b03fbb6625dbadd5331efb0757263ed696a19ca9e8a57fde0b791918bdffd",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "cbee45515e5c2f0d5292338e9e0a6bfdcfd15cfea6a9b757a081ada891a5f466"
+  },
+  "description_digest": "ca55406242eaee710da8959e99d7861b03be5c692b30b9d81f50f1ae79ac39fe",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.072,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.102,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 160.251,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 311.364,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 346.25,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 447.235,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 448.465,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 448.507,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 311.364,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "CT-001 声明的 500 内部错误能力（body error=internal）缺少任务与验证背书：TASK-001、TASK-002 与 CHECK-001 均仅覆盖 200 正常路径，本轮亦无下游 WorkItem 消费该能力，不影响发布，仅作完备度建议。",
+          "evidence": "WI-001.output_contracts[CT-001].capabilities 与 AC-001/CHECK-001（node --test test/hello.test.js）之间不存在任何覆盖 500 路径的任务或验证检查；capability_coverage 为空，Cross-Item demands 为空，无消费方受影响。",
+          "required_action": "如需保留该能力，补充实现并断言 500 路径的任务与验证检查；否则从 CT-001.capabilities 中收敛移除该条。",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "WI-001.output_contracts[CT-001]"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 447.235,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "CT-001 声明的能力（GET /api/hello 内部错误时返回 HTTP 500 且错误响应示例为 {\"error\":\"internal\"}）未被任何 AC、task 或 verification_check 覆盖——AC-001/TASK-002/CHECK-001 仅覆盖 200 成功路径；但当前无下游消费方 demand 该契约，属完备度建议而非发布缺口。",
+          "evidence": "WI-001.output_contracts[CT-001].capabilities 与 AC-001、TASK-002、CHECK-001 对照仅见 200 路径断言；Cross-Item 契约供需中 demands 为空，无 from -> to 边依赖 CT-001",
+          "required_action": "如需保留 500 能力承诺，可在后续修订中补充对应 AC 或验证断言；如无消费方也可维持现状",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "suggestion",
+          "message": "机械校验报告的 2 条 integration_or_e2e_skipped_risk warning（e2e 与 integration tests skipped）对这种最小单端点后端工作项可接受；建议在验收阶段以 CHECK-001 的 node --test 实测作为充分证据，无需强制补手工验证。",
+          "evidence": "Projection Validation Report findings：e2e skipped、integration skipped，severity=warning，error_count=0",
+          "required_action": "可作为发布说明中的已知限制记录，不要求返修",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "suggestion",
+      "message": "CT-001 声明的 500 内部错误能力（body error=internal）缺少任务与验证背书：TASK-001、TASK-002 与 CHECK-001 均仅覆盖 200 正常路径，本轮亦无下游 WorkItem 消费该能力，不影响发布，仅作完备度建议。",
+      "evidence": "WI-001.output_contracts[CT-001].capabilities 与 AC-001/CHECK-001（node --test test/hello.test.js）之间不存在任何覆盖 500 路径的任务或验证检查；capability_coverage 为空，Cross-Item demands 为空，无消费方受影响。",
+      "required_action": "如需保留该能力，补充实现并断言 500 路径的任务与验证检查；否则从 CT-001.capabilities 中收敛移除该条。",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "WI-001.output_contracts[CT-001]"
+    },
+    {
+      "severity": "suggestion",
+      "message": "CT-001 声明的能力（GET /api/hello 内部错误时返回 HTTP 500 且错误响应示例为 {\"error\":\"internal\"}）未被任何 AC、task 或 verification_check 覆盖——AC-001/TASK-002/CHECK-001 仅覆盖 200 成功路径；但当前无下游消费方 demand 该契约，属完备度建议而非发布缺口。",
+      "evidence": "WI-001.output_contracts[CT-001].capabilities 与 AC-001、TASK-002、CHECK-001 对照仅见 200 路径断言；Cross-Item 契约供需中 demands 为空，无 from -> to 边依赖 CT-001",
+      "required_action": "如需保留 500 能力承诺，可在后续修订中补充对应 AC 或验证断言；如无消费方也可维持现状",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验报告的 2 条 integration_or_e2e_skipped_risk warning（e2e 与 integration tests skipped）对这种最小单端点后端工作项可接受；建议在验收阶段以 CHECK-001 的 node --test 实测作为充分证据，无需强制补手工验证。",
+      "evidence": "Projection Validation Report findings：e2e skipped、integration skipped，severity=warning，error_count=0",
+      "required_action": "可作为发布说明中的已知限制记录，不要求返修",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 45505,
+      "output_tokens": 3418,
+      "cache_read_tokens": 128,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 2,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 0,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-09T05:13:45.393Z",
+      "elapsedSec": 311.365,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_004",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-4b1099d6c3",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-09T05:13:45.394Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-09T05:16:01.264Z",
+      "elapsedSec": 447.235,
+      "stage": "cross_review",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_005",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-09T05:16:01.264Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-4b1099d6c3",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_195eb803-4e30-43d6-a412-f9ab93fd59c5",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_002"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 2,
+      "command_id": "cmd-advance-2-992333ad58",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_67999cf2f1fa40dc81f781ca1f9016a3",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0192"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0267:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_195eb803-4e30-43d6-a412-f9ab93fd59c5:attempt:1",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0267:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_195eb803-4e30-43d6-a412-f9ab93fd59c5:attempt:1",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0267:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_195eb803-4e30-43d6-a412-f9ab93fd59c5:attempt:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 448569,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.03,
+    "1:running": 159.149,
+    "2:cross_review": 151.113,
+    "3:human_confirm": 34.886,
+    "4:cross_review": 100.985,
+    "5:human_confirm": 1.23,
+    "6:running": 0.042,
+    "7:completed": 0.062
+  },
+  "stage3_gate_return": {
+    "waits": 1,
+    "dispatched": 1,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

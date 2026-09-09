@@ -1,0 +1,314 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0190",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "claude_code",
+  "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+  "outDir": "/tmp/aria-36-matrix/claude-light/rep4v12/coding/coding-claude_code-coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+  "startedAt": "2026-09-09T04:32:30.691Z",
+  "finishedAt": "2026-09-09T04:38:46.568Z",
+  "elapsedSec": 375.878,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.08,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.116,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 242.273,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "review_request",
+      "elapsedSec": 371.548,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "final_confirm",
+      "elapsedSec": 375.802,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.177,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 242.272,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [
+        {
+          "severity": "warning",
+          "file_path": "test/hello.test.js",
+          "line": 31,
+          "message": "现有测试仅覆盖 GET /api/hello 的 200 主路径，输出契约 CT-001 要求的内部错误分支（500 且 body 恰为 error=internal 的单键对象）没有任何自动化测试覆盖，该契约能力目前仅由源码审查确认，未来回归时无法被验证命令捕获。",
+          "required_action": "非阻塞建议：在后续工作项中为 server.js 的异常分支补充回归测试，可通过故障注入或以可触发错误的最小变体验证 500 与固定错误 body；本工作项不因此返工。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "AC-001 验收通过：验证命令 node --test test/hello.test.js 在 node v24.17.0 实际执行，tests=1 非零、pass=1、fail=0、退出码 0，满足 CHECK-001 的非零测试执行要求；测试以子进程启动服务并断言 200 与单键 body，与实现不自相矛盾。范围合规：diff 仅新增 server.js 与 test/hello.test.js，均在 exclusive_scopes 内，未触碰 forbidden 的 package.json。CT-001 契约能力成立：server.js 异常分支在响应头未发送时返回 500 且 body 恰为 error=internal 的单键对象。存在一条非阻塞 warning：内部错误分支缺少自动化测试覆盖，仅由源码审查确认，建议后续补充回归测试。",
+      "created_at": "2026-09-09T04:38:42.158432856+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [
+        {
+          "severity": "warning",
+          "file_path": "test/hello.test.js",
+          "line": 31,
+          "message": "现有测试仅覆盖 GET /api/hello 的 200 主路径，输出契约 CT-001 要求的内部错误分支（500 且 body 恰为 error=internal 的单键对象）没有任何自动化测试覆盖，该契约能力目前仅由源码审查确认，未来回归时无法被验证命令捕获。",
+          "required_action": "非阻塞建议：在后续工作项中为 server.js 的异常分支补充回归测试，可通过故障注入或以可触发错误的最小变体验证 500 与固定错误 body；本工作项不因此返工。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "AC-001 验收通过：验证命令 node --test test/hello.test.js 在 node v24.17.0 实际执行，tests=1 非零、pass=1、fail=0、退出码 0，满足 CHECK-001 的非零测试执行要求；测试以子进程启动服务并断言 200 与单键 body，与实现不自相矛盾。范围合规：diff 仅新增 server.js 与 test/hello.test.js，均在 exclusive_scopes 内，未触碰 forbidden 的 package.json。CT-001 契约能力成立：server.js 异常分支在响应头未发送时返回 500 且 body 恰为 error=internal 的单键对象。存在一条非阻塞 warning：内部错误分支缺少自动化测试覆盖，仅由源码审查确认，建议后续补充回归测试。",
+      "created_at": "2026-09-09T04:38:42.158432856+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "review_request_0001",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "kind": "git_branch_only",
+      "remote_kind": "github",
+      "remote": "origin",
+      "base_branch": "main",
+      "branch_name": "aria/issues/issue_0190",
+      "commit_sha": "0f4fc23b552092209cdb0d03c836cc699da47976",
+      "push_status": "pushed",
+      "external_url": null,
+      "manual_instructions": [
+        "基于远端 origin/aria/issues/issue_0190 发起代码审查"
+      ],
+      "push_error": null,
+      "owner_kind": "attempt",
+      "pointer_publication_id": null,
+      "revoked": false,
+      "created_at": "2026-09-09T04:38:46.456445765+00:00",
+      "updated_at": "2026-09-09T04:38:46.456445765+00:00"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [
+        {
+          "severity": "warning",
+          "file_path": "test/hello.test.js",
+          "line": 31,
+          "message": "现有测试仅覆盖 GET /api/hello 的 200 主路径，输出契约 CT-001 要求的内部错误分支（500 且 body 恰为 error=internal 的单键对象）没有任何自动化测试覆盖，该契约能力目前仅由源码审查确认，未来回归时无法被验证命令捕获。",
+          "required_action": "非阻塞建议：在后续工作项中为 server.js 的异常分支补充回归测试，可通过故障注入或以可触发错误的最小变体验证 500 与固定错误 body；本工作项不因此返工。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "AC-001 验收通过：验证命令 node --test test/hello.test.js 在 node v24.17.0 实际执行，tests=1 非零、pass=1、fail=0、退出码 0，满足 CHECK-001 的非零测试执行要求；测试以子进程启动服务并断言 200 与单键 body，与实现不自相矛盾。范围合规：diff 仅新增 server.js 与 test/hello.test.js，均在 exclusive_scopes 内，未触碰 forbidden 的 package.json。CT-001 契约能力成立：server.js 异常分支在响应头未发送时返回 500 且 body 恰为 error=internal 的单键对象。存在一条非阻塞 warning：内部错误分支缺少自动化测试覆盖，仅由源码审查确认，建议后续补充回归测试。",
+      "created_at": "2026-09-09T04:38:42.158432856+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [
+        {
+          "severity": "warning",
+          "file_path": "test/hello.test.js",
+          "line": 31,
+          "message": "现有测试仅覆盖 GET /api/hello 的 200 主路径，输出契约 CT-001 要求的内部错误分支（500 且 body 恰为 error=internal 的单键对象）没有任何自动化测试覆盖，该契约能力目前仅由源码审查确认，未来回归时无法被验证命令捕获。",
+          "required_action": "非阻塞建议：在后续工作项中为 server.js 的异常分支补充回归测试，可通过故障注入或以可触发错误的最小变体验证 500 与固定错误 body；本工作项不因此返工。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "AC-001 验收通过：验证命令 node --test test/hello.test.js 在 node v24.17.0 实际执行，tests=1 非零、pass=1、fail=0、退出码 0，满足 CHECK-001 的非零测试执行要求；测试以子进程启动服务并断言 200 与单键 body，与实现不自相矛盾。范围合规：diff 仅新增 server.js 与 test/hello.test.js，均在 exclusive_scopes 内，未触碰 forbidden 的 package.json。CT-001 契约能力成立：server.js 异常分支在响应头未发送时返回 500 且 body 恰为 error=internal 的单键对象。存在一条非阻塞 warning：内部错误分支缺少自动化测试覆盖，仅由源码审查确认，建议后续补充回归测试。",
+      "created_at": "2026-09-09T04:38:42.158432856+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0190",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0190",
+    "head_commit": "0f4fc23b552092209cdb0d03c836cc699da47976",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 110155,
+    "output_tokens": 12829,
+    "cache_read_tokens": 917952
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 60542,
+      "output_tokens": 8733,
+      "cache_read_tokens": 774272,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 49613,
+      "output_tokens": 4096,
+      "cache_read_tokens": 143680,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-09T04:32:30.804254975+00:00",
+      "completed_at": "2026-09-09T04:32:30.832202660+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-09T04:32:35.870431392+00:00",
+      "completed_at": "2026-09-09T04:36:32.916993936+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-09T04:36:37.967567879+00:00",
+      "completed_at": "2026-09-09T04:38:42.166292267+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "stage": "review_request",
+      "title": "发起 review request",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "review request 已创建",
+      "started_at": "2026-09-09T04:38:42.236451568+00:00",
+      "completed_at": "2026-09-09T04:38:46.460917495+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_41d64f8fd9df426a92cfe1dac620dc1a",
+      "stage": "final_confirm",
+      "title": "等待人工最终确认",
+      "status": "completed",
+      "agent_role": "system",
+      "summary": "用户已确认完成",
+      "started_at": "2026-09-09T04:38:46.479654623+00:00",
+      "completed_at": "2026-09-09T04:38:46.520409537+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": null,
+  "error": null,
+  "completed": true
+}
