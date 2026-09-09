@@ -776,7 +776,7 @@ pub(crate) async fn handle_workspace_socket(
         // 断连不再取消 run（claude×轻 五连败终局修复，用户已批）：此前这里无条件
         // abort_workspace_run，慢握手（60-120s 静默）期间客户端断连/重连即杀死
         // runner token，握手以「cancelled」收口。现在 run 跨断连存活，驱动至自然
-        // 完成（35min 硬超时兜底不变）；run task 全程持有 engine 锁，下方
+        // 兜底口径注意（disconnect-fix-review Minor2）：存活 run 的服务端上界是 provider 超时 DEFAULT_PROVIDER_TIMEOUT_SECS=3h（provider_adapter.rs:10）；35min 仅为 driver 侧矩阵口径。本清理任务在 engine 锁上等待 run 自然结束（≤3h）。
         // engine.lock() 会等 run 结束后才追加 aborted_by_disconnect 审计节点
         //（留痕语义不变，仍记 last_active_run_id）。
         eprintln!(
