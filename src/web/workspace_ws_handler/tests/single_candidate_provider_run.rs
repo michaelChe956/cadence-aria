@@ -63,14 +63,38 @@ pub(super) struct ProviderRunFixture {
     pub(super) lifecycle: LifecycleStore,
     pub(super) record: WorkspaceSessionRecord,
     pub(super) engine: Arc<Mutex<WorkspaceEngine>>,
-    current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
-    workspace_runs: WorkspaceRunRegistry,
+    pub(super) engine_tx: mpsc::Sender<EngineEvent>,
+    pub(super) current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    pub(super) workspace_runs: WorkspaceRunRegistry,
     pub(super) story_id: String,
     pub(super) design_id: String,
 }
 
 impl ProviderRunFixture {
     pub(super) fn new(flow_kind: WorkItemPlanFlowKind) -> Self {
+        // 既有语义：engine 事件接收端在 fixture 返回前释放，engine 侧 `send` 立即
+        // 失败且不阻塞。需要观测 engine 事件的用例改用 `new_with_engine_rx`。
+        let (engine_tx, engine_rx) = mpsc::channel(64);
+        let fixture = Self::build(flow_kind, engine_tx);
+        drop(engine_rx);
+        fixture
+    }
+
+    /// 保留 engine 事件接收端：仅用于必须观测内部接力事件（如
+    /// `ProviderRunRequested{WorkItemPlanSingleCandidateAuthor}`）的用例。调用方
+    /// MUST 持续 drain，否则 engine 事件发送端在缓冲区满后阻塞。
+    pub(super) fn new_with_engine_rx(
+        flow_kind: WorkItemPlanFlowKind,
+    ) -> (Self, mpsc::Receiver<EngineEvent>) {
+        let (engine_tx, engine_rx) = mpsc::channel(64);
+        (Self::build(flow_kind, engine_tx), engine_rx)
+    }
+
+    pub(super) fn root_path(&self) -> std::path::PathBuf {
+        self.root.path().to_path_buf()
+    }
+
+    fn build(flow_kind: WorkItemPlanFlowKind, engine_tx: mpsc::Sender<EngineEvent>) -> Self {
         let root = tempfile::tempdir().expect("temporary workspace root");
         let repository_root = tempfile::tempdir().expect("temporary repository root");
         std::fs::create_dir_all(repository_root.path().join(".claude/rules"))
@@ -198,13 +222,12 @@ impl ProviderRunFixture {
                 .id,
             record.id,
         );
-        let (engine_tx, _engine_rx) = mpsc::channel(64);
         let mut session = WorkspaceSession::from_record(record.clone());
         session.repository_path = Some(repository_root.path().to_path_buf());
         let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
             Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
             lifecycle.clone(),
-            engine_tx,
+            engine_tx.clone(),
             session,
         )));
         assert_eq!(
@@ -221,6 +244,7 @@ impl ProviderRunFixture {
             lifecycle,
             record,
             engine,
+            engine_tx,
             current_run: Arc::new(Mutex::new(None)),
             workspace_runs: WorkspaceRunRegistry::default(),
             story_id: story.id,

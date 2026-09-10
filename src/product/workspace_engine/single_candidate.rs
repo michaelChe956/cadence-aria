@@ -111,6 +111,21 @@ impl WorkspaceEngine {
         })
     }
 
+    /// SC 修订接力顶杀在途 run 根修（oracle 候选6）：`CrossReview` 阶段对
+    /// SingleCandidate 流是二义的——`phase=Evaluate` 表示候选已生成、待驱评审
+    /// （在途 run 的 followups 自续 reviewer）；`phase=Generate` 表示评审已裁决
+    /// revise/机械契约缺口、policy 路由已把 author 重跑委托给
+    /// `ProviderRunRequested{WorkItemPlanSingleCandidateAuthor}` 接力（唯一接续
+    /// 路径）。委托态下再按 `stage==CrossReview` 驱 reviewer 只会误燃第二轮
+    /// （候选已裁决，reviewer 无意义），接力 spawn 的 supersede 随即取消在途
+    /// token 杀死该误燃握手（现场：`claude policy session: handshake failed:
+    /// cancelled`）。在途 run 的 followups 据此让位接力。
+    pub(crate) fn sc_author_rerun_delegated(&self) -> bool {
+        self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.single_candidate_phase
+                == Some(crate::product::models::SingleCandidatePhase::Generate)
+    }
+
     /// 将 SingleCandidate provider 的 markdown 原文通过 compiler 与 typed source store
     /// 落盘，并在 durable Evaluate 后启动阶段 1 的 reviewer 路由。
     pub(crate) async fn complete_single_candidate_work_item_plan_author(

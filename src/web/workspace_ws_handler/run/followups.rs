@@ -464,7 +464,26 @@ macro_rules! workspace_ws_provider_run_followups {
         $run_cancel:ident,
         $run_context_clone:ident
     ) => {{
-        while $engine.session().stage == WorkspaceStage::CrossReview {
+        loop {
+            if $engine.session().stage != WorkspaceStage::CrossReview {
+                break;
+            }
+            // SC 修订接力顶杀在途 run 根修（oracle 候选6）：CrossReview 对 SC 流
+            // 语义二义——phase=Evaluate 待驱评审（在途 run 自续 reviewer），
+            // phase=Generate 表示 policy 路由已把返修 author 重跑委托给
+            // ProviderRunRequested{WorkItemPlanSingleCandidateAuthor} 接力（唯一
+            // 接续路径）。委托态若仍按 stage 驱 reviewer，会误燃第二轮（候选已
+            // 裁决 revise），接力 spawn 的 supersede 随即取消在途 token 杀死该
+            // 误燃握手（现场：claude policy session: handshake failed: cancelled）。
+            // 让位接力，registry/节点由接力 run 接续。legacy 流不受影响。
+            if $engine.sc_author_rerun_delegated() {
+                tracing::debug!(
+                    session_id = %$engine.session().session_id,
+                    phase = ?$engine.session().single_candidate_phase,
+                    "single-candidate author rerun delegated; followups yields review loop to relay"
+                );
+                break;
+            }
             let reviewer_name = $engine
                 .session()
                 .reviewer_provider
