@@ -106,7 +106,7 @@ Skill 调用：Claude/Kimi 原生调用；Codex/pi/omp 清单选择后将用途�
 
 **覆盖率阈值**：80%（默认值）
 
-- **产物自动提交（design/plan/code）**：关闭
+- **产物自动提交（design/plan/code）**：打开
 
 ## 当前日期
 
