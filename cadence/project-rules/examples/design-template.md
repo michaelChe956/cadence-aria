@@ -30,26 +30,26 @@
 
 - [ ] 前端项目（Web/Client）
 - [ ] 后端项目（API/Service）
-- [ ] 全栈项目
+- [x] 全栈项目（本项目：Rust 服务 `aria` + React 前端 `web/`，发布为单一二进制内嵌前端）
 - [ ] 其他：[说明]
 
 ### 1.2 现有技术栈
 
 | 维度 | 当前技术 | 版本/备注 |
 |------|----------|-----------|
-| 语言 | [例如 TS / Java / Python / Go] | [版本] |
-| 框架 | [例如 React / Spring / FastAPI / Nest] | [版本] |
-| 数据访问 | [例如 MyBatis / JPA / Prisma / 无] | [备注] |
-| 通信方式 | [例如 REST / RPC / MQ / GraphQL] | [备注] |
-| 测试框架 | [例如 Vitest / JUnit / pytest] | [备注] |
+| 语言 | Rust（后端/核心）+ TypeScript（前端） | Rust edition 2024、stable 工具链（rustfmt + clippy，见 `rust-toolchain.toml`）；TS ^5.7 |
+| 框架 | axum + tokio（后端）；React 19 + Vite 6（前端） | axum 0.8（ws/multipart）；Zustand 5、TanStack Router/Virtual、Monaco、Tailwind 3.4 |
+| 数据访问 | 文件系统 + rust-embed 嵌入资源 | 无数据库；前端构建产物经 rust-embed 嵌入二进制 |
+| 通信方式 | HTTP + WebSocket（axum），serde/serde_json 契约 | 协议依赖 codex-protocol / codex-app-server-protocol（tag rust-v0.124.0） |
+| 测试框架 | cargo test（Rust）+ Vitest / Playwright（前端） | 集成测试 `tests/it_*`（it_web/it_core/it_product/it_interactive/it_provider/it_task_run）；Vitest ^2（jsdom + Testing Library）；Playwright ^1.49 e2e |
 
 ### 1.3 现有约定（禁止猜测）
 
-- 请求入参处理方式: [按项目填写]
-- 响应结构: [按项目填写，例如 `respCode/respDesc` 或 `code/message/data`]
-- 异常体系: [按项目填写]
-- 日志体系: [按项目填写]
-- 分层/目录组织: [按项目填写，示例 `routes -> services -> repositories`]
+- 请求入参处理方式: axum 提取器 + serde 反序列化（沿用现有 handler 风格）
+- 响应结构: HTTP JSON + WebSocket 消息，字段以 serde 类型定义为准（`src/protocol`、`src/web`）；禁止新造通用响应格式
+- 异常体系: `thiserror` 定义库内错误类型，`anyhow` 用于应用层传播
+- 日志体系: `tracing` 结构化日志
+- 分层/目录组织: 后端 `src/`：`cli.rs`/`daemon` → `product`/`task_run`/`interactive`/`runtime_units` → `web`（axum）+ `protocol` + `cross_cutting`；前端 `web/src`：React 组件 → Zustand store → HTTP/WS 客户端
 
 ### 1.4 兼容性边界
 
@@ -115,11 +115,13 @@
 
 ### 4.1 当前工程调用链（事实）
 
-`[按项目填写，例如 页面 -> hooks -> API 客户端 -> BFF]`
+后端（Rust，`src/`）：
 
-或
+`aria CLI（src/cli.rs）/ daemon（src/daemon）→ product / task_run / interactive / runtime_units 模块 → src/web（axum HTTP/WS）→ serde/protocol 类型`
 
-`[按项目填写，例如 controller -> service -> repository -> db]`
+前端（`web/src`）：
+
+`React 组件 → Zustand store → HTTP/WS 客户端 →（开发：vite 代理 dev-server-proxy / 发布：rust-embed 嵌入）→ aria 内嵌 web 服务`
 
 ### 4.2 本次变更落点
 
@@ -155,6 +157,7 @@
 ### 5.3 响应与输出设计
 
 > 必须使用本项目已存在的响应结构，不允许默认套某一种通用格式。
+> 本项目现役契约：axum handler 返回 serde 序列化的 JSON 与 WebSocket 消息；设计时先在 `src/protocol`、`src/web` 中找到现有类型并沿用。
 
 ```json
 {

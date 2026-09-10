@@ -3,6 +3,7 @@
 .aria/
 .mcp.json
 .codex/config.toml
+cadence/cache/mcp-availability/
 
 # Rust build/cache outputs
 target/

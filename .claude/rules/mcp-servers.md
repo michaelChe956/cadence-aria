@@ -1,18 +1,17 @@
+---
+description: MCP Server 与工具使用规则——联网、图片、浏览器自动化
+paths:
+  # 媒体触发：触图自动载；web-search/浏览器场景经 L0 路由必读
+  - "**/*.png"
+  - "**/*.jpg"
+  - "**/*.jpeg"
+  - "**/*.webp"
+  - "**/*.gif"
+  - "**/*.svg"
+---
 ## MCP Server 使用规则
 
 > **MCP 工具使用规范**
-
-### 网络搜索优先级规则
-
-> **🔴 强制优先级 - 无例外**
-
-当任务涉及**网络搜索**（获取实时信息、搜索技术文档、查找解决方案等）时：
-
-1. **必须首先使用 MiniMax Token Plan MCP**（`mcp__MiniMax__web_search`）
-2. **其他网络搜索工具**（如智普联网搜索 MCP）仅在 MiniMax 不可用或结果不满足需求时，**可尝试使用或不使用**
-3. 禁止跳过 MiniMax 直接使用其他网络搜索工具
-
----
 
 ### Time MCP
 
@@ -85,11 +84,11 @@
 - 需要理解某个功能跨文件如何工作
 - 需要分析调用链、依赖关系或影响面
 - 需要进行大范围代码检索
-- 需要回答"某功能从入口到落点如何流转"
+- 需要回答“某功能从入口到落点如何流转”
 
 **使用规则**：
-1. 项目必须先执行 `codegraph init`，存在 `.codegraph/` 后 CodeGraph MCP 才提供工具。
-2. 大范围检索优先使用 CodeGraph。
+1. CodeGraph 仅适用于 Coding 项目：仅当最终 `project_type=coding`，或用户明确启用 `--enable-codegraph` 时，才允许在项目根目录执行 `codegraph init`（存在 `.codegraph/` 后 CodeGraph MCP 才提供工具）。`project_type=non-coding` 默认跳过安装、初始化与配置，且该开关不改变项目类型与规则模板选择。
+2. Coding 项目在 CodeGraph 已启用且可用时，大范围检索优先使用 CodeGraph。
 3. 精确结构阅读优先使用 `ast-grep outline`。
 4. `ast-grep outline` 与 CodeGraph 结果冲突时，以 `ast-grep outline` 为准。
 
@@ -107,7 +106,28 @@ codegraph serve --mcp
 > 使用 CodeGraph 分析修改 UserService 会影响哪些模块
 ```
 
+### 图片识别路由与 MCP 可用性状态
+
+**模型能力判定**：图片任务必须将当前模型能力划分为 `multimodal`、`text-only` 或 `unknown`。判断只依据当前客户端是否实际将目标图片暴露给模型，不得根据模型或产品品牌推断；无法确认时为 `unknown`。
+
+**路由规则**：
+1. `multimodal` 且模型可直接访问图片时，必须使用模型自身能力处理图片；不得仅为识图调用或探测 MCP。
+2. `text-only`、`unknown` 或图片不可达时，才进入 MCP 图片识别路径。
+3. 智普与 MiniMax 没有固定服务优先级；两者都可用时按任务适配性或用户指定任选其一，一个不可用时可改用另一个，全部不可用时必须如实报告识图未完成及原因，不得伪装成功或输出未经识别的猜测内容。
+
+**可用性探测与任务范围缓存**：
+1. 进入 MCP 路径后，调用图片工具前必须确认客户端能发现对应 server、其图片工具可见并完成最小能力确认。首次对智普（`zai-mcp-server`）和 MiniMax 各探测一次；同一 `task-scope-id` 内每个 provider 至多探测一次。探测结论分别写入 `cadence/cache/mcp-availability/<task-scope-id>.json`；scope id 必须在任务开始时生成并在任务内复用。
+2. 每个 provider 分别独立记录，禁止合并为单一总布尔值。`status` 仅限 `unknown`、`available`、`unavailable` 三态：`available` 直接调用，`unavailable` 跳过且不得在同一 scope 内无限重试，`unknown` 允许按首次流程探测；本次调用失败后也不得在同一 scope 内对该 provider 反复重试。
+3. 缓存文件损坏、schema 版本不识别或 scope 不匹配时，相关状态一律视为 `unknown` 并允许重新探测；MCP 配置变更、客户端重连或用户显式要求重检时，既有记录同样失效。
+4. 状态记录仅可包含固定白名单字段：scope 标识、生成时间、provider 名称、status、探测时间、探测方式与原因。不得记录 API Key、Authorization 凭据、原始错误响应正文、图片内容、MCP 返回正文或敏感 URL。项目 `.gitignore` 必须精确包含一行 `cadence/cache/mcp-availability/`，以排除该目录而非整个 `cadence/cache/`。
+
+### 子代理兜底链
+
+若你是子代理（subagent/task 派生会话）：联网搜索优先使用原生 `web_search`；其不可用或失败时，检查你的工具面有无 MCP 搜索工具（如 `webSearchPrime`）并改用；两者皆不可用时，向主会话报告"搜索通道不可用"，由主会话接手，不得放弃任务或编造结果。主会话收到该报告后应自行完成搜索并回传结论；不得因通道不可用而丢弃子任务。
+
 ### 智普视觉理解 MCP（可选）
+
+图片任务必须先遵循《图片识别路由与 MCP 可用性状态》小节；本节排列顺序不代表服务优先级。
 
 **用途**：图像分析、视频理解、UI 截图转代码、OCR 文字提取、错误截图诊断
 
@@ -136,8 +156,11 @@ codegraph serve --mcp
 
 **使用规则**：
 1. 图片建议放到本地目录，通过对话指定图片名称或路径来调用
-2. 直接在客户端粘贴图片无法调用此 MCP（Claude Code 除外）
+2. 直接在客户端粘贴图片无法调用此 MCP（Claude Code 除外；pi 经 pi-mcp-adapter 调用时同样需通过本地路径指定图片）
 3. 需要安装最新版本（>= 0.1.2）
+4. 前提：Node.js 版本需 >= 18
+5. `npx` 可能命中旧缓存；排障时可一次性使用 `@z_ai/mcp-server@latest` 或清理 npx 缓存，配置中的 args 保持不变
+6. `Z_AI_MODE` 可选 `ZHIPU` 或 `ZAI`，本模板固定为 `ZHIPU`
 
 **典型工作流**：
 ```
@@ -154,20 +177,36 @@ codegraph serve --mcp
 > 分析 demo.mp4 中的操作流程
 ```
 
-### 智普联网搜索 MCP（备选）
+### 智普联网搜索 MCP（可选）
 
-**用途**：网络搜索、实时信息获取（MiniMax 不可用时的备选）
+**用途**：网络搜索、实时信息获取
 
 **触发场景**：
-- MiniMax Token Plan MCP 不可用或搜索结果不满足需求时
 - 需要搜索最新技术文档或解决方案
 - 获取实时信息（新闻、更新日志等）
 - 查找特定技术问题的最佳实践
 
+**工具列表**：
+
+| 工具名 | 功能 |
+|--------|------|
+| `webSearchPrime` | 搜索网络信息，返回网页标题、URL、摘要、网站名称等 |
+
 **使用规则**：
-1. **优先级**：仅在 MiniMax Token Plan MCP 之后使用
-2. 基于 HTTP 协议的远程服务，无需本地安装运行时
-3. 搜索结果包含标题、URL、摘要等结构化信息
+1. 基于 HTTP 协议的远程服务，无需本地安装运行时
+2. 搜索结果包含标题、URL、摘要等结构化信息
+
+**典型工作流**：
+```
+# 搜索技术方案
+> 帮我搜索 React Server Components 的最新最佳实践
+
+# 查找解决方案
+> 搜索 Node.js 内存泄漏的排查方法
+
+# 获取实时信息
+> 搜索 TypeScript 最新版本的新特性
+```
 
 ### 智普网页读取 MCP（可选）
 
@@ -188,6 +227,7 @@ codegraph serve --mcp
 **使用规则**：
 1. 基于 HTTP 协议的远程服务，无需本地安装运行时
 2. 返回结构化数据，包含标题、正文、元数据等
+3. 目标站点有反爬或登录墙时可能抓取失败，属预期结果，不要反复重试
 
 **典型工作流**：
 ```
@@ -222,6 +262,7 @@ codegraph serve --mcp
 **使用规则**：
 1. 基于 HTTP 协议的远程服务（基于 zread.ai），无需本地安装运行时
 2. 支持搜索文档、浏览结构、读取代码三种操作
+3. 仅支持公开 GitHub 仓库，且需已被 zread.ai 收录；未收录仓库查询失败属预期
 
 **典型工作流**：
 ```
@@ -238,23 +279,29 @@ codegraph serve --mcp
 > 搜索 prisma/prisma 仓库中关于连接池超时的 Issue
 ```
 
-### MiniMax Token Plan MCP（网络搜索首选）
+### 智普 MCP 通用说明（可选）
 
-**用途**：网络搜索（首选）和图片理解
+1. SSE 备用端点为 `https://open.bigmodel.cn/api/mcp/<name>/sse?Authorization=<KEY>`（`web_search_prime`、`web_reader`、`zread`），仅在 HTTP 端点不可用时临时排障使用；密钥出现在 URL 中会落入日志与 shell 历史，不得写入默认配置。
+2. Claude Code + GLM Coding Plan 场景下，服务端已内置联网搜索、网页读取和 `image_analysis`，可能与本地四个 server 的工具重复，可按需禁用；Codex、pi、Kimi 无内置能力，默认仍需这四个 server。
+
+### MiniMax Token Plan MCP（可选）
+
+图片任务必须先遵循《图片识别路由与 MCP 可用性状态》小节；本节排列顺序不代表服务优先级。
+
+**用途**：网络搜索和图片理解
 
 **触发场景**：
-- **所有网络搜索需求必须优先使用**
-- 需要搜索获取实时信息
+- 需要网络搜索获取实时信息
 - 需要理解和分析图片内容
 
 **前置条件**：需要 `uvx`（pre-check 已包含检查）
 
 **工具列表**：
 
-| 工具名 | 功能 | 优先级 |
-|--------|------|--------|
-| `web_search` | 网络搜索，获取实时信息 | **🔴 首选 - 必须优先使用** |
-| `understand_image` | 图片理解和分析 | 可选 |
+| 工具名 | 功能 |
+|--------|------|
+| `web_search` | 网络搜索，获取实时信息 |
+| `understand_image` | 图片理解和分析 |
 
 **环境变量**：
 
@@ -266,13 +313,12 @@ codegraph serve --mcp
 | `MINIMAX_API_RESOURCE_MODE` | 资源提供方式：`url` 或 `local`，默认 `url` | 否 |
 
 **使用规则**：
-1. **网络搜索时必须优先调用本工具的 `web_search`**
-2. 基于 uvx 运行的本地 MCP 服务
-3. 验证配置：进入 Claude Code 后输入 `/mcp`，能看到 `web_search` 和 `understand_image` 说明配置成功
+1. 基于 uvx 运行的本地 MCP 服务
+2. 验证配置：在 Claude Code 或 pi 中输入 `/mcp`（pi 的 `/mcp` 由 pi-mcp-adapter 提供），能看到 `web_search` 和 `understand_image` 说明配置成功
 
 **典型工作流**：
 ```
-# 网络搜索（首选）
+# 网络搜索
 > 搜索 Python 3.12 的新特性有哪些
 
 # 图片理解
@@ -282,9 +328,10 @@ codegraph serve --mcp
 ### 智普/MiniMax API Key 安全提醒
 
 > **安全警告**
-> 1. 请自行前往对应平台获取 API Key，不要将真实密钥告诉 Claude Code
+> 1. 请自行前往对应平台获取 API Key，不要将真实密钥告诉 AI 客户端（Claude Code、Codex、pi、Kimi 等）
 > 2. 配置文件中使用占位符，用户需自行替换为真实密钥
 > 3. `.mcp.json` 已在 `.gitignore` 中排除，不会提交到版本控制
+> 4. 团队版 Coding Plan Key 与智谱平台其他 API Key 不通用；使用团队额度必须使用团队套餐 Key，个人/团队 Key 获取入口不同。
 >
 > - 智普 API Key 获取地址：https://open.bigmodel.cn/usercenter/apikeys
 > - MiniMax API Key 获取地址：https://platform.minimaxi.com/subscribe/token-plan
