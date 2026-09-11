@@ -1,0 +1,375 @@
+{
+  "type": "artifact_update",
+  "version": 14,
+  "plan_projection": {
+    "id": "plan_projection_bundle_d6ccc634d41d08e2563f49b1",
+    "plan_revision_id": "plan_revision_d6ccc634d41d08e2563f49b1",
+    "dependency_graph_revision_id": "dependency_graph_revision_d6ccc634d41d08e2563f49b1",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_12eb6cb0c1602ca7cb4c873e",
+      "work_item_projection_bundle_8eeba39bd0b576720f32c559",
+      "work_item_projection_bundle_a7c27502fd860899ab4e2a8b"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "后端关卡列表 API 与静态托管服务",
+          "goal": "WHEN 收到 /api/levels 或静态资源请求 THE SYSTEM SHALL 以仅使用 Node 内置模块的单进程服务返回长度为 5 的关卡数组、静态页面与统一 JSON 错误响应。",
+          "depends_on": [],
+          "provides": [
+            "CT-001"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ],
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "title": "原生关卡选择页与可测试渲染逻辑",
+          "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 先显示加载提示、经相对路径 /api/levels 渲染关卡名称难度与锁定态并在请求失败或响应无效时保留页面框架显示可读错误。",
+          "depends_on": [
+            "WI-001"
+          ],
+          "provides": [
+            "CT-002"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "title": "前后端同源集成验证",
+          "goal": "WHEN 以 start({port:0}) 启动同一 Node 服务 THE SYSTEM SHALL 以 HTTP 可观测证据验证同源页面入口、/api/levels 契约形状与 404 错误形状且不重复前端渲染断言。",
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "provides": [
+            "CT-003"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "tests/integration/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "GET /api/levels 成功时返回 200 且 Content-Type 为 application/json; charset=utf-8 的顶层数组，长度为 5",
+            "关卡数据读取或校验失败时返回 500 且返回 code 为 LEVEL_DATA_UNAVAILABLE 的 JSON 错误体且 Content-Type 为 application/json; charset=utf-8",
+            "数组元素字段满足 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值仅可为 简单 或 普通 或 困难 且 unlocked 为布尔值"
+          ],
+          "provided_capabilities": [
+            "GET / 返回 staticRoot 下静态页面且静态资源缺失返回 404 文本响应",
+            "GET /api/levels 成功时返回 200 且 Content-Type 为 application/json; charset=utf-8 的顶层数组，长度为 5",
+            "createServer(options) 可注入 dataPath 与 staticRoot 且 start({port}) 返回 Promise 且 resolve 值含 origin 与 port 与 stop 且 port 为 0 时使用临时端口",
+            "关卡数据读取或校验失败时返回 500 且返回 code 为 LEVEL_DATA_UNAVAILABLE 的 JSON 错误体且 Content-Type 为 application/json; charset=utf-8",
+            "数组元素字段满足 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值仅可为 简单 或 普通 或 困难 且 unlocked 为布尔值",
+            "未知 API 路径返回 404 JSON 错误体且非允许方法返回 405 JSON 错误体",
+            "错误响应示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"，\"message\":\"暂时无法加载关卡数据，请稍后重试\"}}"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "GET / 返回 staticRoot 下静态页面且静态资源缺失返回 404 文本响应",
+            "createServer(options) 可注入 dataPath 与 staticRoot 且 start({port}) 返回 Promise 且 resolve 值含 origin 与 port 与 stop 且 port 为 0 时使用临时端口",
+            "未知 API 路径返回 404 JSON 错误体且非允许方法返回 405 JSON 错误体"
+          ],
+          "provided_capabilities": [
+            "GET / 返回 staticRoot 下静态页面且静态资源缺失返回 404 文本响应",
+            "GET /api/levels 成功时返回 200 且 Content-Type 为 application/json; charset=utf-8 的顶层数组，长度为 5",
+            "createServer(options) 可注入 dataPath 与 staticRoot 且 start({port}) 返回 Promise 且 resolve 值含 origin 与 port 与 stop 且 port 为 0 时使用临时端口",
+            "关卡数据读取或校验失败时返回 500 且返回 code 为 LEVEL_DATA_UNAVAILABLE 的 JSON 错误体且 Content-Type 为 application/json; charset=utf-8",
+            "数组元素字段满足 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值仅可为 简单 或 普通 或 困难 且 unlocked 为布尔值",
+            "未知 API 路径返回 404 JSON 错误体且非允许方法返回 405 JSON 错误体",
+            "错误响应示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"，\"message\":\"暂时无法加载关卡数据，请稍后重试\"}}"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "contract_id": "CT-002",
+          "required_capabilities": [
+            "web/level-select.js 包含对相对路径 /api/levels 的请求调用"
+          ],
+          "provided_capabilities": [
+            "web/index.html 包含容器标记 id=loading、id=level-list、id=error-message",
+            "web/index.html 通过 script 标签引用 web/level-select.js",
+            "web/level-select.js 包含对相对路径 /api/levels 的请求调用",
+            "web/level-select.js 导出 initLevelSelect({document，fetchImpl})"
+          ],
+          "missing_capabilities": []
+        }
+      ],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 成功时返回 200 且 Content-Type 为 application/json; charset=utf-8 的顶层数组，长度为 5",
+                "关卡数据读取或校验失败时返回 500 且返回 code 为 LEVEL_DATA_UNAVAILABLE 的 JSON 错误体且 Content-Type 为 application/json; charset=utf-8",
+                "数组元素字段满足 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值仅可为 简单 或 普通 或 困难 且 unlocked 为布尔值"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET / 返回 staticRoot 下静态页面且静态资源缺失返回 404 文本响应",
+                "createServer(options) 可注入 dataPath 与 staticRoot 且 start({port}) 返回 Promise 且 resolve 值含 origin 与 port 与 stop 且 port 为 0 时使用临时端口",
+                "未知 API 路径返回 404 JSON 错误体且非允许方法返回 405 JSON 错误体"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "web/level-select.js 包含对相对路径 /api/levels 的请求调用"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004",
+            "AC-005"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "criterion_refs": [
+            "AC-006",
+            "AC-007",
+            "AC-008",
+            "AC-009"
+          ],
+          "input_contract_refs": [
+            "CT-001"
+          ],
+          "output_contract_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "criterion_refs": [
+            "AC-010",
+            "AC-011",
+            "AC-012"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002"
+          ],
+          "output_contract_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 成功时返回 200 且 Content-Type 为 application/json; charset=utf-8 的顶层数组，长度为 5",
+                "关卡数据读取或校验失败时返回 500 且返回 code 为 LEVEL_DATA_UNAVAILABLE 的 JSON 错误体且 Content-Type 为 application/json; charset=utf-8",
+                "数组元素字段满足 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值仅可为 简单 或 普通 或 困难 且 unlocked 为布尔值"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET / 返回 staticRoot 下静态页面且静态资源缺失返回 404 文本响应",
+                "createServer(options) 可注入 dataPath 与 staticRoot 且 start({port}) 返回 Promise 且 resolve 值含 origin 与 port 与 stop 且 port 为 0 时使用临时端口",
+                "未知 API 路径返回 404 JSON 错误体且非允许方法返回 405 JSON 错误体"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "web/level-select.js 包含对相对路径 /api/levels 的请求调用"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "NFR-001"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-002"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-003"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-004"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-005"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-006"
+        }
+      ]
+    },
+    "human_group_projection_hash": "10990ee68b897bc459f41a16bfdaeb21419b6aceeac3fc0aa81b1a859f578f69",
+    "coder_group_context_hash": "01494f00c3b7780e7915520d9843787d581d3a96fec08babd7bd7ca9ed5b1cb3",
+    "reviewer_group_matrix_hash": "e55f30718845d975e5493c87df20df9296b1fff480b800e65b47678415d63933",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-10T21:57:19.620143980+00:00"
+  }
+}

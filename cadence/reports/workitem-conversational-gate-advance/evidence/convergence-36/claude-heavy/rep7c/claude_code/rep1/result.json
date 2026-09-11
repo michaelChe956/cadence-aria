@@ -1,0 +1,498 @@
+{
+  "provider": "claude_code",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/claude-heavy-v15/rep7c/claude_code/rep1",
+  "startedAt": "2026-09-10T23:51:10.430Z",
+  "finishedAt": "2026-09-11T00:16:36.554Z",
+  "elapsedSec": 1526.123,
+  "issue_id": "issue_0207",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0295",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "claude_code",
+    "reviewer_provider": "claude_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.068,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.121,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 462.45,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 593.479,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 671.081,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1288.141,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1411.486,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1522.316,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1525.917,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 1525.962,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 593.479,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "AC-003 与 AC-012 未被任何 task 的 done_when_refs 引用，其实质内容已分别由 TASK-005 与 TASK-012 的 statement 覆盖，建议补充引用以保验收可追溯，不阻断发布。",
+          "evidence": "WI-001 各 task 的 done_when_refs 覆盖 AC-001/002/004/005/006 而缺 AC-003；WI-003 各 task 的 done_when_refs 覆盖 AC-011/013/014 而缺 AC-012。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "机械 warning integration_or_e2e_skipped_risk 属非阻断：前端测试明示不启动浏览器且无浏览器级 e2e，如需可在 CHECK-002/CHECK-003 增加 manual_instruction 人工验证项，不影响本候选发布。",
+          "evidence": "Projection Validation Report findings[0]（severity=warning、work_item_ids 为空）；CHECK-002 与 CHECK-003 的 manual_instruction 均为 null。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 970.955,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "CT-001 的 capability 长文本在内嵌错误体 JSON 示例的逗号处被误切分为两条数组元素：首条以未闭合的 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\" 截断，次条 \"message\":\"暂时无法加载关卡数据，请稍后重试\"}} 并非独立 capability，canonical 契约字段以损坏形态发布影响产物完整性与可读性；因 provider 与 consumer 双侧逐字一致，coverage 的 missing_capabilities 为空未触发既有 contract_gap 机械规则，属机械校验漏网的契约硬缺陷。",
+          "evidence": "同一损坏形态同时存在于：WI-001.output_contracts[CT-001].capabilities、WI-002 与 WI-003 的 input_contracts[CT-001].required_capabilities、projection coverage 中 WI-001 -> WI-002 与 WI-001 -> WI-003 边（contract_id=CT-001）的 required/provided capabilities、dependency_graph.contract_edges 及 Cross-Item Contract Supply/Demand 的 supplies/demands。",
+          "required_action": "将被逗号误切分的两条合并回单条完整 capability（或移除/改写内嵌 JSON 示例以消除切分歧义），provider 与 consumer 两侧及 coverage/edges/供需清单同步修正并保持逐字一致。",
+          "category": "other",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[CT-001].capabilities 与 input_contracts[CT-001].required_capabilities"
+        },
+        {
+          "severity": "suggestion",
+          "message": "AC-001 的 GET /api/levels 200 数组行为实际由 TASK-005 实现但其 done_when_refs 仅挂 AC-004，而 AC-001 唯一挂在仅创建数据夹具的 TASK-001；同理 AC-012 的断言在 TASK-012 而 done_when_refs 仅挂 AC-013，按 done_when 归因时 AC-001/AC-012 的实现归属失准。",
+          "evidence": "WI-001：TASK-001.done_when_refs=[AC-001] 而 statement 仅创建 data/levels.json；TASK-005.statement 含提供 GET /api/levels 的 200 数组响应但 done_when_refs=[AC-004]。WI-003：TASK-012.statement 含断言 /api/levels 的 200 数组形状但 done_when_refs=[AC-013]。",
+          "required_action": "在 TASK-005.done_when_refs 增补 AC-001、TASK-012.done_when_refs 增补 AC-012，或将两 AC 挂接到对应实现/断言任务。",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "tasks[TASK-005].done_when_refs 与 tasks[TASK-012].done_when_refs"
+        },
+        {
+          "severity": "suggestion",
+          "message": "WI-003 的 AC-013/TASK-012 需以夹具 dataPath 注入启动真实服务断言 500 响应，但跨 WorkItem 可依赖的 CT-002 仅声明 start/port/stop 生命周期，dataPath 注入面未进入任何输出契约（仅 WI-001 内部 AC-002/TASK-003 隐含），建议补声明以免集成侧依赖口径不足。",
+          "evidence": "CT-002.capabilities 仅含 start 返回 Promise 且 resolve 为 origin/port/stop 的生命周期描述；WI-003.input_contracts 亦未将 dataPath 注入列为 required_capabilities，而 AC-013 与 TASK-012 的验证步骤显式依赖夹具 dataPath 注入。",
+          "required_action": "在 CT-002.capabilities 补充 createServer/start 支持 dataPath 注入的能力声明，并在 WI-003 对应 input_contracts 的 required_capabilities 同步声明。",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts[CT-002].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 3,
+      "elapsedSec": 1288.14,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械告警 integration_or_e2e_skipped_risk 属完备度建议：本计划已用 node --test tests/integration/ 以 port 0 真实启动同源服务的 HTTP 级验证替代浏览器 e2e，不构成阻断或必须修复项",
+          "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk（severity=warning，error_count=0）；WI-003 CHECK-003 non_zero_test_execution_required=true 覆盖 AC-011/012/013",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "AC-003、AC-004 与 AC-013 未被任何 task 的 done_when_refs 直接引用，仅由 TASK-002/TASK-005 与 TASK-012 的 statement 文字及 CHECK-001/CHECK-003 间接覆盖，属可追溯性完备度建议而非契约缺口或自相矛盾",
+          "evidence": "WI-001 各 task done_when_refs 仅含 AC-001/002/005/006，WI-003 各 task 仅含 AC-011/012/014；静态托管与 404/405 行为由 TASK-002、TASK-005 statement 约束，夹具注入 500 行为由 TASK-010、TASK-012 statement 约束",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 4,
+      "elapsedSec": 1522.316,
+      "findings": []
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "suggestion",
+      "message": "AC-003 与 AC-012 未被任何 task 的 done_when_refs 引用，其实质内容已分别由 TASK-005 与 TASK-012 的 statement 覆盖，建议补充引用以保验收可追溯，不阻断发布。",
+      "evidence": "WI-001 各 task 的 done_when_refs 覆盖 AC-001/002/004/005/006 而缺 AC-003；WI-003 各 task 的 done_when_refs 覆盖 AC-011/013/014 而缺 AC-012。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械 warning integration_or_e2e_skipped_risk 属非阻断：前端测试明示不启动浏览器且无浏览器级 e2e，如需可在 CHECK-002/CHECK-003 增加 manual_instruction 人工验证项，不影响本候选发布。",
+      "evidence": "Projection Validation Report findings[0]（severity=warning、work_item_ids 为空）；CHECK-002 与 CHECK-003 的 manual_instruction 均为 null。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "must_fix",
+      "message": "CT-001 的 capability 长文本在内嵌错误体 JSON 示例的逗号处被误切分为两条数组元素：首条以未闭合的 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\" 截断，次条 \"message\":\"暂时无法加载关卡数据，请稍后重试\"}} 并非独立 capability，canonical 契约字段以损坏形态发布影响产物完整性与可读性；因 provider 与 consumer 双侧逐字一致，coverage 的 missing_capabilities 为空未触发既有 contract_gap 机械规则，属机械校验漏网的契约硬缺陷。",
+      "evidence": "同一损坏形态同时存在于：WI-001.output_contracts[CT-001].capabilities、WI-002 与 WI-003 的 input_contracts[CT-001].required_capabilities、projection coverage 中 WI-001 -> WI-002 与 WI-001 -> WI-003 边（contract_id=CT-001）的 required/provided capabilities、dependency_graph.contract_edges 及 Cross-Item Contract Supply/Demand 的 supplies/demands。",
+      "required_action": "将被逗号误切分的两条合并回单条完整 capability（或移除/改写内嵌 JSON 示例以消除切分歧义），provider 与 consumer 两侧及 coverage/edges/供需清单同步修正并保持逐字一致。",
+      "category": "other",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[CT-001].capabilities 与 input_contracts[CT-001].required_capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "AC-001 的 GET /api/levels 200 数组行为实际由 TASK-005 实现但其 done_when_refs 仅挂 AC-004，而 AC-001 唯一挂在仅创建数据夹具的 TASK-001；同理 AC-012 的断言在 TASK-012 而 done_when_refs 仅挂 AC-013，按 done_when 归因时 AC-001/AC-012 的实现归属失准。",
+      "evidence": "WI-001：TASK-001.done_when_refs=[AC-001] 而 statement 仅创建 data/levels.json；TASK-005.statement 含提供 GET /api/levels 的 200 数组响应但 done_when_refs=[AC-004]。WI-003：TASK-012.statement 含断言 /api/levels 的 200 数组形状但 done_when_refs=[AC-013]。",
+      "required_action": "在 TASK-005.done_when_refs 增补 AC-001、TASK-012.done_when_refs 增补 AC-012，或将两 AC 挂接到对应实现/断言任务。",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "tasks[TASK-005].done_when_refs 与 tasks[TASK-012].done_when_refs"
+    },
+    {
+      "severity": "suggestion",
+      "message": "WI-003 的 AC-013/TASK-012 需以夹具 dataPath 注入启动真实服务断言 500 响应，但跨 WorkItem 可依赖的 CT-002 仅声明 start/port/stop 生命周期，dataPath 注入面未进入任何输出契约（仅 WI-001 内部 AC-002/TASK-003 隐含），建议补声明以免集成侧依赖口径不足。",
+      "evidence": "CT-002.capabilities 仅含 start 返回 Promise 且 resolve 为 origin/port/stop 的生命周期描述；WI-003.input_contracts 亦未将 dataPath 注入列为 required_capabilities，而 AC-013 与 TASK-012 的验证步骤显式依赖夹具 dataPath 注入。",
+      "required_action": "在 CT-002.capabilities 补充 createServer/start 支持 dataPath 注入的能力声明，并在 WI-003 对应 input_contracts 的 required_capabilities 同步声明。",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts[CT-002].capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械告警 integration_or_e2e_skipped_risk 属完备度建议：本计划已用 node --test tests/integration/ 以 port 0 真实启动同源服务的 HTTP 级验证替代浏览器 e2e，不构成阻断或必须修复项",
+      "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk（severity=warning，error_count=0）；WI-003 CHECK-003 non_zero_test_execution_required=true 覆盖 AC-011/012/013",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "AC-003、AC-004 与 AC-013 未被任何 task 的 done_when_refs 直接引用，仅由 TASK-002/TASK-005 与 TASK-012 的 statement 文字及 CHECK-001/CHECK-003 间接覆盖，属可追溯性完备度建议而非契约缺口或自相矛盾",
+      "evidence": "WI-001 各 task done_when_refs 仅含 AC-001/002/005/006，WI-003 各 task 仅含 AC-011/012/014；静态托管与 404/405 行为由 TASK-002、TASK-005 statement 约束，夹具注入 500 行为由 TASK-010、TASK-012 statement 约束",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 26039,
+      "output_tokens": 4355,
+      "cache_read_tokens": 67072,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json",
+    "artifact-v10.json",
+    "artifact-v11.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 1,
+    "manual_repairs_used": 0,
+    "transitions_used": 3,
+    "initial_review_count": 4,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_009": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 1,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-11T00:01:03.910Z",
+      "elapsedSec": 593.48,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_004",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-16e94ebcea",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-11T00:01:03.911Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-11T00:12:38.571Z",
+      "elapsedSec": 1288.14,
+      "stage": "cross_review",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_007",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-20d5c7de45",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-11T00:12:38.571Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-11T00:16:32.747Z",
+      "elapsedSec": 1522.316,
+      "stage": "cross_review",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_009",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-11T00:16:32.747Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-16e94ebcea",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_4a9c1910-f575-4483-b287-48e331b2662b",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_002"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-20d5c7de45",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_7fee21b8-dce0-4506-afde-c7adc95b885d",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_004"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 3,
+      "command_id": "cmd-advance-3-5b36363ee1",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_41902716f250467598ef1065280db2ef",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0207"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0295:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_4a9c1910-f575-4483-b287-48e331b2662b:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0295:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_7fee21b8-dce0-4506-afde-c7adc95b885d:attempt:1",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0295:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_4a9c1910-f575-4483-b287-48e331b2662b:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0295:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_7fee21b8-dce0-4506-afde-c7adc95b885d:attempt:1",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 4,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0295:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_4a9c1910-f575-4483-b287-48e331b2662b:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0295:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_7fee21b8-dce0-4506-afde-c7adc95b885d:attempt:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 1526123,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.053,
+    "1:running": 461.329,
+    "2:cross_review": 131.029,
+    "3:human_confirm": 77.602,
+    "4:cross_review": 617.06,
+    "5:human_confirm": 123.345,
+    "6:cross_review": 110.83,
+    "7:human_confirm": 3.601,
+    "8:running": 0.045,
+    "9:completed": 0.161
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

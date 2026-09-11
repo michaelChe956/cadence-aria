@@ -1,0 +1,409 @@
+{
+  "type": "artifact_update",
+  "version": 13,
+  "plan_projection": {
+    "id": "plan_projection_bundle_8b26db1187fbb58a83a79178",
+    "plan_revision_id": "plan_revision_8b26db1187fbb58a83a79178",
+    "dependency_graph_revision_id": "dependency_graph_revision_8b26db1187fbb58a83a79178",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_40a615189492f3c9962b21b5",
+      "work_item_projection_bundle_b9605504f5afc1af4b3ff03c",
+      "work_item_projection_bundle_58817594c3971c60684dadb9"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "实现关卡列表 API 与静态托管服务",
+          "goal": "WHEN 服务经 start 启动 THE SYSTEM SHALL 以 Node 内置模块在同一进程提供 GET /api/levels 关卡数据接口与 staticRoot 静态页面托管。",
+          "depends_on": [],
+          "provides": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ],
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "title": "实现关卡选择页与可测试渲染逻辑",
+          "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 经 GET /api/levels 渲染关卡名称与难度并在失败或数据无效时保留页面框架展示可读错误提示。",
+          "depends_on": [
+            "WI-001"
+          ],
+          "provides": [
+            "CT-004"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "title": "前后端同源联调验证",
+          "goal": "WHEN 以测试端口启动同一服务 THE SYSTEM SHALL 在同一 origin 验证页面入口与 GET /api/levels 同源可达且契约与错误形状符合 CT-001 与 CT-004。",
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "provides": [
+            "CT-005"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "tests/integration/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "provided_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "provided_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-002",
+          "required_capabilities": [
+            "stop 返回 Promise 且释放端口监听"
+          ],
+          "provided_capabilities": [
+            "stop 返回 Promise 且释放端口监听"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-003",
+          "required_capabilities": [
+            "静态资源按请求路径返回文件内容与对应 Content-Type"
+          ],
+          "provided_capabilities": [
+            "静态资源按请求路径返回文件内容与对应 Content-Type"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "contract_id": "CT-004",
+          "required_capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "provided_capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "missing_capabilities": []
+        }
+      ],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "stop 返回 Promise 且释放端口监听"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "静态资源按请求路径返回文件内容与对应 Content-Type"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js 以相对路径引用 /api/levels"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004",
+            "AC-005",
+            "AC-006",
+            "AC-007"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "criterion_refs": [
+            "AC-008",
+            "AC-009",
+            "AC-010",
+            "AC-011"
+          ],
+          "input_contract_refs": [
+            "CT-001"
+          ],
+          "output_contract_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "criterion_refs": [
+            "AC-012",
+            "AC-013",
+            "AC-014",
+            "AC-015"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003",
+            "CT-004"
+          ],
+          "output_contract_refs": [
+            "CT-005"
+          ]
+        }
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "stop 返回 Promise 且释放端口监听"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "静态资源按请求路径返回文件内容与对应 Content-Type"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js 以相对路径引用 /api/levels"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "NFR-001"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-002"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-003"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-004"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-005"
+        },
+        {
+          "source_type": "design_spec",
+          "source_id": "design_spec_0001",
+          "requirement_id": "REQ-006"
+        }
+      ]
+    },
+    "human_group_projection_hash": "610e1ab165278b93f1ad4bd3161b077f300536c1e06d74f5caccac45f22229c2",
+    "coder_group_context_hash": "7f4b5815277ff15d3592c95147bda5c93f4467dc906938c06221db274451834c",
+    "reviewer_group_matrix_hash": "947fa5d975c27c6ebb96f2f31336fa6febcd2bc378c4cb07eb016a811366d158",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-10T20:50:58.882244522+00:00"
+  }
+}

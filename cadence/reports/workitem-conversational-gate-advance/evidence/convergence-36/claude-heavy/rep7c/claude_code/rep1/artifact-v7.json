@@ -1,0 +1,308 @@
+{
+  "type": "artifact_update",
+  "version": 7,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_f3e13c658babecdbc07fd5e6",
+    "work_item_revision_id": "work_item_revision_f3e13c658babecdbc07fd5e6",
+    "canonical_contract_hash": "3ccdcb7f7c13bce72a23bc72e4ce20fb7de72239124197f63582f6eaca25a202",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "关卡选择页与渲染异常处理",
+      "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 调用 /api/levels 渲染 5 个关卡的名称难度与锁定态并在请求或响应异常时展示可读错误且不白屏",
+      "non_goals": [
+        "不实现后端服务与数据文件",
+        "不引入浏览器自动化、npm 依赖或测试框架",
+        "不实现关卡玩法逻辑"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "level-select.js 经同源 HTTP 可达且以相对路径 /api/levels 发起数据请求"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 读取 web/index.html THE SYSTEM SHALL 存在 id 为 loading 与 level-list 与 error-message 的三个容器并以 script 引用 level-select.js",
+        "WHEN 以 DOM 替身调用 initLevelSelect 且注入 fetch 替身返回合法数组 THE SYSTEM SHALL 渲染 5 项名称与难度且 unlocked 为 false 的项呈锁定不可选",
+        "WHEN 注入 fetch 替身失败或返回非 200 或非数组或字段不满足 EXE-006 THE SYSTEM SHALL 进入错误提示分支且保留页面框架且不抛出未捕获异常",
+        "WHEN 运行 node --test tests/frontend/ THE SYSTEM SHALL 全部通过且测试数大于零且不启动浏览器"
+      ],
+      "source_refs": [
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "AC-010",
+        "CHECK-002",
+        "CT-001",
+        "CT-003",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-006",
+        "TASK-007",
+        "TASK-008",
+        "TASK-009"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_f3e13c658babecdbc07fd5e6",
+      "objective": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 调用 /api/levels 渲染 5 个关卡的名称难度与锁定态并在请求或响应异常时展示可读错误且不白屏",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-006",
+        "TASK-007",
+        "TASK-008",
+        "TASK-009"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-006",
+          "statement": "WHEN 构建页面骨架 THE SYSTEM SHALL 创建 web/index.html 且包含 id 为 loading 与 level-list 与 error-message 的三个容器并以 script 引用 level-select.js 且加载时调用 initLevelSelect",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-007"
+          ]
+        },
+        {
+          "task_id": "TASK-007",
+          "statement": "WHEN 实现页面脚本 THE SYSTEM SHALL 使 web/level-select.js 导出 initLevelSelect({document, fetchImpl}) 且先以 DOM 替身与注入 fetch 替身编写渲染、锁定态与错误分支的失败 node --test 测试",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-010"
+          ]
+        },
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN 页面运行 THE SYSTEM SHALL 先展示加载态再将合法响应渲染为含名称与难度的列表且 unlocked 为 false 的项锁定不可选",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-008"
+          ]
+        },
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN fetch 失败或响应非 200 或非数组或字段不满足 EXE-006 THE SYSTEM SHALL 保留页面框架并在 error-message 容器展示可读错误且不抛出未捕获异常",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-009"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-007",
+          "statement": "WHEN 读取 web/index.html THE SYSTEM SHALL 存在 id 为 loading 与 level-list 与 error-message 的三个容器并以 script 引用 level-select.js",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-008",
+          "statement": "WHEN 以 DOM 替身调用 initLevelSelect 且注入 fetch 替身返回合法数组 THE SYSTEM SHALL 渲染 5 项名称与难度且 unlocked 为 false 的项呈锁定不可选",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-009",
+          "statement": "WHEN 注入 fetch 替身失败或返回非 200 或非数组或字段不满足 EXE-006 THE SYSTEM SHALL 进入错误提示分支且保留页面框架且不抛出未捕获异常",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-010",
+          "statement": "WHEN 运行 node --test tests/frontend/ THE SYSTEM SHALL 全部通过且测试数大于零且不启动浏览器",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend/",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "page_entry_path",
+          "container_marker_ids",
+          "script_path",
+          "init_level_select_signature"
+        ],
+        "provided_contract_refs": [
+          "CT-003"
+        ],
+        "reviewer_check_refs": [
+          "AC-007",
+          "AC-008",
+          "AC-009",
+          "AC-010"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_f3e13c658babecdbc07fd5e6",
+      "criterion_refs": [
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "AC-010"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-007",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-008",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-009",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-010",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "level-select.js 经同源 HTTP 可达且以相对路径 /api/levels 发起数据请求"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend/",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "4e79cd586500ab2140cb3e328b782e414d632859a9ac50c34054522c774e3f28",
+    "coder_projection_hash": "f5e0ac4c8b2037f669b9305463acf9507720b3a089af689117e5dfd71442d3b7",
+    "reviewer_projection_hash": "b8eb55d1eae92b418cfbd722a498b47ca5d34b9d44a17516c5e109484784df90",
+    "created_at": "2026-09-11T00:16:32.811569193+00:00"
+  }
+}
