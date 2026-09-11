@@ -1,0 +1,176 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_796b792ee7f8ec8df6b7eecc",
+    "work_item_revision_id": "work_item_revision_796b792ee7f8ec8df6b7eecc",
+    "canonical_contract_hash": "eeb84de1cea66991e6593dd3e727d43def61f4f6e2d2db3f315acae2a6914818",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "Hello API 最小后端服务",
+      "goal": "WHEN 服务收到 GET /api/hello 请求 THE SYSTEM SHALL 在运行时读取仓库根目录 config/hello.json 的 message 字段并返回 200 且 body 恰为该文件完整 JSON 内容。",
+      "non_goals": [
+        "不引入第三方依赖、数据库、认证、外部服务或前端页面，不实现 GET /api/hello 之外的任何接口，不创建、修改或提交 config/ 下任何文件。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "错误响应示例：{\"error\":\"internal\"}"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "config/",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN config/hello.json 就位且收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且 body 恰为该文件的完整 JSON 内容。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "TASK-002",
+        "design_requirement_placeholder"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_796b792ee7f8ec8df6b7eecc",
+      "objective": "WHEN 服务收到 GET /api/hello 请求 THE SYSTEM SHALL 在运行时读取仓库根目录 config/hello.json 的 message 字段并返回 200 且 body 恰为该文件完整 JSON 内容。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 在仓库根目录执行 node --test THE SYSTEM SHALL 在 test/hello.test.js 中以子进程启动 server.js 并对 http://127.0.0.1:3000/api/hello 发起 GET 请求，断言状态码为 200 且 body 恰为 config/hello.json 的完整 JSON 内容。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 收到 GET /api/hello 请求 THE SYSTEM SHALL 由仅使用 node:http 的 server.js 监听 127.0.0.1:3000，在运行时读取 config/hello.json 的 message 字段并返回 200 且 body 恰为该文件完整 JSON 内容，内部错误时返回 500 且 body 为 {\"error\":\"internal\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "config/",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN config/hello.json 就位且收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且 body 恰为该文件的完整 JSON 内容。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_796b792ee7f8ec8df6b7eecc",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "config/",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "错误响应示例：{\"error\":\"internal\"}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "9b9d9c02dcb5c5bc4afff4538af2c602262570c59b6b6ecb57c2df635bd4e236",
+    "coder_projection_hash": "6340f4080c40236da1d3a1aec83e160f09b27e3ea325a7bac589c1925e31ddd0",
+    "reviewer_projection_hash": "eed91940fffb2b841398fd2a4c0c02965108af94514d6cc4c2a2a979a93cca90",
+    "created_at": "2026-09-11T09:46:48.721564456+00:00"
+  }
+}

@@ -1,0 +1,196 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_0ef26bea62def328f6cab520",
+    "work_item_revision_id": "work_item_revision_0ef26bea62def328f6cab520",
+    "canonical_contract_hash": "04eb6e445c197bfd754f5a502f59b7615625ba9882a56832184a63e3ac643f4d",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "Hello API 最小问候接口",
+      "goal": "WHEN config/hello.json 就位且收到 GET /api/hello 请求 THE SYSTEM SHALL 读取该文件并以 200 返回其完整 JSON 内容。",
+      "non_goals": [
+        "不引入任何第三方依赖、数据库、认证、外部服务或前端页面。",
+        "不实现 config/hello.json 缺失时的替代问候路径或任何绕过验收的降级逻辑。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "服务以 node:http 监听 127.0.0.1:3000"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "config/",
+          "package.json",
+          "node_modules/"
+        ]
+      },
+      "completion_summary": [
+        "WHEN config/hello.json 就位为 {\"message\":\"hello\"} 且收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且响应体恰为该文件的完整 JSON 内容。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "TASK-002",
+        "config/hello.json 由需求方线下提供且当前仓库不存在，CHECK-001 在其就位前必然失败。",
+        "design_requirement_placeholder"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_0ef26bea62def328f6cab520",
+      "objective": "WHEN config/hello.json 就位且收到 GET /api/hello 请求 THE SYSTEM SHALL 读取该文件并以 200 返回其完整 JSON 内容。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 收到 GET /api/hello 请求 THE SYSTEM SHALL 读取仓库根目录 config/hello.json 并返回 200 及该文件的完整 JSON 内容。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 执行 node --test test/hello.test.js THE SYSTEM SHALL 起服务请求 /api/hello 并断言状态码为 200 且响应体恰为 config/hello.json 的完整 JSON 内容。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "config/",
+          "package.json",
+          "node_modules/"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN config/hello.json 就位为 {\"message\":\"hello\"} 且收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且响应体恰为该文件的完整 JSON 内容。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [
+        {
+          "reason_code": "config/hello.json 由需求方线下提供且当前仓库不存在，CHECK-001 在其就位前必然失败。",
+          "route": "operational_gate",
+          "target_contract_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "handoff_contract": {
+        "required_fields": [
+          "config_readiness"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_0ef26bea62def328f6cab520",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "config/",
+          "package.json",
+          "node_modules/"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "服务以 node:http 监听 127.0.0.1:3000"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": [
+        {
+          "reason_code": "config/hello.json 由需求方线下提供且当前仓库不存在，CHECK-001 在其就位前必然失败。",
+          "route": "operational_gate",
+          "target_contract_refs": [
+            "CT-001"
+          ]
+        }
+      ]
+    },
+    "human_projection_hash": "6d5f5269326898a089851d896e422fe642a01ffd483c92af917c6a35a60bc6fd",
+    "coder_projection_hash": "66f48ddfe8a2e0228e9f0f1f8f87d1ef474c99494b465d8e63c8ce509269bf45",
+    "reviewer_projection_hash": "608d1bd7543351765abb0fa2798252fad3ea587c63fc3d8e3cfbfb0bb9fb1420",
+    "created_at": "2026-09-11T10:04:23.223046155+00:00"
+  }
+}

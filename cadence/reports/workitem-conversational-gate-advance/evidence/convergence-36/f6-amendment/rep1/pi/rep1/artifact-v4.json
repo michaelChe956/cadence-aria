@@ -1,0 +1,194 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_e26fd73df1081be21baa5e53",
+    "work_item_revision_id": "work_item_revision_e26fd73df1081be21baa5e53",
+    "canonical_contract_hash": "39d4649961745f337dae05f420d3d58f72b87b79115ca536d96583ec9a15c908",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "Hello API 最小后端问候接口",
+      "goal": "WHEN 服务收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}，问候文案读取仓库根目录 config/hello.json 的 message 字段。",
+      "non_goals": [
+        "不引入任何第三方依赖、数据库、认证、外部服务或前端页面；不做 issue_workitem_0001#api 之外的任何契约或 Work Item 拆分；不新增 server.js 与 tests/hello.test.js 之外的运行时代码入口。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "内部错误返回 500 {\"error\":\"internal\"}，错误响应示例为状态码 500 且 body 为 {\"error\":\"internal\"}"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "config/hello.json",
+          "tests/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "package-lock.json",
+          "node_modules",
+          "除 exclusive_scopes 清单外的一切仓库路径"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "TASK-002",
+        "TASK-003",
+        "design_requirement_placeholder"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_e26fd73df1081be21baa5e53",
+      "objective": "WHEN 服务收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}，问候文案读取仓库根目录 config/hello.json 的 message 字段。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002",
+        "TASK-003"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN tests/hello.test.js 以 node --test 执行 THE SYSTEM SHALL 起服务请求 GET /api/hello 并断言状态码 200 与 body 恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 编写冒烟占位配置 THE SYSTEM SHALL 创建仓库根目录 config/hello.json 且其 message 字段为 \"hello\"，供需求方后续提供正式文案时覆盖。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-003",
+          "statement": "WHEN 服务收到 GET /api/hello 请求 THE SYSTEM SHALL 使用 node:http 在 127.0.0.1:3000 监听并读取 config/hello.json 的 message 字段返回 200 {\"message\":<message 值>}，内部错误返回 500 {\"error\":\"internal\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "config/hello.json",
+          "tests/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "package-lock.json",
+          "node_modules",
+          "除 exclusive_scopes 清单外的一切仓库路径"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/hello.test.js",
+          "manual_instruction": null,
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_e26fd73df1081be21baa5e53",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "config/hello.json",
+          "tests/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "package-lock.json",
+          "node_modules",
+          "除 exclusive_scopes 清单外的一切仓库路径"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "内部错误返回 500 {\"error\":\"internal\"}，错误响应示例为状态码 500 且 body 为 {\"error\":\"internal\"}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/hello.test.js",
+          "manual_instruction": null,
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "6d7df6109eb56a570952a0c3c9239a7466c5b7f250fa1ef2e7e0bd8ad31c1bbb",
+    "coder_projection_hash": "a0f169dad7ec19f063ff96ae0d4bbc87033a6b6812275a074d8d0b3116a2ef45",
+    "reviewer_projection_hash": "7278aa5b67e5396b65dc72c832a1c8381f686eb87f36fedfa1c4a9968aa1b1dd",
+    "created_at": "2026-09-11T09:21:50.276085365+00:00"
+  }
+}

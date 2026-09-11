@@ -1,0 +1,115 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0221",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "pi",
+  "attempt_id": "coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+  "outDir": "/tmp/aria-36-matrix/f6-amendment/coding2/coding-pi-coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+  "startedAt": "2026-09-11T09:46:59.559Z",
+  "finishedAt": "2026-09-11T09:55:15.267Z",
+  "elapsedSec": 495.708,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.071,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.103,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 495.708,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.164,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0221",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0221",
+    "head_commit": null,
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 2333,
+    "output_tokens": 2296,
+    "cache_read_tokens": 41088
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 2333,
+      "output_tokens": 2296,
+      "cache_read_tokens": 41088,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-11T09:46:59.660346785+00:00",
+      "completed_at": "2026-09-11T09:46:59.689707950+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "输出未通过 plan_defect 契约解析，转教学重驱: coding_provider_stream_failed: plan_defect_finding_invalid: InvalidRepairTarget(\"plan repair target requires logical work item and revision ids\")",
+      "started_at": "2026-09-11T09:47:04.726161358+00:00",
+      "completed_at": "2026-09-11T09:54:27.491685895+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+      "stage": "coding",
+      "title": "Coding 输出结构化教学重驱",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-11T09:54:27.493207676+00:00",
+      "completed_at": "2026-09-11T09:55:15.222961477+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "blocked_gate_awaiting_triage",
+  "error": "Coder 输出需要人工分诊：kind=blocked 门无自动放行（expires_at=null），attempt 留存服务端待人工分诊",
+  "completed": false,
+  "amendment": {
+    "mode": "enabled",
+    "attempt_id": "coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+    "script_actions": 2,
+    "discovered": null,
+    "gate_turns": [],
+    "confirm": null,
+    "amendment_event_ids": [],
+    "manifest": null,
+    "resume": null
+  }
+}
