@@ -1,0 +1,24 @@
+{
+  "type": "artifact_update",
+  "version": 6,
+  "work_item_revision_history": {
+    "entries": [
+      {
+        "kind": "draft_revision",
+        "id": "draft_756319243fb9f2d13c340fbda492c49065a16c3e405c8c04a198af7749d58871_1",
+        "logical_work_item_id": "WI-001",
+        "related_revision_id": "work_item_revision_4184f014bb28e927d429e600",
+        "summary": "Draft revision 1",
+        "created_at": "2026-09-12T08:58:50.078121417+00:00"
+      },
+      {
+        "kind": "work_item_revision",
+        "id": "work_item_revision_4184f014bb28e927d429e600",
+        "logical_work_item_id": "WI-001",
+        "related_revision_id": "draft_756319243fb9f2d13c340fbda492c49065a16c3e405c8c04a198af7749d58871_1",
+        "summary": "Compiled WorkItem revision from draft_756319243fb9f2d13c340fbda492c49065a16c3e405c8c04a198af7749d58871_1",
+        "created_at": "2026-09-12T08:58:50.078121417+00:00"
+      }
+    ]
+  }
+}
