@@ -12,6 +12,14 @@ use crate::product::work_item_projection::ProjectionValidationReport;
 // PlanDefectClass serde 变体名双向逐字对齐，对齐断言见
 // coding_workspace_engine/tests/parser_prompt/plan_defect_prompt.rs
 // （枚举加变体/改名时该测试必红，教学不得与 schema 漂移）。
+// 3.6 矩阵族④根因修复（route×target 矩阵）：现场 7 例三 provider 全中
+// （route OperationalGate/VerificationRetry 配 target CurrentWorkItem、
+// 大写枚举名 OperationalGate、DependencyGraphInvalid 误配 CurrentWorkItem），
+// 根因是契约只教了 defect_class 8 取值、从未给出合法 route×target 组合，
+// 弱模型恰一次教学重驱后仍重犯。本函数逐字枚举 8 行合法矩阵（defect_class →
+// recommended_route → repair_target）并附反例错误原文；矩阵与校验器判决的
+// 双向对齐断言（含大写枚举名/容器字段名反例）见同一测试文件的
+// plan_defect_output_contract_route_target_matrix_aligns_with_validator。
 pub fn plan_defect_structured_output_contract() -> &'static str {
     "\nPlan Defect structured output contract:\n\
      - Coder 仅在发现计划、Story、Design、依赖契约、验证或运行环境阻塞时输出 plan_defect_findings 数组；普通成功输出或普通 implementation defect 可省略该数组或使用空数组。\n\
@@ -21,6 +29,9 @@ pub fn plan_defect_structured_output_contract() -> &'static str {
      - severity 只能使用 error、warning；阻塞问题使用 severity=error，不得使用 blocking、blocker 等其他取值。\n\
      - confidence 只能使用 low、medium、high；不得使用 0~1 的小数或百分比。\n\
      - repair_target 必须是对象，包含 kind（current_work_item、upstream_work_item 或 subgraph）、logical_work_item_ids、work_item_revision_ids；没有明确修复目标时使用 repair_target=null，不得使用字符串。\n\
+     - recommended_route 与 repair_target 必须逐字使用以下合法矩阵（defect_class → recommended_route → repair_target，8 行之外无合法组合；取值一律 snake_case 小写，禁止大写枚举名或容器字段名当取值——反例：recommended_route=OperationalGate 或 plan_defect_findings → unknown variant 拒绝，错误回显里的 route OperationalGate 是 Rust 变体名，JSON 必须写 operational_gate）：implementation_defect → coder_rework → repair_target=null；verification_incomplete → verification_retry → repair_target=null；current_work_item_invalid → plan_repair → repair_target.kind=current_work_item；upstream_contract_invalid → plan_repair → repair_target.kind=upstream_work_item；dependency_graph_invalid → plan_repair → repair_target.kind=subgraph；design_amendment_required → design_amendment → repair_target=null；story_amendment_required → story_amendment → repair_target=null；operational_blocker → operational_gate → repair_target=null。\n\
+     - 只有 current_work_item_invalid、upstream_contract_invalid、dependency_graph_invalid 三个 defect_class 携带非空 repair_target（kind 依次为 current_work_item、upstream_work_item、subgraph，且 logical_work_item_ids 与 work_item_revision_ids 都必须非空）；其余五个 defect_class 的 repair_target 必须为 null；无 target 路线硬塞 target、kind 错配或省略、id 列表为空都会被拒绝（反例：recommended_route=operational_gate 配 repair_target.kind=current_work_item → InvalidRepairTarget(\"route OperationalGate does not accept target CurrentWorkItem\")；recommended_route=verification_retry 配 repair_target.kind=current_work_item → InvalidRepairTarget(\"route VerificationRetry does not accept target CurrentWorkItem\")；defect_class=dependency_graph_invalid 配 repair_target.kind=current_work_item → InvalidRepairTarget(\"defect class DependencyGraphInvalid requires target Subgraph, got CurrentWorkItem\")；defect_class=current_work_item_invalid 配 repair_target.kind=upstream_work_item → InvalidRepairTarget(\"defect class CurrentWorkItemInvalid requires target CurrentWorkItem, got UpstreamWorkItem\")；defect_class=dependency_graph_invalid 省略 repair_target → InvalidRepairTarget(\"defect class DependencyGraphInvalid requires target Subgraph\")；logical_work_item_ids 或 work_item_revision_ids 为空 → InvalidRepairTarget(\"plan repair target requires logical work item and revision ids\")）。\n\
+     - recommended_route 不得使用 human_triage（serde 合法但 finding 不可输出；反例：defect_class=implementation_defect 配 recommended_route=human_triage → InvalidFinding(\"defect class ImplementationDefect requires route CoderRework, got HumanTriage\")）。\n\
      - evidence 是对象数组，每项包含 kind、source_ref、message；不得把缺失 contract、target、confidence 的普通 finding 伪造成 plan defect。\n\
      - 路由优先级固定为 Story -> Design -> Plan Repair -> Operational -> Verification -> Implementation。\n"
 }
