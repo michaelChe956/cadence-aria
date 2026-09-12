@@ -1,0 +1,8 @@
+{
+  "campaign_run_id": "workitem:kimi_code:rep1:issue_0249",
+  "command_ids": {
+    "human_gate_feedback#0": "cmd-human_gate_feedback-0-65cd3413f9",
+    "human_gate_feedback#1": "cmd-human_gate_feedback-1-22f8c0db64",
+    "advance#3": "cmd-advance-3-50f3a04ccf"
+  }
+}

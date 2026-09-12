@@ -1,0 +1,278 @@
+{
+  "type": "artifact_update",
+  "version": 12,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_ed74d2f7bc3c84a6d5f7a248",
+    "work_item_revision_id": "work_item_revision_ed74d2f7bc3c84a6d5f7a248",
+    "canonical_contract_hash": "6e5a3b472f6bdd074aed3a925d4dd28001aaa9610a6b68c606117e7a2eba7dd6",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "关卡选择页与可测试渲染逻辑",
+      "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 通过相对路径 /api/levels 渲染关卡名称与难度及锁定态并在请求失败时展示可读错误且不白屏。",
+      "non_goals": [
+        "不修改 server/**、data/levels.json、tests/backend/** 或 tests/integration/**；不启动浏览器或引入浏览器自动化与 npm 依赖；不实现关卡玩法逻辑。"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且数组长度恰为 5"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "web/level-select.js 以相对路径调用 /api/levels"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 运行前端验收测试 THE SYSTEM SHALL 证明页面 HTML 含三个容器并以 script 引用 level-select.js 且 initLevelSelect 以文本节点渲染名称、难度与锁定态。",
+        "WHEN 前端测试以替身模拟请求失败或响应结构非法 THE SYSTEM SHALL 证明页面逻辑进入错误提示分支展示可读错误且保留页面框架不白屏。"
+      ],
+      "source_refs": [
+        "AC-005",
+        "AC-006",
+        "CHECK-003",
+        "CHECK-004",
+        "CT-001",
+        "CT-003",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-007",
+        "TASK-008",
+        "TASK-009",
+        "TASK-010"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_ed74d2f7bc3c84a6d5f7a248",
+      "objective": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 通过相对路径 /api/levels 渲染关卡名称与难度及锁定态并在请求失败时展示可读错误且不白屏。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且数组长度恰为 5"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-007",
+        "TASK-008",
+        "TASK-009",
+        "TASK-010"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-007",
+          "statement": "WHEN 打开页面入口 THE SYSTEM SHALL 呈现含 id=loading id=level-list id=error-message 三个容器并以 script 引用 level-select.js 的 web/index.html。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-005"
+          ]
+        },
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN initLevelSelect({ document, fetchImpl }) 收到满足字段约束的五项数组 THE SYSTEM SHALL 先结束加载态再以文本节点渲染每项名称与难度并令 unlocked=false 项呈锁定态且不可选择。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-005"
+          ]
+        },
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN fetchImpl 请求失败或返回非成功状态或响应结构非法 THE SYSTEM SHALL 结束加载态并在错误容器展示可读错误且保留页面框架不白屏。",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-006"
+          ]
+        },
+        {
+          "task_id": "TASK-010",
+          "statement": "WHEN 运行 node --test \"tests/frontend/**/*.test.js\" THE SYSTEM SHALL 通过以最小 document 替身与 fetch 替身驱动渲染、锁定态与错误分支的全部前端测试且不启动浏览器。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-006"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-005",
+          "statement": "WHEN 运行前端验收测试 THE SYSTEM SHALL 证明页面 HTML 含三个容器并以 script 引用 level-select.js 且 initLevelSelect 以文本节点渲染名称、难度与锁定态。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-006",
+          "statement": "WHEN 前端测试以替身模拟请求失败或响应结构非法 THE SYSTEM SHALL 证明页面逻辑进入错误提示分支展示可读错误且保留页面框架不白屏。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test \"tests/frontend/**/*.test.js\"",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "null",
+          "manual_instruction": "核对 web/ 内页面与脚本未引用任何 npm 包或外部网络资源。",
+          "required": true,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "page_entry_path=web/index.html、script_path=web/level-select.js、initLevelSelect({ document",
+          "fetchImpl }) 签名、容器标记 id=loading id=level-list id=error-message、api_path=/api/levels"
+        ],
+        "provided_contract_refs": [
+          "CT-003"
+        ],
+        "reviewer_check_refs": [
+          "AC-005",
+          "AC-006"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_ed74d2f7bc3c84a6d5f7a248",
+      "criterion_refs": [
+        "AC-005",
+        "AC-006"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-005",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-006",
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且数组长度恰为 5"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "web/level-select.js 以相对路径调用 /api/levels"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test \"tests/frontend/**/*.test.js\"",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "null",
+          "manual_instruction": "核对 web/ 内页面与脚本未引用任何 npm 包或外部网络资源。",
+          "required": true,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "ad2cd302cce23bd4867f5857ad4a0e663200dc86ab8c61a5824376bfb4b175d1",
+    "coder_projection_hash": "a29e5a538bb61e8175a68cbe0c79fa59e50fe2812fa6137e837407a82d1a4361",
+    "reviewer_projection_hash": "eba78e26545e83194a0a116b43a0a718d762b0ac20a3d8c7c6938f5849b3b134",
+    "created_at": "2026-09-12T08:17:53.441183633+00:00"
+  }
+}

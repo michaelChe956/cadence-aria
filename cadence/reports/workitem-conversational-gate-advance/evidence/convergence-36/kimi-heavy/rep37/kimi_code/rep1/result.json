@@ -1,0 +1,911 @@
+{
+  "provider": "kimi_code",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/kimi-heavy-v15/rep37/kimi_code/rep1",
+  "startedAt": "2026-09-12T07:25:16.600Z",
+  "finishedAt": "2026-09-12T08:17:58.411Z",
+  "elapsedSec": 3161.81,
+  "issue_id": "issue_0249",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0394",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.465,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.518,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 737.786,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1723.947,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1838.043,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 2544.969,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 2630.422,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 3156.765,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 3161.623,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 3161.664,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 737.786,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 困难}、unlocked 为布尔值 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=困难}、unlocked 为布尔值",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 困难}、unlocked 为布尔值",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::困难}、unlocked 为布尔值"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 普通 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=普通",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 普通",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::普通"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability fetchImpl }) required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=fetchImpl })",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- fetchImpl })",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::fetchImpl })"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 1142.032,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 1426.142,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素 unlocked 为布尔值 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素 unlocked 为布尔值",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素 unlocked 为布尔值",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::关卡元素 unlocked 为布尔值"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 1723.947,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素 unlocked 为布尔值 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素 unlocked 为布尔值",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素 unlocked 为布尔值",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::关卡元素 unlocked 为布尔值"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 1954.619,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-002 上 contract CT-001 缺失 capability「关卡元素 unlocked 为布尔值」：WI-001 的 CT-001 capabilities 仅声明错误响应示例（且该示例字符串被拆分为两条残缺 capability），未声明 levels 数组元素字段约束，compatibility_policy=require_all 下该缺口阻断发布。",
+          "evidence": "coverage entry from=WI-001,to=WI-002,contract_id=CT-001,missing_capabilities=[关卡元素 unlocked 为布尔值]；WI-001 CT-001 capabilities 仅含错误响应示例两条，TASK-001 与 AC-001 的字段校验亦未进入 CT-001 能力声明。",
+          "required_action": "在 WI-001 CT-001 output_contracts.capabilities 中补充 levels 数组元素字段约束（unlocked 为布尔值）并修复被拆分的错误响应示例字符串；或从 WI-002 input_contracts.required_capabilities 中移除该项，使供需一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-003 上 contract CT-001 缺失 capability「未知 API 路径返回 404 且不支持的 HTTP 方法返回 405」：CT-001 提供侧仅含错误响应示例，404/405 行为仅出现在 AC-002/TASK-003 而未声明为 CT-001 能力，require_all 下该缺口阻断发布。",
+          "evidence": "coverage entry from=WI-001,to=WI-003,contract_id=CT-001,missing_capabilities=[未知 API 路径返回 404 且不支持的 HTTP 方法返回 405]。",
+          "required_action": "将未知路径 404 与不支持方法 405 行为补充进 WI-001 CT-001 capabilities；或从 WI-003 input_contracts.required_capabilities 中移除该项。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "edge WI-002 -> WI-003 上 contract CT-003 缺失 capability「web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数」：CT-003 提供侧仅声明错误分支行为，未声明导出签名与注入参数，require_all 下该缺口阻断发布。",
+          "evidence": "coverage entry from=WI-002,to=WI-003,contract_id=CT-003,missing_capabilities=[web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数]；WI-002 CT-003 capabilities 仅含错误提示分支描述，TASK-008/TASK-009 使用的 initLevelSelect({ document, fetchImpl }) 签名未进入契约能力。",
+          "required_action": "在 WI-002 CT-003 capabilities 中补充 initLevelSelect 导出签名（支持 document 与 fetchImpl 注入）；或从 WI-003 input_contracts.required_capabilities 中移除该项。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 6,
+      "elapsedSec": 2228.532,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素 difficulty 取值为简单或普通或困难 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素 difficulty 取值为简单或普通或困难",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素 difficulty 取值为简单或普通或困难",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::关卡元素 difficulty 取值为简单或普通或困难"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-001 capability=API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 以相对路径调用 /api/levels required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 以相对路径调用 /api/levels",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径调用 /api/levels",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::web/level-select.js 以相对路径调用 /api/levels"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 7,
+      "elapsedSec": 2544.969,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "e2e 跳过风险已由 WI-003 的 CHECK-005 同源集成验证覆盖，不阻断发布；如需可在验收前补充人工冒烟说明。",
+          "evidence": "Projection Validation Report error_count=0、仅 1 条 warning（integration_or_e2e_skipped_risk）；CHECK-005（node --test tests/integration/**/*.test.js）已覆盖 GET / 页面入口与 GET /api/levels 成功及数据错误形状的同源契约衔接。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 8,
+      "elapsedSec": 2852.552,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-003 TASK-011 要求集成测试断言数据错误返回 code=LEVEL_DATA_UNAVAILABLE，但供给端 WI-001 的输出契约 CT-001/CT-002 及 TASK-003/AC-002 仅承诺 500/404/405、含 error.code 与 error.message 的 JSON 及 Content-Type，从未绑定具体错误码取值；在契约隔离原则下 WI-001 可合法选择其他取值，导致 CHECK-005/TASK-011 的验收断言存在必然性跨项失败风险，且该缺口未被能力覆盖机械规则捕获（各 coverage entry 的 missing_capabilities 均为空）。",
+          "evidence": "edge WI-001 -> WI-003（contract_id CT-001/CT-002，require_all，missing_capabilities=[]）；WI-003 TASK-011 断言『返回 500 与 code=LEVEL_DATA_UNAVAILABLE』，而 WI-001 TASK-003/AC-002 仅约束『含 error.code 与 error.message 的 JSON』，CT-001 能力仅覆盖成功形状『GET /api/levels 返回 200 与顶层数组且数组长度恰为 5』。",
+          "required_action": "二选一收敛：将错误契约取值（code=LEVEL_DATA_UNAVAILABLE 及各状态码错误体形状）补入 WI-001 的 CT-001 输出能力与 TASK-003/AC-002；或将 TASK-011 放宽为仅断言 error.code/error.message 存在与规定 Content-Type，确保消费端断言不超过供给端契约承诺。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "suggestion",
+          "message": "机械校验仅余 1 条 warning（integration_or_e2e_skipped_risk：无浏览器级 e2e）；WI-003 已以同源 HTTP 集成测试覆盖页面入口与 API 衔接且 error_count=0，属完备度建议，可考虑在验收前补充人工冒烟验证说明，不阻断发布。",
+          "evidence": "Projection Validation Report findings[0]（severity=warning，code=integration_or_e2e_skipped_risk）；CHECK-005 为 required 且 non_zero_test_execution_required=true。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "verification_checks"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 9,
+      "elapsedSec": 3156.765,
+      "findings": []
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::关卡元素满足字段约束 id 为非空字符串且文件内唯一、name 为非空字符串、difficulty 取值属于 {简单"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 困难}、unlocked 为布尔值 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=困难}、unlocked 为布尔值",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 困难}、unlocked 为布尔值",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::困难}、unlocked 为布尔值"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 普通 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=普通",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 普通",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::普通"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失返回 404 文本响应"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability fetchImpl }) required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=fetchImpl })",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- fetchImpl })",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::fetchImpl })"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::web/level-select.js 以相对路径调用 /api/levels 且导出 initLevelSelect({ document"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::关卡元素满足字段约束 id 为非空字符串且文件内唯一且 name 为非空字符串且 difficulty 取值为简单或普通或困难且 unlocked 为布尔值"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::服务以 staticRoot 托管静态资源且 GET / 返回页面入口 HTML 且静态资源缺失时返回 404 文本响应"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::web/level-select.js 以相对路径调用 /api/levels 且导出接收 document 与 fetchImpl 注入参数的 initLevelSelect 函数"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素 unlocked 为布尔值 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素 unlocked 为布尔值",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素 unlocked 为布尔值",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::关卡元素 unlocked 为布尔值"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::服务以 staticRoot 托管静态资源且访问根路径返回页面入口 HTML 且静态资源缺失返回 404 文本响应"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素 unlocked 为布尔值 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素 unlocked 为布尔值",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素 unlocked 为布尔值",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::关卡元素 unlocked 为布尔值"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-002 上 contract CT-001 缺失 capability「关卡元素 unlocked 为布尔值」：WI-001 的 CT-001 capabilities 仅声明错误响应示例（且该示例字符串被拆分为两条残缺 capability），未声明 levels 数组元素字段约束，compatibility_policy=require_all 下该缺口阻断发布。",
+      "evidence": "coverage entry from=WI-001,to=WI-002,contract_id=CT-001,missing_capabilities=[关卡元素 unlocked 为布尔值]；WI-001 CT-001 capabilities 仅含错误响应示例两条，TASK-001 与 AC-001 的字段校验亦未进入 CT-001 能力声明。",
+      "required_action": "在 WI-001 CT-001 output_contracts.capabilities 中补充 levels 数组元素字段约束（unlocked 为布尔值）并修复被拆分的错误响应示例字符串；或从 WI-002 input_contracts.required_capabilities 中移除该项，使供需一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-003 上 contract CT-001 缺失 capability「未知 API 路径返回 404 且不支持的 HTTP 方法返回 405」：CT-001 提供侧仅含错误响应示例，404/405 行为仅出现在 AC-002/TASK-003 而未声明为 CT-001 能力，require_all 下该缺口阻断发布。",
+      "evidence": "coverage entry from=WI-001,to=WI-003,contract_id=CT-001,missing_capabilities=[未知 API 路径返回 404 且不支持的 HTTP 方法返回 405]。",
+      "required_action": "将未知路径 404 与不支持方法 405 行为补充进 WI-001 CT-001 capabilities；或从 WI-003 input_contracts.required_capabilities 中移除该项。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-002 -> WI-003 上 contract CT-003 缺失 capability「web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数」：CT-003 提供侧仅声明错误分支行为，未声明导出签名与注入参数，require_all 下该缺口阻断发布。",
+      "evidence": "coverage entry from=WI-002,to=WI-003,contract_id=CT-003,missing_capabilities=[web/level-select.js 导出支持 document 与 fetchImpl 注入的 initLevelSelect 函数]；WI-002 CT-003 capabilities 仅含错误提示分支描述，TASK-008/TASK-009 使用的 initLevelSelect({ document, fetchImpl }) 签名未进入契约能力。",
+      "required_action": "在 WI-002 CT-003 capabilities 中补充 initLevelSelect 导出签名（支持 document 与 fetchImpl 注入）；或从 WI-003 input_contracts.required_capabilities 中移除该项。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 关卡元素 difficulty 取值为简单或普通或困难 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=关卡元素 difficulty 取值为简单或普通或困难",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 关卡元素 difficulty 取值为简单或普通或困难",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::关卡元素 difficulty 取值为简单或普通或困难"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-001 capability=API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::API 的 500 404 405 错误响应 Content-Type 为 application/json; charset=utf-8 且错误体为含 error.code 与 error.message 的 JSON 对象"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability web/level-select.js 以相对路径调用 /api/levels required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=web/level-select.js 以相对路径调用 /api/levels",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径调用 /api/levels",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::web/level-select.js 以相对路径调用 /api/levels"
+    },
+    {
+      "severity": "suggestion",
+      "message": "e2e 跳过风险已由 WI-003 的 CHECK-005 同源集成验证覆盖，不阻断发布；如需可在验收前补充人工冒烟说明。",
+      "evidence": "Projection Validation Report error_count=0、仅 1 条 warning（integration_or_e2e_skipped_risk）；CHECK-005（node --test tests/integration/**/*.test.js）已覆盖 GET / 页面入口与 GET /api/levels 成功及数据错误形状的同源契约衔接。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-003 TASK-011 要求集成测试断言数据错误返回 code=LEVEL_DATA_UNAVAILABLE，但供给端 WI-001 的输出契约 CT-001/CT-002 及 TASK-003/AC-002 仅承诺 500/404/405、含 error.code 与 error.message 的 JSON 及 Content-Type，从未绑定具体错误码取值；在契约隔离原则下 WI-001 可合法选择其他取值，导致 CHECK-005/TASK-011 的验收断言存在必然性跨项失败风险，且该缺口未被能力覆盖机械规则捕获（各 coverage entry 的 missing_capabilities 均为空）。",
+      "evidence": "edge WI-001 -> WI-003（contract_id CT-001/CT-002，require_all，missing_capabilities=[]）；WI-003 TASK-011 断言『返回 500 与 code=LEVEL_DATA_UNAVAILABLE』，而 WI-001 TASK-003/AC-002 仅约束『含 error.code 与 error.message 的 JSON』，CT-001 能力仅覆盖成功形状『GET /api/levels 返回 200 与顶层数组且数组长度恰为 5』。",
+      "required_action": "二选一收敛：将错误契约取值（code=LEVEL_DATA_UNAVAILABLE 及各状态码错误体形状）补入 WI-001 的 CT-001 输出能力与 TASK-003/AC-002；或将 TASK-011 放宽为仅断言 error.code/error.message 存在与规定 Content-Type，确保消费端断言不超过供给端契约承诺。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验仅余 1 条 warning（integration_or_e2e_skipped_risk：无浏览器级 e2e）；WI-003 已以同源 HTTP 集成测试覆盖页面入口与 API 衔接且 error_count=0，属完备度建议，可考虑在验收前补充人工冒烟验证说明，不阻断发布。",
+      "evidence": "Projection Validation Report findings[0]（severity=warning，code=integration_or_e2e_skipped_risk）；CHECK-005 为 required 且 non_zero_test_execution_required=true。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "verification_checks"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 37917,
+      "output_tokens": 8009,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json",
+    "artifact-v10.json",
+    "artifact-v11.json",
+    "artifact-v12.json",
+    "artifact-v13.json",
+    "artifact-v14.json",
+    "artifact-v15.json",
+    "artifact-v16.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 6,
+    "manual_repairs_used": 0,
+    "transitions_used": 3,
+    "initial_review_count": 9,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_009": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_011": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_013": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_015": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_017": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_019": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 6,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-12T07:54:00.548Z",
+      "elapsedSec": 1723.949,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_010",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-65cd3413f9",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-12T07:54:00.550Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-12T08:07:41.570Z",
+      "elapsedSec": 2544.969,
+      "stage": "cross_review",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_015",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-22f8c0db64",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-12T08:07:41.570Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-12T08:17:53.366Z",
+      "elapsedSec": 3156.765,
+      "stage": "cross_review",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_019",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-12T08:17:53.366Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-65cd3413f9",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_efaf8950-f451-4c11-bb59-d641d93cc469",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_005"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-22f8c0db64",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_f127db83-5187-4a8e-baaf-757f7809cf3e",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_008"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 3,
+      "command_id": "cmd-advance-3-50f3a04ccf",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0249"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:3",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_efaf8950-f451-4c11-bb59-d641d93cc469:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:4",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:5",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_f127db83-5187-4a8e-baaf-757f7809cf3e:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:6",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:3",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_efaf8950-f451-4c11-bb59-d641d93cc469:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:4",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:5",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_f127db83-5187-4a8e-baaf-757f7809cf3e:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:6",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 9,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:2",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:3",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_efaf8950-f451-4c11-bb59-d641d93cc469:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:4",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:5",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_f127db83-5187-4a8e-baaf-757f7809cf3e:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0394:6",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 3161810,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.053,
+    "1:running": 736.268,
+    "2:cross_review": 986.161,
+    "3:human_confirm": 114.096,
+    "4:cross_review": 706.926,
+    "5:human_confirm": 85.453,
+    "6:cross_review": 526.343,
+    "7:human_confirm": 4.858,
+    "8:running": 0.041,
+    "9:completed": 0.146
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

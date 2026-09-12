@@ -1,0 +1,289 @@
+{
+  "type": "artifact_update",
+  "version": 9,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_f54e825ad0e01b70b69bf701",
+    "work_item_revision_id": "work_item_revision_f54e825ad0e01b70b69bf701",
+    "canonical_contract_hash": "17030b43c3ccd98647a68a21b2d6dc3f4ebb334b7f8195f72da203539267b311",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "关卡选择页与 DOM 替身渲染逻辑",
+      "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生生成的脚本经相对路径调用 /api/levels 渲染关卡名称、难度与锁定态，并在请求或数据异常时保留页面框架展示可读错误。",
+      "non_goals": [
+        "不启动浏览器或引入前端框架与 npm 依赖",
+        "不实现选中关卡后的玩法行为",
+        "不修改 server/**、data/levels.json、tests/backend/** 与 tests/integration/**"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 注入的 fetchImpl 返回满足 EXE-006 字段约束的数组 THE SYSTEM SHALL 先展示加载态再将每项渲染为含名称与难度的列表项且 unlocked=false 项呈现锁定不可选状态。",
+        "WHEN fetchImpl 失败、返回非成功状态或响应结构不满足 EXE-006 THE SYSTEM SHALL 在 id=error-message 容器展示可读错误提示并保留页面框架不白屏。",
+        "WHEN 读取 web/index.html 与 web/level-select.js 静态内容 THE SYSTEM SHALL 发现 id=loading、id=level-list、id=error-message 三个容器标记、对 web/level-select.js 的 script 引用及对 /api/levels 的相对路径引用。"
+      ],
+      "source_refs": [
+        "AC-006",
+        "AC-007",
+        "AC-008",
+        "CHECK-002",
+        "CT-001",
+        "CT-004",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-008",
+        "TASK-009",
+        "TASK-010",
+        "TASK-011"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_f54e825ad0e01b70b69bf701",
+      "objective": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生生成的脚本经相对路径调用 /api/levels 渲染关卡名称、难度与锁定态，并在请求或数据异常时保留页面框架展示可读错误。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-008",
+        "TASK-009",
+        "TASK-010",
+        "TASK-011"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN tests/frontend 缺少渲染测试 THE SYSTEM SHALL 先编写以最小 document 替身与可注入 fetchImpl 调用 initLevelSelect 的失败测试，断言加载态、名称与难度渲染及 unlocked=false 锁定态。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-006"
+          ]
+        },
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN tests/frontend 缺少异常测试 THE SYSTEM SHALL 先编写以 fetchImpl 模拟网络失败、非成功状态与结构无效响应的失败测试，断言进入错误提示分支且保留页面框架。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-007"
+          ]
+        },
+        {
+          "task_id": "TASK-010",
+          "statement": "WHEN 实现 web/index.html THE SYSTEM SHALL 提供 id=loading、id=level-list、id=error-message 三个容器标记并通过 script 引用 web/level-select.js。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-008"
+          ]
+        },
+        {
+          "task_id": "TASK-011",
+          "statement": "WHEN 实现 web/level-select.js THE SYSTEM SHALL 导出 initLevelSelect({ document, fetchImpl }) 并以相对路径请求 /api/levels，成功后以文本节点渲染名称、难度与锁定态，失败时在 id=error-message 展示可读提示。",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-007"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-006",
+          "statement": "WHEN 注入的 fetchImpl 返回满足 EXE-006 字段约束的数组 THE SYSTEM SHALL 先展示加载态再将每项渲染为含名称与难度的列表项且 unlocked=false 项呈现锁定不可选状态。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-007",
+          "statement": "WHEN fetchImpl 失败、返回非成功状态或响应结构不满足 EXE-006 THE SYSTEM SHALL 在 id=error-message 容器展示可读错误提示并保留页面框架不白屏。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-008",
+          "statement": "WHEN 读取 web/index.html 与 web/level-select.js 静态内容 THE SYSTEM SHALL 发现 id=loading、id=level-list、id=error-message 三个容器标记、对 web/level-select.js 的 script 引用及对 /api/levels 的相对路径引用。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend/*.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "web/index.html 页面入口、web/level-select.js 模块路径、initLevelSelect({ document",
+          "fetchImpl }) 签名、容器 id=loading、id=level-list、id=error-message"
+        ],
+        "provided_contract_refs": [
+          "CT-004"
+        ],
+        "reviewer_check_refs": [
+          "AC-006",
+          "AC-007",
+          "AC-008"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_f54e825ad0e01b70b69bf701",
+      "criterion_refs": [
+        "AC-006",
+        "AC-007",
+        "AC-008"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-006",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-007",
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-008",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend/*.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "7478d18962b155bf56131c50d7de123bbb6dec366f906a8e09c4dfb35d3744bd",
+    "coder_projection_hash": "2a6c71c45d5da7192b0e9dba70658db2b1d9f97c37b02eff027e743d88c962d8",
+    "reviewer_projection_hash": "b4950ee10906ae287030060208691b54723436bd749327fa5683376069734fab",
+    "created_at": "2026-09-12T06:54:18.883431997+00:00"
+  }
+}

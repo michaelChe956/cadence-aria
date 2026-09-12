@@ -1,0 +1,628 @@
+{
+  "provider": "kimi_code",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/kimi-heavy-v15/rep35/kimi_code/rep1",
+  "startedAt": "2026-09-12T06:03:49.390Z",
+  "finishedAt": "2026-09-12T06:54:23.756Z",
+  "elapsedSec": 3034.365,
+  "issue_id": "issue_0247",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0386",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.47,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.527,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1365.383,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1654.642,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1756.813,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 2202.788,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 2290.272,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 3029.424,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 3034.164,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 3034.206,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 1365.383,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 错误响应 Content-Type 为 application/json; charset=utf-8 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=API 错误响应 Content-Type 为 application/json; charset=utf-8",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 错误响应 Content-Type 为 application/json; charset=utf-8",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::API 错误响应 Content-Type 为 application/json; charset=utf-8"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源缺失返回 404 文本响应 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源缺失返回 404 文本响应",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源缺失返回 404 文本响应",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::静态资源缺失返回 404 文本响应"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 1654.642,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 错误响应 Content-Type 为 application/json; charset=utf-8 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=API 错误响应 Content-Type 为 application/json; charset=utf-8",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 错误响应 Content-Type 为 application/json; charset=utf-8",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::API 错误响应 Content-Type 为 application/json; charset=utf-8"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源缺失返回 404 文本响应 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源缺失返回 404 文本响应",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源缺失返回 404 文本响应",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::静态资源缺失返回 404 文本响应"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 1940.679,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "供需校验失败：edge WI-001 -> WI-002 契约 CT-001 为 require_all，但 WI-001 输出契约 CT-001 仅声明 [不支持方法返回 405 且体为 API-002 JSON 错误结构]，未声明所需 capability [API 错误响应 Content-Type 为 application/json; charset=utf-8]；该行为已由 WI-001 AC-003/TASK-005 要求，属契约声明缺口，须补充后方可通过覆盖校验。",
+          "evidence": "capability_coverage entry from=WI-001 to=WI-002 contract_id=CT-001 compatibility_policy=require_all missing_capabilities=[API 错误响应 Content-Type 为 application/json; charset=utf-8]；supplies 中 WI-001 CT-001 capabilities 不含该项",
+          "required_action": "在 WI-001 的 CT-001 capabilities 中补充「API 错误响应 Content-Type 为 application/json; charset=utf-8」（依据 AC-003/TASK-005 已覆盖行为，仅补声明不改写策略）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "供需校验失败：edge WI-001 -> WI-003 契约 CT-002 为 require_all，但 WI-001 输出契约 CT-002 仅声明 [静态路径解析禁止越过 staticRoot]，未声明所需 capability [静态资源缺失返回 404 文本响应]；该行为已由 WI-001 AC-004/TASK-006 要求，属契约声明缺口，须补充后方可通过覆盖校验。",
+          "evidence": "capability_coverage entry from=WI-001 to=WI-003 contract_id=CT-002 compatibility_policy=require_all missing_capabilities=[静态资源缺失返回 404 文本响应]；supplies 中 WI-001 CT-002 capabilities 不含该项",
+          "required_action": "在 WI-001 的 CT-002 capabilities 中补充「静态资源缺失返回 404 文本响应」（依据 AC-004/TASK-006 已覆盖行为，仅补声明不改写策略）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-002].capabilities"
+        },
+        {
+          "severity": "suggestion",
+          "message": "WI-003 的 AC-009 未被任何 task 的 done_when_refs 引用（TASK-012 仅引用 AC-010，其 statement 实质已覆盖 AC-009 的三容器标记、脚本引用与相对路径断言）；建议在 TASK-012 补引 AC-009 以保证验收归因完整，不影响本轮发布判定。",
+          "evidence": "WI-003 tasks done_when_refs 并集为 {AC-010, AC-011, AC-012}，AC-009 无任何 task 引用",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "WI-003.tasks[TASK-012].done_when_refs"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 2202.788,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 错误响应 Content-Type 为 application/json; charset=utf-8 required by WI-002",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=API 错误响应 Content-Type 为 application/json; charset=utf-8",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 错误响应 Content-Type 为 application/json; charset=utf-8",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::API 错误响应 Content-Type 为 application/json; charset=utf-8"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源缺失返回 404 文本响应 required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源缺失返回 404 文本响应",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源缺失返回 404 文本响应",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::静态资源缺失返回 404 文本响应"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 2405.26,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "能力覆盖缺口：edge WI-001 -> WI-002（contract_id=CT-001，compatibility_policy=require_all）所需 capability「API 错误响应 Content-Type 为 application/json; charset=utf-8」未在提供方 CT-001 的 capabilities 中声明（现仅声明「不支持方法返回 405 且体为 API-002 JSON 错误结构」），missing_capabilities 非空必须返回 must_fix。",
+          "evidence": "coverage entry from WI-001 -> to WI-002, contract_id=CT-001, missing_capabilities=[\"API 错误响应 Content-Type 为 application/json; charset=utf-8\"], compatibility_policy=require_all",
+          "required_action": "在 WI-001 输出契约 CT-001 的 capabilities 中补充声明「API 错误响应 Content-Type 为 application/json; charset=utf-8」（该行为已由 AC-003/TASK-005 实现，属声明缺口；保留既有 405 capability，勿替换）。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[contract_id=CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "能力覆盖缺口：edge WI-001 -> WI-003（contract_id=CT-002，compatibility_policy=require_all）所需 capability「静态资源缺失返回 404 文本响应」未在提供方 CT-002 的 capabilities 中声明（现仅声明「静态路径解析禁止越过 staticRoot」），missing_capabilities 非空必须返回 must_fix。",
+          "evidence": "coverage entry from WI-001 -> to WI-003, contract_id=CT-002, missing_capabilities=[\"静态资源缺失返回 404 文本响应\"], compatibility_policy=require_all",
+          "required_action": "在 WI-001 输出契约 CT-002 的 capabilities 中补充声明「静态资源缺失返回 404 文本响应」（该行为已由 AC-004/TASK-006 实现，属声明缺口；保留既有路径安全 capability）。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[contract_id=CT-002].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 6,
+      "elapsedSec": 3029.424,
+      "findings": []
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 错误响应 Content-Type 为 application/json; charset=utf-8 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=API 错误响应 Content-Type 为 application/json; charset=utf-8",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 错误响应 Content-Type 为 application/json; charset=utf-8",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::API 错误响应 Content-Type 为 application/json; charset=utf-8"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源缺失返回 404 文本响应 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源缺失返回 404 文本响应",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源缺失返回 404 文本响应",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::静态资源缺失返回 404 文本响应"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 错误响应 Content-Type 为 application/json; charset=utf-8 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=API 错误响应 Content-Type 为 application/json; charset=utf-8",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 错误响应 Content-Type 为 application/json; charset=utf-8",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::API 错误响应 Content-Type 为 application/json; charset=utf-8"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源缺失返回 404 文本响应 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源缺失返回 404 文本响应",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源缺失返回 404 文本响应",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::静态资源缺失返回 404 文本响应"
+    },
+    {
+      "severity": "must_fix",
+      "message": "供需校验失败：edge WI-001 -> WI-002 契约 CT-001 为 require_all，但 WI-001 输出契约 CT-001 仅声明 [不支持方法返回 405 且体为 API-002 JSON 错误结构]，未声明所需 capability [API 错误响应 Content-Type 为 application/json; charset=utf-8]；该行为已由 WI-001 AC-003/TASK-005 要求，属契约声明缺口，须补充后方可通过覆盖校验。",
+      "evidence": "capability_coverage entry from=WI-001 to=WI-002 contract_id=CT-001 compatibility_policy=require_all missing_capabilities=[API 错误响应 Content-Type 为 application/json; charset=utf-8]；supplies 中 WI-001 CT-001 capabilities 不含该项",
+      "required_action": "在 WI-001 的 CT-001 capabilities 中补充「API 错误响应 Content-Type 为 application/json; charset=utf-8」（依据 AC-003/TASK-005 已覆盖行为，仅补声明不改写策略）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "供需校验失败：edge WI-001 -> WI-003 契约 CT-002 为 require_all，但 WI-001 输出契约 CT-002 仅声明 [静态路径解析禁止越过 staticRoot]，未声明所需 capability [静态资源缺失返回 404 文本响应]；该行为已由 WI-001 AC-004/TASK-006 要求，属契约声明缺口，须补充后方可通过覆盖校验。",
+      "evidence": "capability_coverage entry from=WI-001 to=WI-003 contract_id=CT-002 compatibility_policy=require_all missing_capabilities=[静态资源缺失返回 404 文本响应]；supplies 中 WI-001 CT-002 capabilities 不含该项",
+      "required_action": "在 WI-001 的 CT-002 capabilities 中补充「静态资源缺失返回 404 文本响应」（依据 AC-004/TASK-006 已覆盖行为，仅补声明不改写策略）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-002].capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "WI-003 的 AC-009 未被任何 task 的 done_when_refs 引用（TASK-012 仅引用 AC-010，其 statement 实质已覆盖 AC-009 的三容器标记、脚本引用与相对路径断言）；建议在 TASK-012 补引 AC-009 以保证验收归因完整，不影响本轮发布判定。",
+      "evidence": "WI-003 tasks done_when_refs 并集为 {AC-010, AC-011, AC-012}，AC-009 无任何 task 引用",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "WI-003.tasks[TASK-012].done_when_refs"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability API 错误响应 Content-Type 为 application/json; charset=utf-8 required by WI-002",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=API 错误响应 Content-Type 为 application/json; charset=utf-8",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- API 错误响应 Content-Type 为 application/json; charset=utf-8",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::API 错误响应 Content-Type 为 application/json; charset=utf-8"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源缺失返回 404 文本响应 required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源缺失返回 404 文本响应",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源缺失返回 404 文本响应",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::静态资源缺失返回 404 文本响应"
+    },
+    {
+      "severity": "must_fix",
+      "message": "能力覆盖缺口：edge WI-001 -> WI-002（contract_id=CT-001，compatibility_policy=require_all）所需 capability「API 错误响应 Content-Type 为 application/json; charset=utf-8」未在提供方 CT-001 的 capabilities 中声明（现仅声明「不支持方法返回 405 且体为 API-002 JSON 错误结构」），missing_capabilities 非空必须返回 must_fix。",
+      "evidence": "coverage entry from WI-001 -> to WI-002, contract_id=CT-001, missing_capabilities=[\"API 错误响应 Content-Type 为 application/json; charset=utf-8\"], compatibility_policy=require_all",
+      "required_action": "在 WI-001 输出契约 CT-001 的 capabilities 中补充声明「API 错误响应 Content-Type 为 application/json; charset=utf-8」（该行为已由 AC-003/TASK-005 实现，属声明缺口；保留既有 405 capability，勿替换）。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[contract_id=CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "能力覆盖缺口：edge WI-001 -> WI-003（contract_id=CT-002，compatibility_policy=require_all）所需 capability「静态资源缺失返回 404 文本响应」未在提供方 CT-002 的 capabilities 中声明（现仅声明「静态路径解析禁止越过 staticRoot」），missing_capabilities 非空必须返回 must_fix。",
+      "evidence": "coverage entry from WI-001 -> to WI-003, contract_id=CT-002, missing_capabilities=[\"静态资源缺失返回 404 文本响应\"], compatibility_policy=require_all",
+      "required_action": "在 WI-001 输出契约 CT-002 的 capabilities 中补充声明「静态资源缺失返回 404 文本响应」（该行为已由 AC-004/TASK-006 实现，属声明缺口；保留既有路径安全 capability）。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[contract_id=CT-002].capabilities"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 38655,
+      "output_tokens": 14470,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json",
+    "artifact-v10.json",
+    "artifact-v11.json",
+    "artifact-v12.json",
+    "artifact-v13.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 3,
+    "manual_repairs_used": 0,
+    "transitions_used": 3,
+    "initial_review_count": 6,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_009": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_011": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_013": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 3,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": false
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-12T06:31:24.033Z",
+      "elapsedSec": 1654.643,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_006",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-4f44cbaac2",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-12T06:31:24.034Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-12T06:40:32.179Z",
+      "elapsedSec": 2202.788,
+      "stage": "cross_review",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_009",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-7ee12acf93",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-12T06:40:32.179Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-12T06:54:18.815Z",
+      "elapsedSec": 3029.424,
+      "stage": "cross_review",
+      "reviewVerdict": "needs_human",
+      "active_node_id": "timeline_node_013",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-12T06:54:18.815Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-4f44cbaac2",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_12dcfdbd-0d12-4297-94ca-d1d51805659e",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_003"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-7ee12acf93",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_e2b026f1-6700-4c7b-b6f1-7d9f0dca2ee3",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_005"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 3,
+      "command_id": "cmd-advance-3-76e5fa0953",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_628d2a85bb1a4c2fab906a063a59b68f",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0247"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_12dcfdbd-0d12-4297-94ca-d1d51805659e:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_e2b026f1-6700-4c7b-b6f1-7d9f0dca2ee3:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:3",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_12dcfdbd-0d12-4297-94ca-d1d51805659e:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_e2b026f1-6700-4c7b-b6f1-7d9f0dca2ee3:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:3",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 6,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_12dcfdbd-0d12-4297-94ca-d1d51805659e:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:2",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_e2b026f1-6700-4c7b-b6f1-7d9f0dca2ee3:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0386:3",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 3034365,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.057,
+    "1:running": 1363.856,
+    "2:cross_review": 289.259,
+    "3:human_confirm": 102.171,
+    "4:cross_review": 445.975,
+    "5:human_confirm": 87.484,
+    "6:cross_review": 739.152,
+    "7:human_confirm": 4.74,
+    "8:running": 0.042,
+    "9:completed": 0.159
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

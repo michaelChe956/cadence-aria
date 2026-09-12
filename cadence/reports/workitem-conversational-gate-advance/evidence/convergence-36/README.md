@@ -1,6 +1,6 @@
 # 3.6 矩阵汇总表（convergence-36 总览）——截至 2026-09-11 晨
 
-> 状态：**7/9 闭环 + kimi×重 进行中**。模型基线=glm-5.3-flash（用户裁决，四 provider 统一）；判据 C1/C2/C3 见 `cadence/plans/2026-09-04_计划文档_3.6全量收敛轮_v1.0.md`；SOP v15=levels+双脚本+60min workitem 预算+90min coding 预算。
+> 状态：**8/9 闭环**（kimi×重 收官 2026-09-12 晨；唯一开口=F6 复验（v16 教学后）+报告 v2）。模型基线=glm-5.3-flash（用户裁决，四 provider 统一）；判据 C1/C2/C3 见 `cadence/plans/2026-09-04_计划文档_3.6全量收敛轮_v1.0.md`；SOP v15=levels+双脚本+60min workitem 预算+90min coding 预算。
 > 细节权威=台账 `.superpowers/sdd/2026-09-04_计划文档_3.6全量收敛轮_v1.0/progress.md`；逐格证据=本目录各子目录 README。
 
 ## 1. 矩阵终盘
@@ -13,7 +13,7 @@
 | kimi×轻 | ✅ 3/3 | rep1v9/rep2v10/rep3v10（0175/0182/0183） | kimi-light/ |
 | claude×轻 | ✅ 3/3 | rep4/5/6v12（0190-0192，claude 首秀首通） | claude-light/ |
 | claude×重 | ✅ 3/3 | v15 rep5/rep6/rep7c（0203/0204/0207；coding 加分 2/3 全链） | claude-heavy/ |
-| **kimi×重** | ⏳ **进行中** | v15 战绩 5过/5悬（rep1b/2/4/6/8 过；0199×3+语法×1+空输出×2 悬），最大连胜 2；通道 09-11 坏（用户测试中） | （未入库，恢复后续磨） |
+| kimi×重 | ✅ 3/3 | rep35/36/37（0247-0249，37 跑 17过/20悬 纯方差收敛；coding 加分全 miss 谱系如实入档） | kimi-heavy/ |
 | codex×重 | 📋 限制归档 | 0/10+适配器逐字节等价实锤=模型行为差异 | codex-heavy-limitation/ |
 | F6 amendment | 📋 3 跑预算耗尽 | 判据 B 未达：语料强化生效（缺陷浮出 2/2）但 InvalidRepairTarget×1+路由分歧×1 拦在 plan_repair 前 | f6-amendment/ |
 

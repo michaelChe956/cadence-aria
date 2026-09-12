@@ -1,0 +1,323 @@
+{
+  "type": "artifact_update",
+  "version": 7,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_142b4bc7e84c9b789cfaf328",
+    "work_item_revision_id": "work_item_revision_142b4bc7e84c9b789cfaf328",
+    "canonical_contract_hash": "fa7489dc5bcb5c336c783ce6bdf2e28740931f36fff643e2777158e5cab3207d",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-003",
+      "title": "前后端同源联调集成验证",
+      "goal": "WHEN 后端与前端产物就绪 THE SYSTEM SHALL 以 port 0 启动的同一服务实例经 HTTP 可观测证据验证同源可达、页面骨架、API 成功形状与错误契约且不重复运行时渲染断言。",
+      "non_goals": [
+        "不实现或修改 server/**、web/**、data/levels.json 与上游测试且仅新增维护 tests/integration/**",
+        "不通过页面源断言运行时渲染后的可见名称、难度与锁定态且该断言归属前端 DOM 替身测试",
+        "不引入浏览器自动化、npm 依赖、数据库或认证"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "stop() 返回 Promise 并释放监听端口"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "错误 message 不含堆栈、绝对路径与内部实现细节"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "同源可达与页面骨架及 API 错误契约的 HTTP 证据记录"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 以 start({ port: 0 }) 启动服务 THE SYSTEM SHALL 经 origin 同源访问 GET / 返回 200 页面 HTML 且 GET /api/levels 返回 200 与满足字段约束的五项顶层数组。",
+        "WHEN 集成检查页面可观测结构 THE SYSTEM SHALL GET / 返回的 HTML 含 id 为 loading、level-list、error-message 的三个容器标记与对 level-select.js 的 script 引用且经 HTTP 获取的该脚本响应体含相对路径 /api/levels。",
+        "WHEN 集成检查 API 错误契约 THE SYSTEM SHALL 未知 API 路径返回含 error 对象的 JSON 404、非允许方法访问 /api/levels 返回 JSON 405 且错误响应 Content-Type 为 application/json; charset=utf-8。"
+      ],
+      "source_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "CHECK-004",
+        "CHECK-005",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "NFR-001",
+        "TASK-008",
+        "TASK-009"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_142b4bc7e84c9b789cfaf328",
+      "objective": "WHEN 后端与前端产物就绪 THE SYSTEM SHALL 以 port 0 启动的同一服务实例经 HTTP 可观测证据验证同源可达、页面骨架、API 成功形状与错误契约且不重复运行时渲染断言。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "stop() 返回 Promise 并释放监听端口"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "错误 message 不含堆栈、绝对路径与内部实现细节"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-008",
+        "TASK-009"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN 集成实现开始 THE SYSTEM SHALL 先在 tests/integration/ 编写以 start({ port: 0 }) 启动服务并断言 AC-011、AC-012、AC-013 的失败测试。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-013"
+          ]
+        },
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN 三方套件全部执行 THE SYSTEM SHALL tests/integration/ 验证同源页面与脚本引用、五项 API 成功形状、未知路径 JSON 404、JSON 405 与错误 Content-Type 并在测试结束调用 stop() 释放端口。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-013"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 以 start({ port: 0 }) 启动服务 THE SYSTEM SHALL 经 origin 同源访问 GET / 返回 200 页面 HTML 且 GET /api/levels 返回 200 与满足字段约束的五项顶层数组。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "statement": "WHEN 集成检查页面可观测结构 THE SYSTEM SHALL GET / 返回的 HTML 含 id 为 loading、level-list、error-message 的三个容器标记与对 level-select.js 的 script 引用且经 HTTP 获取的该脚本响应体含相对路径 /api/levels。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-013",
+          "statement": "WHEN 集成检查 API 错误契约 THE SYSTEM SHALL 未知 API 路径返回含 error 对象的 JSON 404、非允许方法访问 /api/levels 返回 JSON 405 且错误响应 Content-Type 为 application/json; charset=utf-8。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-004",
+          "command": "node --test tests/integration",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-005",
+          "command": "null",
+          "manual_instruction": "联调验证输入输出示例 输入 start({ port: 0 }) 时输出为 { origin, port, stop } 且 origin 形如 http://127.0.0.1:41234；输入 GET http://127.0.0.1:41234/api/levels 时输出为 200 与五项数组示例体 [{\"id\":\"level-1\",\"name\":\"初始之地\",\"difficulty\":\"简单\",\"unlocked\":true}]；输入 GET http://127.0.0.1:41234/api/nope 时输出为 404 与示例体 {\"error\":{\"code\":\"ROUTE_NOT_FOUND\",\"message\":\"接口不存在，请检查请求路径\"}}；输入 POST http://127.0.0.1:41234/api/levels 时输出为 405 与示例体 {\"error\":{\"code\":\"METHOD_NOT_ALLOWED\",\"message\":\"不支持该请求方法\"}}",
+          "required": true,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "integration_evidence_report"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-011",
+          "AC-012",
+          "AC-013"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_142b4bc7e84c9b789cfaf328",
+      "criterion_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-012",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-013",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "stop() 返回 Promise 并释放监听端口"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "错误 message 不含堆栈、绝对路径与内部实现细节"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "同源可达与页面骨架及 API 错误契约的 HTTP 证据记录"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-004",
+          "command": "node --test tests/integration",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-005",
+          "command": "null",
+          "manual_instruction": "联调验证输入输出示例 输入 start({ port: 0 }) 时输出为 { origin, port, stop } 且 origin 形如 http://127.0.0.1:41234；输入 GET http://127.0.0.1:41234/api/levels 时输出为 200 与五项数组示例体 [{\"id\":\"level-1\",\"name\":\"初始之地\",\"difficulty\":\"简单\",\"unlocked\":true}]；输入 GET http://127.0.0.1:41234/api/nope 时输出为 404 与示例体 {\"error\":{\"code\":\"ROUTE_NOT_FOUND\",\"message\":\"接口不存在，请检查请求路径\"}}；输入 POST http://127.0.0.1:41234/api/levels 时输出为 405 与示例体 {\"error\":{\"code\":\"METHOD_NOT_ALLOWED\",\"message\":\"不支持该请求方法\"}}",
+          "required": true,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "44808f6c14342d366cf5d4730daac4d799a6f55dc37ac88b95eaec6b6cf84c58",
+    "coder_projection_hash": "9ed851dea58aef2697dbcc22c2fae79d210383d5bf88e524adedffbe34ea621a",
+    "reviewer_projection_hash": "ed35d025dbd587c5f95148407138ab541584dba36b937a120a6a99475e3436ad",
+    "created_at": "2026-09-12T07:24:57.930663133+00:00"
+  }
+}

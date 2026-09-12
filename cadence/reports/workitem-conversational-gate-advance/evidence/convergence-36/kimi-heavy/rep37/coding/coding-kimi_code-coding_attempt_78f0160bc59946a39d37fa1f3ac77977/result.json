@@ -1,0 +1,224 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0249",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "kimi_code",
+  "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+  "outDir": "/tmp/aria-36-matrix/kimi-heavy-v15/coding37/coding-kimi_code-coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+  "startedAt": "2026-09-12T08:18:13.879Z",
+  "finishedAt": "2026-09-12T08:46:42.947Z",
+  "elapsedSec": 1709.069,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.163,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.306,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 625.977,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1029.564,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 1029.564,
+      "source": "coding_stage_change"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.379,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 625.977,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1029.564,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0003",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "只读代码审查完成：变更全部位于独占范围内（server、data/levels.json、tests/backend），未触碰禁止范围。package.json 未新增任何依赖，实现与测试仅使用 node 内置模块，CHECK-002 人工核对通过。逐行核对 server/server.js 与全部 16 个测试用例：CT-001（GET /api/levels 返回 200、顶层数组、恰 5 项，数据错误统一 500 LEVEL_DATA_UNAVAILABLE）与 CT-002（staticRoot 静态托管、根路径返回入口 HTML、目录索引、Content-Type 映射、缺失返回 404 文本、双重路径穿越防护）的断言与实现一致，测试与夹具互相吻合，未发现自相矛盾。审查方式说明：reviewer 角色只读、终端被环境禁用，未能亲自执行 CHECK-001 的 node --test 命令，结论基于源代码与测试的逐条静态比对。无阻塞问题，同意通过。",
+      "created_at": "2026-09-12T08:35:23.042833888+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "只读代码审查完成：变更全部位于独占范围内（server、data/levels.json、tests/backend），未触碰禁止范围。package.json 未新增任何依赖，实现与测试仅使用 node 内置模块，CHECK-002 人工核对通过。逐行核对 server/server.js 与全部 16 个测试用例：CT-001（GET /api/levels 返回 200、顶层数组、恰 5 项，数据错误统一 500 LEVEL_DATA_UNAVAILABLE）与 CT-002（staticRoot 静态托管、根路径返回入口 HTML、目录索引、Content-Type 映射、缺失返回 404 文本、双重路径穿越防护）的断言与实现一致，测试与夹具互相吻合，未发现自相矛盾。审查方式说明：reviewer 角色只读、终端被环境禁用，未能亲自执行 CHECK-001 的 node --test 命令，结论基于源代码与测试的逐条静态比对。无阻塞问题，同意通过。",
+      "created_at": "2026-09-12T08:35:23.042833888+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "只读代码审查完成：变更全部位于独占范围内（server、data/levels.json、tests/backend），未触碰禁止范围。package.json 未新增任何依赖，实现与测试仅使用 node 内置模块，CHECK-002 人工核对通过。逐行核对 server/server.js 与全部 16 个测试用例：CT-001（GET /api/levels 返回 200、顶层数组、恰 5 项，数据错误统一 500 LEVEL_DATA_UNAVAILABLE）与 CT-002（staticRoot 静态托管、根路径返回入口 HTML、目录索引、Content-Type 映射、缺失返回 404 文本、双重路径穿越防护）的断言与实现一致，测试与夹具互相吻合，未发现自相矛盾。审查方式说明：reviewer 角色只读、终端被环境禁用，未能亲自执行 CHECK-001 的 node --test 命令，结论基于源代码与测试的逐条静态比对。无阻塞问题，同意通过。",
+      "created_at": "2026-09-12T08:35:23.042833888+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "只读代码审查完成：变更全部位于独占范围内（server、data/levels.json、tests/backend），未触碰禁止范围。package.json 未新增任何依赖，实现与测试仅使用 node 内置模块，CHECK-002 人工核对通过。逐行核对 server/server.js 与全部 16 个测试用例：CT-001（GET /api/levels 返回 200、顶层数组、恰 5 项，数据错误统一 500 LEVEL_DATA_UNAVAILABLE）与 CT-002（staticRoot 静态托管、根路径返回入口 HTML、目录索引、Content-Type 映射、缺失返回 404 文本、双重路径穿越防护）的断言与实现一致，测试与夹具互相吻合，未发现自相矛盾。审查方式说明：reviewer 角色只读、终端被环境禁用，未能亲自执行 CHECK-001 的 node --test 命令，结论基于源代码与测试的逐条静态比对。无阻塞问题，同意通过。",
+      "created_at": "2026-09-12T08:35:23.042833888+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "只读代码审查完成：变更全部位于独占范围内（server、data/levels.json、tests/backend），未触碰禁止范围。package.json 未新增任何依赖，实现与测试仅使用 node 内置模块，CHECK-002 人工核对通过。逐行核对 server/server.js 与全部 16 个测试用例：CT-001（GET /api/levels 返回 200、顶层数组、恰 5 项，数据错误统一 500 LEVEL_DATA_UNAVAILABLE）与 CT-002（staticRoot 静态托管、根路径返回入口 HTML、目录索引、Content-Type 映射、缺失返回 404 文本、双重路径穿越防护）的断言与实现一致，测试与夹具互相吻合，未发现自相矛盾。审查方式说明：reviewer 角色只读、终端被环境禁用，未能亲自执行 CHECK-001 的 node --test 命令，结论基于源代码与测试的逐条静态比对。无阻塞问题，同意通过。",
+      "created_at": "2026-09-12T08:35:23.042833888+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0249",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0249",
+    "head_commit": "954efab94b7c122c7ad85c9c2fb654fec3e4b1e9",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 9194,
+    "output_tokens": 2527,
+    "cache_read_tokens": 102592
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 1417,
+      "output_tokens": 2255,
+      "cache_read_tokens": 64192,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 7777,
+      "output_tokens": 272,
+      "cache_read_tokens": 38400,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-12T08:18:14.182608147+00:00",
+      "completed_at": "2026-09-12T08:18:14.212964189+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-12T08:18:19.264799938+00:00",
+      "completed_at": "2026-09-12T08:28:39.700426611+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-12T08:28:44.870048774+00:00",
+      "completed_at": "2026-09-12T08:35:23.050897148+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_78f0160bc59946a39d37fa1f3ac77977",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-12T08:35:28.445267312+00:00",
+      "completed_at": "2026-09-12T08:46:42.777531328+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "blocked_gate_awaiting_triage",
+  "error": "Coder 输出需要人工分诊：kind=blocked 门无自动放行（expires_at=null），attempt 留存服务端待人工分诊",
+  "completed": false
+}
