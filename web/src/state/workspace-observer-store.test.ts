@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceSessionSummary } from "../api/types";
 import type { WorkspaceWsState } from "./workspace-ws-store";
 import {
@@ -63,7 +63,7 @@ describe("workspace observer store", () => {
     expect(
       selectObservedInbox(records.filter((record) => ids.includes(record.sessionId))),
     ).toHaveLength(1);
-    expect(watchWindowCopy(2)).toBe("仅监视最近 2 个候选；集合外实时卡壳不计入计数");
+    expect(watchWindowCopy(2, 15_000)).toBe("仅监视最近 2 个候选；集合外不计入计数，集合内准实时（最多 15 秒陈旧）");
   });
 
   it("keeps API order for active candidates and excludes terminal statuses", () => {
@@ -98,6 +98,104 @@ describe("workspace observer store", () => {
     expect(controller.records()).toEqual([]);
   });
 
+
+  it("refreshes a record from the next scheduled connection snapshot", async () => {
+    type SocketCallbacks = {
+      onSnapshot: (state: WorkspaceWsState) => void;
+      onClose: () => void;
+      onError: () => void;
+    };
+    const sockets: SocketCallbacks[] = [];
+    const scheduled: Array<() => void> = [];
+    const controller = createObserverController(
+      (_sessionId, callbacks) => {
+        sockets.push(callbacks);
+        return { close: vi.fn() };
+      },
+      undefined,
+      {
+        refreshIntervalMs: 15_000,
+        reconnectDelayMs: 0,
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return 0 as never;
+        },
+        cancel: vi.fn(),
+      },
+    );
+    await controller.replaceWatchedSessionIds(["a"]);
+    sockets[0]?.onSnapshot(observedState("a", { sessionStatus: "running" }));
+
+    scheduled[0]?.();
+    sockets[1]?.onSnapshot(observedState("a", { sessionStatus: "stopped_needs_human" }));
+
+    expect(sockets).toHaveLength(2);
+    expect(controller.records()).toEqual([
+      { sessionId: "a", state: expect.objectContaining({ sessionStatus: "stopped_needs_human" }) },
+    ]);
+  });
+
+  it("reopens after a socket closes instead of retaining a dead K slot", async () => {
+    type SocketCallbacks = {
+      onSnapshot: (state: WorkspaceWsState) => void;
+      onClose: () => void;
+      onError: () => void;
+    };
+    const sockets: SocketCallbacks[] = [];
+    const scheduled: Array<() => void> = [];
+    const controller = createObserverController(
+      (_sessionId, callbacks) => {
+        sockets.push(callbacks);
+        return { close: vi.fn() };
+      },
+      undefined,
+      {
+        refreshIntervalMs: 15_000,
+        reconnectDelayMs: 0,
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return 0 as never;
+        },
+        cancel: vi.fn(),
+      },
+    );
+    await controller.replaceWatchedSessionIds(["a"]);
+    sockets[0]?.onClose();
+    scheduled.at(-1)?.();
+
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("reopens after a socket error instead of retaining a dead K slot", async () => {
+    type SocketCallbacks = {
+      onSnapshot: (state: WorkspaceWsState) => void;
+      onClose: () => void;
+      onError: () => void;
+    };
+    const sockets: SocketCallbacks[] = [];
+    const scheduled: Array<() => void> = [];
+    const controller = createObserverController(
+      (_sessionId, callbacks) => {
+        sockets.push(callbacks);
+        return { close: vi.fn() };
+      },
+      undefined,
+      {
+        refreshIntervalMs: 15_000,
+        reconnectDelayMs: 0,
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return 0 as never;
+        },
+        cancel: vi.fn(),
+      },
+    );
+    await controller.replaceWatchedSessionIds(["a"]);
+    sockets[0]?.onError();
+    scheduled.at(-1)?.();
+
+    expect(sockets).toHaveLength(2);
+  });
   it("keys merged inbox entries by session and sorts severity before session id", () => {
     expect(
       selectObservedInbox([

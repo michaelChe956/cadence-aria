@@ -17,12 +17,12 @@ const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> =
   "stopped_needs_human",
   "failed",
 ]);
+const OBSERVER_PING_INTERVAL_MS = 25_000;
 
 type WorkspaceSessionStateMessage = Extract<
   WsOutMessage,
   { type: "session_state" }
 >;
-
 type WorkspaceObserverMessage = WsOutMessage & Record<string, unknown>;
 
 export interface WorkspaceObserverRecord {
@@ -34,13 +34,27 @@ export interface WorkspaceObserverSocket {
   close(): void;
 }
 
+export interface WorkspaceObserverSocketCallbacks {
+  onSnapshot(state: WorkspaceWsState): void;
+  onClose(): void;
+  onError(): void;
+}
+
 export type WorkspaceObserverSocketFactory = (
   sessionId: string,
-  onSnapshot: (state: WorkspaceWsState) => void,
+  callbacks: WorkspaceObserverSocketCallbacks,
 ) => WorkspaceObserverSocket;
+
+export interface WorkspaceObserverControllerOptions {
+  refreshIntervalMs: number;
+  reconnectDelayMs: number;
+  schedule?(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  cancel?(timer: ReturnType<typeof setTimeout>): void;
+}
 
 export interface WorkspaceObserverController {
   replaceWatchedSessionIds(sessionIds: readonly string[]): Promise<void>;
+  refresh(): Promise<void>;
   records(): readonly WorkspaceObserverRecord[];
   dispose(): void;
 }
@@ -65,8 +79,8 @@ export function selectWatchedSessionIds(
     .map(({ session }) => session.workspace_session_id);
 }
 
-export function watchWindowCopy(watchLimit: number): string {
-  return `仅监视最近 ${watchLimit} 个候选；集合外实时卡壳不计入计数`;
+export function watchWindowCopy(watchLimit: number, refreshIntervalMs: number): string {
+  return `仅监视最近 ${watchLimit} 个候选；集合外不计入计数，集合内准实时（最多 ${Math.ceil(refreshIntervalMs / 1000)} 秒陈旧）`;
 }
 
 export function selectObservedInbox(
@@ -88,53 +102,116 @@ export function selectObservedInbox(
 export function createObserverController(
   socketFactory: WorkspaceObserverSocketFactory = createWorkspaceObserverSocket,
   onRecordsChange: (records: readonly WorkspaceObserverRecord[]) => void = () => undefined,
+  options: WorkspaceObserverControllerOptions = {
+    refreshIntervalMs: 15_000,
+    reconnectDelayMs: 1_000,
+  },
 ): WorkspaceObserverController {
   const sockets = new Map<string, WorkspaceObserverSocket>();
   const snapshots = new Map<string, WorkspaceWsState>();
+  const watchedSessionIds = new Set<string>();
+  const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const schedule = options.schedule ?? setTimeout;
+  const cancel = options.cancel ?? clearTimeout;
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
 
   const notifyRecordsChanged = () => {
     onRecordsChange(Array.from(snapshots, ([sessionId, state]) => ({ sessionId, state })));
   };
+  const clearReconnect = (sessionId: string) => {
+    const timer = reconnectTimers.get(sessionId);
+    if (timer) {
+      cancel(timer);
+      reconnectTimers.delete(sessionId);
+    }
+  };
+  const clearSocket = (sessionId: string) => {
+    clearReconnect(sessionId);
+    const socket = sockets.get(sessionId);
+    sockets.delete(sessionId);
+    socket?.close();
+  };
+  const ensureSocket = (sessionId: string) => {
+    if (disposed || !watchedSessionIds.has(sessionId) || sockets.has(sessionId)) {
+      return;
+    }
+    sockets.set(
+      sessionId,
+      socketFactory(sessionId, {
+        onSnapshot: (state) => {
+          if (!disposed && watchedSessionIds.has(sessionId)) {
+            snapshots.set(sessionId, state);
+            notifyRecordsChanged();
+          }
+        },
+        onClose: () => scheduleReconnect(sessionId),
+        onError: () => scheduleReconnect(sessionId),
+      }),
+    );
+  };
+  const scheduleReconnect = (sessionId: string) => {
+    if (disposed || !watchedSessionIds.has(sessionId) || reconnectTimers.has(sessionId)) {
+      return;
+    }
+    sockets.delete(sessionId);
+    const timer = schedule(() => {
+      reconnectTimers.delete(sessionId);
+      ensureSocket(sessionId);
+    }, options.reconnectDelayMs);
+    reconnectTimers.set(sessionId, timer);
+  };
+  const scheduleRefresh = () => {
+    if (disposed || options.refreshIntervalMs <= 0) {
+      return;
+    }
+    refreshTimer = schedule(() => {
+      refreshTimer = null;
+      void refresh();
+      scheduleRefresh();
+    }, options.refreshIntervalMs);
+  };
+  const refresh = async () => {
+    for (const sessionId of watchedSessionIds) {
+      clearSocket(sessionId);
+      ensureSocket(sessionId);
+    }
+  };
+
+  scheduleRefresh();
 
   return {
     async replaceWatchedSessionIds(sessionIds) {
       const nextIds = new Set(sessionIds);
-      let changed = false;
-      for (const [sessionId, socket] of sockets) {
+      for (const sessionId of watchedSessionIds) {
         if (!nextIds.has(sessionId)) {
-          socket.close();
-          sockets.delete(sessionId);
+          clearSocket(sessionId);
+          watchedSessionIds.delete(sessionId);
           snapshots.delete(sessionId);
-          changed = true;
         }
       }
-
       for (const sessionId of sessionIds) {
-        if (sockets.has(sessionId)) {
-          continue;
-        }
-        sockets.set(
-          sessionId,
-          socketFactory(sessionId, (state) => {
-            snapshots.set(sessionId, state);
-            notifyRecordsChanged();
-          }),
-        );
+        watchedSessionIds.add(sessionId);
+        ensureSocket(sessionId);
       }
-
-      if (changed) {
-        notifyRecordsChanged();
-      }
+      notifyRecordsChanged();
     },
+
+    refresh,
 
     records() {
       return Array.from(snapshots, ([sessionId, state]) => ({ sessionId, state }));
     },
 
     dispose() {
-      for (const socket of sockets.values()) {
-        socket.close();
+      disposed = true;
+      if (refreshTimer) {
+        cancel(refreshTimer);
       }
+      for (const sessionId of watchedSessionIds) {
+        clearSocket(sessionId);
+      }
+      watchedSessionIds.clear();
       sockets.clear();
       snapshots.clear();
       notifyRecordsChanged();
@@ -144,43 +221,64 @@ export function createObserverController(
 
 function createWorkspaceObserverSocket(
   sessionId: string,
-  onSnapshot: (state: WorkspaceWsState) => void,
+  callbacks: WorkspaceObserverSocketCallbacks,
 ): WorkspaceObserverSocket {
   const socket = new WebSocket(workspaceSessionWebSocketUrl(sessionId));
   let state: WorkspaceWsState | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
+
+  const close = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    if (pingTimer) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
+    socket.close();
+  };
+  const notifyClosed = () => {
+    if (!closed) {
+      closed = true;
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      callbacks.onClose();
+    }
+  };
 
   socket.onopen = () => {
-    socket.send(
-      JSON.stringify({
-        type: "hello",
-        session_id: sessionId,
-        last_seen_node_id: null,
-      }),
-    );
+    socket.send(JSON.stringify({ type: "hello", session_id: sessionId, last_seen_node_id: null }));
+    pingTimer = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "ping" }));
+      }
+    }, OBSERVER_PING_INTERVAL_MS);
   };
+  socket.onclose = notifyClosed;
+  socket.onerror = notifyClosed;
   socket.onmessage = (event) => {
     try {
       const message = JSON.parse(event.data) as WorkspaceObserverMessage;
       if (message.type === "session_state" && message.session_id === sessionId) {
         state = observerStateFromSessionState(message as WorkspaceSessionStateMessage);
-        onSnapshot(state);
-        return;
-      }
-      if (state) {
+        callbacks.onSnapshot(state);
+      } else if (state) {
         state = reduceObserverMessage(state, message);
-        onSnapshot(state);
+        callbacks.onSnapshot(state);
       }
     } catch {
       // observer 仅消费可识别帧，畸形帧不能影响当前工作区连接。
     }
   };
 
-  return socket;
+  return { close };
 }
 
-function observerStateFromSessionState(
-  message: WorkspaceSessionStateMessage,
-): WorkspaceWsState {
+function observerStateFromSessionState(message: WorkspaceSessionStateMessage): WorkspaceWsState {
   return {
     sessionId: message.session_id,
     stage: message.stage,
@@ -208,10 +306,7 @@ function reduceObserverMessage(
     case "error":
       return { ...state, error: String(message.message) };
     case "protocol_error":
-      return {
-        ...state,
-        protocolError: { code: String(message.code), message: String(message.message) },
-      };
+      return { ...state, protocolError: { code: String(message.code), message: String(message.message) } };
     case "review_complete":
       return {
         ...state,
@@ -265,10 +360,7 @@ function reduceObserverMessage(
     case "human_gate_closed":
       return {
         ...state,
-        humanGateClosure: {
-          decision: message.decision,
-          stage: String(message.stage),
-        },
+        humanGateClosure: { decision: message.decision, stage: String(message.stage) },
       };
     case "advance_rejected":
       return {

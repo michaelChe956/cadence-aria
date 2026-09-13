@@ -14,6 +14,7 @@ describe("cockpit settings storage", () => {
       systemNotificationsEnabled: true,
       titleEmojiEnabled: true,
       watchLimit: 8,
+      observerRefreshIntervalMs: 15_000,
       gateOpenEscalationMs: 600_000,
       escalationRepeatMs: 300_000,
       escalationBudgetThreshold: 1,
@@ -28,7 +29,7 @@ describe("cockpit settings storage", () => {
       JSON.stringify({
         soundEnabled: true,
         watchLimit: 0,
-        gateOpenEscalationMs: -1,
+        observerRefreshIntervalMs: 0,
         stopPoints: ["human_gate", "invalid"],
       }),
     );
@@ -36,7 +37,7 @@ describe("cockpit settings storage", () => {
     expect(readCockpitSettings(window.localStorage)).toMatchObject({
       soundEnabled: true,
       watchLimit: 8,
-      gateOpenEscalationMs: 600_000,
+      observerRefreshIntervalMs: 15_000,
       stopPoints: ["human_gate"],
     });
   });

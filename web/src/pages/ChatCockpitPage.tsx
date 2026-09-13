@@ -42,8 +42,12 @@ export function ChatCockpitPage({
     currentSessionId: sessionId,
     currentSessionState: state,
     watchLimit: cockpitSettings.watchLimit,
+    refreshIntervalMs: cockpitSettings.observerRefreshIntervalMs,
   });
-  const watchWindow = watchWindowCopy(cockpitSettings.watchLimit);
+  const watchWindow = watchWindowCopy(
+    cockpitSettings.watchLimit,
+    cockpitSettings.observerRefreshIntervalMs,
+  );
   const flowRows = useMemo(() => selectCockpitFlow(state, now), [state, now]);
   const contentCacheValues = useMemo(
     () => workspaceContentCacheValues(state.contentCache),

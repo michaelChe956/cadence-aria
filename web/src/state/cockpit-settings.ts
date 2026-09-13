@@ -7,6 +7,7 @@ export interface CockpitSettings {
   systemNotificationsEnabled: boolean;
   titleEmojiEnabled: boolean;
   watchLimit: number;
+  observerRefreshIntervalMs: number;
   gateOpenEscalationMs: number;
   escalationRepeatMs: number;
   escalationBudgetThreshold: number;
@@ -19,6 +20,7 @@ export const DEFAULT_COCKPIT_SETTINGS: Readonly<CockpitSettings> = {
   systemNotificationsEnabled: true,
   titleEmojiEnabled: true,
   watchLimit: 8,
+  observerRefreshIntervalMs: 15_000,
   gateOpenEscalationMs: 600_000,
   escalationRepeatMs: 300_000,
   escalationBudgetThreshold: 1,
@@ -81,6 +83,13 @@ function normalizeCockpitSettings(value: unknown): CockpitSettings {
       candidate.watchLimit <= 32
         ? candidate.watchLimit
         : defaults.watchLimit,
+    observerRefreshIntervalMs:
+      typeof candidate.observerRefreshIntervalMs === "number" &&
+      Number.isInteger(candidate.observerRefreshIntervalMs) &&
+      candidate.observerRefreshIntervalMs >= 5_000 &&
+      candidate.observerRefreshIntervalMs <= 60_000
+        ? candidate.observerRefreshIntervalMs
+        : defaults.observerRefreshIntervalMs,
     gateOpenEscalationMs:
       typeof candidate.gateOpenEscalationMs === "number" &&
       Number.isInteger(candidate.gateOpenEscalationMs) &&

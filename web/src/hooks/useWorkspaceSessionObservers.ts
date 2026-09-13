@@ -23,6 +23,7 @@ export interface WorkspaceSessionObserverOptions {
   currentSessionId: string | null;
   currentSessionState?: WorkspaceWsState | null;
   watchLimit: number;
+  refreshIntervalMs: number;
   listProjects?: typeof listProjects;
   listProductIssues?: (projectId: string) => Promise<ProductIssueListResponse>;
   getIssueLifecycle?: (
@@ -47,6 +48,7 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     currentSessionId,
     currentSessionState = null,
     watchLimit,
+    refreshIntervalMs,
     listProjects: getProjects = listProjects,
     listProductIssues: getProductIssues = listProductIssues,
     getIssueLifecycle: getLifecycle = getIssueLifecycle,
@@ -60,7 +62,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   if (controllerRef.current === null) {
     controllerRef.current = createController
       ? createController(setObserverRecords)
-      : createObserverController(undefined, setObserverRecords);
+      : createObserverController(undefined, setObserverRecords, {
+          refreshIntervalMs,
+          reconnectDelayMs: 1_000,
+        });
   }
 
   const watchedSessionIds = useMemo(
