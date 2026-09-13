@@ -7,6 +7,7 @@ import {
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
+import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useWorkspaceSessionObservers } from "../hooks/useWorkspaceSessionObservers";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
@@ -34,10 +35,16 @@ export function ChatCockpitPage({
   sessionId: string;
   onBack: () => void;
 }) {
-  useWorkspaceWs(sessionId);
+  const workspaceWs = useWorkspaceWs(sessionId);
   const state = useWorkspaceStore();
   const now = useNowTicker(1000);
   const cockpitSettings = readCockpitSettings();
+  useCockpitAutopilot({
+    sessionId,
+    state,
+    settings: cockpitSettings,
+    sendAdvance: workspaceWs.sendAdvance,
+  });
   const { inbox: observedInbox } = useWorkspaceSessionObservers({
     currentSessionId: sessionId,
     currentSessionState: state,
