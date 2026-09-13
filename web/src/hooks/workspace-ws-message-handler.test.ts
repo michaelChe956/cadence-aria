@@ -413,6 +413,67 @@ describe("workspace websocket human gate protocol branches", () => {
     expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
   });
 
+  // REQ-UI37-02 收敛语义回归：后端 terminate 事件顺序为
+  // HumanGateClosed{decision:"terminate", stage:"completed"} → StageChange("completed")；
+  // 阶段迁移不得把已收敛的门重新投影成开放门（收件箱「门禁等待」复活）。
+  it("keeps a terminated gate converged when the terminal stage change follows", () => {
+    startTypedGateSession();
+    handleWorkspaceWsMessage(
+      {
+        type: "human_gate_turn_open",
+        turn_id: "turn_terminate",
+        command_id: "cmd_1",
+        remaining_budget: 2,
+      } as WsServerMessage,
+      options(),
+    );
+
+    handleWorkspaceWsMessage(
+      { type: "human_gate_closed", decision: "terminate", stage: "completed" } as WsServerMessage,
+      options(),
+    );
+    handleWorkspaceWsMessage(
+      { type: "stage_change", stage: "completed" } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().humanGateClosure).toEqual({
+      decision: "terminate",
+      stage: "completed",
+    });
+    expect(gateEntries()[0]).toMatchObject({ resolved: true, resolution: "terminate" });
+    expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
+  });
+
+  // confirm 路径不得因后续阶段迁移回退：门一旦已过，之后的 stage_change 只推进流程。
+  it("keeps a confirmed gate converged across the stage changes that follow", () => {
+    startTypedGateSession();
+    handleWorkspaceWsMessage(
+      {
+        type: "human_gate_turn_open",
+        turn_id: "turn_confirm",
+        command_id: "cmd_1",
+        remaining_budget: 2,
+      } as WsServerMessage,
+      options(),
+    );
+
+    handleWorkspaceWsMessage(
+      { type: "stage_change", stage: "compile_plan" } as WsServerMessage,
+      options(),
+    );
+    handleWorkspaceWsMessage(
+      { type: "human_gate_closed", decision: "confirm", stage: "compile_plan" } as WsServerMessage,
+      options(),
+    );
+    handleWorkspaceWsMessage(
+      { type: "stage_change", stage: "running" } as WsServerMessage,
+      options(),
+    );
+
+    expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
+  });
+
   it("records advance completion and rejection by command_id", () => {
     handleWorkspaceWsMessage(
       {

@@ -180,6 +180,10 @@ export interface TimelineNode {
   title: string;
   summary?: string | null;
   started_at: string;
+  // 最近一次引擎事件时间（客户端维护，见 store 的 addTimelineNode / updateTimelineNode /
+  // appendStreamChunk 刷新点）；REQ-UI37-18 的「长时间无事件」静默判据取本字段，
+  // 老数据或重建快照缺省时回退 `started_at`。
+  last_event_at?: string | null;
   completed_at?: string | null;
   duration_ms?: number | null;
   artifact_ref?: string | null;

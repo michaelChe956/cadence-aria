@@ -216,6 +216,22 @@ describe("workspace cockpit inbox projection", () => {
     expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
   });
 
+  // 闭环保留不得让「下一代 legacy 门」被误判为已收：
+  // 进入 human_confirm 即新门开启，必须清上一轮闭环（原设计里清 closure 的逃生口）。
+  it("clears the previous closure when a new legacy gate opens", () => {
+    const store = useWorkspaceStore.getState();
+    store.setStage("human_confirm");
+    store.applyHumanGateClosed("confirm", "human_confirm");
+    store.setStage("compile_plan");
+
+    store.setStage("human_confirm");
+
+    expect(useWorkspaceStore.getState().humanGateClosure).toBeNull();
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).filter((item) => item.kind === "gate"),
+    ).toHaveLength(1);
+  });
+
   it("sorts by severity descending then newest first", () => {
     const store = useWorkspaceStore.getState();
     store.setProtocolError({ code: "SOME_PROTOCOL_ERROR", message: "hard" });
@@ -299,6 +315,32 @@ describe("workspace cockpit execution flow projection", () => {
     expect(formatFlowElapsed(45_000)).toBe("45s");
     expect(formatFlowElapsed(90_000)).toBe("1m30s");
     expect(formatFlowElapsed(3_725_000)).toBe("1h2m");
+  });
+
+  // REQ-UI37-18「长时间无事件」：静默量取自最近一次引擎事件，而不是节点起点。
+  it("measures idle time from the node last event rather than from the start", () => {
+    const store = useWorkspaceStore.getState();
+    store.setTimelineNodesForTest([
+      timelineNode({
+        node_id: "n1",
+        status: "active",
+        started_at: "2026-09-13T00:00:00Z",
+        last_event_at: "2026-09-13T00:29:00Z",
+      }),
+    ]);
+
+    const rows = selectCockpitFlow(useWorkspaceStore.getState(), Date.parse("2026-09-13T00:30:00Z"));
+
+    expect(rows[0]).toMatchObject({ elapsed_ms: 30 * 60_000, idle_ms: 60_000 });
+  });
+
+  it("falls back to the node start when a node carries no last event", () => {
+    const store = useWorkspaceStore.getState();
+    store.setTimelineNodesForTest([timelineNode({ node_id: "n1", status: "active" })]);
+
+    const rows = selectCockpitFlow(useWorkspaceStore.getState(), Date.parse("2026-09-13T00:30:00Z"));
+
+    expect(rows[0]).toMatchObject({ elapsed_ms: 30 * 60_000, idle_ms: 30 * 60_000 });
   });
 
   it("maps cockpit states onto css token suffixes", () => {

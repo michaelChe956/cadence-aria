@@ -71,8 +71,9 @@ export function TimelineNodeList({
 // REQ-UI37-18：进行中状态灯带呼吸动画（running 为主色，见 T1 的
 // `--aria-topo-node-running-fg: var(--aria-primary)`）；减弱动效下由 T1 的降级块静态实心化。
 const FLOW_PULSE_STATES: CockpitFlowRow["state"][] = ["running", "awaiting_triage"];
-// 静默判据（M2）：行仍在推进（running）且自最近一次引擎事件（T4 由 `node.started_at` 与
-// nowMs 推出 `elapsed_ms`）起已超过 5 分钟没有新事件 → 静默视觉（静态透明度，非动画）。
+// 静默判据（M2）：行仍在推进（running）且自最近一次引擎事件（T4 由节点 `last_event_at`
+// 推出 `idle_ms`；无该字段时回退 `started_at`）起已超过 5 分钟没有新事件 → 静默视觉
+// （静态透明度，非动画）。持续流式事件的长 running 行不得被判为静默。
 const FLOW_QUIET_AFTER_MS = 5 * 60_000;
 
 function TimelineNodeButton({
@@ -94,7 +95,7 @@ function TimelineNodeButton({
   // REQ-UI37-18 静默视觉：仍在推进的行超过 5 分钟没有新引擎事件 → 静默（静态透明度）；
   // MUST NOT 报警（报警归四层卡壳体系）。
   const quiet =
-    flowRow !== null && flowRow.state === "running" && flowRow.elapsed_ms >= FLOW_QUIET_AFTER_MS;
+    flowRow !== null && flowRow.state === "running" && flowRow.idle_ms >= FLOW_QUIET_AFTER_MS;
 
   return (
     <button

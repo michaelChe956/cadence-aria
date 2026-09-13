@@ -130,6 +130,7 @@ describe("TimelineNodeList flow variant", () => {
       index: 1,
       total: 2,
       elapsed_ms: 30_000,
+      idle_ms: 5_000,
       started_at: "2026-09-13T00:00:00Z",
       topology: ["running", "pending"] as const,
     },
@@ -140,6 +141,7 @@ describe("TimelineNodeList flow variant", () => {
       index: 2,
       total: 2,
       elapsed_ms: 90_000,
+      idle_ms: 5_000,
       started_at: "2026-09-13T00:01:00Z",
       topology: ["running", "awaiting_triage"] as const,
     },
@@ -240,8 +242,11 @@ describe("TimelineNodeList flow variant", () => {
     );
   });
 
-  it("mutes a row that has seen no new events for a long time and leaves fresh rows unmuted", () => {
-    const quietRow = { ...flowRows[0]!, elapsed_ms: 600_000 };
+  it("mutes a row whose last event is long past and leaves rows with ongoing events unmuted", () => {
+    // flowRows[0] 行仍在持续出事件（elapsed 已超 5 分钟，但最近事件刚发生）→ 不得静默；
+    // reviewer_run 行同为 running，但自最近事件起已超 5 分钟 → 静默。
+    const activeRow = { ...flowRows[0]!, elapsed_ms: 30 * 60_000, idle_ms: 2_000 };
+    const quietRow = { ...flowRows[1]!, state: "running" as const, idle_ms: 600_000 };
     render(
       <TimelineNodeList
         nodes={[flowNode, timelineNode({ node_id: "node-flow-2", node_type: "reviewer_run" })]}
@@ -249,12 +254,12 @@ describe("TimelineNodeList flow variant", () => {
         selectedNodeId={null}
         onSelectNode={vi.fn()}
         variant="flow"
-        flowRows={[quietRow, flowRows[1]!]}
+        flowRows={[activeRow, quietRow]}
       />,
     );
 
     // REQ-UI37-18：久无事件 → 静默视觉（muted 透明度），不是报警。
-    expect(screen.getByTestId("timeline-node-author_run").className).toContain("opacity-60");
-    expect(screen.getByTestId("timeline-node-reviewer_run").className).not.toContain("opacity-60");
+    expect(screen.getByTestId("timeline-node-author_run").className).not.toContain("opacity-60");
+    expect(screen.getByTestId("timeline-node-reviewer_run").className).toContain("opacity-60");
   });
 });

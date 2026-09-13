@@ -281,7 +281,16 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const details = { ...prev.nodeDetails };
       const detail = ensureNodeDetail(details, nodeId);
       detail.streaming_content += content;
-      return { nodeDetails: details };
+      const lastEventAt = new Date().toISOString();
+      return {
+        nodeDetails: details,
+        // REQ-UI37-18：持续流式事件刷新节点事件钟，长 running 行不得被判为静默。
+        timelineNodes: prev.timelineNodes.some((node) => node.node_id === nodeId)
+          ? prev.timelineNodes.map((node) =>
+              node.node_id === nodeId ? { ...node, last_event_at: lastEventAt } : node,
+            )
+          : prev.timelineNodes,
+      };
     }),
 
   appendBufferedStreamChunk: (content, nodeId, role) =>
@@ -597,8 +606,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       stage,
       visitedStages: mergeVisitedStages(prev.visitedStages, stage),
       streamingContent: STREAMING_STAGES.has(stage) ? prev.streamingContent : "",
-      // 阶段已推进：上一轮门的闭环状态不再适用于当前门（避免下一轮 legacy 门被误判为已收）。
-      humanGateClosure: stage === prev.stage ? prev.humanGateClosure : null,
+      // 进入 human_confirm = 新一代 legacy 门开启：清上一轮闭环，避免新门被误判为已收。
+      // 其余阶段迁移不清：闭环绑定在当前 turn/snapshot 上，清掉会让已收敛的门在收件箱复活
+      // （terminate 时序为 HumanGateClosed → StageChange("completed")）；
+      // 新 typed 门的旧闭环由 applyHumanGateTurnOpen 清除。
+      humanGateClosure:
+        stage === "human_confirm" && stage !== prev.stage ? null : prev.humanGateClosure,
     })),
 
   setArtifact: (markdown, version) =>
@@ -704,7 +717,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         ? chatEntryId(retrySourceNodeId, "stream-active")
         : null;
       return {
-        timelineNodes: [...prev.timelineNodes, node],
+        timelineNodes: [
+          ...prev.timelineNodes,
+          { ...node, last_event_at: node.last_event_at ?? new Date().toISOString() },
+        ],
         activeNodeId: node.node_id,
         selectedNodeId: node.node_id,
         nodeDetails: {
@@ -733,6 +749,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
               status,
               summary: summary ?? node.summary,
               completed_at: completedAt ?? node.completed_at,
+              // REQ-UI37-18：timeline_node_updated 本身就是一次引擎事件。
+              last_event_at: new Date().toISOString(),
             }
           : node,
       ),

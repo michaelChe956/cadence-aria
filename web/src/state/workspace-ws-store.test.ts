@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "./chat-entries";
 import {
   emptyWorkspaceContentCache,
   workspaceContentCacheValues,
 } from "./workspace-content-cache";
-import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
+import {
+  selectPrepareContextNotes,
+  useWorkspaceStore,
+  type TimelineNode,
+} from "./workspace-ws-store";
 import {
   installWorkspaceStoreTestHooks,
   makeCompileArtifactPayload,
@@ -474,5 +478,52 @@ describe("workspace ws store base state", () => {
         exit_code: 0,
       },
     ]);
+  });
+});
+
+// REQ-UI37-18：静默判据取“最近一次引擎事件”而非节点起点，因此 store 必须在
+// timeline_node_updated 与 stream_chunk 两类事件上刷新节点的 last_event_at。
+describe("workspace ws timeline node event clock", () => {
+  installWorkspaceStoreTestHooks();
+
+  const timelineNode = (overrides: Partial<TimelineNode> = {}): TimelineNode => ({
+    node_id: "node_1",
+    node_type: "author_run",
+    agent: "claude_code",
+    stage: "running",
+    round: null,
+    status: "active",
+    title: "Author 运行",
+    summary: null,
+    started_at: "2026-09-13T00:00:00Z",
+    completed_at: null,
+    duration_ms: null,
+    artifact_ref: null,
+    provider_config_snapshot: { author: "claude_code", reviewer: null, review_rounds: 1 },
+    ...overrides,
+  });
+
+  it("refreshes a node last-event clock on stream chunks and status updates", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-13T01:00:00Z"));
+      const store = useWorkspaceStore.getState();
+      store.setTimelineNodesForTest([timelineNode({ node_id: "n1" })]);
+
+      store.appendStreamChunk("chunk", "n1");
+
+      expect(useWorkspaceStore.getState().timelineNodes[0]?.last_event_at).toBe(
+        "2026-09-13T01:00:00.000Z",
+      );
+
+      vi.setSystemTime(new Date("2026-09-13T01:04:00Z"));
+      store.updateTimelineNode("n1", "active", "仍在运行", null);
+
+      expect(useWorkspaceStore.getState().timelineNodes[0]?.last_event_at).toBe(
+        "2026-09-13T01:04:00.000Z",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

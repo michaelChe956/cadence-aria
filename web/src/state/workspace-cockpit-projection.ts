@@ -261,6 +261,9 @@ export interface CockpitFlowRow {
   index: number;
   total: number;
   elapsed_ms: number;
+  // REQ-UI37-18「长时间无事件」的静默量：自节点最近一次引擎事件（`last_event_at`，
+  // 缺省回退 `started_at`）起的毫秒数，与 `elapsed_ms`（节点起点起算）区分开。
+  idle_ms: number;
   started_at: string;
   // 只读投影：行数据由 store 派生，消费方只读不写；只读元素类型同时接纳 `as const` 字面量。
   topology: readonly CockpitFlowState[];
@@ -321,14 +324,20 @@ export function selectCockpitFlow(state: WorkspaceWsState, nowMs = Date.now()): 
     cockpitFlowState(node, awaitingTriage && node.node_id === state.activeNodeId),
   );
 
-  return state.timelineNodes.map((node, index) => ({
-    node_id: node.node_id,
-    title: node.title,
-    state: topology[index] ?? "pending",
-    index: index + 1,
-    total,
-    elapsed_ms: flowElapsedMs(node, nowMs),
-    started_at: node.started_at,
-    topology,
-  }));
+  return state.timelineNodes.map((node, index) => {
+    // REQ-UI37-18：静默量取自最近一次引擎事件；节点没有 `last_event_at`
+    // （老数据 / session_state 重建快照）时回退 `started_at`，与既有行为一致。
+    const lastEventAt = Date.parse(node.last_event_at ?? node.started_at);
+    return {
+      node_id: node.node_id,
+      title: node.title,
+      state: topology[index] ?? "pending",
+      index: index + 1,
+      total,
+      elapsed_ms: flowElapsedMs(node, nowMs),
+      idle_ms: Number.isNaN(lastEventAt) ? 0 : Math.max(0, nowMs - lastEventAt),
+      started_at: node.started_at,
+      topology,
+    };
+  });
 }
