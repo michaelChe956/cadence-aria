@@ -12,6 +12,7 @@ import type { JSX } from "react";
 import { useWorkspaceSessionObservers } from "../../hooks/useWorkspaceSessionObservers";
 import { readCockpitSettings } from "../../state/cockpit-settings";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
+import { CockpitEscalation } from "./CockpitEscalation";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 
 const GO_TO_INBOX_EVENT = "aria:cockpit:go-to-inbox";
@@ -210,6 +211,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
             需要处理：{toast.title}
           </div>
         ) : null}
+        <CockpitEscalation items={inbox} settings={settings} />
         {children}
       </div>
     </CockpitShellContext.Provider>
