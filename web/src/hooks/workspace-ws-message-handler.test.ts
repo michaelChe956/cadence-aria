@@ -7,6 +7,7 @@ import {
   makeContextBlockerArtifactPayload,
 } from "../state/workspace-ws-store.test-utils";
 import { selectCockpitInbox } from "../state/workspace-cockpit-projection";
+import { linkedWorkspaceAmendmentSnapshotFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
 
 describe("workspace websocket provider parser", () => {
   it("accepts kimi_code as a workspace provider", () => {
@@ -468,5 +469,34 @@ describe("workspace websocket human gate protocol branches", () => {
       type: "future_event",
     });
     expect(useWorkspaceStore.getState().protocolError).toBeNull();
+  });
+
+  it("does not diagnose known protocol members left to downstream consumers", () => {
+    useWorkspaceStore.getState().recordProtocolDiagnostic({
+      code: "SEED",
+      message: "既有诊断",
+      at: "2026-09-13T00:00:00Z",
+      type: "seed",
+    });
+
+    handleWorkspaceWsMessage(
+      {
+        type: "linked_workspace_amendment_created",
+        snapshot: linkedWorkspaceAmendmentSnapshotFixture(),
+      },
+      options(),
+    );
+    handleWorkspaceWsMessage(
+      {
+        type: "provider_select_request",
+        stage: "prepare_context",
+        defaults: { author: "claude_code", reviewer: null, review_rounds: 1 },
+      },
+      options(),
+    );
+
+    const diagnostics = useWorkspaceStore.getState().protocolDiagnostics;
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ code: "SEED" });
   });
 });

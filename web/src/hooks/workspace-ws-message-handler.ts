@@ -495,6 +495,13 @@ const store = useWorkspaceStore.getState();
         msg.reason as string,
       );
       break;
+    // 已知协议成员但本 handler 不做处理：linked_workspace_amendment_created 由
+    // useWorkspaceWs 的 aggregatePlanRepairChildMessage 下游消费（该消息仍会流经本 switch），
+    // provider_select_request 为协议保留成员。二者都不属于协议漂移，不计诊断——
+    // 否则每次到达都会写假诊断，并挤占 protocolDiagnostics 的 50 条上限。
+    case "linked_workspace_amendment_created":
+    case "provider_select_request":
+      break;
     default:
       {
         // default 分支里联合类型已收窄为 never，无法直读判别字段；
