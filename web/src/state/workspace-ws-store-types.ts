@@ -569,5 +569,6 @@ export interface WorkspaceWsActions {
   setActiveNodeId: (nodeId: string | null) => void;
   setSessionStatus: (status: WorkspaceSessionStatus) => void;
   setHumanGateSnapshot: (snapshot: WorkItemPlanHumanGateSnapshot | null) => void;
+  setSessionIdForTest: (sessionId: string) => void;
   reset: () => void;
 }
