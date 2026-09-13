@@ -34,6 +34,47 @@
   --aria-warning-soft: #fef3c7;
   --aria-danger: #dc2626;
   --aria-danger-soft: #fee2e2;
+  /* 3.7 §1.3（1）对话流：派生自既有语义色，不新增色相 */
+  --aria-conv-user-bg: var(--aria-primary-soft);
+  --aria-conv-user-ink: var(--aria-primary);
+  --aria-conv-agent-bg: var(--aria-panel);
+  --aria-conv-agent-ink: var(--aria-ink);
+  --aria-conv-turn-rail: var(--aria-line-strong);
+  --aria-conv-turn-active: var(--aria-primary);
+  --aria-conv-caret: var(--aria-cta);
+  /* 3.7 §1.3（2）拓扑六态：fg=既有语义色，bg=既有 soft 变体，border=fg 与 --aria-line 混色 */
+  --aria-topo-node-running-fg: var(--aria-primary);
+  --aria-topo-node-running-bg: var(--aria-primary-soft);
+  --aria-topo-node-running-border: color-mix(in srgb, var(--aria-primary) 55%, var(--aria-line));
+  --aria-topo-node-pending-fg: var(--aria-ink-muted);
+  --aria-topo-node-pending-bg: var(--aria-panel-subtle);
+  --aria-topo-node-pending-border: var(--aria-line-strong);
+  --aria-topo-node-blocked-fg: var(--aria-warning);
+  --aria-topo-node-blocked-bg: var(--aria-warning-soft);
+  --aria-topo-node-blocked-border: color-mix(in srgb, var(--aria-warning) 55%, var(--aria-line));
+  --aria-topo-node-done-fg: var(--aria-success);
+  --aria-topo-node-done-bg: var(--aria-success-soft);
+  --aria-topo-node-done-border: color-mix(in srgb, var(--aria-success) 55%, var(--aria-line));
+  --aria-topo-node-failed-fg: var(--aria-danger);
+  --aria-topo-node-failed-bg: var(--aria-danger-soft);
+  --aria-topo-node-failed-border: color-mix(in srgb, var(--aria-danger) 55%, var(--aria-line));
+  --aria-topo-node-awaiting-triage-fg: var(--aria-warning);
+  --aria-topo-node-awaiting-triage-bg: var(--aria-warning-soft);
+  --aria-topo-node-awaiting-triage-border: color-mix(in srgb, var(--aria-warning) 55%, var(--aria-line));
+  --aria-topo-edge: var(--aria-line-strong);
+  --aria-topo-edge-active: var(--aria-primary);
+  /* 3.7 §1.3（3）门禁三态 */
+  --aria-gate-open-fg: var(--aria-warning);
+  --aria-gate-open-bg: var(--aria-warning-soft);
+  --aria-gate-open-border: color-mix(in srgb, var(--aria-warning) 45%, var(--aria-line));
+  --aria-gate-pending-fg: var(--aria-primary);
+  --aria-gate-pending-bg: var(--aria-primary-soft);
+  --aria-gate-pending-border: color-mix(in srgb, var(--aria-primary) 45%, var(--aria-line));
+  --aria-gate-passed-fg: var(--aria-success);
+  --aria-gate-passed-bg: var(--aria-success-soft);
+  --aria-gate-passed-border: color-mix(in srgb, var(--aria-success) 45%, var(--aria-line));
+  /* 3.7 §1.4 等宽系统栈 */
+  --aria-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 body {
@@ -102,6 +143,25 @@ select:disabled {
   }
 }
 
+@keyframes aria-cockpit-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* R5：新增动画在减弱动效下静止；醒目度由语义色与边框承担，不使用 !important 绕过全局降级块 */
+@media (prefers-reduced-motion: reduce) {
+  .aria-pulse {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 @layer components {
   /* 边框强度与元素面积匹配：大卡片可“实”（粗边框），小控件要“轻”（细边/无边框） */
   .aria-card-clay {
@@ -125,5 +185,14 @@ select:disabled {
   }
   .btn-secondary:hover {
     border-color: var(--aria-line-strong);
+  }
+  .aria-mono {
+    font-family: var(--aria-font-mono);
+  }
+  .aria-num {
+    font-variant-numeric: tabular-nums;
+  }
+  .aria-pulse {
+    animation: aria-cockpit-pulse 1.6s ease-in-out infinite;
   }
 }
