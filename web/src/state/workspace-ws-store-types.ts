@@ -320,6 +320,42 @@ export interface WorkItemPlanHumanGateSnapshot {
   resumable: boolean;
 }
 
+export type HumanGateTurnStatus = "open" | "awaiting_confirm" | "failed" | "busy";
+export type GateClosureDecision = "confirm" | "terminate";
+export type AdvanceCommandStatus = "pending" | "completed" | "rejected";
+
+export interface HumanGateTurnState {
+  turn_id: string;
+  command_id: string | null;
+  remaining_budget: number;
+  status: HumanGateTurnStatus;
+  artifact_ref: string | null;
+  failure_class: string | null;
+  failure_message: string | null;
+  opened_at: string;
+}
+
+export interface HumanGateClosure {
+  decision: GateClosureDecision;
+  stage: string;
+}
+
+export interface AdvanceCommandState {
+  command_id: string;
+  status: AdvanceCommandStatus;
+  code: string | null;
+  reason: string | null;
+  attempt_id: string | null;
+  workspace_entry: string | null;
+}
+
+export interface ProtocolDiagnostic {
+  code: string;
+  message: string;
+  at: string;
+  type: string;
+}
+
 export interface WorkItemPlanRepairReservation {
   token: string;
   owner_session_id: string;
@@ -404,6 +440,10 @@ export interface WorkspaceWsState {
   };
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
+  humanGateTurn: HumanGateTurnState | null;
+  humanGateClosure: HumanGateClosure | null;
+  advanceCommands: Record<string, AdvanceCommandState>;
+  protocolDiagnostics: ProtocolDiagnostic[];
 }
 
 export interface WorkspaceWsActions {
@@ -505,5 +545,25 @@ export interface WorkspaceWsActions {
     mode: ProviderPermissionMode,
   ) => void;
   setAcknowledgedAbortedNodes: (nodeIds: string[]) => void;
+  applyHumanGateTurnOpen: (
+    turnId: string,
+    commandId: string,
+    remainingBudget: number,
+  ) => void;
+  applyHumanGateTurnCompleted: (turnId: string, artifactRef: string) => void;
+  applyHumanGateTurnFailed: (
+    turnId: string,
+    failureClass: string,
+    message: string,
+  ) => void;
+  applyHumanGateBusy: (turnId: string) => void;
+  applyHumanGateClosed: (decision: GateClosureDecision, stage: string) => void;
+  applyAdvanceCompleted: (
+    commandId: string,
+    attemptId: string,
+    workspaceEntry: string,
+  ) => void;
+  applyAdvanceRejected: (commandId: string, code: string, reason: string) => void;
+  recordProtocolDiagnostic: (diagnostic: ProtocolDiagnostic) => void;
   reset: () => void;
 }

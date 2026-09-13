@@ -44,13 +44,19 @@ export {
   workspaceContentCacheKey,
 } from "./workspace-ws-selectors";
 export type {
+  AdvanceCommandState,
   ArtifactVersion,
   ArtifactVersionSummary,
   ExecutionEvent,
   ExecutionEventKind,
   ExecutionEventStatus,
+  GateClosureDecision,
+  HumanGateClosure,
+  HumanGateTurnState,
+  HumanGateTurnStatus,
   NodeDetailSummary,
   PermissionRequest,
+  ProtocolDiagnostic,
   ProtocolErrorState,
   RecoverableInterruptedRun,
   ProviderConfigSnapshot,
@@ -137,6 +143,10 @@ const initialState: WorkspaceWsState = {
   permissionModes: { author: "auto", reviewer: "auto" },
   pendingReviewDecision: null,
   pendingReviewerSummary: null,
+  humanGateTurn: null,
+  humanGateClosure: null,
+  advanceCommands: {},
+  protocolDiagnostics: [],
 };
 
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
@@ -388,6 +398,115 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         activeStreamEntryId: entry.type === "provider_stream" ? entry.id : prev.activeStreamEntryId,
       };
     }),
+
+  applyHumanGateTurnOpen: (turnId, commandId, remainingBudget) =>
+    set((prev) => {
+      if (prev.humanGateTurn?.turn_id === turnId) {
+        // 引擎同 turn_id 重放（decisions.rs Replayed）→ 幂等消费：
+        // 不新建条目、不重算预算、不刷新 opened_at。
+        return {};
+      }
+      return {
+        humanGateTurn: {
+          turn_id: turnId,
+          command_id: commandId,
+          remaining_budget: remainingBudget,
+          status: "open",
+          artifact_ref: null,
+          failure_class: null,
+          failure_message: null,
+          opened_at: new Date().toISOString(),
+        },
+        humanGateClosure: null,
+      };
+    }),
+
+  applyHumanGateTurnCompleted: (turnId, artifactRef) =>
+    set((prev) => {
+      if (prev.humanGateTurn?.turn_id !== turnId) {
+        return {};
+      }
+      return {
+        humanGateTurn: {
+          ...prev.humanGateTurn,
+          status: "awaiting_confirm",
+          artifact_ref: artifactRef,
+        },
+      };
+    }),
+
+  applyHumanGateTurnFailed: (turnId, failureClass, message) =>
+    set((prev) => {
+      if (prev.humanGateTurn?.turn_id !== turnId) {
+        return {};
+      }
+      return {
+        humanGateTurn: {
+          ...prev.humanGateTurn,
+          status: "failed",
+          failure_class: failureClass,
+          failure_message: message,
+        },
+      };
+    }),
+
+  applyHumanGateBusy: (turnId) =>
+    set((prev) => {
+      if (prev.humanGateTurn?.turn_id !== turnId) {
+        return {};
+      }
+      return { humanGateTurn: { ...prev.humanGateTurn, status: "busy" } };
+    }),
+
+  applyHumanGateClosed: (decision, stage) =>
+    set({ humanGateClosure: { decision, stage } }),
+
+  applyAdvanceCompleted: (commandId, attemptId, workspaceEntry) =>
+    set((prev) => {
+      const existing = prev.advanceCommands[commandId];
+      if (existing?.status === "completed" || existing?.status === "rejected") {
+        return {};
+      }
+      return {
+        advanceCommands: {
+          ...prev.advanceCommands,
+          [commandId]: {
+            command_id: commandId,
+            status: "completed",
+            code: null,
+            reason: null,
+            attempt_id: attemptId,
+            workspace_entry: workspaceEntry,
+          },
+        },
+      };
+    }),
+
+  applyAdvanceRejected: (commandId, code, reason) =>
+    set((prev) => {
+      const existing = prev.advanceCommands[commandId];
+      if (existing?.status === "completed" || existing?.status === "rejected") {
+        return {};
+      }
+      return {
+        advanceCommands: {
+          ...prev.advanceCommands,
+          [commandId]: {
+            command_id: commandId,
+            status: "rejected",
+            code,
+            reason,
+            attempt_id: null,
+            workspace_entry: null,
+          },
+        },
+      };
+    }),
+
+  recordProtocolDiagnostic: (diagnostic) =>
+    set((prev) => ({
+      protocolDiagnostics: [...prev.protocolDiagnostics, diagnostic].slice(-50),
+    })),
 
   resolveGateEntry: (resolution) =>
     set((prev) => {
