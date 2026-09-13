@@ -86,7 +86,11 @@ export type WorkItemPlanHumanGateSnapshot = {
   repeated_fingerprints: string[];
   attempts_used: number;
   manual_repairs_remaining: number;
-  trigger: "native_human_required" | "repeated_fingerprint" | "repair_budget_exhausted";
+  trigger:
+    | "native_human_required"
+    | "repeated_fingerprint"
+    | "verification_new_findings"
+    | "repair_budget_exhausted";
   resumable: boolean;
 };
 
@@ -255,6 +259,8 @@ export type WsInMessage =
     }
   | SaveHumanPresentationRevisionMessage
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
+  | { type: "human_gate_feedback"; command_id: string; feedback: string }
+  | { type: "advance"; command_id: string }
   | { type: "confirm_plan_amendment"; amendment_id: string }
   | {
       type: "cancel_plan_amendment";
@@ -591,6 +597,27 @@ export type WsOutMessage =
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
   | { type: "human_gate_closed"; decision: "confirm" | "terminate"; stage: string }
+  | {
+      type: "human_gate_turn_open";
+      turn_id: string;
+      command_id: string;
+      remaining_budget: number;
+    }
+  | { type: "human_gate_turn_completed"; turn_id: string; artifact_ref: string }
+  | {
+      type: "human_gate_turn_failed";
+      turn_id: string;
+      failure_class: string;
+      message: string;
+    }
+  | { type: "human_gate_busy"; turn_id: string }
+  | {
+      type: "advance_completed";
+      command_id: string;
+      attempt_id: string;
+      workspace_entry: string;
+    }
+  | { type: "advance_rejected"; command_id: string; code: string; reason: string }
   | { type: "human_presentation_revision_saved"; revision: HumanPresentationRevision }
   | {
       type: "human_presentation_revision_save_failed";

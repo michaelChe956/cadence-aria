@@ -19,6 +19,7 @@ import type {
   RepositoryInitializationOperationSnapshot,
   TimelineNodeType,
   WorkItemExecutionPlan,
+  WorkItemPlanHumanGateSnapshot,
   WsInMessage,
   WsOutMessage,
 } from "./types";
@@ -715,5 +716,69 @@ describe("work item split lifecycle types", () => {
 
     expect(workItem.kind).toBe("backend");
     expect(request.include_integration_tests).toBe(true);
+  });
+});
+
+describe("human gate protocol variants", () => {
+  it("covers the seven outbound gate/advance events with backend field names", () => {
+    const events: WsOutMessage[] = [
+      {
+        type: "human_gate_turn_open",
+        turn_id: "gate_turn_1",
+        command_id: "cmd_1",
+        remaining_budget: 2,
+      },
+      { type: "human_gate_turn_completed", turn_id: "gate_turn_1", artifact_ref: "artifact_9" },
+      {
+        type: "human_gate_turn_failed",
+        turn_id: "gate_turn_1",
+        failure_class: "compile_failed",
+        message: "compile failed",
+      },
+      { type: "human_gate_busy", turn_id: "gate_turn_1" },
+      { type: "human_gate_closed", decision: "confirm", stage: "human_confirm" },
+      {
+        type: "advance_completed",
+        command_id: "cmd_2",
+        attempt_id: "coding_attempt_1",
+        workspace_entry: "coding",
+      },
+      {
+        type: "advance_rejected",
+        command_id: "cmd_2",
+        code: "ADVANCE_REPLAY_NOT_READY",
+        reason: "advance record is in durable status Pending",
+      },
+    ];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "human_gate_turn_open",
+      "human_gate_turn_completed",
+      "human_gate_turn_failed",
+      "human_gate_busy",
+      "human_gate_closed",
+      "advance_completed",
+      "advance_rejected",
+    ]);
+  });
+
+  it("accepts the two inbound gate/advance commands", () => {
+    const messages: WsInMessage[] = [
+      { type: "human_gate_feedback", command_id: "cmd_1", feedback: "验收命令缺失" },
+      { type: "advance", command_id: "cmd_2" },
+    ];
+
+    expect(messages.map((message) => message.type)).toEqual(["human_gate_feedback", "advance"]);
+  });
+
+  it("widens the gate trigger union to the four engine variants", () => {
+    const triggers: WorkItemPlanHumanGateSnapshot["trigger"][] = [
+      "native_human_required",
+      "repeated_fingerprint",
+      "verification_new_findings",
+      "repair_budget_exhausted",
+    ];
+
+    expect(triggers).toHaveLength(4);
   });
 });

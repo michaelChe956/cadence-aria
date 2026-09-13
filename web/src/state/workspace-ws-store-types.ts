@@ -312,7 +312,11 @@ export interface WorkItemPlanHumanGateSnapshot {
   repeated_fingerprints: string[];
   attempts_used: number;
   manual_repairs_remaining: number;
-  trigger: "native_human_required" | "repeated_fingerprint" | "repair_budget_exhausted";
+  trigger:
+    | "native_human_required"
+    | "repeated_fingerprint"
+    | "verification_new_findings"
+    | "repair_budget_exhausted";
   resumable: boolean;
 }
 
