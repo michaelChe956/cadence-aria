@@ -23,6 +23,8 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendWorkItemPlanCompileRecoveryAction: vi.fn(),
     sendHumanPresentationRevision: vi.fn(() => true),
     sendHumanConfirm: vi.fn(() => true),
+    sendHumanGateFeedback: vi.fn(() => true),
+    sendAdvance: vi.fn(() => true),
     confirmPlanAmendment: vi.fn(() => true),
     cancelPlanAmendment: vi.fn(() => true),
     startLinkedWorkspaceAmendment: vi.fn(() => true),

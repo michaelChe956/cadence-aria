@@ -41,6 +41,12 @@ const CONNECT_TIMEOUT_MS = 5_000;
 const STREAM_FLUSH_INTERVAL_MS = 80;
 const DISCONNECTED_PRESENTATION_SAVE_ERROR = "连接已断开，请重连后重试";
 
+// M2：门禁/推进命令 id 唯一生成点。动作发起时生成一次并随动作保存；
+// 重试 / 重连重放由调用方把同一 id 传回 helper（不重新生成）。
+export function newCommandId(): string {
+  return crypto.randomUUID();
+}
+
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const socketSessionIdRef = useRef<string | null>(null);
@@ -383,6 +389,28 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const sendHumanGateFeedback = useCallback(
+    (feedback: string, commandId?: string) => {
+      const trimmed = feedback.trim();
+      if (!trimmed) {
+        return false;
+      }
+      return sendJson({
+        type: "human_gate_feedback",
+        command_id: commandId ?? newCommandId(),
+        feedback: trimmed,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendAdvance = useCallback(
+    (commandId?: string) => {
+      return sendJson({ type: "advance", command_id: commandId ?? newCommandId() });
+    },
+    [sendJson],
+  );
+
   const confirmPlanAmendment = useCallback(
     (amendmentId: string) => {
       const id = amendmentId.trim();
@@ -685,6 +713,8 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendWorkItemPlanCompileRecoveryAction,
     sendHumanPresentationRevision,
     sendHumanConfirm,
+    sendHumanGateFeedback,
+    sendAdvance,
     confirmPlanAmendment,
     cancelPlanAmendment,
     startLinkedWorkspaceAmendment,
