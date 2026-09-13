@@ -4,6 +4,7 @@ import type {
   ChoiceResponsePayload,
 } from "./chat-entries";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
+import { selectGateProjection } from "./workspace-cockpit-projection";
 import { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
 import { structuredOutputDiagnosticFromUnknown } from "./structured-output-diagnostic";
 import { trustedReviewComments } from "./workspace-review-trust";
@@ -524,7 +525,10 @@ export function buildGatePromptEntry(
   state: WorkspaceWsState,
   entries = state.chatEntries,
 ): ChatEntry | null {
-  if (state.stage !== "human_confirm") {
+  // H5：存在条件从「stage === "human_confirm"」放宽到「存在 store gate 投影」——
+  // legacy human_confirm 与 SC typed turn（human_gate_turn_open）两形态共用同一投影入口。
+  const projection = selectGateProjection(state);
+  if (!projection) {
     return null;
   }
 
@@ -536,9 +540,10 @@ export function buildGatePromptEntry(
   const comments = trustedReviewComments(
     latestReview?.metadata as Record<string, unknown> | undefined,
   );
-  const findings = Array.isArray(latestReview?.metadata?.findings)
+  const reviewFindings = Array.isArray(latestReview?.metadata?.findings)
     ? latestReview.metadata.findings
     : [];
+  const findings = reviewFindings.length > 0 ? reviewFindings : projection.findings;
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const contextBlockerGate = isWorkItemPlanContextBlockerGate(state);
   const metadata = {
@@ -547,6 +552,17 @@ export function buildGatePromptEntry(
     ...(comments ? { comments } : {}),
     ...(findings.length > 0 ? { findings } : {}),
     ...(reviewGate ? { review_gate: reviewGate } : {}),
+    ...(projection.turn_id ? { turn_id: projection.turn_id } : {}),
+    ...(projection.turn?.command_id ? { command_id: projection.turn.command_id } : {}),
+    ...(projection.trigger ? { gate_trigger: projection.trigger } : {}),
+    ...(projection.remaining_budget !== null
+      ? { remaining_budget: projection.remaining_budget }
+      : {}),
+    ...(projection.turn?.failure_class ? { failure_class: projection.turn.failure_class } : {}),
+    ...(projection.turn?.failure_message
+      ? { failure_message: projection.turn.failure_message }
+      : {}),
+    gate_status: projection.closed ?? projection.status,
     ...(contextBlockerGate
       ? {
           gate_kind: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND,
@@ -556,13 +572,19 @@ export function buildGatePromptEntry(
   };
   const fallbackContent = verdict === "needs_human" ? "需要人工确认" : "等待人工确认";
   return {
-    id: chatEntryId(gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
+    // legacy 路径 id 与改动前逐字相同（最新 human_confirm 节点 node_id）；
+    // typed 门以 turn_id 为 id，同 turn_id 重放 upsert 同一张门卡。
+    id: chatEntryId(projection.turn_id ?? gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
     type: "gate_prompt",
     role: "system",
     content: workItemPlanContextBlockerGatePromptContent(state) ?? fallbackContent,
-    timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
+    timestamp:
+      gatePromptNode?.completed_at ??
+      gatePromptNode?.started_at ??
+      (projection.opened_at || new Date().toISOString()),
     node_id: gatePromptNode?.node_id,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    ...(projection.closed ? { resolved: true, resolution: projection.closed } : {}),
   };
 }
 

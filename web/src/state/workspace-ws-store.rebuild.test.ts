@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "./chat-entries";
+import type { WsServerMessage } from "../hooks/workspace-ws-message-handler";
+import { handleWorkspaceWsMessage } from "../hooks/workspace-ws-message-handler";
+import { selectCockpitInbox } from "./workspace-cockpit-projection";
 import {
   emptyWorkspaceContentCache,
   workspaceContentCacheValues,
@@ -831,5 +834,174 @@ describe("workspace ws store chat rebuild", () => {
     ]);
   });
 });
+
+describe("workspace ws store gate rebuild", () => {
+  installWorkspaceStoreTestHooks();
+
+  it("rebuilds the gate entry for a typed turn gate without a human_confirm stage", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      session_id: "session_typed_gate",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "waiting_for_human",
+      flow_kind: "single_candidate",
+      run_policy: "auto_if_valid",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 1,
+        transitions_used: 0,
+        initial_review_count: 1,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+    });
+    useWorkspaceStore.getState().applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
+
+    useWorkspaceStore.getState().rebuildChatEntries();
+
+    const gatePrompts = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompts).toHaveLength(1);
+    expect(gatePrompts[0]).toMatchObject({ id: "turn_1:gate-prompt" });
+    expect(gatePrompts[0]?.metadata).toMatchObject({
+      turn_id: "turn_1",
+      remaining_budget: 1,
+      gate_status: "open",
+    });
+  });
+
+  it("rebuilds the legacy human_confirm gate entry unchanged", () => {
+    useWorkspaceStore.getState().setStage("human_confirm");
+
+    useWorkspaceStore.getState().rebuildChatEntries();
+
+    const gatePrompts = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompts).toHaveLength(1);
+    expect(gatePrompts[0]).toMatchObject({ id: "human_confirm:gate-prompt" });
+    expect(gatePrompts[0]?.metadata).toMatchObject({ gate_status: "open" });
+    expect(gatePrompts[0]?.metadata?.turn_id).toBeUndefined();
+  });
+
+  it("keeps the gate entry from the durable snapshot after a reconnect rebuild", () => {
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_snapshot_gate",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "waiting_for_human",
+      flow_kind: "single_candidate",
+      run_policy: "auto_if_valid",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 1,
+        transitions_used: 0,
+        initial_review_count: 1,
+        verification_review_count: 0,
+      },
+      human_gate_snapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    useWorkspaceStore.getState().rebuildChatEntries();
+
+    const gatePrompts = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompts).toHaveLength(1);
+    expect(gatePrompts[0]?.metadata).toMatchObject({
+      gate_trigger: "verification_new_findings",
+      remaining_budget: 1,
+      gate_status: "open",
+    });
+  });
+
+  it("keeps terminal advance dedup across a same-session rebuild and clears it across sessions", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(buildSessionState("session_dedup"));
+    useWorkspaceStore.getState().applyAdvanceCompleted("cmd_done", "attempt_1", "coding");
+    useWorkspaceStore.getState().applyAdvanceRejected("cmd_rejected", "ADVANCE_NOT_READY", "nope");
+    useWorkspaceStore.getState().recordProtocolDiagnostic({
+      code: "UNRECOGNIZED_EVENT",
+      message: "未识别的出向事件类型：future_event",
+      at: "2026-09-13T00:00:00Z",
+      type: "future_event",
+    });
+
+    // 同会话重建：去重集从持久化会话状态重放恢复、不丢弃（D8）
+    useWorkspaceStore.getState().setSessionState(buildSessionState("session_dedup"));
+
+    expect(Object.keys(useWorkspaceStore.getState().advanceCommands).sort()).toEqual([
+      "cmd_done",
+      "cmd_rejected",
+    ]);
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(1);
+
+    // 切到另一个会话：去重集必须清空，避免串会话
+    useWorkspaceStore.getState().setSessionState(buildSessionState("session_other"));
+
+    expect(useWorkspaceStore.getState().advanceCommands).toEqual({});
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toEqual([]);
+  });
+
+  it("does not fall back to the inbox for a replayed advance rejection after reconnect", () => {
+    useWorkspaceStore.getState().setSessionState(buildSessionState("session_replay"));
+    handleWorkspaceWsMessage(
+      {
+        type: "advance_rejected",
+        command_id: "cmd_replay",
+        code: "ADVANCE_REPLAY_NOT_READY",
+        reason: "durable record exists",
+      } as WsServerMessage,
+      {
+        invalidatedPreStageNodeIds: new Set<string>(),
+        scheduleFlush: vi.fn(),
+        streamFlushTimeouts: {},
+      },
+    );
+
+    expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
+  });
+});
+
+function buildSessionState(sessionId: string) {
+  return {
+    session_id: sessionId,
+    workspace_type: "work_item_plan" as const,
+    stage: "running",
+    session_status: "waiting_for_human" as const,
+    flow_kind: "single_candidate" as const,
+    run_policy: "auto_if_valid" as const,
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 1,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code" as const, reviewer: null },
+  };
+}
 
 

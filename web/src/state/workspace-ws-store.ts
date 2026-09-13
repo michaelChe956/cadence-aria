@@ -182,6 +182,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         state.human_presentation_revisions,
       );
 
+      const sameSession = prev.sessionId === state.session_id;
+      const durableGateStillOpen =
+        state.human_gate_snapshot !== undefined && state.human_gate_snapshot !== null;
+      // 重建口径：durable snapshot 在场即门仍开；否则要求仍处 legacy human_confirm 阶段。
+      const gateProjectionStillOpen = durableGateStillOpen || state.stage === "human_confirm";
+
       const nextState: WorkspaceWsState = {
         ...prev,
         sessionId: state.session_id,
@@ -250,6 +256,15 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         protocolError: null,
         activeRunId: state.active_run_id ?? null,
         recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
+        // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
+        // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
+        humanGateTurn:
+          sameSession && gateProjectionStillOpen && prev.humanGateClosure === null
+            ? prev.humanGateTurn
+            : null,
+        humanGateClosure: sameSession && gateProjectionStillOpen ? prev.humanGateClosure : null,
+        advanceCommands: sameSession ? prev.advanceCommands : {},
+        protocolDiagnostics: sameSession ? prev.protocolDiagnostics : [],
         reviewerEnabled: state.reviewer_enabled_at_start ?? prev.reviewerEnabled,
       };
       return {
@@ -582,6 +597,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       stage,
       visitedStages: mergeVisitedStages(prev.visitedStages, stage),
       streamingContent: STREAMING_STAGES.has(stage) ? prev.streamingContent : "",
+      // 阶段已推进：上一轮门的闭环状态不再适用于当前门（避免下一轮 legacy 门被误判为已收）。
+      humanGateClosure: stage === prev.stage ? prev.humanGateClosure : null,
     })),
 
   setArtifact: (markdown, version) =>
