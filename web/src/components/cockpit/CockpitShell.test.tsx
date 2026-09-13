@@ -35,6 +35,14 @@ function gateItem(sessionId: string): CockpitInboxItem {
     inlineError: null,
   };
 }
+function stoppedItem(sessionId: string): CockpitInboxItem {
+  return {
+    ...gateItem(sessionId),
+    id: `${sessionId}:stopped:${sessionId}`,
+    kind: "stopped",
+    title: "会话停在停点",
+  };
+}
 
 function ShellWithInbox({ inbox }: { inbox: readonly CockpitInboxItem[] }) {
   mockedUseWorkspaceSessionObservers.mockReturnValue({
@@ -120,6 +128,23 @@ describe("CockpitShell", () => {
     );
   });
 
+  it("alerts again when the same stopped item reopens after closing", () => {
+    const view = renderShell({ inbox: [stoppedItem("s1")] });
+
+    expect(screen.getByTestId("cockpit-inbox-item-stopped")).toHaveAttribute(
+      "data-pulse",
+      "true",
+    );
+    view.rerender(<ShellWithInbox inbox={[]} />);
+    view.rerender(<ShellWithInbox inbox={[stoppedItem("s1")]} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("会话停在停点");
+    expect(screen.getByTestId("cockpit-inbox-item-stopped")).toHaveAttribute(
+      "data-pulse",
+      "true",
+    );
+  });
+
   it("delays notification 30 seconds and keeps L1/L2 when permission is denied", async () => {
     vi.spyOn(Notification, "permission", "get").mockReturnValue("denied");
     renderShell({ inbox: [gateItem("s1")] });
@@ -137,6 +162,16 @@ describe("CockpitShell", () => {
     expect(
       document.querySelector<HTMLLinkElement>('link[rel~="icon"]')?.getAttribute("href") ?? "",
     ).toContain("%3E1%3C");
+  });
+
+  it("does not postpone notification when more items arrive before 30 seconds", async () => {
+    const view = renderShell({ inbox: [gateItem("s1")] });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    view.rerender(<ShellWithInbox inbox={[gateItem("s1"), gateItem("s2")]} />);
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(notificationTitles).toEqual(["aria：需要处理"]);
   });
 
   it("notifies once after an item remains unhandled for 30 seconds", async () => {

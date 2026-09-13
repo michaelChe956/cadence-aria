@@ -1,6 +1,10 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  selectCockpitInbox,
+  type CockpitInboxItem,
+} from "../state/workspace-cockpit-projection";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useWorkspaceStore, type TimelineNode } from "../state/workspace-ws-store";
 import { ChatCockpitPage } from "./ChatCockpitPage";
@@ -15,6 +19,16 @@ vi.mock("../api/workspace-content", () => ({
   fetchWorkspaceEventOutput: vi.fn(),
   fetchWorkspaceNodeDetail: vi.fn(),
   fetchWorkspacePrompt: vi.fn(),
+}));
+
+const cockpitInbox: CockpitInboxItem[] = [];
+
+vi.mock("../components/cockpit/CockpitShell", () => ({
+  useCockpitShellInbox: () =>
+    cockpitInbox.length > 0
+      ? cockpitInbox
+      : selectCockpitInbox(useWorkspaceStore.getState()),
+  useCockpitInboxPulse: () => false,
 }));
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
@@ -44,6 +58,8 @@ describe("ChatCockpitPage", () => {
     useWorkspaceStore.getState().setSessionIdForTest(sessionId);
     return render(<ChatCockpitPage sessionId={sessionId} onBack={vi.fn()} />);
   };
+
+  beforeEach(() => cockpitInbox.splice(0));
 
   it("renders the three cockpit zones", () => {
     renderCockpit();
@@ -102,6 +118,25 @@ describe("ChatCockpitPage", () => {
     expect(screen.queryByRole("button", { name: /确认产物/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /采纳建议并返修/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /终止/ })).toBeNull();
+  });
+
+  it("uses the shared shell inbox instead of a second session observer", () => {
+    cockpitInbox.push({
+      id: "other:gate",
+      kind: "gate",
+      severity: 3,
+      title: "全局待处理",
+      summary: "来自根壳观察",
+      triage: false,
+      source: "gate",
+      createdAt: null,
+      gate: null,
+      inlineError: null,
+    });
+
+    renderCockpit();
+
+    expect(within(screen.getByTestId("cockpit-inbox")).getByText("全局待处理")).toBeInTheDocument();
   });
 
   it("projects stopped sessions and protocol errors as inbox items", () => {

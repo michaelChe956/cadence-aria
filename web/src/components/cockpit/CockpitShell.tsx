@@ -59,6 +59,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   const [toast, setToast] = useState<CockpitInboxItem | null>(null);
   const [notificationGuidance, setNotificationGuidance] = useState<NotificationGuidance>(null);
   const knownItemIdsRef = useRef(new Set<string>());
+  const inboxBecameNonEmptyAtRef = useRef<number | null>(null);
   const previousFaviconHrefRef = useRef<string | null>(null);
   const initialTitleRef = useRef(document.title);
   const { inbox } = useWorkspaceSessionObservers({
@@ -82,9 +83,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
 
   useEffect(() => {
     const newlyOpened = inbox.filter((item) => !knownItemIdsRef.current.has(item.id));
-    for (const item of inbox) {
-      knownItemIdsRef.current.add(item.id);
-    }
+    knownItemIdsRef.current = itemIds;
     setPulseItemIds((previous) => {
       const next = new Set(Array.from(previous).filter((itemId) => itemIds.has(itemId)));
       for (const item of newlyOpened) {
@@ -130,9 +129,21 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   }, [inbox.length]);
 
   useEffect(() => {
-    if (inbox.length === 0 || !settings.systemNotificationsEnabled || typeof Notification === "undefined") {
+    if (inbox.length === 0) {
+      inboxBecameNonEmptyAtRef.current = null;
       return;
     }
+    if (!settings.systemNotificationsEnabled || typeof Notification === "undefined") {
+      return;
+    }
+    const now = Date.now();
+    if (inboxBecameNonEmptyAtRef.current === null) {
+      inboxBecameNonEmptyAtRef.current = now;
+    }
+    const remainingDelayMs = Math.max(
+      0,
+      SYSTEM_NOTIFICATION_DELAY_MS - (now - inboxBecameNonEmptyAtRef.current),
+    );
     const timer = window.setTimeout(() => {
       if (Notification.permission === "granted") {
         new Notification("aria：需要处理", {
@@ -145,9 +156,9 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
       } else {
         setNotificationGuidance("permission-default");
       }
-    }, SYSTEM_NOTIFICATION_DELAY_MS);
+    }, remainingDelayMs);
     return () => window.clearTimeout(timer);
-  }, [inbox.length, itemIdKey, settings.systemNotificationsEnabled]);
+  }, [inbox, settings.systemNotificationsEnabled]);
 
   const goToInbox = useCallback(() => {
     const firstItem = inbox[0];

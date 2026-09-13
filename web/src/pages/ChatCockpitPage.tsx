@@ -6,9 +6,9 @@ import {
 } from "../components/chat-workspace/ChatEntryList";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
+import { useCockpitShellInbox } from "../components/cockpit/CockpitShell";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
-import { useWorkspaceSessionObservers } from "../hooks/useWorkspaceSessionObservers";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { selectCockpitFlow } from "../state/workspace-cockpit-projection";
@@ -45,12 +45,7 @@ export function ChatCockpitPage({
     settings: cockpitSettings,
     sendAdvance: workspaceWs.sendAdvance,
   });
-  const { inbox: observedInbox } = useWorkspaceSessionObservers({
-    currentSessionId: sessionId,
-    currentSessionState: state,
-    watchLimit: cockpitSettings.watchLimit,
-    refreshIntervalMs: cockpitSettings.observerRefreshIntervalMs,
-  });
+  const observedInbox = useCockpitShellInbox();
   const watchWindow = watchWindowCopy(
     cockpitSettings.watchLimit,
     cockpitSettings.observerRefreshIntervalMs,
