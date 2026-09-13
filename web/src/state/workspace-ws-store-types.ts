@@ -565,5 +565,9 @@ export interface WorkspaceWsActions {
   ) => void;
   applyAdvanceRejected: (commandId: string, code: string, reason: string) => void;
   recordProtocolDiagnostic: (diagnostic: ProtocolDiagnostic) => void;
+  setTimelineNodesForTest: (nodes: TimelineNode[]) => void;
+  setActiveNodeId: (nodeId: string | null) => void;
+  setSessionStatus: (status: WorkspaceSessionStatus) => void;
+  setHumanGateSnapshot: (snapshot: WorkItemPlanHumanGateSnapshot | null) => void;
   reset: () => void;
 }

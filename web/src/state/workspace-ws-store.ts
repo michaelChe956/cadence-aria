@@ -917,6 +917,11 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setProviderStatus: (status) => set({ providerStatus: status }),
 
+  setTimelineNodesForTest: (nodes) => set({ timelineNodes: nodes }),
+  setActiveNodeId: (nodeId) => set({ activeNodeId: nodeId }),
+  setSessionStatus: (status) => set({ sessionStatus: status }),
+  setHumanGateSnapshot: (snapshot) => set({ humanGateSnapshot: snapshot }),
+
   upsertExecutionEvent: (event) =>
     set((prev) => {
       if (event.node_id) {
