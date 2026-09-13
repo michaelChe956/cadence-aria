@@ -60,6 +60,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   const [notificationGuidance, setNotificationGuidance] = useState<NotificationGuidance>(null);
   const knownItemIdsRef = useRef(new Set<string>());
   const inboxBecameNonEmptyAtRef = useRef<number | null>(null);
+  const notificationSentRef = useRef(false);
   const previousFaviconHrefRef = useRef<string | null>(null);
   const initialTitleRef = useRef(document.title);
   const { inbox } = useWorkspaceSessionObservers({
@@ -69,7 +70,6 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
     refreshIntervalMs: settings.observerRefreshIntervalMs,
   });
   const itemIds = useMemo(() => new Set(inbox.map((item) => item.id)), [inbox]);
-  const itemIdKey = useMemo(() => Array.from(itemIds).sort().join("|"), [itemIds]);
 
   useEffect(() => {
     if (currentSessionId === null) return;
@@ -131,9 +131,14 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   useEffect(() => {
     if (inbox.length === 0) {
       inboxBecameNonEmptyAtRef.current = null;
+      notificationSentRef.current = false;
       return;
     }
-    if (!settings.systemNotificationsEnabled || typeof Notification === "undefined") {
+    if (
+      notificationSentRef.current ||
+      !settings.systemNotificationsEnabled ||
+      typeof Notification === "undefined"
+    ) {
       return;
     }
     const now = Date.now();
@@ -150,6 +155,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
           body: `待处理 ${inbox.length} 项`,
           tag: "aria-cockpit-inbox",
         });
+        notificationSentRef.current = true;
         setNotificationGuidance(null);
       } else if (Notification.permission === "denied") {
         setNotificationGuidance("permission-denied");

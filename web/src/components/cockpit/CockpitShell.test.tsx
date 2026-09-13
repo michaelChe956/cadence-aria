@@ -174,6 +174,16 @@ describe("CockpitShell", () => {
     expect(notificationTitles).toEqual(["aria：需要处理"]);
   });
 
+  it("does not notify twice when observer refreshes an unchanged inbox", async () => {
+    const view = renderShell({ inbox: [gateItem("s1")] });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    view.rerender(<ShellWithInbox inbox={[gateItem("s1")]} />);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(notificationTitles).toEqual(["aria：需要处理"]);
+  });
+
   it("notifies once after an item remains unhandled for 30 seconds", async () => {
     renderShell({ inbox: [gateItem("s1")] });
 
