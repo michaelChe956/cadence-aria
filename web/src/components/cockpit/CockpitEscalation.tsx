@@ -91,24 +91,52 @@ function activeEscalationKeys(
   );
 }
 
-function defaultPlaySound(): void {
-  if (typeof window === "undefined" || !("AudioContext" in window)) {
+function defaultPlaySound(
+  audioContextRef: { current: AudioContext | null },
+  soundUnavailableRef: { current: boolean },
+): void {
+  if (
+    typeof window === "undefined" ||
+    soundUnavailableRef.current ||
+    !window.AudioContext
+  ) {
     return;
   }
 
-  const context = new AudioContext();
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-  const startAt = context.currentTime;
-  oscillator.frequency.value = 880;
-  gain.gain.setValueAtTime(0.08, startAt);
-  gain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.12);
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.start(startAt);
-  oscillator.stop(startAt + 0.12);
-  oscillator.addEventListener("ended", () => {
-    void context.close();
+  let context = audioContextRef.current;
+  try {
+    if (context === null) {
+      context = new window.AudioContext();
+      audioContextRef.current = context;
+    }
+  } catch {
+    soundUnavailableRef.current = true;
+    return;
+  }
+
+  const play = () => {
+    try {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const startAt = context.currentTime;
+      oscillator.frequency.value = 880;
+      gain.gain.setValueAtTime(0.08, startAt);
+      gain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.12);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.12);
+    } catch {
+      soundUnavailableRef.current = true;
+    }
+  };
+
+  if (context.state === "running") {
+    play();
+    return;
+  }
+  void context.resume().then(play).catch(() => {
+    soundUnavailableRef.current = true;
   });
 }
 
@@ -158,7 +186,7 @@ export function CockpitEscalation({
   items,
   settings,
   now,
-  playSound = defaultPlaySound,
+  playSound,
 }: {
   items: readonly CockpitInboxItem[];
   settings: CockpitSettings;
@@ -168,6 +196,8 @@ export function CockpitEscalation({
   const currentNow = useEscalationNow(now);
   const firstEscalatedAtRef = useRef(new Map<string, number>());
   const lastAudibleAtRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const soundUnavailableRef = useRef(false);
   const [visibleEscalations, setVisibleEscalations] = useState<ReadonlyMap<
     string,
     CockpitEscalation
@@ -175,6 +205,16 @@ export function CockpitEscalation({
   const itemById = useMemo(
     () => new Map(items.map((item) => [item.id, item])),
     [items],
+  );
+  useEffect(
+    () => () => {
+      const context = audioContextRef.current;
+      audioContextRef.current = null;
+      if (context && context.state !== "closed") {
+        void context.close().catch(() => {});
+      }
+    },
+    [],
   );
 
   useEffect(() => {
@@ -220,7 +260,11 @@ export function CockpitEscalation({
       (lastAudibleAtRef.current === null ||
         currentNow - lastAudibleAtRef.current >= settings.escalationRepeatMs)
     ) {
-      playSound();
+      if (playSound) {
+        playSound();
+      } else {
+        defaultPlaySound(audioContextRef, soundUnavailableRef);
+      }
       lastAudibleAtRef.current = currentNow;
     }
   }, [currentNow, items, playSound, settings]);

@@ -1,10 +1,46 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CockpitSettings } from "../../state/cockpit-settings";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitEscalation, evaluateEscalations } from "./CockpitEscalation";
 
 const now = Date.UTC(2026, 8, 14, 12, 0, 0);
+
+class AudioContextMock {
+  static instances: AudioContextMock[] = [];
+
+  state: AudioContextState = "suspended";
+  currentTime = 0;
+  resume = vi.fn(async () => {
+    this.state = "running";
+  });
+  close = vi.fn(async () => {
+    this.state = "closed";
+  });
+  createOscillator = vi.fn(() => ({
+    frequency: { value: 0 },
+    connect: vi.fn(),
+    start: vi.fn(),
+    stop: vi.fn(),
+    addEventListener: vi.fn(),
+  }));
+  createGain = vi.fn(() => ({
+    gain: {
+      setValueAtTime: vi.fn(),
+      exponentialRampToValueAtTime: vi.fn(),
+    },
+    connect: vi.fn(),
+  }));
+
+  constructor() {
+    AudioContextMock.instances.push(this);
+  }
+}
+
+afterEach(() => {
+  AudioContextMock.instances = [];
+  vi.unstubAllGlobals();
+});
 
 function settings(overrides: Partial<CockpitSettings> = {}): CockpitSettings {
   return {
@@ -179,8 +215,59 @@ describe("CockpitEscalation", () => {
         playSound={playSound}
       />,
     );
+    expect(playSound).toHaveBeenCalledTimes(1);
 
     expect(screen.getAllByTestId("cockpit-escalation-gate_age")).toHaveLength(2);
+  });
+
+  it("uses one repeat interval for newly due gates", () => {
+    const playSound = vi.fn();
+    const firstGate = gateItem("gate-a", { remaining_budget: 1 });
+    const secondGate = gateItem("gate-b", { remaining_budget: 1 });
+    const view = render(
+      <CockpitEscalation
+        items={[firstGate]}
+        settings={settings({ soundEnabled: true })}
+        now={now}
+        playSound={playSound}
+      />,
+    );
+
+    view.rerender(
+      <CockpitEscalation
+        items={[firstGate, secondGate]}
+        settings={settings({ soundEnabled: true })}
+        now={now + 1}
+        playSound={playSound}
+      />,
+    );
+
+    expect(playSound).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows the next audible escalation after the configured repeat interval", () => {
+    const playSound = vi.fn();
+    const firstGate = gateItem("gate-a", { remaining_budget: 1 });
+    const secondGate = gateItem("gate-b", { remaining_budget: 1 });
+    const view = render(
+      <CockpitEscalation
+        items={[firstGate]}
+        settings={settings({ soundEnabled: true })}
+        now={now}
+        playSound={playSound}
+      />,
+    );
+
+    view.rerender(
+      <CockpitEscalation
+        items={[firstGate, secondGate]}
+        settings={settings({ soundEnabled: true })}
+        now={now + 300_000}
+        playSound={playSound}
+      />,
+    );
+
+    expect(playSound).toHaveBeenCalledTimes(2);
   });
 
   it("keeps sound disabled by default", () => {
@@ -220,5 +307,46 @@ describe("CockpitEscalation", () => {
     );
 
     expect(playSound).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes and reuses one audio context across due intervals", async () => {
+    vi.stubGlobal("AudioContext", AudioContextMock);
+    const item = gateItem("gate-a", { remaining_budget: 1 });
+    const view = render(
+      <CockpitEscalation
+        items={[item]}
+        settings={settings({ soundEnabled: true })}
+        now={now}
+      />,
+    );
+
+    await act(async () => {});
+    view.rerender(
+      <CockpitEscalation
+        items={[item]}
+        settings={settings({ soundEnabled: true })}
+        now={now + 300_000}
+      />,
+    );
+    await act(async () => {});
+
+    expect(AudioContextMock.instances).toHaveLength(1);
+    expect(AudioContextMock.instances[0]?.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("contains audio context construction failures", () => {
+    vi.stubGlobal("AudioContext", () => {
+      throw new Error("audio unavailable");
+    });
+
+    expect(() =>
+      render(
+        <CockpitEscalation
+          items={[gateItem("gate-a", { remaining_budget: 1 })]}
+          settings={settings({ soundEnabled: true })}
+          now={now}
+        />,
+      ),
+    ).not.toThrow();
   });
 });
