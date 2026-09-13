@@ -322,6 +322,7 @@ export interface WorkItemPlanHumanGateSnapshot {
     | "verification_new_findings"
     | "repair_budget_exhausted";
   resumable: boolean;
+  opened_at?: string;
 }
 
 export type HumanGateTurnStatus = "open" | "awaiting_confirm" | "failed" | "busy";
@@ -337,12 +338,19 @@ export interface HumanGateTurnState {
   failure_class: string | null;
   failure_message: string | null;
   opened_at: string;
+  inlineError: InlineProtocolError | null;
+}
+
+export interface InlineProtocolError {
+  code: string;
+  message: string;
 }
 
 export interface HumanGateClosure {
   decision: GateClosureDecision;
   stage: string;
 }
+
 
 export interface AdvanceCommandState {
   command_id: string;
@@ -351,7 +359,9 @@ export interface AdvanceCommandState {
   reason: string | null;
   attempt_id: string | null;
   workspace_entry: string | null;
+  inlineError: InlineProtocolError | null;
 }
+
 
 export interface ProtocolDiagnostic {
   code: string;
@@ -445,6 +455,9 @@ export interface WorkspaceWsState {
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
   humanGateTurn: HumanGateTurnState | null;
+
+  snapshotGateIdentity: string | null;
+  snapshotGateOpenedAt: string | null;
   humanGateClosure: HumanGateClosure | null;
   advanceCommands: Record<string, AdvanceCommandState>;
   protocolDiagnostics: ProtocolDiagnostic[];
@@ -569,6 +582,9 @@ export interface WorkspaceWsActions {
   ) => void;
   applyAdvanceRejected: (commandId: string, code: string, reason: string) => void;
   recordProtocolDiagnostic: (diagnostic: ProtocolDiagnostic) => void;
+
+  applyGateProtocolError: (turnId: string, error: InlineProtocolError) => void;
+  applyAdvanceProtocolError: (commandId: string, error: InlineProtocolError) => void;
   setTimelineNodesForTest: (nodes: TimelineNode[]) => void;
   setActiveNodeId: (nodeId: string | null) => void;
   setSessionStatus: (status: WorkspaceSessionStatus) => void;

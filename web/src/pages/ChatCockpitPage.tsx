@@ -86,9 +86,17 @@ export function ChatCockpitPage({
             aria-label="自动执行流"
             className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
           >
-            <h2 className="px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
-              自动执行流
-            </h2>
+            <div className="flex items-center justify-between gap-2 px-3 py-2">
+              <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
+              <button
+                type="button"
+                data-testid="cockpit-protocol-diagnostic-count"
+                onClick={() => setDrilldownNodeId(state.activeNodeId)}
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              >
+                诊断 {state.protocolDiagnostics.length}
+              </button>
+            </div>
             <TimelineNodeList
               nodes={state.timelineNodes}
               // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。

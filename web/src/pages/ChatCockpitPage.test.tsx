@@ -117,6 +117,25 @@ describe("ChatCockpitPage", () => {
     expect(within(inbox).getByText("协议错误原文")).toBeInTheDocument();
   });
 
+  it("exposes protocol diagnostic count beside the execution-flow title", async () => {
+    const user = userEvent.setup();
+    useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode({ node_id: "node_diagnostic" })]);
+    useWorkspaceStore.getState().setActiveNodeId("node_diagnostic");
+    useWorkspaceStore.getState().recordProtocolDiagnostic({
+      code: "UNRECOGNIZED_EVENT",
+      message: "未知事件",
+      at: "2026-09-14T00:00:00.000Z",
+      type: "future_event",
+    });
+
+    renderCockpit();
+
+    const diagnosticCount = screen.getByTestId("cockpit-protocol-diagnostic-count");
+    expect(diagnosticCount).toHaveTextContent("1");
+    await user.click(diagnosticCount);
+    expect(screen.getByTestId("timeline-node-author_run")).toHaveAttribute("aria-current", "step");
+  });
+
   it("removes a closed gate from the inbox", () => {
     useWorkspaceStore.getState().setStage("human_confirm");
     renderCockpit();

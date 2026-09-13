@@ -2,6 +2,7 @@ import type {
   ChatEntry,
   ChatEntryRole,
   ChoiceResponsePayload,
+  GateEntryMetadata,
 } from "./chat-entries";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
 import { selectGateProjection } from "./workspace-cockpit-projection";
@@ -546,7 +547,7 @@ export function buildGatePromptEntry(
   const findings = reviewFindings.length > 0 ? reviewFindings : projection.findings;
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const contextBlockerGate = isWorkItemPlanContextBlockerGate(state);
-  const metadata = {
+  const metadata: GateEntryMetadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
     ...(comments ? { comments } : {}),
@@ -554,6 +555,8 @@ export function buildGatePromptEntry(
     ...(reviewGate ? { review_gate: reviewGate } : {}),
     ...(projection.turn_id ? { turn_id: projection.turn_id } : {}),
     ...(projection.turn?.command_id ? { command_id: projection.turn.command_id } : {}),
+    gate_identity: projection.key,
+    action_facade: projection.turn_id ? "typed" : "legacy",
     ...(projection.trigger ? { gate_trigger: projection.trigger } : {}),
     ...(projection.remaining_budget !== null
       ? { remaining_budget: projection.remaining_budget }
@@ -562,6 +565,7 @@ export function buildGatePromptEntry(
     ...(projection.turn?.failure_message
       ? { failure_message: projection.turn.failure_message }
       : {}),
+    ...(projection.turn?.inlineError ? { inline_error: projection.turn.inlineError } : {}),
     gate_status: projection.closed ?? projection.status,
     ...(contextBlockerGate
       ? {

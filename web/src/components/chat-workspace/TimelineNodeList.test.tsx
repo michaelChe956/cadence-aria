@@ -198,6 +198,7 @@ describe("TimelineNodeList flow variant", () => {
     expect(container.querySelectorAll("input, select, textarea")).toHaveLength(0);
   });
 
+
   it("keeps the sidebar variant free of flow metrics and drills down on click", () => {
     const onSelectNode = vi.fn();
     render(

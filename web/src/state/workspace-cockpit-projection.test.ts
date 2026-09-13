@@ -41,6 +41,39 @@ function reviewVerdictEntry(metadata: Record<string, unknown>): ChatEntry {
   };
 }
 
+function snapshotGateState(overrides: {
+  trigger: "native_human_required" | "verification_new_findings";
+  manual_repairs_remaining: number;
+}) {
+  return {
+    session_id: "session_snapshot_gate",
+    workspace_type: "work_item_plan" as const,
+    stage: "running",
+    session_status: "waiting_for_human" as const,
+    flow_kind: "single_candidate" as const,
+    run_policy: "auto_if_valid" as const,
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 1,
+      verification_review_count: 0,
+    },
+    human_gate_snapshot: {
+      findings: [],
+      repeated_fingerprints: [],
+      attempts_used: 1,
+      resumable: true,
+      ...overrides,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code" as const, reviewer: null },
+  };
+}
+
 describe("workspace cockpit gate projection", () => {
   installWorkspaceStoreTestHooks();
 
@@ -105,10 +138,29 @@ describe("workspace cockpit gate projection", () => {
     });
 
     expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
-      key: "snapshot:running",
+      key: expect.stringMatching(/^snapshot:/),
       trigger: "verification_new_findings",
       remaining_budget: 1,
       resumable: true,
+    });
+  });
+
+  it("does not project an old closure onto a newly observed offline snapshot gate", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(snapshotGateState({
+      trigger: "native_human_required",
+      manual_repairs_remaining: 2,
+    }));
+    store.applyHumanGateClosed("confirm", "running");
+
+    store.setSessionState(snapshotGateState({
+      trigger: "verification_new_findings",
+      manual_repairs_remaining: 1,
+    }));
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      closed: null,
+      key: expect.stringMatching(/^snapshot:.*:verification_new_findings\|1\|true\|\|$/),
     });
   });
 
@@ -152,7 +204,7 @@ describe("workspace cockpit inbox projection", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      id: "gate:snapshot:human_confirm",
+      id: expect.stringMatching(/^gate:snapshot:/),
       kind: "gate",
       severity: 2,
       triage: true,

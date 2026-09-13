@@ -515,6 +515,65 @@ describe("workspace websocket human gate protocol branches", () => {
     expect(useWorkspaceStore.getState().advanceCommands.cmd_replay?.status).toBe("rejected");
   });
 
+  it("keeps an owned gate protocol rejection inline instead of creating a hard error", () => {
+    startTypedGateSession();
+    handleWorkspaceWsMessage(
+      {
+        type: "human_gate_turn_open",
+        turn_id: "turn_protocol",
+        command_id: "cmd_gate",
+        remaining_budget: 1,
+      } as WsServerMessage,
+      options(),
+    );
+
+    handleWorkspaceWsMessage(
+      {
+        type: "protocol_error",
+        code: "INVALID_HUMAN_CONFIRM_ACTION",
+        message: "confirm is rejected on this gate",
+        context: { turn_id: "turn_protocol" },
+      } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(useWorkspaceStore.getState().humanGateTurn?.inlineError).toEqual({
+      code: "INVALID_HUMAN_CONFIRM_ACTION",
+      message: "confirm is rejected on this gate",
+    });
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(1);
+  });
+
+  it("keeps an owned advance replay protocol rejection inline instead of creating a hard error", () => {
+    handleWorkspaceWsMessage(
+      {
+        type: "advance_rejected",
+        command_id: "advance_protocol",
+        code: "ADVANCE_NOT_READY",
+        reason: "gate still open",
+      } as WsServerMessage,
+      options(),
+    );
+
+    handleWorkspaceWsMessage(
+      {
+        type: "protocol_error",
+        code: "ADVANCE_REPLAY_NOT_READY",
+        message: "durable record exists",
+        context: { command_id: "advance_protocol" },
+      } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(useWorkspaceStore.getState().advanceCommands.advance_protocol?.inlineError).toEqual({
+      code: "ADVANCE_REPLAY_NOT_READY",
+      message: "durable record exists",
+    });
+    expect(useWorkspaceStore.getState().protocolDiagnostics).toHaveLength(1);
+  });
+
   it("tolerates an unknown event type and leaves a diagnostic", () => {
     expect(() =>
       handleWorkspaceWsMessage(

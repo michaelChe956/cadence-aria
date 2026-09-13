@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ChatEntry, ChoiceResponsePayload } from "./chat-entries";
+import { snapshotGateFingerprint } from "./cockpit-action-routing";
 import {
   emptyWorkspaceContentCache,
   getWorkspaceContentCacheValue,
@@ -95,6 +96,8 @@ const initialState: WorkspaceWsState = {
   reviewInvocationScope: null,
   humanGateSnapshot: null,
   repairReservation: null,
+  snapshotGateIdentity: null,
+  snapshotGateOpenedAt: null,
   policyDiagnostics: [],
   providerStartLedger: [],
   singleCandidatePhase: null,
@@ -149,6 +152,13 @@ const initialState: WorkspaceWsState = {
   protocolDiagnostics: [],
 };
 
+function snapshotIdentityFor(
+  fingerprint: string,
+  openedAt: string,
+): string {
+  return `snapshot:${openedAt}:${fingerprint}`;
+}
+
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
   ...initialState,
 
@@ -183,11 +193,24 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       );
 
       const sameSession = prev.sessionId === state.session_id;
-      const durableGateStillOpen =
-        state.human_gate_snapshot !== undefined && state.human_gate_snapshot !== null;
+      const snapshotGateFingerprintValue = state.human_gate_snapshot
+        ? snapshotGateFingerprint(state.human_gate_snapshot)
+        : null;
+      const snapshotGateOpenedAt = snapshotGateFingerprintValue
+        ? sameSession && prev.snapshotGateIdentity?.endsWith(`:${snapshotGateFingerprintValue}`)
+          ? prev.snapshotGateOpenedAt
+          : new Date().toISOString()
+        : null;
+      const snapshotGateIdentity = snapshotGateFingerprintValue && snapshotGateOpenedAt
+        ? snapshotIdentityFor(snapshotGateFingerprintValue, snapshotGateOpenedAt)
+        : null;
+      const snapshotGateChanged = sameSession && snapshotGateIdentity !== prev.snapshotGateIdentity;
+      const humanGateSnapshot = state.human_gate_snapshot
+        ? { ...state.human_gate_snapshot, opened_at: snapshotGateOpenedAt ?? undefined }
+        : null;
+      const durableGateStillOpen = humanGateSnapshot !== null;
       // 重建口径：durable snapshot 在场即门仍开；否则要求仍处 legacy human_confirm 阶段。
       const gateProjectionStillOpen = durableGateStillOpen || state.stage === "human_confirm";
-
       const nextState: WorkspaceWsState = {
         ...prev,
         sessionId: state.session_id,
@@ -200,7 +223,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         runPolicy: state.run_policy,
         runHistory: state.run_history,
         reviewInvocationScope: state.review_invocation_scope ?? null,
-        humanGateSnapshot: state.human_gate_snapshot ?? null,
+        humanGateSnapshot,
+        snapshotGateIdentity,
+        snapshotGateOpenedAt,
         repairReservation: state.repair_reservation ?? null,
         policyDiagnostics: state.policy_diagnostics ?? [],
         providerStartLedger: state.provider_start_ledger ?? [],
@@ -259,10 +284,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
         // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
         humanGateTurn:
-          sameSession && gateProjectionStillOpen && prev.humanGateClosure === null
+          sameSession && gateProjectionStillOpen && !snapshotGateChanged && prev.humanGateClosure === null
             ? prev.humanGateTurn
             : null,
-        humanGateClosure: sameSession && gateProjectionStillOpen ? prev.humanGateClosure : null,
+        humanGateClosure:
+          sameSession && gateProjectionStillOpen && !snapshotGateChanged
+            ? prev.humanGateClosure
+            : null,
         advanceCommands: sameSession ? prev.advanceCommands : {},
         protocolDiagnostics: sameSession ? prev.protocolDiagnostics : [],
         reviewerEnabled: state.reviewer_enabled_at_start ?? prev.reviewerEnabled,
@@ -440,6 +468,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
           failure_class: null,
           failure_message: null,
           opened_at: new Date().toISOString(),
+          inlineError: null,
         },
         humanGateClosure: null,
       };
@@ -501,6 +530,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
             reason: null,
             attempt_id: attemptId,
             workspace_entry: workspaceEntry,
+            inlineError: null,
           },
         },
       };
@@ -522,6 +552,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
             reason,
             attempt_id: null,
             workspace_entry: null,
+            inlineError: null,
           },
         },
       };
@@ -531,6 +562,26 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set((prev) => ({
       protocolDiagnostics: [...prev.protocolDiagnostics, diagnostic].slice(-50),
     })),
+
+  applyGateProtocolError: (turnId, error) =>
+    set((prev) =>
+      prev.humanGateTurn?.turn_id === turnId
+        ? { humanGateTurn: { ...prev.humanGateTurn, inlineError: error } }
+        : {},
+    ),
+
+  applyAdvanceProtocolError: (commandId, error) =>
+    set((prev) => {
+      const command = prev.advanceCommands[commandId];
+      return command
+        ? {
+            advanceCommands: {
+              ...prev.advanceCommands,
+              [commandId]: { ...command, inlineError: error },
+            },
+          }
+        : {};
+    }),
 
   resolveGateEntry: (resolution) =>
     set((prev) => {
@@ -955,7 +1006,18 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   setTimelineNodesForTest: (nodes) => set({ timelineNodes: nodes }),
   setActiveNodeId: (nodeId) => set({ activeNodeId: nodeId }),
   setSessionStatus: (status) => set({ sessionStatus: status }),
-  setHumanGateSnapshot: (snapshot) => set({ humanGateSnapshot: snapshot }),
+  setHumanGateSnapshot: (snapshot) =>
+    set((prev) => {
+      const openedAt = snapshot ? snapshot.opened_at ?? new Date().toISOString() : null;
+      const snapshotGateIdentity = snapshot && openedAt
+        ? snapshotIdentityFor(snapshotGateFingerprint(snapshot), openedAt)
+        : null;
+      return {
+        humanGateSnapshot: snapshot ? { ...snapshot, opened_at: openedAt ?? undefined } : null,
+        snapshotGateOpenedAt: openedAt,
+        snapshotGateIdentity,
+      };
+    }),
   setSessionIdForTest: (sessionId) => set({ sessionId }),
 
   upsertExecutionEvent: (event) =>

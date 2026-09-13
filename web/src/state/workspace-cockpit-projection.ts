@@ -1,3 +1,4 @@
+import { gateIdentityFromState } from "./cockpit-action-routing";
 import type { WorkItemPlanHumanGateSnapshot } from "../api/types";
 import type { ChatEntry } from "./chat-entries";
 import type {
@@ -71,7 +72,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
 
   if (turn) {
     return {
-      key: turn.turn_id,
+      key: gateIdentityFromState(state) ?? turn.turn_id,
       turn_id: turn.turn_id,
       stage: state.stage,
       flow_kind: state.flowKind,
@@ -90,7 +91,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
 
   if (snapshot) {
     return {
-      key: `snapshot:${state.stage}`,
+      key: gateIdentityFromState(state) ?? `snapshot:${state.stage}`,
       turn_id: null,
       stage: state.stage,
       flow_kind: state.flowKind,
@@ -102,7 +103,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       triage,
       closed: closure?.decision ?? null,
       closure_stage: closure?.stage ?? null,
-      opened_at: "",
+      opened_at: state.snapshotGateOpenedAt ?? "",
       turn: null,
     };
   }
@@ -112,7 +113,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   }
 
   return {
-    key: `legacy:${state.stage}`,
+    key: gateIdentityFromState(state) ?? `legacy:${state.stage}`,
     turn_id: null,
     stage: state.stage,
     flow_kind: state.flowKind,
@@ -141,6 +142,7 @@ export interface CockpitInboxItem {
   source: "gate" | "session_status" | "protocol_error" | "engine_error" | "advance";
   createdAt: string | null;
   gate: GateProjection | null;
+  inlineError: { code: string; message: string } | null;
 }
 
 export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] {
@@ -169,6 +171,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       source: "gate",
       createdAt: gate.opened_at || null,
       gate,
+      inlineError: gate.turn?.inlineError ?? null,
     });
   }
 
@@ -185,6 +188,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       source: "session_status",
       createdAt: null,
       gate: null,
+      inlineError: null,
     });
   }
 
@@ -199,6 +203,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       source: "protocol_error",
       createdAt: null,
       gate: null,
+      inlineError: null,
     });
   }
 
@@ -213,6 +218,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       source: "engine_error",
       createdAt: null,
       gate: null,
+      inlineError: null,
     });
   }
 
@@ -230,6 +236,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       source: "advance",
       createdAt: null,
       gate: null,
+      inlineError: command.inlineError,
     });
   }
 

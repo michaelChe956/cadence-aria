@@ -30,6 +30,7 @@ import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artif
 import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 import { buildGatePromptEntry } from "../state/workspace-chat-rebuild";
+import { classifyProtocolError } from "../state/cockpit-action-routing";
 
 export type WsServerMessage = WsOutMessage & Record<string, unknown>;
 
@@ -395,22 +396,35 @@ const store = useWorkspaceStore.getState();
             store.rejectChoiceRequest(choiceId, message);
           }
         }
-        store.setProtocolError({
+        const disposition = classifyProtocolError(code, msg.context, store);
+        if (disposition.kind === "gate") {
+          store.applyGateProtocolError(disposition.turnId, { code, message });
+        } else if (disposition.kind === "advance") {
+          store.applyAdvanceProtocolError(disposition.commandId, { code, message });
+        } else {
+          store.setProtocolError({ code, message });
+          store.appendChatEntry({
+            id: chatEntryId("protocol_error", `${code}:${message}`),
+            type: "error",
+            role: "system",
+            content: `${code} · ${message}`,
+            timestamp: new Date().toISOString(),
+            metadata: { code, message },
+          });
+        }
+        store.recordProtocolDiagnostic({
           code,
           message,
+          at: new Date().toISOString(),
+          type: "protocol_error",
         });
+        if (disposition.kind === "gate") {
+          const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+          if (gatePrompt) {
+            store.appendChatEntry(gatePrompt);
+          }
+        }
       }
-      store.appendChatEntry({
-        id: chatEntryId("protocol_error", `${msg.code as string}:${msg.message as string}`),
-        type: "error",
-        role: "system",
-        content: `${msg.code as string} · ${msg.message as string}`,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          code: msg.code as string,
-          message: msg.message as string,
-        },
-      });
       break;
     case "provider_locked":
       store.setProviderLocked({

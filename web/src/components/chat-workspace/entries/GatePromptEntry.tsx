@@ -37,6 +37,7 @@ export function GatePromptEntry({
   const gateTrigger = gateTriggerFromEntry(entry);
   const remainingBudget = remainingBudgetFromEntry(entry);
   const failureMessage = failureMessageFromEntry(entry);
+  const inlineError = inlineErrorFromEntry(entry);
   const isContextBlockerGate = gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
@@ -82,6 +83,14 @@ export function GatePromptEntry({
             className="aria-mono text-xs text-[var(--aria-danger)]"
           >
             {failureMessage}
+          </div>
+        ) : null}
+        {inlineError ? (
+          <div
+            data-testid="gate-inline-protocol-error"
+            className="aria-mono text-xs text-[var(--aria-danger)]"
+          >
+            {inlineError.code} · {inlineError.message}
           </div>
         ) : null}
         {requiresTriage && findings.length === 0 ? (
@@ -205,6 +214,15 @@ function failureMessageFromEntry(entry: ChatEntry): string | null {
     return null;
   }
   return [failureClass, message].filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function inlineErrorFromEntry(entry: ChatEntry): { code: string; message: string } | null {
+  const value = (entry.metadata as Record<string, unknown> | undefined)?.inline_error;
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const { code, message } = value as Record<string, unknown>;
+  return typeof code === "string" && typeof message === "string" ? { code, message } : null;
 }
 
 type ReviewFinding = {

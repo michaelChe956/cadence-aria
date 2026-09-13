@@ -8,6 +8,7 @@ export type StageAction =
   | "terminate"
   | "select_revision_path";
 
+export type GateActionFacade = "typed" | "legacy";
 export interface StageUIConfig {
   actions: StageAction[];
   headerBadge: string;
