@@ -431,6 +431,84 @@ const store = useWorkspaceStore.getState();
       break;
     case "pong":
       break;
+    case "human_gate_turn_open":
+      {
+        store.applyHumanGateTurnOpen(
+          msg.turn_id as string,
+          msg.command_id as string,
+          msg.remaining_budget as number,
+        );
+        // 同 turn_id 重放时 buildGatePromptEntry 产出同一 id，appendChatEntry 为 upsert：
+        // 不新建门卡条目（去重键 turn_id）。
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.appendChatEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_turn_completed":
+      {
+        store.applyHumanGateTurnCompleted(
+          msg.turn_id as string,
+          msg.artifact_ref as string,
+        );
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.appendChatEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_turn_failed":
+      {
+        store.applyHumanGateTurnFailed(
+          msg.turn_id as string,
+          msg.failure_class as string,
+          msg.message as string,
+        );
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.appendChatEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_busy":
+      store.applyHumanGateBusy(msg.turn_id as string);
+      break;
+    case "human_gate_closed":
+      {
+        const decision = msg.decision as "confirm" | "terminate";
+        store.applyHumanGateClosed(decision, msg.stage as string);
+        store.resolveGateEntry(decision);
+      }
+      break;
+    case "advance_completed":
+      store.applyAdvanceCompleted(
+        msg.command_id as string,
+        msg.attempt_id as string,
+        msg.workspace_entry as string,
+      );
+      break;
+    case "advance_rejected":
+      store.applyAdvanceRejected(
+        msg.command_id as string,
+        msg.code as string,
+        msg.reason as string,
+      );
+      break;
+    default:
+      {
+        // default 分支里联合类型已收窄为 never，无法直读判别字段；
+        // 回到未收窄的字典视图读取原始事件名（WsServerMessage 自带 Record<string, unknown>）。
+        const rawMessage: Record<string, unknown> = msg;
+        const unknownEventType = String(rawMessage["type"]);
+        store.recordProtocolDiagnostic({
+          code: "UNRECOGNIZED_EVENT",
+          message: `未识别的出向事件类型：${unknownEventType}`,
+          at: new Date().toISOString(),
+          type: unknownEventType,
+        });
+      }
+      break;
   }
 }
 
