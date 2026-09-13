@@ -584,3 +584,51 @@ function makeEntry(overrides: Partial<ChatEntry>): ChatEntry {
     ...overrides,
   } as ChatEntry;
 }
+
+describe("gate prompt read-only truth", () => {
+  const triggerCases = [
+    ["native_human_required", "引擎判定需人工"],
+    ["repeated_fingerprint", "同一问题重复出现"],
+    ["verification_new_findings", "复验发现新问题"],
+    ["repair_budget_exhausted", "修复轮次已用尽"],
+  ] as const;
+
+  const gateEntry = (metadata: Record<string, unknown>): ChatEntry =>
+    makeEntry({
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      metadata,
+    });
+
+  it.each(triggerCases)("renders the %s gate trigger label", (trigger, label) => {
+    render(<GatePromptEntry entry={gateEntry({ gate_trigger: trigger })} />);
+
+    expect(screen.getByTestId("gate-trigger-label")).toHaveTextContent(label);
+  });
+
+  it("always shows the remaining manual repair budget next to the gate", () => {
+    render(<GatePromptEntry entry={gateEntry({ remaining_budget: 1 })} />);
+
+    const budget = screen.getByTestId("gate-budget");
+    expect(budget).toHaveTextContent("剩余修复轮次 1");
+    expect(budget.className).toContain("aria-mono");
+    expect(budget.className).toContain("aria-num");
+  });
+
+  it("renders the turn failure inline while the gate stays visible", () => {
+    render(
+      <GatePromptEntry
+        entry={gateEntry({
+          gate_status: "failed",
+          failure_class: "compile_failed",
+          failure_message: "compile failed",
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("gate-failure")).toHaveTextContent(
+      "compile_failed · compile failed",
+    );
+  });
+});

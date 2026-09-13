@@ -1,5 +1,7 @@
 import { Check, RotateCcw, X } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
+import { GATE_TRIGGER_LABELS } from "../../../state/workspace-cockpit-projection";
+import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
 import { trustedReviewComments } from "../../../state/workspace-review-trust";
 import { ChatEntryContainer } from "../ChatEntryContainer";
@@ -32,6 +34,9 @@ export function GatePromptEntry({
         : "确认产物";
   const requestChangeLabel = canAdoptSuggestions ? "采纳建议并返修" : null;
   const isResolved = entry.resolved === true;
+  const gateTrigger = gateTriggerFromEntry(entry);
+  const remainingBudget = remainingBudgetFromEntry(entry);
+  const failureMessage = failureMessageFromEntry(entry);
   const isContextBlockerGate = gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
@@ -51,6 +56,34 @@ export function GatePromptEntry({
       <div className="space-y-3">
         <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
         {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
+        {gateTrigger || remainingBudget !== null ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {gateTrigger ? (
+              <span
+                data-testid="gate-trigger-label"
+                className="aria-chip border-[var(--aria-gate-open-border)] bg-[var(--aria-gate-open-bg)] text-[var(--aria-gate-open-fg)]"
+              >
+                {GATE_TRIGGER_LABELS[gateTrigger]}
+              </span>
+            ) : null}
+            {remainingBudget !== null ? (
+              <span
+                data-testid="gate-budget"
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+              >
+                剩余修复轮次 {remainingBudget}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        {failureMessage ? (
+          <div
+            data-testid="gate-failure"
+            className="aria-mono text-xs text-[var(--aria-danger)]"
+          >
+            {failureMessage}
+          </div>
+        ) : null}
         {requiresTriage && findings.length === 0 ? (
           <div className="text-xs text-[var(--aria-ink-muted)]">
             请在下方输入人工修改说明后发送返修。
@@ -143,6 +176,35 @@ function reviewGateFromEntry(entry: ChatEntry) {
 function gateKindFromEntry(entry: ChatEntry) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   return typeof metadata?.gate_kind === "string" ? metadata.gate_kind : null;
+}
+
+function gateTriggerFromEntry(
+  entry: ChatEntry,
+): WorkItemPlanHumanGateSnapshot["trigger"] | null {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  const value = metadata?.gate_trigger;
+  return value === "native_human_required" ||
+    value === "repeated_fingerprint" ||
+    value === "verification_new_findings" ||
+    value === "repair_budget_exhausted"
+    ? value
+    : null;
+}
+
+function remainingBudgetFromEntry(entry: ChatEntry): number | null {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  return typeof metadata?.remaining_budget === "number" ? metadata.remaining_budget : null;
+}
+
+function failureMessageFromEntry(entry: ChatEntry): string | null {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  const failureClass =
+    typeof metadata?.failure_class === "string" ? metadata.failure_class : null;
+  const message = typeof metadata?.failure_message === "string" ? metadata.failure_message : null;
+  if (!failureClass && !message) {
+    return null;
+  }
+  return [failureClass, message].filter((part): part is string => Boolean(part)).join(" · ");
 }
 
 type ReviewFinding = {
