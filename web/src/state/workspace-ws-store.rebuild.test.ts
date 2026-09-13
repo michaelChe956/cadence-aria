@@ -933,6 +933,37 @@ describe("workspace ws store gate rebuild", () => {
     });
   });
 
+  it("keeps a typed turn across a same-session snapshot fingerprint change", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      ...buildSessionState("session_typed_snapshot"),
+      human_gate_snapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 2,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+    store.applyHumanGateTurnOpen("turn_persistent", "cmd_persistent", 2);
+
+    store.setSessionState({
+      ...buildSessionState("session_typed_snapshot"),
+      human_gate_snapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+
+    expect(useWorkspaceStore.getState().humanGateTurn?.turn_id).toBe("turn_persistent");
+    expect(selectCockpitInbox(useWorkspaceStore.getState())[0]?.gate?.turn_id).toBe("turn_persistent");
+  });
+
   it("keeps terminal advance dedup across a same-session rebuild and clears it across sessions", () => {
     const store = useWorkspaceStore.getState();
     store.setSessionState(buildSessionState("session_dedup"));

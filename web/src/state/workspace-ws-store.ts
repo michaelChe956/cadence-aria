@@ -284,7 +284,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
         // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
         humanGateTurn:
-          sameSession && gateProjectionStillOpen && !snapshotGateChanged && prev.humanGateClosure === null
+          sameSession && gateProjectionStillOpen && prev.humanGateClosure === null
             ? prev.humanGateTurn
             : null,
         humanGateClosure:
