@@ -263,6 +263,21 @@ describe("workspace cockpit execution flow projection", () => {
     expect(rows[0]).toMatchObject({ state: "awaiting_triage", index: 1, total: 1 });
   });
 
+  it("returns the active node to running once the triage gate is closed", () => {
+    const store = useWorkspaceStore.getState();
+    store.setTimelineNodesForTest([
+      timelineNode({ node_id: "n1", node_type: "reviewer_run", status: "active" }),
+    ]);
+    store.setActiveNodeId("n1");
+    store.setStage("human_confirm");
+    store.appendChatEntry(reviewVerdictEntry({ review_gate: "user_triage_required" }));
+    expect(selectCockpitFlow(useWorkspaceStore.getState())[0]?.state).toBe("awaiting_triage");
+
+    store.applyHumanGateClosed("confirm", "human_confirm");
+
+    expect(selectCockpitFlow(useWorkspaceStore.getState())[0]?.state).toBe("running");
+  });
+
   it("computes progress, elapsed from duration_ms and the topology strip", () => {
     const store = useWorkspaceStore.getState();
     store.setTimelineNodesForTest([

@@ -313,9 +313,11 @@ export function topologyTokenName(state: CockpitFlowState): string {
 
 export function selectCockpitFlow(state: WorkspaceWsState, nowMs = Date.now()): CockpitFlowRow[] {
   const total = state.timelineNodes.length;
-  const triage = isGateTriage(state);
+  // 与收件箱同源：awaiting_triage 是「开放 triage 门」的投影态，门禁关闭后必须回到 running。
+  const gate = selectGateProjection(state);
+  const awaitingTriage = gate !== null && gate.closed === null && gate.triage;
   const topology = state.timelineNodes.map((node) =>
-    cockpitFlowState(node, triage && node.node_id === state.activeNodeId),
+    cockpitFlowState(node, awaitingTriage && node.node_id === state.activeNodeId),
   );
 
   return state.timelineNodes.map((node, index) => ({
