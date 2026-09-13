@@ -563,3 +563,68 @@ describe("ChatWorkspacePage shell and content loading", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("ChatWorkspacePage dual track switch", () => {
+  installChatWorkspacePageTestHooks();
+
+  it("renders the legacy four-block form by default", () => {
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_switch",
+      workspace_type: "story",
+      stage: "prepare_context",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+    mockWorkspaceWs();
+
+    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("timeline-node-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+  });
+
+  it("renders the three-zone cockpit when the switch is set to cockpit", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "cockpit");
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_switch",
+      workspace_type: "story",
+      stage: "prepare_context",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+    mockWorkspaceWs();
+
+    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
+    // brief 原写 `timeline-node-list` 为空，但 T10 驾驶舱 ② 区复用 TimelineNodeList
+    // （variant="flow"），该 testid 两种形态都在；改用 legacy 专有的状态栏作为排除判据。
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+});
