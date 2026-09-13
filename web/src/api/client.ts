@@ -76,6 +76,14 @@ export function listProjects(): Promise<{ projects: Project[] }> {
   return requestJson<{ projects: Project[] }>("/api/projects");
 }
 
+export function workspaceSessionWebSocketUrl(
+  sessionId: string,
+  location: Pick<Location, "protocol" | "host"> = window.location,
+): string {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${location.host}/api/workspace-sessions/${encodeURIComponent(sessionId)}/ws`;
+}
+
 export function createProject(payload: {
   name: string;
   description?: string | null;

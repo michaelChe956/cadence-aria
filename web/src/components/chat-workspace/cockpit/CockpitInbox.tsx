@@ -13,7 +13,7 @@ const KIND_CLASS = {
   hard_error: "border-[var(--aria-danger)] bg-[var(--aria-danger-soft)]",
 } as const;
 
-export function CockpitInbox({ items }: { items: CockpitInboxItem[] }) {
+export function CockpitInbox({ items }: { items: readonly CockpitInboxItem[] }) {
   return (
     <section
       data-testid="cockpit-inbox"

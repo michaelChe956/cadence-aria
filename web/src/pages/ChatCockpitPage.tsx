@@ -7,12 +7,12 @@ import {
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
+import { useWorkspaceSessionObservers } from "../hooks/useWorkspaceSessionObservers";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
-import {
-  selectCockpitFlow,
-  selectCockpitInbox,
-} from "../state/workspace-cockpit-projection";
+import { selectCockpitFlow } from "../state/workspace-cockpit-projection";
+import { readCockpitSettings } from "../state/cockpit-settings";
+import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
 
@@ -37,7 +37,13 @@ export function ChatCockpitPage({
   useWorkspaceWs(sessionId);
   const state = useWorkspaceStore();
   const now = useNowTicker(1000);
-  const inbox = useMemo(() => selectCockpitInbox(state), [state]);
+  const cockpitSettings = readCockpitSettings();
+  const { inbox: observedInbox } = useWorkspaceSessionObservers({
+    currentSessionId: sessionId,
+    currentSessionState: state,
+    watchLimit: cockpitSettings.watchLimit,
+  });
+  const watchWindow = watchWindowCopy(cockpitSettings.watchLimit);
   const flowRows = useMemo(() => selectCockpitFlow(state, now), [state, now]);
   const contentCacheValues = useMemo(
     () => workspaceContentCacheValues(state.contentCache),
@@ -75,10 +81,11 @@ export function ChatCockpitPage({
           返回
         </button>
         <span className="aria-mono text-xs text-[var(--aria-ink-muted)]">{sessionId}</span>
+        <span className="text-xs text-[var(--aria-ink-muted)]">{watchWindow}</span>
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 lg:grid-cols-[20rem_minmax(0,1fr)]">
-        <CockpitInbox items={inbox} />
+        <CockpitInbox items={observedInbox} />
 
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
           <section
