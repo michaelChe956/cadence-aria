@@ -118,3 +118,143 @@ function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
     ...overrides,
   };
 }
+
+describe("TimelineNodeList flow variant", () => {
+  const flowNode = timelineNode({ node_id: "node-flow-1", node_type: "author_run", status: "active" });
+
+  const flowRows = [
+    {
+      node_id: "node-flow-1",
+      title: "Author 运行",
+      state: "running" as const,
+      index: 1,
+      total: 2,
+      elapsed_ms: 30_000,
+      started_at: "2026-09-13T00:00:00Z",
+      topology: ["running", "pending"] as const,
+    },
+    {
+      node_id: "node-flow-2",
+      title: "Review Round 1",
+      state: "awaiting_triage" as const,
+      index: 2,
+      total: 2,
+      elapsed_ms: 90_000,
+      started_at: "2026-09-13T00:01:00Z",
+      topology: ["running", "awaiting_triage"] as const,
+    },
+  ];
+
+  it("renders the four execution flow essentials per row", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode, timelineNode({ node_id: "node-flow-2", node_type: "reviewer_run" })]}
+        activeNodeId="node-flow-1"
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[...flowRows]}
+      />,
+    );
+
+    expect(screen.getByTestId("flow-status-light-author_run")).toBeInTheDocument();
+    expect(screen.getByTestId("flow-progress-author_run")).toHaveTextContent("1/2");
+    expect(screen.getByTestId("flow-elapsed-author_run")).toHaveTextContent("30s");
+    expect(screen.getAllByTestId("cockpit-mini-topology")).toHaveLength(2);
+  });
+
+  it("keeps mono and tabular numeric classes on progress and elapsed", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+      />,
+    );
+
+    expect(screen.getByTestId("flow-progress-author_run").className).toContain("aria-mono");
+    expect(screen.getByTestId("flow-progress-author_run").className).toContain("aria-num");
+    expect(screen.getByTestId("flow-elapsed-author_run").className).toContain("aria-mono");
+    expect(screen.getByTestId("flow-elapsed-author_run").className).toContain("aria-num");
+  });
+
+  it("exposes no input controls in the flow zone", () => {
+    const { container } = render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId="node-flow-1"
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[...flowRows]}
+      />,
+    );
+
+    expect(container.querySelectorAll("input, select, textarea")).toHaveLength(0);
+  });
+
+  it("keeps the sidebar variant free of flow metrics and drills down on click", () => {
+    const onSelectNode = vi.fn();
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={onSelectNode}
+        flowRows={[...flowRows]}
+      />,
+    );
+
+    expect(screen.queryByTestId("flow-progress-author_run")).toBeNull();
+    expect(screen.queryByTestId("flow-status-light-author_run")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("timeline-node-author_run"));
+    expect(onSelectNode).toHaveBeenCalledWith("node-flow-1");
+  });
+
+  it("breathes on a running row and stays static on a settled row", () => {
+    const settledRow = {
+      ...flowRows[0]!,
+      node_id: "node-flow-2",
+      state: "done" as const,
+      elapsed_ms: 12_000,
+    };
+    render(
+      <TimelineNodeList
+        nodes={[flowNode, timelineNode({ node_id: "node-flow-2", node_type: "reviewer_run" })]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!, settledRow]}
+      />,
+    );
+
+    // REQ-UI37-18：running 为主色呼吸灯（aria-pulse）；settled 行静态实心。
+    expect(screen.getByTestId("flow-status-light-author_run").className).toContain("aria-pulse");
+    expect(screen.getByTestId("flow-status-light-reviewer_run").className).not.toContain(
+      "aria-pulse",
+    );
+  });
+
+  it("mutes a row that has seen no new events for a long time and leaves fresh rows unmuted", () => {
+    const quietRow = { ...flowRows[0]!, elapsed_ms: 600_000 };
+    render(
+      <TimelineNodeList
+        nodes={[flowNode, timelineNode({ node_id: "node-flow-2", node_type: "reviewer_run" })]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[quietRow, flowRows[1]!]}
+      />,
+    );
+
+    // REQ-UI37-18：久无事件 → 静默视觉（muted 透明度），不是报警。
+    expect(screen.getByTestId("timeline-node-author_run").className).toContain("opacity-60");
+    expect(screen.getByTestId("timeline-node-reviewer_run").className).not.toContain("opacity-60");
+  });
+});

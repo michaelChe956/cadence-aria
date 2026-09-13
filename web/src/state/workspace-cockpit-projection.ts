@@ -262,7 +262,8 @@ export interface CockpitFlowRow {
   total: number;
   elapsed_ms: number;
   started_at: string;
-  topology: CockpitFlowState[];
+  // 只读投影：行数据由 store 派生，消费方只读不写；只读元素类型同时接纳 `as const` 字面量。
+  topology: readonly CockpitFlowState[];
 }
 
 export function cockpitFlowState(node: TimelineNode, awaitingTriage: boolean): CockpitFlowState {
