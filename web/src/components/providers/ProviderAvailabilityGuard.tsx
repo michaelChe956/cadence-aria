@@ -8,6 +8,9 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
   const realWorkflowBlocked = useProviderAvailabilityStore(
     (state) => state.realWorkflowBlocked,
   );
+  const testProviderEnabled = useProviderAvailabilityStore(
+    (state) => state.testProviderEnabled,
+  );
   const stateStatus = useProviderAvailabilityStore((state) => state.stateStatus);
   const stateError = useProviderAvailabilityStore((state) => state.stateError);
   const recheckStatus = useProviderAvailabilityStore((state) => state.recheckStatus);
@@ -38,7 +41,7 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
     );
   }
 
-  if (snapshot && !realWorkflowBlocked) {
+  if (snapshot && (testProviderEnabled || !realWorkflowBlocked)) {
     return (
       <>
         {children}

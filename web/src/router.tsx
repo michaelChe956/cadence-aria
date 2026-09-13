@@ -13,13 +13,18 @@ import {
 import { useCallback } from "react";
 import { AppShell } from "./app-shell";
 import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
+import { CockpitShell } from "./components/cockpit/CockpitShell";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
 import { ImageCreatePage } from "./pages/ImageCreatePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 
 function RootRouteComponent() {
-  return <Outlet />;
+  return (
+    <CockpitShell>
+      <Outlet />
+    </CockpitShell>
+  );
 }
 
 function GuardedWorkflowLayout() {

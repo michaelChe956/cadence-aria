@@ -1,5 +1,6 @@
 import { AlertTriangle, ClipboardList, CircleAlert } from "lucide-react";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
+import { useCockpitInboxPulse } from "../../cockpit/CockpitShell";
 
 const KIND_GLYPH = {
   gate: ClipboardList,
@@ -24,28 +25,34 @@ export function CockpitInbox({ items }: { items: readonly CockpitInboxItem[] }) 
       {items.length === 0 ? (
         <p className="text-xs text-[var(--aria-ink-muted)]">暂无待处理项</p>
       ) : (
-        items.map((item) => {
-          const Glyph = KIND_GLYPH[item.kind];
-          return (
-            <article
-              key={item.id}
-              data-testid={`cockpit-inbox-item-${item.kind}`}
-              className={[
-                "flex min-h-11 items-start gap-2 rounded-lg border-2 px-3 py-2",
-                KIND_CLASS[item.kind],
-              ].join(" ")}
-            >
-              <Glyph className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</p>
-                <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
-                  {item.summary}
-                </p>
-              </div>
-            </article>
-          );
-        })
+        items.map((item) => <CockpitInboxRow key={item.id} item={item} />)
       )}
     </section>
+  );
+}
+
+function CockpitInboxRow({ item }: { item: CockpitInboxItem }) {
+  const pulse = useCockpitInboxPulse(item.id);
+  const Glyph = KIND_GLYPH[item.kind];
+
+  return (
+    <article
+      data-testid={`cockpit-inbox-item-${item.kind}`}
+      data-pulse={pulse}
+      className={[
+        "flex min-h-11 items-start gap-2 rounded-lg border-2 px-3 py-2",
+        "motion-safe:transition-colors motion-safe:duration-200",
+        pulse ? "ring-2 ring-[var(--aria-danger)]" : "",
+        KIND_CLASS[item.kind],
+      ].join(" ")}
+    >
+      <Glyph className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-[var(--aria-ink)]">{item.title}</p>
+        <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+          {item.summary}
+        </p>
+      </div>
+    </article>
   );
 }

@@ -270,6 +270,27 @@ describe("router", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("wraps image-create routes in the global cockpit shell", async () => {
+    const health = {
+      ...blockedSnapshot(),
+      test_provider_enabled: true,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+
+    render(<RouterProvider router={memoryRouter("/image-create")} />);
+
+    expect(await screen.findByTestId("image-create-page")).toBeInTheDocument();
+    expect(screen.getByTestId("cockpit-shell")).toBeInTheDocument();
+  });
+
   it("passes the image-create session id from the independent route", async () => {
     render(
       <RouterProvider
