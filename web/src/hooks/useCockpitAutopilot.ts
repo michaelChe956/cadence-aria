@@ -6,7 +6,7 @@ import type { WorkspaceWsState } from "../state/workspace-ws-store-types";
 
 type AutopilotState = Pick<
   WorkspaceWsState,
-  "sessionStatus" | "humanGateTurn" | "humanGateClosure" | "advanceCommands" | "flowKind"
+  "sessionId" | "sessionStatus" | "humanGateTurn" | "humanGateClosure" | "advanceCommands" | "flowKind"
 >;
 
 interface AutopilotAnchor {
@@ -29,8 +29,15 @@ export function useCockpitAutopilot({
   settings,
   sendAdvance,
 }: CockpitAutopilotInput): void {
-  const { sessionStatus, humanGateTurn, humanGateClosure, advanceCommands, flowKind } = state;
-  const stopPoints = settings.stopPoints;
+  const {
+    sessionId: stateSessionId,
+    sessionStatus,
+    humanGateTurn,
+    humanGateClosure,
+    advanceCommands,
+    flowKind,
+  } = state;
+  const humanGateStopPoint = settings.stopPoints.includes("human_gate");
   const anchorsRef = useRef(new Map<string, AutopilotAnchor>());
   const stoppedSessionRef = useRef<string | null>(null);
   const sessionRef = useRef(sessionId);
@@ -45,7 +52,7 @@ export function useCockpitAutopilot({
   }, [sessionId]);
 
   useEffect(() => {
-    if (stoppedSessionRef.current === sessionId) {
+    if (stoppedSessionRef.current === sessionId || stateSessionId !== sessionId) {
       return;
     }
 
@@ -66,7 +73,7 @@ export function useCockpitAutopilot({
       humanGateSnapshot: null,
       stage: humanGateClosure?.stage ?? "",
     });
-    if (!gateIdentity || stopPoints.includes("human_gate")) {
+    if (!gateIdentity || humanGateStopPoint) {
       return;
     }
 
@@ -74,7 +81,7 @@ export function useCockpitAutopilot({
       const busyEntryId = confirmedEntryId(humanGateTurn, gateIdentity);
       const busyAnchorKey = `${sessionId}:${gateIdentity}:${busyEntryId}`;
       const busyAnchor = anchorsRef.current.get(busyAnchorKey) ?? {
-        commandId: newCommandId(),
+        commandId: "",
         sent: false,
         stopped: false,
       };
@@ -116,7 +123,8 @@ export function useCockpitAutopilot({
     sendAdvance,
     sessionId,
     sessionStatus,
-    stopPoints,
+    humanGateStopPoint,
+    stateSessionId,
   ]);
 }
 

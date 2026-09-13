@@ -18,12 +18,12 @@ const defaultSettings = {
 
 type AutopilotState = Pick<
   WorkspaceWsState,
-  "sessionStatus" | "humanGateTurn" | "humanGateClosure" | "advanceCommands" | "flowKind"
+  "sessionId" | "sessionStatus" | "humanGateTurn" | "humanGateClosure" | "advanceCommands" | "flowKind"
 >;
-
 
 function state(overrides: Partial<AutopilotState> = {}): AutopilotState {
   return {
+    sessionId: "session-1",
     sessionStatus: "waiting_for_human",
     flowKind: "single_candidate",
     humanGateTurn: null,
@@ -67,11 +67,13 @@ function renderAutopilot(
   autopilotState: AutopilotState,
   sendAdvance = vi.fn<(commandId: string) => boolean>(() => true),
   stopPoints: readonly ("human_gate" | "stopped" | "hard_error")[] = [],
+  sessionId = "session-1",
 ) {
   return {
     sendAdvance,
     ...render(
       <AutopilotHarness
+        sessionId={sessionId}
         state={autopilotState}
         sendAdvance={sendAdvance}
         stopPoints={stopPoints}
@@ -136,19 +138,56 @@ describe("useCockpitAutopilot", () => {
     expect(view.sendAdvance).toHaveBeenCalledTimes(1);
   });
 
+  it("does not carry rejected commands into a new session before its snapshot arrives", () => {
+    const sendAdvance = vi.fn<(commandId: string) => boolean>(() => true);
+    const view = renderAutopilot(
+      state({
+        sessionId: "session-a",
+        advanceCommands: { "advance-a": advanceRejected("advance-a") },
+      }),
+      sendAdvance,
+      [],
+      "session-a",
+    );
+
+    view.rerender(
+      <AutopilotHarness
+        sessionId="session-b"
+        state={state({
+          sessionId: "session-a",
+          advanceCommands: { "advance-a": advanceRejected("advance-a") },
+        })}
+        sendAdvance={sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+    view.rerender(
+      <AutopilotHarness
+        sessionId="session-b"
+        state={state({ ...confirmedGate("turn-b"), sessionId: "session-b" })}
+        sendAdvance={sendAdvance}
+        stopPoints={[]}
+      />,
+    );
+
+    expect(sendAdvance).toHaveBeenCalledTimes(1);
+  });
+
   it("does not advance legacy or group flows", () => {
     const view = renderAutopilot(state({ ...confirmedGate("turn-legacy"), flowKind: "legacy" }));
 
     expect(view.sendAdvance).not.toHaveBeenCalled();
   });
 
-  it("abandons a busy candidate without queuing a later advance", () => {
+  it("abandons a busy candidate without allocating a command id", () => {
+    const randomUUID = vi.spyOn(crypto, "randomUUID");
     const busy = state({
       ...confirmedGate("turn-busy"),
       humanGateTurn: { ...confirmedGate("turn-busy").humanGateTurn!, status: "busy" },
     });
     const view = renderAutopilot(busy);
 
+    expect(randomUUID).not.toHaveBeenCalled();
     view.rerender(
       <AutopilotHarness
         state={confirmedGate("turn-next")}
@@ -158,6 +197,7 @@ describe("useCockpitAutopilot", () => {
     );
 
     expect(view.sendAdvance).toHaveBeenCalledTimes(1);
+    randomUUID.mockRestore();
   });
 
   it("does not regenerate a command id while transport is unavailable", () => {
@@ -191,16 +231,18 @@ describe("useCockpitAutopilot", () => {
 });
 
 function AutopilotHarness({
+  sessionId = "session-1",
   state,
   sendAdvance,
   stopPoints,
 }: {
+  sessionId?: string;
   state: AutopilotState;
   sendAdvance: (commandId: string) => boolean;
   stopPoints: readonly ("human_gate" | "stopped" | "hard_error")[];
 }) {
   useCockpitAutopilot({
-    sessionId: "session-1",
+    sessionId,
     state,
     settings: { ...defaultSettings, stopPoints },
     sendAdvance,
