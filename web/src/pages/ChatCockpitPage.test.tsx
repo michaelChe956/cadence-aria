@@ -15,6 +15,7 @@ import {
   type WorkspaceWsState,
 } from "../state/workspace-ws-store";
 import { observerStateFromSessionState } from "../state/workspace-observer-store";
+import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 
@@ -48,6 +49,7 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
         })),
   useCockpitInboxPulse: () => false,
   useCockpitSessionWatch: () => watchSession,
+  useCockpitSettings: () => readCockpitSettings(),
   useCockpitObservedRecords: () => cockpitObservedRecords,
 }));
 

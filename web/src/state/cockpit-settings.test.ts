@@ -30,6 +30,7 @@ describe("cockpit settings storage", () => {
         soundEnabled: true,
         watchLimit: 0,
         observerRefreshIntervalMs: 0,
+        gateOpenEscalationMs: -1,
         stopPoints: ["human_gate", "invalid"],
       }),
     );
@@ -39,6 +40,7 @@ describe("cockpit settings storage", () => {
       watchLimit: 8,
       observerRefreshIntervalMs: 15_000,
       stopPoints: ["human_gate"],
+      gateOpenEscalationMs: 600_000,
     });
   });
 

@@ -9,25 +9,30 @@ import {
   type ReactNode,
 } from "react";
 import type { JSX } from "react";
+import { Settings } from "lucide-react";
 import {
   useWorkspaceSessionObservers,
   type WorkspaceSessionObserverResult,
 } from "../../hooks/useWorkspaceSessionObservers";
-import { readCockpitSettings } from "../../state/cockpit-settings";
+import {
+  readCockpitSettings,
+  writeCockpitSettings,
+  type CockpitSettings,
+} from "../../state/cockpit-settings";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitEscalation } from "./CockpitEscalation";
+import { CockpitSettingsDialog } from "./CockpitSettingsDialog";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
-
 const GO_TO_INBOX_EVENT = "aria:cockpit:go-to-inbox";
 const SYSTEM_NOTIFICATION_DELAY_MS = 30_000;
 
 type NotificationGuidance = "permission-denied" | "permission-default" | null;
-
 type CockpitShellContextValue = {
   inbox: readonly CockpitInboxItem[];
   records: WorkspaceSessionObserverResult["records"];
   pulseItemIds: ReadonlySet<string>;
   notificationGuidance: NotificationGuidance;
+  settings: CockpitSettings;
   watchSession(sessionId: string): void;
 };
 
@@ -64,8 +69,13 @@ export function useCockpitInboxPulse(itemId: string): boolean {
 export function useCockpitNotificationGuidance(): NotificationGuidance {
   return useContext(CockpitShellContext)?.notificationGuidance ?? null;
 }
+
+export function useCockpitSettings(): CockpitSettings {
+  return useContext(CockpitShellContext)?.settings ?? readCockpitSettings();
+}
 export function CockpitShell({ children }: { children: ReactNode }): JSX.Element {
-  const [settings] = useState(() => readCockpitSettings());
+  const [settings, setSettings] = useState<CockpitSettings>(() => readCockpitSettings());
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const currentSessionId = useWorkspaceStore((state) => state.sessionId);
   const currentSessionState = useWorkspaceStore();
   const [pulseItemIds, setPulseItemIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -192,9 +202,13 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
       new CustomEvent(GO_TO_INBOX_EVENT, { detail: { sessionId } }),
     );
   }, [inbox]);
+  const updateSettings = useCallback((nextSettings: CockpitSettings) => {
+    writeCockpitSettings(nextSettings);
+    setSettings(nextSettings);
+  }, []);
   const contextValue = useMemo<CockpitShellContextValue>(
-    () => ({ inbox, records, pulseItemIds, notificationGuidance, watchSession }),
-    [inbox, notificationGuidance, pulseItemIds, records, watchSession],
+    () => ({ inbox, records, pulseItemIds, notificationGuidance, settings, watchSession }),
+    [inbox, notificationGuidance, pulseItemIds, records, settings, watchSession],
   );
 
   return (
@@ -223,6 +237,22 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
             需要处理：{toast.title}
           </div>
         ) : null}
+        <header className="fixed right-4 top-4 z-[100]">
+          <button
+            type="button"
+            aria-label="驾驶舱设置"
+            onClick={() => setSettingsOpen(true)}
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] shadow-md transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+          >
+            <Settings aria-hidden="true" className="h-4 w-4" />
+          </button>
+        </header>
+        <CockpitSettingsDialog
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          settings={settings}
+          onChange={updateSettings}
+        />
         <CockpitEscalation items={inbox} settings={settings} />
         {children}
       </div>

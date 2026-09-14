@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readCockpitSettings } from "../../state/cockpit-settings";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitInbox } from "../chat-workspace/cockpit/CockpitInbox";
 import { CockpitShell } from "./CockpitShell";
@@ -48,7 +49,7 @@ function ShellWithInbox({ inbox }: { inbox: readonly CockpitInboxItem[] }) {
   mockedUseWorkspaceSessionObservers.mockReturnValue({
     records: [],
     inbox,
-    watchedSessionIds: [],
+    watchedSessionIds: ["s1", "s2", "s3", "s4"],
     watchSession: vi.fn(),
   });
 
@@ -81,6 +82,22 @@ describe("CockpitShell", () => {
     mockedUseWorkspaceSessionObservers.mockReset();
     useWorkspaceStore.getState().reset();
     document.title = "Aria Web";
+    window.localStorage.clear();
+  });
+
+  it("persists changed K immediately without changing the URL", async () => {
+    window.history.replaceState({}, "", "/chat/session-a");
+    renderShell({ inbox: [] });
+    fireEvent.click(screen.getByRole("button", { name: "驾驶舱设置" }));
+    fireEvent.change(screen.getByLabelText("聚合窗口 K"), {
+      target: { value: "4" },
+    });
+
+    expect(readCockpitSettings()).toMatchObject({ watchLimit: 4 });
+    expect(mockedUseWorkspaceSessionObservers).toHaveBeenLastCalledWith(
+      expect.objectContaining({ watchLimit: 4 }),
+    );
+    expect(window.location.pathname).toBe("/chat/session-a");
   });
 
   it("keeps an unclosable sticky banner until observed count reaches zero", () => {

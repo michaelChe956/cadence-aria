@@ -10,6 +10,7 @@ import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox"
 import {
   useCockpitObservedRecords,
   useCockpitSessionWatch,
+  useCockpitSettings,
   useCockpitShellInbox,
 } from "../components/cockpit/CockpitShell";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
@@ -18,7 +19,6 @@ import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { selectCockpitFlow } from "../state/workspace-cockpit-projection";
-import { readCockpitSettings } from "../state/cockpit-settings";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
@@ -44,7 +44,7 @@ export function ChatCockpitPage({
   const workspaceWs = useWorkspaceWs(sessionId);
   const state = useWorkspaceStore();
   const now = useNowTicker(1000);
-  const cockpitSettings = readCockpitSettings();
+  const cockpitSettings = useCockpitSettings();
   useCockpitAutopilot({
     sessionId,
     state,
