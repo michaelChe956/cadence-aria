@@ -53,7 +53,30 @@ describe("useWorkspaceWsReconnect", () => {
     expect(onReconnect).not.toHaveBeenCalled();
   });
 
-  it("pauses while document is hidden", () => {
+  it("reconnects at the hidden base delay after an abnormal close while hidden", () => {
+    const onReconnect = vi.fn();
+
+    setDocumentHidden(true);
+    renderHook(() =>
+      useWorkspaceWsReconnect({
+        enabled: true,
+        onReconnect,
+        closeCode: 1006,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(59999);
+    });
+    expect(onReconnect).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a pending reconnect when backgrounded and slows to the hidden base delay", () => {
     const onReconnect = vi.fn();
 
     renderHook(() =>
@@ -67,10 +90,22 @@ describe("useWorkspaceWsReconnect", () => {
     act(() => {
       setDocumentHidden(true);
       document.dispatchEvent(new Event("visibilitychange"));
-      vi.advanceTimersByTime(5000);
     });
 
-    expect(onReconnect).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(59999);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(2);
   });
 
   it("retries immediately when requested manually", () => {
