@@ -67,7 +67,7 @@ describe("workspace observer store", () => {
     expect(watchWindowCopy(2, 15_000)).toBe("仅监视最近 2 个候选；集合外不计入计数，集合内准实时（最多 15 秒陈旧）");
   });
 
-  it("keeps API order for active candidates and excludes terminal statuses", () => {
+  it("keeps API order for active candidates and excludes terminal statuses including failed", () => {
     expect(
       selectWatchedSessionIds(
         [
@@ -79,7 +79,22 @@ describe("workspace observer store", () => {
         ],
         3,
       ),
-    ).toEqual(["first", "second", "third"]);
+    ).toEqual(["first", "second"]);
+  });
+
+  it("does not let failed sessions consume watch slots when K is contested", () => {
+    expect(
+      selectWatchedSessionIds(
+        [
+          summary("f1", "failed"),
+          summary("a1", "running"),
+          summary("a2", "stopped_needs_human"),
+          summary("a3", "open"),
+          summary("f2", "failed"),
+        ],
+        2,
+      ),
+    ).toEqual(["a1", "a2"]);
   });
 
   it("opens only entries newly admitted to K and closes entries leaving K", async () => {

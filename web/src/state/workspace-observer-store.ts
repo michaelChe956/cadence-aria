@@ -8,6 +8,7 @@ import type {
   WorkspaceWsState,
 } from "./workspace-ws-store";
 
+// watch 候选 = 非终态活跃会话（REQ-UI37-07）；failed/terminated 为终态不占 K 槽（终审 P3 修复），其历史卡壳走 K 外降级语义。
 const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> = new Set([
   "open",
   "running",
@@ -15,7 +16,6 @@ const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> =
   "confirmed",
   "change_requested",
   "stopped_needs_human",
-  "failed",
 ]);
 const OBSERVER_PING_INTERVAL_MS = 25_000;
 
