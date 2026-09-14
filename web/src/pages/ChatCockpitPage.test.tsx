@@ -14,6 +14,7 @@ import {
   type TimelineNode,
   type WorkspaceWsState,
 } from "../state/workspace-ws-store";
+import { observerStateFromSessionState } from "../state/workspace-observer-store";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 
@@ -41,7 +42,10 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitShellInbox: () =>
     cockpitInbox.length > 0
       ? cockpitInbox
-      : selectCockpitInbox(useWorkspaceStore.getState()),
+      : selectCockpitInbox(useWorkspaceStore.getState()).map((item) => ({
+          ...item,
+          id: `${useWorkspaceStore.getState().sessionId}:${item.id}`,
+        })),
   useCockpitInboxPulse: () => false,
   useCockpitSessionWatch: () => watchSession,
   useCockpitObservedRecords: () => cockpitObservedRecords,
@@ -103,10 +107,38 @@ describe("ChatCockpitPage", () => {
       await screen.findByText("workspace_session_takeover_not_allowed · not stopped"),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "接管" })).toBeDisabled();
+    expect(takeoverWorkspaceSession).toHaveBeenCalledWith("s1");
+  });
+
+  it("resets takeover confirmation and shows non-409 errors", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockRejectedValue(new Error("服务暂不可用"));
+    cockpitInbox.push(stoppedItem("session_001"));
+
+    renderCockpit();
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(await screen.findByText("接管失败：服务暂不可用")).toBeVisible();
+    expect(screen.getByRole("button", { name: "接管" })).toBeVisible();
+  });
+
+  it("resets takeover confirmation after success", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+
+    renderCockpit();
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(await screen.findByRole("button", { name: "接管" })).toBeVisible();
   });
 
   it("offers retry and terminate but never takeover for hard error", () => {
-    cockpitInbox.push(hardErrorItem("s2"));
+    cockpitInbox.push(hardErrorItem("session_001"));
 
     renderCockpit();
 
@@ -120,7 +152,7 @@ describe("ChatCockpitPage", () => {
     mockWorkspaceWs({ sendAdvance });
     cockpitInbox.push({
       ...hardErrorItem("session_001"),
-      id: "hard_error:advance:command_001",
+      id: "session_001:hard_error:advance:command_001",
       source: "advance",
     });
 
@@ -137,18 +169,31 @@ describe("ChatCockpitPage", () => {
     cockpitInbox.push(stoppedItem("session_001"));
     cockpitObservedRecords.push({
       sessionId: "child_001",
-      state: {
-        ...useWorkspaceStore.getState(),
-        chatEntries: [
-          {
-            id: "child-entry",
-            type: "provider_stream",
-            role: "author",
-            content: "子会话对话",
-            timestamp: "2026-09-14T00:00:00Z",
-          },
-        ],
-      },
+      state: observerStateFromSessionState({
+        type: "session_state",
+        session_id: "child_001",
+        workspace_type: "work_item",
+        stage: "running",
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        messages: [{ id: "message_001", role: "author", content: "子会话对话", created_at: "2026-09-14T00:00:00Z" }],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: null },
+        timeline_nodes: [],
+        active_node_id: null,
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: null,
+        human_presentation_revisions: [],
+        session_status: "running",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [], repairs_used: 0, manual_repairs_used: 0,
+          transitions_used: 0, initial_review_count: 0, verification_review_count: 0,
+        },
+      }),
     });
 
     renderCockpit();
@@ -235,6 +280,27 @@ describe("ChatCockpitPage", () => {
     );
 
     expect(feedback).toHaveBeenCalledWith("修复缺口", "cmd_1");
+  });
+
+  it("edits typed inbox feedback before dispatching it", async () => {
+    const user = userEvent.setup();
+    const feedback = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({ flowKind: "single_candidate" });
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
+    store.rebuildChatEntries();
+
+    renderCockpit("session_001", false);
+    await user.click(screen.getByRole("button", { name: "编辑反馈" }));
+    const feedbackInput = screen.getByLabelText("门禁反馈");
+    await user.clear(feedbackInput);
+    await user.type(feedbackInput, "请补齐边界");
+    await user.click(
+      within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "提交反馈" }),
+    );
+
+    expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
   });
 
   it("uses the shared shell inbox instead of a second session observer", () => {
@@ -364,7 +430,7 @@ describe("ChatCockpitPage", () => {
 });
 function stoppedItem(sessionId: string): CockpitInboxItem {
   return {
-    id: `stopped:${sessionId}`,
+    id: `${sessionId}:stopped:${sessionId}`,
     kind: "stopped",
     severity: 2,
     title: "会话停在停点",
@@ -379,7 +445,7 @@ function stoppedItem(sessionId: string): CockpitInboxItem {
 
 function hardErrorItem(sessionId: string): CockpitInboxItem {
   return {
-    id: `hard_error:${sessionId}:error`,
+    id: `${sessionId}:hard_error:error`,
     kind: "hard_error",
     severity: 3,
     title: "引擎错误",

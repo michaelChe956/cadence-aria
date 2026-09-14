@@ -104,6 +104,10 @@ export function LegacyChatWorkspacePage({
   const storeSessionId = useWorkspaceStore((state) => state.sessionId);
   const workspaceType = useWorkspaceStore((state) => state.workspaceType);
   const stage = useWorkspaceStore((state) => state.stage);
+  const flowKind = useWorkspaceStore((state) => state.flowKind);
+  const humanGateCommandId = useWorkspaceStore(
+    (state) => state.humanGateTurn?.command_id ?? null,
+  );
   const providers = useWorkspaceStore((state) => state.providers);
   const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
   const permissionModes = useWorkspaceStore((state) => state.permissionModes);
@@ -196,12 +200,12 @@ export function LegacyChatWorkspacePage({
   const gateActions = useMemo(
     () =>
       createCockpitActionFacade({
-        flowKind: useWorkspaceStore.getState().flowKind,
-        commandId: useWorkspaceStore.getState().humanGateTurn?.command_id ?? null,
+        flowKind,
+        commandId: humanGateCommandId,
         sendHumanConfirm,
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
       }),
-    [sendHumanConfirm, workspaceWs.sendHumanGateFeedback],
+    [flowKind, humanGateCommandId, sendHumanConfirm, workspaceWs.sendHumanGateFeedback],
   );
   const selectedEntryId = useMemo(
     () =>

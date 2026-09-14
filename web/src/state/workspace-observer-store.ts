@@ -278,17 +278,31 @@ function createWorkspaceObserverSocket(
   return { close };
 }
 
-function observerStateFromSessionState(message: WorkspaceSessionStateMessage): WorkspaceWsState {
+export function observerStateFromSessionState(
+  message: WorkspaceSessionStateMessage,
+): WorkspaceWsState {
+  const timelineNodes = message.timeline_nodes ?? [];
   return {
     sessionId: message.session_id,
+    workspaceType: message.workspace_type,
     stage: message.stage,
     sessionStatus: message.session_status,
+    flowKind: message.flow_kind,
     humanGateSnapshot: message.human_gate_snapshot ?? null,
     humanGateTurn: null,
     humanGateClosure: null,
-    flowKind: message.flow_kind,
     pendingReviewerSummary: null,
-    chatEntries: [],
+    chatEntries: message.messages.map((message, index) => ({
+      id: `message:${index}`,
+      type: "provider_stream",
+      role: message.role === "user" ? "user" : "system",
+      content: message.content,
+      timestamp: message.created_at,
+    })),
+    timelineNodes,
+    activeNodeId: message.active_node_id ?? null,
+    selectedNodeId: message.active_node_id ?? timelineNodes.at(-1)?.node_id ?? null,
+    protocolDiagnostics: [],
     protocolError: null,
     error: null,
     advanceCommands: {},

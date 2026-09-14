@@ -3,6 +3,7 @@ import type { WorkspaceSessionSummary } from "../api/types";
 import type { WorkspaceWsState } from "./workspace-ws-store";
 import {
   createObserverController,
+  observerStateFromSessionState,
   selectObservedInbox,
   selectWatchedSessionIds,
   watchWindowCopy,
@@ -196,6 +197,44 @@ describe("workspace observer store", () => {
 
     expect(sockets).toHaveLength(2);
   });
+  it("builds a complete observer snapshot with child conversation content", () => {
+    const state = observerStateFromSessionState({
+      type: "session_state",
+      session_id: "child_001",
+      workspace_type: "work_item",
+      stage: "running",
+      superpowers_enabled: false,
+      openspec_enabled: false,
+      messages: [{ id: "message_001", role: "author", content: "子会话对话", created_at: "2026-09-14T00:00:00Z" }],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+      human_presentation_revisions: [],
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+    });
+
+    expect(state.timelineNodes).toEqual([]);
+    expect(state.protocolDiagnostics).toEqual([]);
+    expect(state.chatEntries).toEqual([
+      expect.objectContaining({ content: "子会话对话" }),
+    ]);
+  });
+
   it("keys merged inbox entries by session and sorts severity before session id", () => {
     expect(
       selectObservedInbox([

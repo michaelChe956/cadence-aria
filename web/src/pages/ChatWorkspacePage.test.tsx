@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderHealthResponse } from "../api/types";
@@ -562,6 +562,34 @@ describe("ChatWorkspacePage shell and content loading", () => {
       await screen.findByText("mcp__codegraph__codegraph_explore"),
     ).toBeInTheDocument();
   });
+  it("uses the stable typed gate command after a session snapshot arrives", async () => {
+    const feedback = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    act(() => {
+      useWorkspaceStore.getState().setSessionState({
+        session_id: "workspace_session_0001",
+        workspace_type: "work_item_plan",
+        stage: "running",
+        session_status: "waiting_for_human",
+        flow_kind: "single_candidate",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [], repairs_used: 0, manual_repairs_used: 0,
+          transitions_used: 0, initial_review_count: 0, verification_review_count: 0,
+        },
+        messages: [], checkpoints: [], artifact: null,
+        providers: { author: "claude_code", reviewer: null },
+      });
+      useWorkspaceStore.getState().applyHumanGateTurnOpen("turn_001", "stable_command_001", 1);
+      useWorkspaceStore.getState().rebuildChatEntries();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "提交反馈" }));
+    expect(feedback).toHaveBeenCalledWith("修复缺口", "stable_command_001");
+  });
+
 });
 
 describe("ChatWorkspacePage dual track switch", () => {

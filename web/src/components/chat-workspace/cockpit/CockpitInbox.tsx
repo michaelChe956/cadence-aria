@@ -46,10 +46,7 @@ export function CockpitInbox({
             actions={actions}
             onTakeover={onTakeover}
             onRetry={onRetry}
-            actionable={
-              sessionIdForItem(item.id) === "" ||
-              actionableSessionId === sessionIdForItem(item.id)
-            }
+            actionable={actionableSessionId === sessionIdForItem(item.id)}
           />
         ))
       )}
@@ -121,34 +118,45 @@ function CockpitInboxRow({
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
-              disabled={takeoverDisabled}
+              disabled={takeoverDisabled || sessionId === null}
+              title={sessionId === null ? "无法识别会话，不能接管" : undefined}
               onClick={() => {
+                if (sessionId === null) {
+                  return;
+                }
                 if (!pendingTakeover) {
                   setPendingTakeover(true);
                   return;
                 }
-                void onTakeover(sessionId).catch((error: unknown) => {
-                  if (
-                    typeof error === "object" &&
-                    error !== null &&
-                    "code" in error &&
-                    error.code === "workspace_session_takeover_not_allowed"
-                  ) {
-                    const details = "details" in error ? error.details : null;
-                    const reason =
-                      typeof details === "object" &&
-                      details !== null &&
-                      "reason" in details &&
-                      typeof details.reason === "string"
-                        ? details.reason
-                        : "";
-                    setTakeoverError(
-                      `workspace_session_takeover_not_allowed${reason ? ` · ${reason}` : ""}`,
-                    );
-                    setTakeoverDisabled(true);
-                  }
-                  setPendingTakeover(false);
-                });
+                void onTakeover(sessionId)
+                  .then(() => {
+                    setPendingTakeover(false);
+                  })
+                  .catch((error: unknown) => {
+                    if (
+                      typeof error === "object" &&
+                      error !== null &&
+                      "code" in error &&
+                      error.code === "workspace_session_takeover_not_allowed"
+                    ) {
+                      const details = "details" in error ? error.details : null;
+                      const reason =
+                        typeof details === "object" &&
+                        details !== null &&
+                        "reason" in details &&
+                        typeof details.reason === "string"
+                          ? details.reason
+                          : "";
+                      setTakeoverError(
+                        `workspace_session_takeover_not_allowed${reason ? ` · ${reason}` : ""}`,
+                      );
+                      setTakeoverDisabled(true);
+                    } else {
+                      const message = error instanceof Error ? error.message : "未知错误";
+                      setTakeoverError(`接管失败：${message}`);
+                    }
+                    setPendingTakeover(false);
+                  });
               }}
               className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             >
@@ -199,8 +207,9 @@ function GateInboxActions({
   actions: CockpitActionFacade;
 }) {
   const [pendingTerminate, setPendingTerminate] = useState(false);
+  const [feedbackEditorOpen, setFeedbackEditorOpen] = useState(false);
+  const [feedback, setFeedback] = useState("修复缺口");
   const typed = item.gate?.flow_kind === "single_candidate";
-  const feedback = "修复缺口";
 
   useEffect(() => {
     if (!pendingTerminate) {
@@ -213,14 +222,33 @@ function GateInboxActions({
   return (
     <div className="mt-2 flex flex-wrap gap-2">
       {typed ? (
-        <button
-          type="button"
-          onClick={() => actions.feedback(feedback)}
-          className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-        >
-          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-          提交反馈
-        </button>
+        feedbackEditorOpen ? (
+          <>
+            <textarea
+              aria-label="门禁反馈"
+              value={feedback}
+              onChange={(event) => setFeedback(event.target.value)}
+              className="min-h-11 w-full rounded-md border border-[var(--aria-line-strong)] bg-white px-3 py-2 text-xs text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            />
+            <button
+              type="button"
+              onClick={() => actions.feedback(feedback)}
+              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            >
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+              提交反馈
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setFeedbackEditorOpen(true)}
+            className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+            编辑反馈
+          </button>
+        )
       ) : (
         <button
           type="button"
@@ -263,13 +291,13 @@ function GateInboxActions({
   );
 }
 
-function sessionIdForItem(itemId: string): string {
+function sessionIdForItem(itemId: string): string | null {
   const separator = itemId.indexOf(":");
-  if (separator === -1) {
-    return "";
+  if (separator <= 0) {
+    return null;
   }
-  const prefix = itemId.slice(0, separator);
-  return prefix === "gate" || prefix === "hard_error" || prefix === "stopped"
-    ? ""
-    : prefix;
+  const sessionId = itemId.slice(0, separator);
+  return sessionId === "gate" || sessionId === "hard_error" || sessionId === "stopped"
+    ? null
+    : sessionId;
 }
