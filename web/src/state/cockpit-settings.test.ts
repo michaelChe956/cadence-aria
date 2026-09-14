@@ -44,4 +44,21 @@ describe("cockpit settings storage", () => {
     });
   });
 
+  it("normalizes persisted duration values to values selectable by the settings dialog", () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        observerRefreshIntervalMs: 12_000,
+        gateOpenEscalationMs: 120_000,
+        escalationRepeatMs: 240_000,
+      }),
+    );
+
+    expect(readCockpitSettings(window.localStorage)).toMatchObject({
+      observerRefreshIntervalMs: 15_000,
+      gateOpenEscalationMs: 60_000,
+      escalationRepeatMs: 300_000,
+    });
+  });
+
 });

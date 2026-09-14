@@ -127,7 +127,7 @@ export function CockpitSettingsDialog({
                 <button
                   type="button"
                   onClick={requestNotificationPermission}
-                  className="cursor-pointer rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 font-semibold text-[var(--aria-ink)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+                  className="min-h-11 cursor-pointer rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 font-semibold text-[var(--aria-ink)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
                 >
                   请求通知权限
                 </button>
@@ -229,7 +229,7 @@ export function CockpitSettingsDialog({
           <button
             type="button"
             onClick={onClose}
-            className="cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-sm transition-colors duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+            className="min-h-11 cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-sm transition-colors duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
           >
             完成
           </button>

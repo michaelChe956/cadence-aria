@@ -139,6 +139,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   }, [getLifecycle, getProductIssues, getProjects]);
 
   useEffect(() => {
+    controllerRef.current?.updateRefreshIntervalMs(refreshIntervalMs);
+  }, [refreshIntervalMs]);
+
+  useEffect(() => {
     void controllerRef.current?.replaceWatchedSessionIds(observedSessionIds);
   }, [observedSessionIds]);
 

@@ -136,6 +136,42 @@ describe("workspace observer store", () => {
     ]);
   });
 
+  it("reschedules the next observed refresh when the interval changes", async () => {
+    type ScheduledRefresh = {
+      callback: () => void;
+      delayMs: number;
+      cancelled: boolean;
+    };
+    const scheduled: ScheduledRefresh[] = [];
+    const controller = createObserverController(
+      () => ({ close: vi.fn() }),
+      undefined,
+      {
+        refreshIntervalMs: 15_000,
+        reconnectDelayMs: 1_000,
+        schedule: (callback, delayMs) => {
+          const refresh = { callback, delayMs, cancelled: false };
+          scheduled.push(refresh);
+          return refresh as never;
+        },
+        cancel: (refresh) => {
+          (refresh as unknown as ScheduledRefresh).cancelled = true;
+        },
+      },
+    );
+
+    controller.updateRefreshIntervalMs(5_000);
+
+    expect(scheduled).toEqual([
+      expect.objectContaining({ delayMs: 15_000, cancelled: true }),
+      expect.objectContaining({ delayMs: 5_000, cancelled: false }),
+    ]);
+    scheduled[1]?.callback();
+    expect(scheduled[2]).toEqual(
+      expect.objectContaining({ delayMs: 5_000, cancelled: false }),
+    );
+  });
+
   it("reopens after a socket closes instead of retaining a dead K slot", async () => {
     type SocketCallbacks = {
       onSnapshot: (state: WorkspaceWsState) => void;

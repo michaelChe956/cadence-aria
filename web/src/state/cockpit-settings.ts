@@ -28,6 +28,10 @@ export const DEFAULT_COCKPIT_SETTINGS: Readonly<CockpitSettings> = {
   stopPoints: ["human_gate", "stopped", "hard_error"],
 };
 
+const OBSERVER_REFRESH_INTERVAL_OPTIONS = [5_000, 15_000, 30_000, 60_000] as const;
+const GATE_OPEN_ESCALATION_OPTIONS = [60_000, 300_000, 600_000, 900_000] as const;
+const ESCALATION_REPEAT_OPTIONS = [60_000, 300_000, 600_000] as const;
+
 
 export function readCockpitSettings(storage: Storage = window.localStorage): CockpitSettings {
   try {
@@ -83,25 +87,21 @@ function normalizeCockpitSettings(value: unknown): CockpitSettings {
       candidate.watchLimit <= 32
         ? candidate.watchLimit
         : defaults.watchLimit,
-    observerRefreshIntervalMs:
-      typeof candidate.observerRefreshIntervalMs === "number" &&
-      Number.isInteger(candidate.observerRefreshIntervalMs) &&
-      candidate.observerRefreshIntervalMs >= 5_000 &&
-      candidate.observerRefreshIntervalMs <= 60_000
-        ? candidate.observerRefreshIntervalMs
-        : defaults.observerRefreshIntervalMs,
-    gateOpenEscalationMs:
-      typeof candidate.gateOpenEscalationMs === "number" &&
-      Number.isInteger(candidate.gateOpenEscalationMs) &&
-      candidate.gateOpenEscalationMs > 0
-        ? candidate.gateOpenEscalationMs
-        : defaults.gateOpenEscalationMs,
-    escalationRepeatMs:
-      typeof candidate.escalationRepeatMs === "number" &&
-      Number.isInteger(candidate.escalationRepeatMs) &&
-      candidate.escalationRepeatMs > 0
-        ? candidate.escalationRepeatMs
-        : defaults.escalationRepeatMs,
+    observerRefreshIntervalMs: selectDurationOption(
+      candidate.observerRefreshIntervalMs,
+      OBSERVER_REFRESH_INTERVAL_OPTIONS,
+      defaults.observerRefreshIntervalMs,
+    ),
+    gateOpenEscalationMs: selectDurationOption(
+      candidate.gateOpenEscalationMs,
+      GATE_OPEN_ESCALATION_OPTIONS,
+      defaults.gateOpenEscalationMs,
+    ),
+    escalationRepeatMs: selectDurationOption(
+      candidate.escalationRepeatMs,
+      ESCALATION_REPEAT_OPTIONS,
+      defaults.escalationRepeatMs,
+    ),
     escalationBudgetThreshold:
       typeof candidate.escalationBudgetThreshold === "number" &&
       Number.isInteger(candidate.escalationBudgetThreshold) &&
@@ -125,4 +125,18 @@ function normalizeCockpitSettings(value: unknown): CockpitSettings {
         )
       : defaults.stopPoints,
   };
+}
+
+function selectDurationOption(
+  value: unknown,
+  options: readonly number[],
+  fallback: number,
+): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    return fallback;
+  }
+
+  return options.reduce((closest, option) =>
+    Math.abs(option - value) < Math.abs(closest - value) ? option : closest,
+  );
 }

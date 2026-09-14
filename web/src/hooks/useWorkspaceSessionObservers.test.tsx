@@ -62,16 +62,20 @@ function observerOptions(overrides: Partial<WorkspaceSessionObserverOptions> = {
   } satisfies WorkspaceSessionObserverOptions;
 }
 
-function renderObserverHook(options: WorkspaceSessionObserverOptions) {
+function renderObserverHook(initialOptions: WorkspaceSessionObserverOptions) {
   let result: WorkspaceSessionObserverResult | undefined;
 
-  function Harness() {
+  function Harness({ options }: { options: WorkspaceSessionObserverOptions }) {
     result = useWorkspaceSessionObservers(options);
     return null;
   }
 
+  const view = render(<Harness options={initialOptions} />);
   return {
-    ...render(<Harness />),
+    ...view,
+    rerender(options: WorkspaceSessionObserverOptions) {
+      view.rerender(<Harness options={options} />);
+    },
     get result() {
       if (!result) throw new Error("hook result unavailable");
       return result;
@@ -82,17 +86,26 @@ function renderObserverHook(options: WorkspaceSessionObserverOptions) {
 describe("useWorkspaceSessionObservers", () => {
   it("enumerates REST sessions and replaces the watch window immediately when K changes", async () => {
     const replaceWatchedSessionIds = vi.fn();
-    const view = renderObserverHook(observerOptions({
+    const updateRefreshIntervalMs = vi.fn();
+    const options = observerOptions({
       createController: () => ({
         replaceWatchedSessionIds,
+        updateRefreshIntervalMs,
         refresh: vi.fn(),
         records: () => [],
         dispose: vi.fn(),
       }),
-    }));
+    });
+    const view = renderObserverHook(options);
 
     await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["s1", "s2"]));
     expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["s2"]);
+
+    view.rerender({ ...options, watchLimit: 3, refreshIntervalMs: 5_000 });
+
+    await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["s1", "s2", "s3"]));
+    expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["s2", "s3"]);
+    expect(updateRefreshIntervalMs).toHaveBeenLastCalledWith(5_000);
 
     await act(async () => {
       view.unmount();
@@ -107,6 +120,7 @@ describe("useWorkspaceSessionObservers", () => {
         replaceWatchedSessionIds,
         refresh: vi.fn(),
         records: () => [],
+        updateRefreshIntervalMs: vi.fn(),
         dispose: vi.fn(),
       }),
     }));
@@ -139,6 +153,7 @@ describe("useWorkspaceSessionObservers", () => {
       }),
       createController: () => ({
         replaceWatchedSessionIds,
+        updateRefreshIntervalMs: vi.fn(),
         refresh: vi.fn(),
         records: () => [],
         dispose: vi.fn(),
@@ -157,12 +172,12 @@ describe("useWorkspaceSessionObservers", () => {
       watchLimit: 0,
       createController: () => ({
         replaceWatchedSessionIds,
+        updateRefreshIntervalMs: vi.fn(),
         refresh: vi.fn(),
         records: () => [],
         dispose: vi.fn(),
       }),
     }));
-
     await act(async () => {
       view.result.watchSession("child_001");
     });

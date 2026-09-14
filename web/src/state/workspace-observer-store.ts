@@ -54,6 +54,7 @@ export interface WorkspaceObserverControllerOptions {
 
 export interface WorkspaceObserverController {
   replaceWatchedSessionIds(sessionIds: readonly string[]): Promise<void>;
+  updateRefreshIntervalMs(refreshIntervalMs: number): void;
   refresh(): Promise<void>;
   records(): readonly WorkspaceObserverRecord[];
   dispose(): void;
@@ -115,6 +116,7 @@ export function createObserverController(
   const cancel = options.cancel ?? clearTimeout;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  let refreshIntervalMs = options.refreshIntervalMs;
 
   const notifyRecordsChanged = () => {
     onRecordsChange(Array.from(snapshots, ([sessionId, state]) => ({ sessionId, state })));
@@ -162,14 +164,14 @@ export function createObserverController(
     reconnectTimers.set(sessionId, timer);
   };
   const scheduleRefresh = () => {
-    if (disposed || options.refreshIntervalMs <= 0) {
+    if (disposed || refreshIntervalMs <= 0) {
       return;
     }
     refreshTimer = schedule(() => {
       refreshTimer = null;
       void refresh();
       scheduleRefresh();
-    }, options.refreshIntervalMs);
+    }, refreshIntervalMs);
   };
   const refresh = async () => {
     for (const sessionId of watchedSessionIds) {
@@ -195,6 +197,18 @@ export function createObserverController(
         ensureSocket(sessionId);
       }
       notifyRecordsChanged();
+    },
+
+    updateRefreshIntervalMs(nextRefreshIntervalMs) {
+      if (refreshIntervalMs === nextRefreshIntervalMs) {
+        return;
+      }
+      refreshIntervalMs = nextRefreshIntervalMs;
+      if (refreshTimer !== null) {
+        cancel(refreshTimer);
+        refreshTimer = null;
+      }
+      scheduleRefresh();
     },
 
     refresh,
