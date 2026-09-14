@@ -1,22 +1,13 @@
 // web/src/components/coding-workspace/dashboard/CodingTopologyGraph.tsx
 import type { KeyboardEvent } from "react";
-import type { CodingTopology, CodingTopologyNode, CodingUnitState } from "../../../state/coding-dashboard-projection";
-import { topologyTokenName } from "../../../state/workspace-cockpit-projection";
+import type { CodingTopology, CodingTopologyNode } from "../../../state/coding-dashboard-projection";
+import { CODING_UNIT_STATE_LABELS, topologyTokenName } from "../../../state/coding-dashboard-projection";
 
 const NODE_WIDTH = 176;
 const NODE_HEIGHT = 44; // R2：节点可点击区域 ≥ 44px
 const GAP_X = 64;
 const GAP_Y = 12;
 const PADDING = 8;
-
-const UNIT_STATE_LABELS: Record<CodingUnitState, string> = {
-  running: "执行中",
-  pending: "待开始",
-  blocked: "被阻塞",
-  done: "已完成",
-  failed: "失败",
-  awaiting_triage: "等待分诊",
-};
 
 // 分层 = 最长路径深度（依赖无环；有环时按 0 层稳定降级，不抛错）。
 function nodeDepths(topology: CodingTopology): Map<string, number> {
@@ -156,7 +147,7 @@ export function CodingTopologyGraph({
                 .join(" ")}
               role="button"
               tabIndex={0}
-              aria-label={`${node.title} · ${UNIT_STATE_LABELS[node.state]}`}
+              aria-label={`${node.title} · ${CODING_UNIT_STATE_LABELS[node.state]}`}
               onClick={() => onSelectWorkItem(node.workItemId)}
               onKeyDown={(event) => handleKeyDown(event, node.workItemId)}
             >
@@ -177,7 +168,7 @@ export function CodingTopologyGraph({
                 className="aria-mono"
                 fill="var(--aria-ink-muted)"
               >
-                {`${node.workItemId} · ${UNIT_STATE_LABELS[node.state]}`}
+                {`${node.workItemId} · ${CODING_UNIT_STATE_LABELS[node.state]}`}
               </text>
             </g>
           );

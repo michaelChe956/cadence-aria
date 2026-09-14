@@ -4,6 +4,7 @@ import {
   CODING_BUDGET_CODING_TOTAL_MS,
   CODING_BUDGET_NEAR_EXHAUSTION_MS,
   CODING_BUDGET_WORK_ITEM_TOTAL_MS,
+  CODING_UNIT_STATE_LABELS,
   codingUnitState,
   selectCodingBudgetGates,
   selectCodingDependencyChain,
@@ -53,6 +54,17 @@ describe("codingUnitState", () => {
     for (const status of ["pending", "stale", "superseded", "skipped"] as const) {
       expect(codingUnitState(status)).toBe("pending");
     }
+  });
+
+  it("labels each of the six topology states", () => {
+    expect(Object.keys(CODING_UNIT_STATE_LABELS)).toEqual([
+      "running",
+      "pending",
+      "blocked",
+      "done",
+      "failed",
+      "awaiting_triage",
+    ]);
   });
 });
 

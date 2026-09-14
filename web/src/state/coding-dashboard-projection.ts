@@ -7,6 +7,9 @@ import type { CockpitFlowState } from "./workspace-cockpit-projection";
 
 export type CodingUnitState = CockpitFlowState;
 
+// 仪表盘组件统一从本模块取状态词汇（T2/T3），避免组件横向依赖 cockpit 投影。
+export { topologyTokenName } from "./workspace-cockpit-projection";
+
 // 12 态 → 六态（REQ-UI37-14：六态复用 1a 拓扑口径，无新色相）。
 // waiting_for_human 是编码侧人工卡壳（gate/permission/choice），投影为 awaiting_triage
 // 脉冲态，与对话侧「needs_human → awaiting_triage」同构；blocked_by_plan_defect /
@@ -31,6 +34,16 @@ export function codingUnitState(status: CodingExecutionUnitStatus): CodingUnitSt
       return "pending"; // pending / stale / superseded / skipped
   }
 }
+
+// 六态中文标签：拓扑图与依赖链视图共用的单一定义点（REQ-UI37-15）。
+export const CODING_UNIT_STATE_LABELS: Readonly<Record<CodingUnitState, string>> = {
+  running: "执行中",
+  pending: "待开始",
+  blocked: "被阻塞",
+  done: "已完成",
+  failed: "失败",
+  awaiting_triage: "等待分诊",
+};
 
 export type CodingTopologyEdgeState = "satisfied" | "blocking";
 
