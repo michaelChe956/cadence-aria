@@ -477,7 +477,14 @@ describe("chat workspace p1 entries", () => {
     expect(actions.feedback).toHaveBeenCalledWith("请补齐边界");
   });
 
-  it("keeps a snapshot-shaped typed gate out of the legacy revision path", () => {
+  it("keeps a typed snapshot gate out of the legacy revision path while allowing fresh-command feedback", async () => {
+    const actions = {
+      confirm: vi.fn(),
+      requestChange: vi.fn(),
+      feedback: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const user = userEvent.setup();
     const entry = makeEntry({
       type: "gate_prompt",
       role: "system",
@@ -488,11 +495,20 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: vi.fn(), requestChange: vi.fn(), feedback: vi.fn(), terminate: vi.fn() }} />);
+    render(<GatePromptEntry entry={entry} actions={actions} />);
 
-    expect(screen.getByText("等待门禁命令同步后再提交反馈")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "提交反馈" })).toBeNull();
+    // 无活 turn（刷新/断连后仅剩快照门）不再阻断输入，改为次要提示 + 可输入可提交。
+    expect(screen.getByText("未同步门命令，将以新命令提交")).toBeVisible();
+    const submit = screen.getByRole("button", { name: "提交反馈" });
+    expect(submit).toBeDisabled();
+    // 快照门仍不得走 legacy 返修路径。
     expect(screen.queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
+
+    await user.type(screen.getByLabelText("反馈内容"), "请补齐边界");
+    await user.click(submit);
+
+    expect(actions.feedback).toHaveBeenCalledWith("请补齐边界");
+    expect(actions.requestChange).not.toHaveBeenCalled();
   });
 
   it("sends legacy request change through the supplied facade", async () => {

@@ -1,3 +1,4 @@
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
 import type { TakeoverResponse } from "../api/types";
 import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
@@ -18,8 +19,8 @@ import { observerStateFromSessionState } from "../state/workspace-observer-store
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
-
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -320,7 +321,10 @@ describe("ChatCockpitPage", () => {
     expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
   });
 
-  it("keeps a typed snapshot inbox gate waiting until its command synchronizes", () => {
+  it("submits typed snapshot inbox feedback with a freshly generated command id", async () => {
+    const user = userEvent.setup();
+    const feedback = vi.fn((_feedback: string, _commandId?: string) => true);
+    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
     useWorkspaceStore.setState({
       flowKind: "single_candidate",
       humanGateSnapshot: {
@@ -333,13 +337,23 @@ describe("ChatCockpitPage", () => {
       },
     });
 
-    renderCockpit();
+    renderCockpit("session_001", false);
 
     const inbox = screen.getByTestId("cockpit-inbox");
-    expect(within(inbox).getByText("等待门禁命令同步后再提交反馈")).toBeVisible();
-    expect(within(inbox).queryByRole("button", { name: "编辑反馈" })).toBeNull();
-    expect(within(inbox).queryByRole("button", { name: "提交反馈" })).toBeNull();
+    // 刷新/断连后仅剩快照门（无活 turn）：不阻断，给次要提示并允许提交。
+    expect(within(inbox).getByText("未同步门命令，将以新命令提交")).toBeVisible();
     expect(within(inbox).queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
+    await user.click(within(inbox).getByRole("button", { name: "编辑反馈" }));
+    const submit = within(inbox).getByRole("button", { name: "提交反馈" });
+    await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
+    await user.click(submit);
+
+    expect(feedback).toHaveBeenCalledTimes(1);
+    const [feedbackText, commandId] = feedback.mock.calls[0];
+    expect(feedbackText).toBe("请补齐边界");
+    expect(commandId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
   });
 
   it("uses the shared shell inbox instead of a second session observer", () => {

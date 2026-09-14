@@ -1,3 +1,4 @@
+import { newCommandId } from "../hooks/useWorkspaceWs";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export type CockpitActionFacade = {
@@ -37,9 +38,16 @@ export function createCockpitActionFacade(input: {
       }
     },
     feedback(feedback) {
-      if (actionFacadeForFlowKind(input.flowKind) === "typed" && input.commandId !== null) {
-        input.sendHumanGateFeedback(feedback, input.commandId);
+      if (actionFacadeForFlowKind(input.flowKind) !== "typed") {
+        return;
       }
+      // 协议依据（cadence/reports/workitem-conversational-gate-advance/evidence/
+      // amendment-wire-notes.md §40-42）：human_gate_feedback 的 command_id 完全由
+      // driver/client 生成；服务端按 (session_id, command_id) durable 查重并开新
+      // turn（Reserved+扣预算）。重连/刷新后 typed 门只剩 session_state 快照、无活
+      // turn 提供既有 command_id 时，凭新生成的 command_id 提交反馈而非拒发。
+      // 有活 turn 时仍复用其 command_id（重试/重连重放同 id，不重新生成）。
+      input.sendHumanGateFeedback(feedback, input.commandId ?? newCommandId());
     },
     terminate() {
       input.sendHumanConfirm("terminate");

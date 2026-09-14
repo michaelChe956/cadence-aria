@@ -125,7 +125,7 @@ export function GatePromptEntry({
           <ResolutionBadge resolution={entry.resolution} />
         ) : actions ? (
           <div className="space-y-2">
-            {actionFacade === "typed" && !typedGateAwaitingCommand ? (
+            {actionFacade === "typed" ? (
               <div className="flex flex-wrap items-center gap-2">
                 <label className="sr-only" htmlFor={`gate-feedback-${entry.id}`}>
                   反馈内容
@@ -149,8 +149,10 @@ export function GatePromptEntry({
               </div>
             ) : null}
             {typedGateAwaitingCommand ? (
+              // 无活 turn（重连/刷新后仅剩快照门）：提示态而非禁用态——
+              // 引擎允许客户端自生成 command_id 开新回合提交反馈。
               <p className="text-xs text-[var(--aria-ink-muted)]">
-                等待门禁命令同步后再提交反馈
+                未同步门命令，将以新命令提交
               </p>
             ) : null}
             <div className="flex flex-wrap justify-end gap-2">

@@ -79,11 +79,51 @@ describe("cockpit gate action facade", () => {
     expect(actionFacadeForFlowKind("legacy")).toBe("legacy");
   });
 
-  it("does not dispatch snapshot feedback before the server provides a command id", () => {
-    const sendHumanGateFeedback = vi.fn(() => true);
+  it("dispatches typed snapshot feedback with a freshly generated command id", () => {
+    const sendHumanGateFeedback = vi.fn(
+      (_feedback: string, _commandId?: string) => true,
+    );
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
       commandId: null,
+      sendHumanConfirm: vi.fn(() => true),
+      sendHumanGateFeedback,
+    });
+
+    actions.feedback("请补齐边界");
+
+    expect(sendHumanGateFeedback).toHaveBeenCalledTimes(1);
+    const [feedback, commandId] = sendHumanGateFeedback.mock.calls[0];
+    expect(feedback).toBe("请补齐边界");
+    // 协议允许客户端自生成 command_id：断言拿到了新的 id，而不是拒发或透传空值。
+    expect(commandId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it("reuses the live turn command id instead of regenerating one", () => {
+    const sendHumanGateFeedback = vi.fn(
+      (_feedback: string, _commandId?: string) => true,
+    );
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: "cmd_1",
+      sendHumanConfirm: vi.fn(() => true),
+      sendHumanGateFeedback,
+    });
+
+    actions.feedback("请补齐边界");
+
+    expect(sendHumanGateFeedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
+  });
+
+  it("keeps legacy flow feedback off the typed websocket helper", () => {
+    const sendHumanGateFeedback = vi.fn(
+      (_feedback: string, _commandId?: string) => true,
+    );
+    const actions = createCockpitActionFacade({
+      flowKind: "legacy",
+      commandId: "cmd_1",
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback,
     });

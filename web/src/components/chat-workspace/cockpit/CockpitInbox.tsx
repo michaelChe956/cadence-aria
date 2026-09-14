@@ -224,39 +224,44 @@ function GateInboxActions({
   return (
     <div className="mt-2 flex flex-wrap gap-2">
       {typed ? (
-        typedGateAwaitingCommand ? (
-          <p className="text-xs text-[var(--aria-ink-muted)]">
-            等待门禁命令同步后再提交反馈
-          </p>
-        ) : feedbackEditorOpen ? (
-          <>
-            <textarea
-              aria-label="门禁反馈"
-              value={feedback}
-              onChange={(event) => setFeedback(event.target.value)}
-              placeholder="请输入反馈内容"
-              className="min-h-11 w-full rounded-md border border-[var(--aria-line-strong)] bg-white px-3 py-2 text-xs text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            />
+        <>
+          {typedGateAwaitingCommand ? (
+            // 无活 turn（重连/刷新后仅剩快照门）：提示态而非禁用态——
+            // 引擎允许客户端自生成 command_id 开新回合提交反馈。
+            <p className="w-full text-xs text-[var(--aria-ink-muted)]">
+              未同步门命令，将以新命令提交
+            </p>
+          ) : null}
+          {feedbackEditorOpen ? (
+            <>
+              <textarea
+                aria-label="门禁反馈"
+                value={feedback}
+                onChange={(event) => setFeedback(event.target.value)}
+                placeholder="请输入反馈内容"
+                className="min-h-11 w-full rounded-md border border-[var(--aria-line-strong)] bg-white px-3 py-2 text-xs text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              />
+              <button
+                type="button"
+                disabled={!feedback.trim()}
+                onClick={() => actions.feedback(feedback)}
+                className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                提交反馈
+              </button>
+            </>
+          ) : (
             <button
               type="button"
-              disabled={!feedback.trim()}
-              onClick={() => actions.feedback(feedback)}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              onClick={() => setFeedbackEditorOpen(true)}
+              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              提交反馈
+              编辑反馈
             </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setFeedbackEditorOpen(true)}
-            className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-          >
-            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-            编辑反馈
-          </button>
-        )
+          )}
+        </>
       ) : (
         <button
           type="button"
