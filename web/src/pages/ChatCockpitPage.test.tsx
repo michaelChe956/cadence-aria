@@ -38,7 +38,6 @@ vi.mock("../api/workspace-content", () => ({
 const cockpitInbox: CockpitInboxItem[] = [];
 const cockpitObservedRecords: Array<{ sessionId: string; state: WorkspaceWsState }> = [];
 const watchSession = vi.fn();
-
 vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitShellInbox: () =>
     cockpitInbox.length > 0
@@ -52,7 +51,6 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitSettings: () => readCockpitSettings(),
   useCockpitObservedRecords: () => cockpitObservedRecords,
 }));
-
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
   return {
     node_id: "node-1",
@@ -97,9 +95,11 @@ describe("ChatCockpitPage", () => {
         details: { reason: "not stopped" },
       }),
     );
+
     cockpitInbox.push(stoppedItem("s1"), hardErrorItem("s2"));
 
     renderCockpit();
+
 
     expect(screen.queryAllByRole("button", { name: "接管" })).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: "接管" }));
@@ -111,6 +111,7 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByRole("button", { name: "接管" })).toBeDisabled();
     expect(takeoverWorkspaceSession).toHaveBeenCalledWith("s1");
   });
+
 
   it("resets takeover confirmation and shows non-409 errors", async () => {
     const user = userEvent.setup();
@@ -234,6 +235,17 @@ describe("ChatCockpitPage", () => {
     expect(within(inbox).getByText("门禁等待")).toBeInTheDocument();
     expect(within(inbox).getByText(/复验发现新问题/)).toBeInTheDocument();
     expect(within(inbox).getByText(/剩余修复轮次 1/)).toBeInTheDocument();
+  });
+
+  it("renders one observed gate through inbox and action card", () => {
+    const store = useWorkspaceStore.getState();
+    store.applyHumanGateTurnOpen("turn_gate", "cmd_gate", 1);
+    store.rebuildChatEntries();
+
+    renderCockpit();
+
+    expect(screen.getByTestId("cockpit-inbox-item-gate")).toBeVisible();
+    expect(screen.getByTestId("gate-prompt-entry")).toBeVisible();
   });
 
   it("exposes no input controls in the execution flow zone", () => {

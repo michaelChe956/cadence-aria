@@ -209,4 +209,19 @@ describe("CockpitShell", () => {
 
     expect(notificationTitles).toEqual(["aria：需要处理"]);
   });
+
+  it("aggregates one opened item across L1 toast, L2 sticky, L3 badge and L4 notification", async () => {
+    renderShell({ inbox: [gateItem("s1")] });
+
+    expect(screen.getByRole("status")).toHaveTextContent("需要处理");
+    expect(screen.getByRole("alert")).toHaveTextContent("待处理 1 项");
+    expect(document.title).toBe("🔴待处理×1 · aria");
+    expect(
+      document.querySelector<HTMLLinkElement>('link[rel~="icon"]')?.getAttribute("href") ?? "",
+    ).toContain("%3E1%3C");
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(notificationTitles).toEqual(["aria：需要处理"]);
+  });
 });
