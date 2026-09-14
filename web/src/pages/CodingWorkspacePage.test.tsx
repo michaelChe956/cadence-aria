@@ -246,7 +246,7 @@ describe("CodingWorkspacePage shell and actions", () => {
 
     expect(await screen.findByText("WorkItemGroup")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
-    expect(screen.getByText("work_item_0001")).toBeInTheDocument();
+    expect(screen.getAllByText("work_item_0001").length).toBeGreaterThan(0);
   });
 
   it("renders automatic retry history and waits for human handling after the third failure", async () => {
@@ -831,9 +831,29 @@ describe("CodingWorkspacePage shell and actions", () => {
       status: "completed",
       stage: "final_confirm",
       units: [
-        { unit_id: "coding_unit_0001", status: "completed" },
-        { unit_id: "coding_unit_0002", status: "completed" },
-      ] as CodingExecutionUnit[],
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
+          order_index: 0,
+          status: "completed",
+          summary: null,
+          latest_handoff_revision_id: null,
+          completion_commit: null,
+        },
+        {
+          unit_id: "coding_unit_0002",
+          logical_work_item_id: "work_item_0002",
+          work_item_revision_id: "work_item_revision_0002",
+          dependency_logical_work_item_ids: [],
+          order_index: 1,
+          status: "completed",
+          summary: null,
+          latest_handoff_revision_id: null,
+          completion_commit: null,
+        },
+      ],
       headCommit: "abcdef1234567890abcdef1234567890abcdef12",
     });
 
@@ -842,5 +862,70 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(screen.getByText("组级 Coding Workspace 已完成")).toBeInTheDocument();
     expect(screen.getByText("2 个 Work Item 已完成并确认")).toBeInTheDocument();
     expect(screen.getByText(/最终提交 abcdef123456/)).toBeInTheDocument();
+  });
+
+  function dashboardUnits(): CodingExecutionUnit[] {
+    const base = {
+      work_item_revision_id: "rev_0001",
+      dependency_logical_work_item_ids: [] as string[],
+      summary: null,
+      latest_handoff_revision_id: null,
+      completion_commit: null,
+    };
+    return [
+      { ...base, unit_id: "u_a", logical_work_item_id: "wi_a", order_index: 0, status: "completed" as const },
+      { ...base, unit_id: "u_b", logical_work_item_id: "wi_b", order_index: 1, status: "running" as const, dependency_logical_work_item_ids: ["wi_a"] },
+      { ...base, unit_id: "u_c", logical_work_item_id: "wi_c", order_index: 2, status: "blocked" as const, dependency_logical_work_item_ids: ["wi_b"] },
+    ];
+  }
+
+  it("renders the coding dashboard with topology, dependency chain, budget gates and log console", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      attemptScope: "work_item_group",
+      workItemGroupId: "work_item_group_0001",
+      currentWorkItemId: "wi_b",
+      units: dashboardUnits(),
+      timelineNodes: [
+        {
+          id: "node_coding_1",
+          attempt_id: "coding_attempt_0001",
+          stage: "coding",
+          title: "Coder",
+          status: "running",
+          agent_role: "author",
+          summary: null,
+          started_at: new Date(Date.now() - 1_800_000).toISOString(),
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      status: "running",
+      stage: "coding",
+    });
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={() => undefined} />);
+
+    expect(screen.getByTestId("coding-dashboard")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-topology-graph")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-dependency-chain")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-budget-gates")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-log-console")).toBeInTheDocument();
+    // 当前 work item 的依赖链默认展开：wi_b 的下游 wi_c 可见
+    expect(screen.getByTestId("coding-chain-downstream")).toHaveTextContent("wi_c");
+    // 预算门自计时可见且口径免责在场
+    expect(screen.getByTestId("coding-budget-disclaimer")).toBeInTheDocument();
+  });
+
+  it("collapses the dashboard without unmounting the page", async () => {
+    const user = userEvent.setup();
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({ ...readyCodingState(), units: dashboardUnits(), attemptScope: "work_item_group", workItemGroupId: "work_item_group_0001" });
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={() => undefined} />);
+
+    await user.click(screen.getByRole("button", { name: "折叠编码仪表盘" }));
+    expect(screen.queryByTestId("coding-topology-graph")).toBeNull();
+    expect(screen.getByTestId("coding-dashboard")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开编码仪表盘" })).toBeInTheDocument();
   });
 });

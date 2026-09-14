@@ -93,7 +93,7 @@ export function CodingTopologyGraph({
   }
 
   return (
-    <div data-testid="coding-topology-graph" className="min-w-0 overflow-auto rounded-lg border border-[var(--aria-line)] bg-white" aria-label="单元拓扑图">
+    <div role="figure" data-testid="coding-topology-graph" className="min-w-0 overflow-auto rounded-lg border border-[var(--aria-line)] bg-white" aria-label="单元拓扑图">
       <svg role="presentation" width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block">
         <defs>
           <marker id="coding-topo-arrow-satisfied" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
