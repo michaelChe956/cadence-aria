@@ -1,15 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
+import { takeoverWorkspaceSession } from "../api/client";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
-import { useCockpitShellInbox } from "../components/cockpit/CockpitShell";
+import {
+  useCockpitObservedRecords,
+  useCockpitSessionWatch,
+  useCockpitShellInbox,
+} from "../components/cockpit/CockpitShell";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { selectCockpitFlow } from "../state/workspace-cockpit-projection";
 import { readCockpitSettings } from "../state/cockpit-settings";
@@ -45,25 +51,67 @@ export function ChatCockpitPage({
     settings: cockpitSettings,
     sendAdvance: workspaceWs.sendAdvance,
   });
+  const [takeoverSessionId, setTakeoverSessionId] = useState<string | null>(null);
   const observedInbox = useCockpitShellInbox();
+  const observedRecords = useCockpitObservedRecords();
+  const watchSession = useCockpitSessionWatch();
   const watchWindow = watchWindowCopy(
     cockpitSettings.watchLimit,
     cockpitSettings.observerRefreshIntervalMs,
   );
-  const flowRows = useMemo(() => selectCockpitFlow(state, now), [state, now]);
-  const contentCacheValues = useMemo(
-    () => workspaceContentCacheValues(state.contentCache),
-    [state.contentCache],
+  const selectedState =
+    takeoverSessionId === null
+      ? state
+      : observedRecords.find((record) => record.sessionId === takeoverSessionId)?.state ?? null;
+  const selectedSessionId = takeoverSessionId ?? sessionId;
+  const flowRows = useMemo(
+    () => (selectedState ? selectCockpitFlow(selectedState, now) : []),
+    [now, selectedState],
   );
-  const { loadContent, cacheContent } = useWorkspaceContentLoaders(sessionId);
+  const contentCacheValues = useMemo(
+    () => workspaceContentCacheValues(selectedState?.contentCache ?? state.contentCache),
+    [selectedState?.contentCache, state.contentCache],
+  );
+  const { loadContent, cacheContent: cacheCurrentContent } = useWorkspaceContentLoaders(selectedSessionId);
+  const cacheContent = takeoverSessionId === null ? cacheCurrentContent : undefined;
   const [drilldownNodeId, setDrilldownNodeId] = useState<string | null>(null);
+  const actions = useMemo(
+    () =>
+      createCockpitActionFacade({
+        flowKind: state.flowKind,
+        commandId:
+          typeof state.humanGateTurn?.command_id === "string"
+            ? state.humanGateTurn.command_id
+            : null,
+        sendHumanConfirm: workspaceWs.sendHumanConfirm,
+        sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+      }),
+    [
+      state.flowKind,
+      state.humanGateTurn?.command_id,
+      workspaceWs.sendHumanConfirm,
+      workspaceWs.sendHumanGateFeedback,
+    ],
+  );
+  const handleTakeover = async (parentSessionId: string) => {
+    const child = await takeoverWorkspaceSession(parentSessionId);
+    watchSession(child.workspace_session_id);
+    setTakeoverSessionId(child.workspace_session_id);
+  };
+  const handleRetry = (item: { id: string; source: string }) => {
+    if (item.source !== "advance") {
+      return;
+    }
+    const commandId = item.id.slice(item.id.lastIndexOf(":") + 1);
+    workspaceWs.sendAdvance(commandId);
+  };
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const drilldownEntryId = useMemo(
     () =>
-      drilldownNodeId
-        ? scrollTargetEntryIdForNode(state.chatEntries, drilldownNodeId)
+      drilldownNodeId && selectedState
+        ? scrollTargetEntryIdForNode(selectedState.chatEntries, drilldownNodeId)
         : null,
-    [drilldownNodeId, state.chatEntries],
+    [drilldownNodeId, selectedState],
   );
 
   useEffect(() => {
@@ -91,8 +139,13 @@ export function ChatCockpitPage({
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 lg:grid-cols-[20rem_minmax(0,1fr)]">
-        <CockpitInbox items={observedInbox} />
-
+        <CockpitInbox
+          items={observedInbox}
+          actions={actions}
+          onTakeover={handleTakeover}
+          onRetry={handleRetry}
+          actionableSessionId={sessionId}
+        />
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
           <section
             data-testid="cockpit-execution-flow"
@@ -104,16 +157,16 @@ export function ChatCockpitPage({
               <button
                 type="button"
                 data-testid="cockpit-protocol-diagnostic-count"
-                onClick={() => setDrilldownNodeId(state.activeNodeId)}
+                onClick={() => setDrilldownNodeId(selectedState?.activeNodeId ?? null)}
                 className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
               >
-                诊断 {state.protocolDiagnostics.length}
+                诊断 {selectedState?.protocolDiagnostics.length ?? 0}
               </button>
             </div>
             <TimelineNodeList
-              nodes={state.timelineNodes}
+              nodes={selectedState?.timelineNodes ?? []}
               // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。
-              activeNodeId={drilldownNodeId ?? state.activeNodeId}
+              activeNodeId={drilldownNodeId ?? selectedState?.activeNodeId ?? null}
               selectedNodeId={drilldownNodeId}
               onSelectNode={setDrilldownNodeId}
               variant="flow"
@@ -132,11 +185,12 @@ export function ChatCockpitPage({
             </h2>
             <ChatEntryList
               ref={chatListRef}
-              entries={state.chatEntries}
-              sessionId={sessionId}
+              entries={selectedState?.chatEntries ?? []}
+              actions={takeoverSessionId === null ? actions : undefined}
               contentCache={contentCacheValues}
               loadContent={loadContent}
               onCacheContent={cacheContent}
+              sessionId={selectedSessionId}
               testId="cockpit-conversation-flow-list"
             />
           </section>

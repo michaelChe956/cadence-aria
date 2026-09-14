@@ -24,6 +24,7 @@ import type {
   RepositoryDeletionReceipt,
   RepositoryInitializationOperationSnapshot,
   RepositoryListResponse,
+  TakeoverResponse,
   WorkItemExecutionPlan,
 } from "./types";
 
@@ -82,6 +83,13 @@ export function workspaceSessionWebSocketUrl(
 ): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${location.host}/api/workspace-sessions/${encodeURIComponent(sessionId)}/ws`;
+}
+
+export function takeoverWorkspaceSession(sessionId: string): Promise<TakeoverResponse> {
+  return requestJson<TakeoverResponse>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/takeover`,
+    { method: "POST" },
+  );
 }
 
 export function createProject(payload: {

@@ -1,3 +1,4 @@
+import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import type { RevisionPath } from "../../api/types";
 import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../../state/chat-entries";
 import { ChatEntryContainer } from "./ChatEntryContainer";
@@ -18,10 +19,7 @@ interface MessageGroupViewProps {
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => void;
+  actions?: CockpitActionFacade;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
@@ -33,7 +31,7 @@ export function MessageGroupView({
   onPermissionResponse,
   onChoiceResponse,
   onSelectRevisionPath,
-  onHumanConfirm,
+  actions,
   sessionId,
   contentCache,
   loadContent,
@@ -97,7 +95,7 @@ export function MessageGroupView({
                   onPermissionResponse={onPermissionResponse}
                   onChoiceResponse={onChoiceResponse}
                   onSelectRevisionPath={onSelectRevisionPath}
-                  onHumanConfirm={onHumanConfirm}
+                  actions={actions}
                 />
               ),
             )}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getIssueLifecycle,
   listProductIssues,
@@ -41,6 +41,7 @@ export interface WorkspaceSessionObserverResult {
   records: readonly WorkspaceObserverRecord[];
   inbox: readonly CockpitInboxItem[];
   watchedSessionIds: readonly string[];
+  watchSession(sessionId: string): void;
 }
 
 export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOptions): WorkspaceSessionObserverResult {
@@ -57,6 +58,7 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [sessions, setSessions] = useState<readonly WorkspaceSessionSummary[]>([]);
   const [observerRecords, setObserverRecords] = useState<readonly WorkspaceObserverRecord[]>([]);
   const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [extraSessionIds, setExtraSessionIds] = useState<readonly string[]>([]);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
   if (controllerRef.current === null) {
@@ -69,8 +71,14 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   }
 
   const watchedSessionIds = useMemo(
-    () => selectWatchedSessionIds(sessions, watchLimit),
-    [sessions, watchLimit],
+    () =>
+      Array.from(
+        new Set([
+          ...selectWatchedSessionIds(sessions, watchLimit),
+          ...extraSessionIds,
+        ]),
+      ),
+    [extraSessionIds, sessions, watchLimit],
   );
   const observedSessionIds = useMemo(
     () => watchedSessionIds.filter((sessionId) => sessionId !== currentSessionId),
@@ -142,5 +150,16 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     [],
   );
 
-  return { records, inbox, watchedSessionIds };
+  const watchSession = useCallback((sessionId: string) => {
+    setExtraSessionIds((previous) =>
+      previous.includes(sessionId) ? previous : [...previous, sessionId],
+    );
+  }, []);
+
+  return {
+    records,
+    inbox,
+    watchedSessionIds,
+    watchSession,
+  };
 }

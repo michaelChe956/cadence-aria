@@ -1,21 +1,33 @@
-import { Check, RotateCcw, X } from "lucide-react";
+import { Check, RotateCcw, Send, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { GATE_TRIGGER_LABELS } from "../../../state/workspace-cockpit-projection";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
+import type {
+  CockpitActionFacade,
+  CockpitRequestChangePayload,
+} from "../../../state/cockpit-action-routing";
 import { trustedReviewComments } from "../../../state/workspace-review-trust";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
-type HumanConfirmPayload = { description: string; source: "human" | "review_findings" };
-type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
-
 export function GatePromptEntry({
   entry,
-  onDecision,
+  actions,
 }: {
   entry: ChatEntry;
-  onDecision?: (decision: HumanConfirmDecision, payload?: HumanConfirmPayload) => void;
+  actions?: CockpitActionFacade;
 }) {
+  const [pendingTerminate, setPendingTerminate] = useState(false);
+  const [feedback, setFeedback] = useState("修复缺口");
+
+  useEffect(() => {
+    if (!pendingTerminate) {
+      return;
+    }
+    const timer = window.setTimeout(() => setPendingTerminate(false), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [pendingTerminate]);
   const summary = summaryFromEntry(entry);
   const verdict = verdictFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
@@ -105,36 +117,66 @@ export function GatePromptEntry({
         ) : null}
         {isResolved ? (
           <ResolutionBadge resolution={entry.resolution} />
-        ) : onDecision ? (
-          <div className="flex flex-wrap justify-end gap-2">
-            {isContextBlockerGate ? null : (
-              <button
-                type="button"
-                onClick={() => onDecision("confirm")}
-                className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
-              >
-                <Check className="h-3.5 w-3.5" />
-                {confirmLabel}
-              </button>
-            )}
-            {requestChangeLabel ? (
-              <button
-                type="button"
-                onClick={() => onDecision("request-change", requestChangePayload(entry))}
-                className="inline-flex h-8 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                {requestChangeLabel}
-              </button>
+        ) : actions ? (
+          <div className="space-y-2">
+            {(entry.metadata as Record<string, unknown> | undefined)?.action_facade === "typed" ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="sr-only" htmlFor={`gate-feedback-${entry.id}`}>
+                  反馈内容
+                </label>
+                <input
+                  id={`gate-feedback-${entry.id}`}
+                  value={feedback}
+                  onChange={(event) => setFeedback(event.target.value)}
+                  className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => actions.feedback(feedback)}
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                >
+                  <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                  提交反馈
+                </button>
+              </div>
             ) : null}
-            <button
-              type="button"
-              onClick={() => onDecision("terminate")}
-              className="inline-flex h-8 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50"
-            >
-              <X className="h-3.5 w-3.5" />
-              终止
-            </button>
+            <div className="flex flex-wrap justify-end gap-2">
+              {isContextBlockerGate ? null : (
+                <button
+                  type="button"
+                  onClick={() => actions.confirm()}
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                >
+                  <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                  {confirmLabel}
+                </button>
+              )}
+              {(entry.metadata as Record<string, unknown> | undefined)?.action_facade !== "typed" && requestChangeLabel ? (
+                <button
+                  type="button"
+                  onClick={() => actions.requestChange(requestChangePayload(entry))}
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  {requestChangeLabel}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  if (pendingTerminate) {
+                    actions.terminate();
+                    setPendingTerminate(false);
+                    return;
+                  }
+                  setPendingTerminate(true);
+                }}
+                className="inline-flex min-h-11 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+                {pendingTerminate ? "确认终止" : "终止"}
+              </button>
+            </div>
           </div>
         ) : null}
       </div>
@@ -232,7 +274,7 @@ type ReviewFinding = {
   required_action?: string;
 };
 
-function requestChangePayload(entry: ChatEntry): HumanConfirmPayload {
+function requestChangePayload(entry: ChatEntry): CockpitRequestChangePayload {
   return { description: requestChangeDescription(entry), source: "review_findings" };
 }
 

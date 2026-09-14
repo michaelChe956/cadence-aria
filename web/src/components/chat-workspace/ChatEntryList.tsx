@@ -1,3 +1,4 @@
+import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { RevisionPath } from "../../api/types";
@@ -15,10 +16,7 @@ interface ChatEntryListProps {
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => void;
+  actions?: CockpitActionFacade;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
@@ -34,7 +32,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       onPermissionResponse,
       onChoiceResponse,
       onSelectRevisionPath,
-      onHumanConfirm,
+      actions,
       sessionId,
       contentCache,
       loadContent,
@@ -164,7 +162,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                       onPermissionResponse={onPermissionResponse}
                       onChoiceResponse={onChoiceResponse}
                       onSelectRevisionPath={onSelectRevisionPath}
-                      onHumanConfirm={onHumanConfirm}
+                      actions={actions}
                       sessionId={sessionId}
                       contentCache={contentCache}
                       loadContent={loadContent}
@@ -188,7 +186,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                     onPermissionResponse={onPermissionResponse}
                     onChoiceResponse={onChoiceResponse}
                     onSelectRevisionPath={onSelectRevisionPath}
-                    onHumanConfirm={onHumanConfirm}
+                    actions={actions}
                   />
                 </div>
               );

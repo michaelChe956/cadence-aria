@@ -49,6 +49,7 @@ function ShellWithInbox({ inbox }: { inbox: readonly CockpitInboxItem[] }) {
     records: [],
     inbox,
     watchedSessionIds: [],
+    watchSession: vi.fn(),
   });
 
   return (

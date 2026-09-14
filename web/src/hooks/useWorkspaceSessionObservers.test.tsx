@@ -150,4 +150,24 @@ describe("useWorkspaceSessionObservers", () => {
     expect(view.result.inbox).toEqual([]);
     expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["watched"]);
   });
+
+  it("adds a manually watched child session to the observer controller", async () => {
+    const replaceWatchedSessionIds = vi.fn();
+    const view = renderObserverHook(observerOptions({
+      watchLimit: 0,
+      createController: () => ({
+        replaceWatchedSessionIds,
+        refresh: vi.fn(),
+        records: () => [],
+        dispose: vi.fn(),
+      }),
+    }));
+
+    await act(async () => {
+      view.result.watchSession("child_001");
+    });
+
+    await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["child_001"]));
+    expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["child_001"]);
+  });
 });

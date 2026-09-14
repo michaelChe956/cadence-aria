@@ -1,5 +1,47 @@
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
+export type CockpitActionFacade = {
+  confirm(): void;
+  requestChange(payload: CockpitRequestChangePayload): void;
+  feedback(feedback: string): void;
+  terminate(): void;
+};
+
+export type CockpitRequestChangePayload = {
+  description: string;
+  source: "human" | "review_findings";
+};
+
+export function createCockpitActionFacade(input: {
+  flowKind: WorkspaceWsState["flowKind"];
+  commandId: string | null;
+  sendHumanConfirm: (
+    decision: "confirm" | "request-change" | "terminate",
+    payload?: unknown,
+  ) => boolean;
+  sendHumanGateFeedback: (feedback: string, commandId?: string) => boolean;
+}): CockpitActionFacade {
+  return {
+    confirm() {
+      input.sendHumanConfirm("confirm");
+    },
+    requestChange(payload) {
+      if (input.flowKind !== "single_candidate") {
+        input.sendHumanConfirm("request-change", payload);
+      }
+    },
+    feedback(feedback) {
+      if (input.flowKind === "single_candidate") {
+        input.sendHumanGateFeedback(feedback, input.commandId ?? undefined);
+      }
+    },
+    terminate() {
+      input.sendHumanConfirm("terminate");
+    },
+  };
+}
+
+
 export type ProtocolErrorDisposition =
   | { kind: "gate"; turnId: string }
   | { kind: "advance"; commandId: string }

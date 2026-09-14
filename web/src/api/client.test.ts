@@ -23,6 +23,7 @@ import {
   listRepositories,
   normalizeApiError,
   recheckProviders,
+  takeoverWorkspaceSession,
 } from "./client";
 import type {
   CreateRepositoryResponse,
@@ -527,5 +528,38 @@ describe("api client", () => {
         attemptId: "coding_attempt_0001",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("posts takeover with an encoded workspace session id", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          workspace_session_id: "child_1",
+          issue_id: "issue_1",
+          entity_id: "entity_1",
+          workspace_type: "work_item_plan",
+          status: "open",
+          author_provider: "claude_code",
+          reviewer_provider: "codex",
+          review_rounds: 1,
+          superpowers_enabled: true,
+          openspec_enabled: false,
+          messages: [],
+          parent_session_id: "parent/with space",
+          takeover_event_id: "takeover_1",
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(takeoverWorkspaceSession("parent/with space")).resolves.toMatchObject({
+      workspace_session_id: "child_1",
+      parent_session_id: "parent/with space",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/workspace-sessions/parent%2Fwith%20space/takeover",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

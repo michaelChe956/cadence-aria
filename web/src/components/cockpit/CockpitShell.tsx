@@ -9,7 +9,10 @@ import {
   type ReactNode,
 } from "react";
 import type { JSX } from "react";
-import { useWorkspaceSessionObservers } from "../../hooks/useWorkspaceSessionObservers";
+import {
+  useWorkspaceSessionObservers,
+  type WorkspaceSessionObserverResult,
+} from "../../hooks/useWorkspaceSessionObservers";
 import { readCockpitSettings } from "../../state/cockpit-settings";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitEscalation } from "./CockpitEscalation";
@@ -22,8 +25,10 @@ type NotificationGuidance = "permission-denied" | "permission-default" | null;
 
 type CockpitShellContextValue = {
   inbox: readonly CockpitInboxItem[];
+  records: WorkspaceSessionObserverResult["records"];
   pulseItemIds: ReadonlySet<string>;
   notificationGuidance: NotificationGuidance;
+  watchSession(sessionId: string): void;
 };
 
 const CockpitShellContext = createContext<CockpitShellContextValue | null>(null);
@@ -45,6 +50,13 @@ export function useCockpitShellInbox(): readonly CockpitInboxItem[] {
   return useContext(CockpitShellContext)?.inbox ?? [];
 }
 
+export function useCockpitObservedRecords(): WorkspaceSessionObserverResult["records"] {
+  return useContext(CockpitShellContext)?.records ?? [];
+}
+export function useCockpitSessionWatch(): (sessionId: string) => void {
+  return useContext(CockpitShellContext)?.watchSession ?? (() => undefined);
+}
+
 export function useCockpitInboxPulse(itemId: string): boolean {
   return useContext(CockpitShellContext)?.pulseItemIds.has(itemId) ?? false;
 }
@@ -64,7 +76,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   const notificationSentRef = useRef(false);
   const previousFaviconHrefRef = useRef<string | null>(null);
   const initialTitleRef = useRef(document.title);
-  const { inbox } = useWorkspaceSessionObservers({
+  const { inbox, records, watchSession } = useWorkspaceSessionObservers({
     currentSessionId,
     currentSessionState,
     watchLimit: settings.watchLimit,
@@ -181,8 +193,8 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
     );
   }, [inbox]);
   const contextValue = useMemo<CockpitShellContextValue>(
-    () => ({ inbox, pulseItemIds, notificationGuidance }),
-    [inbox, notificationGuidance, pulseItemIds],
+    () => ({ inbox, records, pulseItemIds, notificationGuidance, watchSession }),
+    [inbox, notificationGuidance, pulseItemIds, records, watchSession],
   );
 
   return (

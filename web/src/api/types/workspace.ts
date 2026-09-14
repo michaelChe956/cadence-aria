@@ -136,6 +136,11 @@ export type WorkspaceSession = WorkspaceSessionSummary & {
   publication_provenance_ref?: string | null;
 };
 
+export type TakeoverResponse = WorkspaceSession & {
+  parent_session_id: string;
+  takeover_event_id: string;
+};
+
 export type ArtifactUpdateMessage =
   | { type: "artifact_update"; version: number; markdown: string; diff?: string | null }
   | { type: "artifact_update"; version: number; candidate: WorkItemPlanCandidateDto }

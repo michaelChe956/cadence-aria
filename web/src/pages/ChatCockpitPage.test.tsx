@@ -1,3 +1,6 @@
+import type * as ApiClient from "../api/client";
+import type { TakeoverResponse } from "../api/types";
+import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +9,11 @@ import {
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
-import { useWorkspaceStore, type TimelineNode } from "../state/workspace-ws-store";
+import {
+  useWorkspaceStore,
+  type TimelineNode,
+  type WorkspaceWsState,
+} from "../state/workspace-ws-store";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 
@@ -14,6 +21,11 @@ vi.mock("../hooks/useWorkspaceWs", () => ({
   useWorkspaceWs: vi.fn(),
 }));
 
+
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof ApiClient>()),
+  takeoverWorkspaceSession: vi.fn(),
+}));
 vi.mock("../api/workspace-content", () => ({
   fetchWorkspaceArtifactVersion: vi.fn(),
   fetchWorkspaceEventOutput: vi.fn(),
@@ -22,6 +34,8 @@ vi.mock("../api/workspace-content", () => ({
 }));
 
 const cockpitInbox: CockpitInboxItem[] = [];
+const cockpitObservedRecords: Array<{ sessionId: string; state: WorkspaceWsState }> = [];
+const watchSession = vi.fn();
 
 vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitShellInbox: () =>
@@ -29,6 +43,8 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
       ? cockpitInbox
       : selectCockpitInbox(useWorkspaceStore.getState()),
   useCockpitInboxPulse: () => false,
+  useCockpitSessionWatch: () => watchSession,
+  useCockpitObservedRecords: () => cockpitObservedRecords,
 }));
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
@@ -52,14 +68,96 @@ function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
 
 describe("ChatCockpitPage", () => {
   installChatWorkspacePageTestHooks();
-
-  const renderCockpit = (sessionId = "session_001") => {
-    mockWorkspaceWs();
+  beforeEach(() => {
+    cockpitInbox.splice(0);
+    cockpitObservedRecords.splice(0);
+    watchSession.mockReset();
+    vi.mocked(takeoverWorkspaceSession).mockReset();
+  });
+  const renderCockpit = (sessionId = "session_001", mockWs = true) => {
+    if (mockWs) {
+      mockWorkspaceWs();
+    }
     useWorkspaceStore.getState().setSessionIdForTest(sessionId);
     return render(<ChatCockpitPage sessionId={sessionId} onBack={vi.fn()} />);
   };
 
-  beforeEach(() => cockpitInbox.splice(0));
+  it("shows takeover only on stopped and disables it with 409 code plus reason", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockRejectedValue(
+      new ApiRequestError({
+        code: "workspace_session_takeover_not_allowed",
+        message: "not allowed",
+        details: { reason: "not stopped" },
+      }),
+    );
+    cockpitInbox.push(stoppedItem("s1"), hardErrorItem("s2"));
+
+    renderCockpit();
+
+    expect(screen.queryAllByRole("button", { name: "接管" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(
+      await screen.findByText("workspace_session_takeover_not_allowed · not stopped"),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "接管" })).toBeDisabled();
+  });
+
+  it("offers retry and terminate but never takeover for hard error", () => {
+    cockpitInbox.push(hardErrorItem("s2"));
+
+    renderCockpit();
+
+    expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "终止" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "接管" })).toBeNull();
+  });
+  it("replays the rejected advance with its existing command ID", async () => {
+    const user = userEvent.setup();
+    const sendAdvance = vi.fn(() => true);
+    mockWorkspaceWs({ sendAdvance });
+    cockpitInbox.push({
+      ...hardErrorItem("session_001"),
+      id: "hard_error:advance:command_001",
+      source: "advance",
+    });
+
+    renderCockpit("session_001", false);
+    await user.click(screen.getByRole("button", { name: "重试" }));
+
+    expect(sendAdvance).toHaveBeenCalledWith("command_001");
+  });
+  it("watches and selects the child session after a successful takeover", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+    cockpitObservedRecords.push({
+      sessionId: "child_001",
+      state: {
+        ...useWorkspaceStore.getState(),
+        chatEntries: [
+          {
+            id: "child-entry",
+            type: "provider_stream",
+            role: "author",
+            content: "子会话对话",
+            timestamp: "2026-09-14T00:00:00Z",
+          },
+        ],
+      },
+    });
+
+    renderCockpit();
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(watchSession).toHaveBeenCalledWith("child_001");
+    expect(await screen.findByText("子会话对话")).toBeVisible();
+  });
 
   it("renders the three cockpit zones", () => {
     renderCockpit();
@@ -101,7 +199,7 @@ describe("ChatCockpitPage", () => {
     expect(within(flow).queryAllByRole("textbox")).toHaveLength(0);
   });
 
-  it("offers no gate action buttons in the read-only cockpit", () => {
+  it("exposes gate actions in the cockpit", () => {
     const store = useWorkspaceStore.getState();
     store.setStage("human_confirm");
     store.appendChatEntry({
@@ -110,14 +208,33 @@ describe("ChatCockpitPage", () => {
       role: "system",
       content: "等待人工确认",
       timestamp: "2026-09-13T00:00:00Z",
+      metadata: { action_facade: "legacy" },
     });
 
     renderCockpit();
 
-    expect(screen.getByTestId("gate-prompt-entry")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /确认产物/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /采纳建议并返修/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /终止/ })).toBeNull();
+    const gateEntry = screen.getByTestId("gate-prompt-entry");
+    expect(gateEntry).toBeInTheDocument();
+    expect(within(gateEntry).getByRole("button", { name: "确认产物" })).toBeVisible();
+    expect(within(gateEntry).getByRole("button", { name: "终止" })).toBeVisible();
+  });
+
+  it("dispatches typed gate feedback through the typed websocket helper", async () => {
+    const feedback = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
+    const user = userEvent.setup();
+    const store = useWorkspaceStore.getState();
+    store.setSessionIdForTest("session_001");
+    useWorkspaceStore.setState({ flowKind: "single_candidate" });
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
+    store.rebuildChatEntries();
+
+    render(<ChatCockpitPage sessionId="session_001" onBack={vi.fn()} />);
+    await user.click(
+      within(screen.getByTestId("gate-prompt-entry")).getByRole("button", { name: "提交反馈" }),
+    );
+
+    expect(feedback).toHaveBeenCalledWith("修复缺口", "cmd_1");
   });
 
   it("uses the shared shell inbox instead of a second session observer", () => {
@@ -245,3 +362,32 @@ describe("ChatCockpitPage", () => {
     vi.useRealTimers();
   });
 });
+function stoppedItem(sessionId: string): CockpitInboxItem {
+  return {
+    id: `stopped:${sessionId}`,
+    kind: "stopped",
+    severity: 2,
+    title: "会话停在停点",
+    summary: "等待人工接管后继续",
+    triage: false,
+    source: "session_status",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+  };
+}
+
+function hardErrorItem(sessionId: string): CockpitInboxItem {
+  return {
+    id: `hard_error:${sessionId}:error`,
+    kind: "hard_error",
+    severity: 3,
+    title: "引擎错误",
+    summary: "错误",
+    triage: false,
+    source: "engine_error",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+  };
+}

@@ -1,5 +1,6 @@
-import type { ChatEntry } from "../../state/chat-entries";
 import type { RevisionPath } from "../../api/types";
+import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
+import type { ChatEntry } from "../../state/chat-entries";
 import { ArtifactUpdateEntry } from "./entries/ArtifactUpdateEntry";
 import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
 import { ChoiceResponseEntry } from "./entries/ChoiceResponseEntry";
@@ -24,10 +25,7 @@ interface ChatEntryRendererProps {
     response: { selected_option_ids: string[]; free_text: string | null },
   ) => void;
   onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => void;
+  actions?: CockpitActionFacade;
 }
 
 export function ChatEntryRenderer({
@@ -35,7 +33,7 @@ export function ChatEntryRenderer({
   onPermissionResponse,
   onChoiceResponse,
   onSelectRevisionPath,
-  onHumanConfirm,
+  actions,
 }: ChatEntryRendererProps) {
   switch (entry.type) {
     case "context_note":
@@ -59,7 +57,7 @@ export function ChatEntryRenderer({
     case "review_verdict":
       return <ReviewVerdictEntry entry={entry} onSelectPath={onSelectRevisionPath} />;
     case "gate_prompt":
-      return <GatePromptEntry entry={entry} onDecision={onHumanConfirm} />;
+      return <GatePromptEntry entry={entry} actions={actions} />;
     case "human_decision":
       return <HumanDecisionEntry entry={entry} />;
     case "stage_change":

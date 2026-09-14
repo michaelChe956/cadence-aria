@@ -37,6 +37,7 @@ import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import type {
   ChatEntry,
   ChoiceResponsePayload,
@@ -74,6 +75,7 @@ export function LegacyChatWorkspacePage({
   sessionId: string;
   onBack: () => void;
 }) {
+  const workspaceWs = useWorkspaceWs(sessionId);
   const {
     sendContextNote,
     sendStartGeneration,
@@ -98,7 +100,7 @@ export function LegacyChatWorkspacePage({
     isReconnecting,
     reconnectAttemptCount,
     retryNow,
-  } = useWorkspaceWs(sessionId);
+  } = workspaceWs;
   const storeSessionId = useWorkspaceStore((state) => state.sessionId);
   const workspaceType = useWorkspaceStore((state) => state.workspaceType);
   const stage = useWorkspaceStore((state) => state.stage);
@@ -190,6 +192,16 @@ export function LegacyChatWorkspacePage({
       pendingDecision?.options ??
       optionalWorkItemPlanReviewDecisionOptions(workspaceType, chatEntries),
     [chatEntries, pendingDecision?.options, workspaceType],
+  );
+  const gateActions = useMemo(
+    () =>
+      createCockpitActionFacade({
+        flowKind: useWorkspaceStore.getState().flowKind,
+        commandId: useWorkspaceStore.getState().humanGateTurn?.command_id ?? null,
+        sendHumanConfirm,
+        sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+      }),
+    [sendHumanConfirm, workspaceWs.sendHumanGateFeedback],
   );
   const selectedEntryId = useMemo(
     () =>
@@ -431,16 +443,6 @@ export function LegacyChatWorkspacePage({
     sendSelectRevisionPath(path, extraContext);
   }
 
-  function handleHumanConfirm(
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) {
-    if (payload === undefined) {
-      sendHumanConfirm(decision);
-      return;
-    }
-    sendHumanConfirm(decision, payload);
-  }
 
   function handleAuthorDecision(decision: AuthorDecisionChoice, feedback?: string) {
     // spec-design-dialog-revision T8："revise" 携带反馈，由 useWorkspaceWs 构造
@@ -619,7 +621,7 @@ export function LegacyChatWorkspacePage({
                   entries={chatEntries}
                   onPermissionResponse={handlePermissionResponse}
                   onChoiceResponse={handleChoiceResponse}
-                  onHumanConfirm={handleHumanConfirm}
+                  actions={gateActions}
                   sessionId={sessionReady ? sessionId : null}
                   contentCache={contentCacheValues}
                   loadContent={handleLoadContent}
@@ -829,7 +831,7 @@ export function LegacyChatWorkspacePage({
                 entries={chatEntries}
                 onPermissionResponse={handlePermissionResponse}
                 onChoiceResponse={handleChoiceResponse}
-                onHumanConfirm={handleHumanConfirm}
+                actions={gateActions}
                 sessionId={sessionReady ? sessionId : null}
                 contentCache={contentCacheValues}
                 loadContent={handleLoadContent}
