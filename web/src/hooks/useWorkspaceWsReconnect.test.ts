@@ -108,6 +108,42 @@ describe("useWorkspaceWsReconnect", () => {
     expect(onReconnect).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the visible backoff delay across enabled toggles", () => {
+    const onReconnect = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) =>
+        useWorkspaceWsReconnect({
+          enabled,
+          onReconnect,
+          closeCode: 1006,
+        }),
+      { initialProps: { enabled: true } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    // 模拟真实接线:重连尝试令 status 翻转,enabled false→true 各自独立提交,
+    // 使 close effect 重跑
+    act(() => {
+      rerender({ enabled: false });
+    });
+    act(() => {
+      rerender({ enabled: true });
+    });
+    act(() => {
+      vi.advanceTimersByTime(1001);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1599);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(2);
+  });
+
   it("retries immediately when requested manually", () => {
     const onReconnect = vi.fn();
     const { result } = renderHook(() =>
