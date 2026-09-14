@@ -6,6 +6,7 @@ import type {
   WorkItemExecutionPlan,
 } from "../api/types";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceWs } from "./useCodingWorkspaceWs";
 
 export class MockWebSocket {
@@ -183,6 +184,7 @@ export function installCodingWorkspaceWsTestHooks() {
     MockWebSocket.instances = [];
     vi.stubGlobal("WebSocket", MockWebSocket);
     useCodingWorkspaceStore.getState().reset();
+    useCodingLogStore.getState().reset();
   });
 
   afterEach(() => {

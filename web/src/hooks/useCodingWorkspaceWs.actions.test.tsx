@@ -1,5 +1,6 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import {
   MockWebSocket,
@@ -371,5 +372,53 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       allowed_write_scopes: ["src/product/**"],
     });
     expect(useCodingWorkspaceStore.getState().requireExecutionPlanConfirm).toBe(false);
+  });
+
+  it("routes frame-merged stream chunks into the coding log store", () => {
+    vi.useFakeTimers();
+    try {
+      useCodingLogStore.getState().reset();
+      const harness = renderCodingHook();
+      act(() => {
+        harness.ws.open();
+        harness.ws.receive(codingSessionState({}));
+      });
+      act(() => {
+        harness.ws.receive({ type: "coding_stream_chunk", content: "he", node_id: "node_1" });
+        harness.ws.receive({ type: "coding_stream_chunk", content: "llo", node_id: "node_1" });
+      });
+      act(() => {
+        vi.advanceTimersByTime(60);
+      });
+      const lines = useCodingLogStore.getState().lines;
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ text: "hello", nodeId: "node_1", kind: "stream" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("logs execution events with a stable title line and resets the log on address change", () => {
+    useCodingLogStore.getState().reset();
+    const harness = renderCodingHook();
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(codingSessionState({}));
+      harness.ws.receive({
+        type: "coding_execution_event",
+        event: { event_id: "e1", kind: "command", status: "completed", title: "运行验证", command: "pnpm test" },
+      });
+    });
+    expect(useCodingLogStore.getState().lines.at(-1)).toMatchObject({ kind: "event", text: "运行验证 · pnpm test" });
+
+    // test-utils 的 renderCodingHook 返回 rerenderAddress(nextAddress)（useCodingWorkspaceWs.test-utils.tsx:160-162）
+    act(() => {
+      harness.rerenderAddress({
+        projectId: "project_0002",
+        issueId: "issue_0002",
+        attemptId: "coding_attempt_0002",
+      });
+    });
+    expect(useCodingLogStore.getState().lines).toEqual([]);
   });
 });

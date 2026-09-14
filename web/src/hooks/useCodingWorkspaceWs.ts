@@ -6,10 +6,12 @@ import type {
   CodingProviderSelectRole,
   CodingWsInMessage,
   CodingWsOutMessage,
+  ExecutionEvent,
   WorkspaceProviderName,
 } from "../api/types";
 import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
+import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 
 interface CodingWsServerMessage {
@@ -40,6 +42,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
       reconnectTimerRef.current = null;
     }
     useCodingWorkspaceStore.getState().reset();
+    useCodingLogStore.getState().reset();
   }, [attemptId, issueId, projectId]);
 
   const sendJson = useCallback((message: CodingWsInMessage) => {
@@ -348,6 +351,15 @@ function createCodingStreamBatcher() {
     pending.delete(key);
     if (item.content && useCodingWorkspaceStore.getState().status !== "aborted") {
       useCodingWorkspaceStore.getState().appendStreamChunk(item.content, item.nodeId);
+      useCodingLogStore.getState().appendLines([
+        {
+          nodeId: item.nodeId,
+          nodeTitle: codingLogNodeTitle(item.nodeId),
+          text: item.content,
+          at: new Date().toISOString(),
+          kind: "stream",
+        },
+      ]);
     }
   }
 
@@ -426,15 +438,24 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
       streamBatcher.flush((message.node_id as string | null | undefined) ?? null);
       store.completeStream((message.node_id as string | null | undefined) ?? null);
       break;
-    case "coding_execution_event":
+    case "coding_execution_event": {
+      const event = (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event;
       if (store.status === "aborted") {
         break;
       }
       streamBatcher.flushAll();
-      store.addExecutionEvent(
-        (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event,
-      );
+      useCodingLogStore.getState().appendLines([
+        {
+          nodeId: event.node_id ?? null,
+          nodeTitle: codingLogNodeTitle(event.node_id ?? null),
+          text: codingExecutionEventLogText(event),
+          at: new Date().toISOString(),
+          kind: "event",
+        },
+      ]);
+      store.addExecutionEvent(event);
       break;
+    }
     case "coding_permission_request": {
       const request = message as Extract<
         CodingWsOutMessage,
@@ -633,4 +654,13 @@ function rejectCodingChoiceRequestFromError(message: string) {
 
 function choiceIdFromProtocolError(message: string) {
   return message.match(/^ChoiceResponse id=([^ ]+)/)?.[1] ?? null;
+}
+
+function codingLogNodeTitle(nodeId: string | null): string | null {
+  if (!nodeId) return null;
+  return useCodingWorkspaceStore.getState().timelineNodes.find((node) => node.id === nodeId)?.title ?? null;
+}
+
+function codingExecutionEventLogText(event: ExecutionEvent): string {
+  return [event.title, event.command].filter(Boolean).join(" · ");
 }
