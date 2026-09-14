@@ -927,6 +927,7 @@ describe("workspace ws store gate rebuild", () => {
       .chatEntries.filter((entry) => entry.type === "gate_prompt");
     expect(gatePrompts).toHaveLength(1);
     expect(gatePrompts[0]?.metadata).toMatchObject({
+      action_facade: "typed",
       gate_trigger: "verification_new_findings",
       remaining_budget: 1,
       gate_status: "open",

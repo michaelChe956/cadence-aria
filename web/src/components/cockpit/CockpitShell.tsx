@@ -23,7 +23,6 @@ import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection"
 import { CockpitEscalation } from "./CockpitEscalation";
 import { CockpitSettingsDialog } from "./CockpitSettingsDialog";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
-const GO_TO_INBOX_EVENT = "aria:cockpit:go-to-inbox";
 const SYSTEM_NOTIFICATION_DELAY_MS = 30_000;
 
 type NotificationGuidance = "permission-denied" | "permission-default" | null;
@@ -73,7 +72,13 @@ export function useCockpitNotificationGuidance(): NotificationGuidance {
 export function useCockpitSettings(): CockpitSettings {
   return useContext(CockpitShellContext)?.settings ?? readCockpitSettings();
 }
-export function CockpitShell({ children }: { children: ReactNode }): JSX.Element {
+export function CockpitShell({
+  children,
+  onGoToInbox,
+}: {
+  children: ReactNode;
+  onGoToInbox?: (sessionId: string) => void;
+}): JSX.Element {
   const [settings, setSettings] = useState<CockpitSettings>(() => readCockpitSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const currentSessionId = useWorkspaceStore((state) => state.sessionId);
@@ -86,13 +91,13 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   const notificationSentRef = useRef(false);
   const previousFaviconHrefRef = useRef<string | null>(null);
   const initialTitleRef = useRef(document.title);
-  const { inbox, records, watchSession } = useWorkspaceSessionObservers({
+  const { inbox, countedInbox, records, watchSession } = useWorkspaceSessionObservers({
     currentSessionId,
     currentSessionState,
     watchLimit: settings.watchLimit,
     refreshIntervalMs: settings.observerRefreshIntervalMs,
   });
-  const itemIds = useMemo(() => new Set(inbox.map((item) => item.id)), [inbox]);
+  const itemIds = useMemo(() => new Set(countedInbox.map((item) => item.id)), [countedInbox]);
 
   useEffect(() => {
     if (currentSessionId === null) return;
@@ -105,7 +110,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   }, [currentSessionId]);
 
   useEffect(() => {
-    const newlyOpened = inbox.filter((item) => !knownItemIdsRef.current.has(item.id));
+    const newlyOpened = countedInbox.filter((item) => !knownItemIdsRef.current.has(item.id));
     knownItemIdsRef.current = itemIds;
     setPulseItemIds((previous) => {
       const next = new Set(Array.from(previous).filter((itemId) => itemIds.has(itemId)));
@@ -117,7 +122,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
     if (newlyOpened.length > 0) {
       setToast(newlyOpened[0]);
     }
-  }, [inbox, itemIds]);
+  }, [countedInbox, itemIds]);
 
   useEffect(() => {
     if (!toast) return;
@@ -126,7 +131,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   }, [toast]);
 
   useEffect(() => {
-    const count = inbox.length;
+    const count = countedInbox.length;
     if (settings.titleEmojiEnabled && count > 0) {
       document.title = `🔴待处理×${count} · aria`;
     } else {
@@ -135,7 +140,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
     return () => {
       document.title = initialTitleRef.current;
     };
-  }, [inbox.length, settings.titleEmojiEnabled]);
+  }, [countedInbox.length, settings.titleEmojiEnabled]);
 
   useEffect(() => {
     const icon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
@@ -143,16 +148,16 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
     if (previousFaviconHrefRef.current === null) {
       previousFaviconHrefRef.current = icon.href;
     }
-    icon.href = inbox.length > 0 ? faviconHref(inbox.length) : previousFaviconHrefRef.current;
+    icon.href = countedInbox.length > 0 ? faviconHref(countedInbox.length) : previousFaviconHrefRef.current;
     return () => {
       if (previousFaviconHrefRef.current !== null) {
         icon.href = previousFaviconHrefRef.current;
       }
     };
-  }, [inbox.length]);
+  }, [countedInbox.length]);
 
   useEffect(() => {
-    if (inbox.length === 0) {
+    if (countedInbox.length === 0) {
       inboxBecameNonEmptyAtRef.current = null;
       notificationSentRef.current = false;
       return;
@@ -175,7 +180,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
     const timer = window.setTimeout(() => {
       if (Notification.permission === "granted") {
         new Notification("aria：需要处理", {
-          body: `待处理 ${inbox.length} 项`,
+          body: `待处理 ${countedInbox.length} 项`,
           tag: "aria-cockpit-inbox",
         });
         notificationSentRef.current = true;
@@ -187,10 +192,10 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
       }
     }, remainingDelayMs);
     return () => window.clearTimeout(timer);
-  }, [inbox, settings.systemNotificationsEnabled]);
+  }, [countedInbox, settings.systemNotificationsEnabled]);
 
   const goToInbox = useCallback(() => {
-    const firstItem = inbox[0];
+    const firstItem = countedInbox[0];
     if (!firstItem) return;
     const sessionId = sessionIdFor(firstItem.id);
     setPulseItemIds((previous) =>
@@ -198,10 +203,8 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
         Array.from(previous).filter((itemId) => sessionIdFor(itemId) !== sessionId),
       ),
     );
-    window.dispatchEvent(
-      new CustomEvent(GO_TO_INBOX_EVENT, { detail: { sessionId } }),
-    );
-  }, [inbox]);
+    onGoToInbox?.(sessionId);
+  }, [countedInbox, onGoToInbox]);
   const updateSettings = useCallback((nextSettings: CockpitSettings) => {
     writeCockpitSettings(nextSettings);
     setSettings(nextSettings);
@@ -214,12 +217,12 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
   return (
     <CockpitShellContext.Provider value={contextValue}>
       <div data-testid="cockpit-shell" className="min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)]">
-        {inbox.length > 0 ? (
+        {countedInbox.length > 0 ? (
           <aside
             role="alert"
             className="sticky top-0 z-[90] flex min-h-11 items-center justify-between gap-3 bg-[var(--aria-danger)] px-3 py-1 text-sm font-semibold text-white shadow-md"
           >
-            <span>待处理 {inbox.length} 项</span>
+            <span>待处理 {countedInbox.length} 项</span>
             <button
               type="button"
               onClick={goToInbox}
@@ -253,7 +256,7 @@ export function CockpitShell({ children }: { children: ReactNode }): JSX.Element
           settings={settings}
           onChange={updateSettings}
         />
-        <CockpitEscalation items={inbox} settings={settings} />
+        <CockpitEscalation items={countedInbox} settings={settings} />
         {children}
       </div>
     </CockpitShellContext.Provider>

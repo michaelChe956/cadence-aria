@@ -19,6 +19,12 @@ import {
 import type { CockpitInboxItem } from "../state/workspace-cockpit-projection";
 import type { WorkspaceWsState } from "../state/workspace-ws-store";
 
+export type CatalogRefreshTimer = number;
+
+const scheduleCatalogRefresh = (callback: () => void, delayMs: number): CatalogRefreshTimer =>
+  window.setTimeout(callback, delayMs);
+const cancelCatalogRefresh = (timer: CatalogRefreshTimer): void => window.clearTimeout(timer);
+
 export interface WorkspaceSessionObserverOptions {
   currentSessionId: string | null;
   currentSessionState?: WorkspaceWsState | null;
@@ -31,6 +37,8 @@ export interface WorkspaceSessionObserverOptions {
     projectId: string,
   ) => Promise<Pick<IssueLifecycleResponse, "workspace_sessions">>;
   createController?: WorkspaceObserverControllerFactory;
+  scheduleCatalogRefresh?: (callback: () => void, delayMs: number) => CatalogRefreshTimer;
+  cancelCatalogRefresh?: (timer: CatalogRefreshTimer) => void;
 }
 
 export type WorkspaceObserverControllerFactory = (
@@ -41,6 +49,7 @@ export interface WorkspaceSessionObserverResult {
   records: readonly WorkspaceObserverRecord[];
   inbox: readonly CockpitInboxItem[];
   watchedSessionIds: readonly string[];
+  countedInbox: readonly CockpitInboxItem[];
   watchSession(sessionId: string): void;
 }
 
@@ -54,10 +63,11 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     listProductIssues: getProductIssues = listProductIssues,
     getIssueLifecycle: getLifecycle = getIssueLifecycle,
     createController,
+    scheduleCatalogRefresh: scheduleRefresh = scheduleCatalogRefresh,
+    cancelCatalogRefresh: cancelRefresh = cancelCatalogRefresh,
   } = options;
   const [sessions, setSessions] = useState<readonly WorkspaceSessionSummary[]>([]);
   const [observerRecords, setObserverRecords] = useState<readonly WorkspaceObserverRecord[]>([]);
-  const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [extraSessionIds, setExtraSessionIds] = useState<readonly string[]>([]);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
@@ -88,55 +98,60 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     const observed = observerRecords.filter((record) =>
       watchedSessionIds.includes(record.sessionId),
     );
-    if (
-      currentSessionId !== null &&
-      currentSessionState !== null &&
-      (!catalogLoaded || watchedSessionIds.includes(currentSessionId))
-    ) {
+    if (currentSessionId !== null && currentSessionState !== null) {
       return [{ sessionId: currentSessionId, state: currentSessionState }, ...observed];
     }
     return observed;
-  }, [
-    catalogLoaded,
-    currentSessionId,
-    currentSessionState,
-    observerRecords,
-    watchedSessionIds,
-  ]);
+  }, [currentSessionId, currentSessionState, observerRecords, watchedSessionIds]);
   const inbox = useMemo(() => selectObservedInbox(records), [records]);
+  const countedRecords = useMemo(
+    () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
+    [records, watchedSessionIds],
+  );
+  const countedInbox = useMemo(() => selectObservedInbox(countedRecords), [countedRecords]);
 
   useEffect(() => {
     let alive = true;
-    void (async () => {
-      try {
-        const { projects } = await getProjects();
-        const listedIssues = await Promise.all(
-          projects.map(async (project) => ({
-            projectId: project.project_id,
-            issues: (await getProductIssues(project.project_id)).issues,
-          })),
-        );
-        const lifecycles = await Promise.all(
-          listedIssues.flatMap(({ projectId, issues }) =>
-            issues.map(async (issue) => getLifecycle(issue.issue_id, projectId)),
-          ),
-        );
-        if (alive) {
-          setSessions(lifecycles.flatMap((lifecycle) => lifecycle.workspace_sessions));
-          setCatalogLoaded(true);
+    let refreshTimer: CatalogRefreshTimer | null = null;
+    const refreshCatalog = () => {
+      void (async () => {
+        try {
+          const { projects } = await getProjects();
+          const listedIssues = await Promise.all(
+            projects.map(async (project) => ({
+              projectId: project.project_id,
+              issues: (await getProductIssues(project.project_id)).issues,
+            })),
+          );
+          const lifecycles = await Promise.all(
+            listedIssues.flatMap(({ projectId, issues }) =>
+              issues.map(async (issue) => getLifecycle(issue.issue_id, projectId)),
+            ),
+          );
+          if (alive) {
+            setSessions(lifecycles.flatMap((lifecycle) => lifecycle.workspace_sessions));
+          }
+        } catch {
+          if (alive) {
+            setSessions([]);
+          }
+        } finally {
+          if (alive && refreshIntervalMs > 0) {
+            refreshTimer = scheduleRefresh(refreshCatalog, refreshIntervalMs);
+          }
         }
-      } catch {
-        if (alive) {
-          setSessions([]);
-          setCatalogLoaded(true);
-        }
-      }
-    })();
+      })();
+    };
+
+    refreshCatalog();
 
     return () => {
       alive = false;
+      if (refreshTimer !== null) {
+        cancelRefresh(refreshTimer);
+      }
     };
-  }, [getLifecycle, getProductIssues, getProjects]);
+  }, [cancelRefresh, getLifecycle, getProductIssues, getProjects, refreshIntervalMs, scheduleRefresh]);
 
   useEffect(() => {
     controllerRef.current?.updateRefreshIntervalMs(refreshIntervalMs);
@@ -163,6 +178,7 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   return {
     records,
     inbox,
+    countedInbox,
     watchedSessionIds,
     watchSession,
   };

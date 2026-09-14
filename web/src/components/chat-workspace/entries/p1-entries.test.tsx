@@ -450,7 +450,7 @@ describe("chat workspace p1 entries", () => {
     expect(onDecision).not.toHaveBeenCalled();
   });
 
-  it("renders typed feedback, confirm and terminate but no request-change", async () => {
+  it("requires typed feedback text before dispatching it", async () => {
     const actions = {
       confirm: vi.fn(),
       requestChange: vi.fn(),
@@ -466,11 +466,33 @@ describe("chat workspace p1 entries", () => {
     });
 
     render(<GatePromptEntry entry={entry} actions={actions} />);
-    expect(screen.getByRole("button", { name: "提交反馈" })).toBeVisible();
+    const submit = screen.getByRole("button", { name: "提交反馈" });
+    expect(screen.getByLabelText("反馈内容")).toHaveValue("");
+    expect(submit).toBeDisabled();
     expect(screen.queryByRole("button", { name: /返修|请求变更/ })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "提交反馈" }));
 
-    expect(actions.feedback).toHaveBeenCalledWith("修复缺口");
+    await user.type(screen.getByLabelText("反馈内容"), "请补齐边界");
+    await user.click(submit);
+
+    expect(actions.feedback).toHaveBeenCalledWith("请补齐边界");
+  });
+
+  it("keeps a snapshot-shaped typed gate out of the legacy revision path", () => {
+    const entry = makeEntry({
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      metadata: {
+        action_facade: "typed",
+        findings: [{ message: "采用 findings" }],
+      },
+    });
+
+    render(<GatePromptEntry entry={entry} actions={{ confirm: vi.fn(), requestChange: vi.fn(), feedback: vi.fn(), terminate: vi.fn() }} />);
+
+    expect(screen.getByText("等待门禁命令同步后再提交反馈")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "提交反馈" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
   });
 
   it("sends legacy request change through the supplied facade", async () => {

@@ -289,11 +289,13 @@ describe("ChatCockpitPage", () => {
     store.rebuildChatEntries();
 
     render(<ChatCockpitPage sessionId="session_001" onBack={vi.fn()} />);
-    await user.click(
-      within(screen.getByTestId("gate-prompt-entry")).getByRole("button", { name: "提交反馈" }),
-    );
+    const gateEntry = screen.getByTestId("gate-prompt-entry");
+    const submit = within(gateEntry).getByRole("button", { name: "提交反馈" });
+    expect(submit).toBeDisabled();
+    await user.type(within(gateEntry).getByLabelText("反馈内容"), "请补齐边界");
+    await user.click(submit);
 
-    expect(feedback).toHaveBeenCalledWith("修复缺口", "cmd_1");
+    expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
   });
 
   it("edits typed inbox feedback before dispatching it", async () => {
@@ -308,11 +310,12 @@ describe("ChatCockpitPage", () => {
     renderCockpit("session_001", false);
     await user.click(screen.getByRole("button", { name: "编辑反馈" }));
     const feedbackInput = screen.getByLabelText("门禁反馈");
-    await user.clear(feedbackInput);
+    const submit = within(screen.getByTestId("cockpit-inbox")).getByRole("button", {
+      name: "提交反馈",
+    });
+    expect(submit).toBeDisabled();
     await user.type(feedbackInput, "请补齐边界");
-    await user.click(
-      within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "提交反馈" }),
-    );
+    await user.click(submit);
 
     expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
   });

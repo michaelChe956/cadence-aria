@@ -4,6 +4,7 @@ import type {
   ChoiceResponsePayload,
   GateEntryMetadata,
 } from "./chat-entries";
+import { actionFacadeForFlowKind } from "./cockpit-action-routing";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
 import { selectGateProjection } from "./workspace-cockpit-projection";
 import { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
@@ -556,7 +557,7 @@ export function buildGatePromptEntry(
     ...(projection.turn_id ? { turn_id: projection.turn_id } : {}),
     ...(projection.turn?.command_id ? { command_id: projection.turn.command_id } : {}),
     gate_identity: projection.key,
-    action_facade: projection.turn_id ? "typed" : "legacy",
+    action_facade: actionFacadeForFlowKind(projection.flow_kind),
     ...(projection.trigger ? { gate_trigger: projection.trigger } : {}),
     ...(projection.remaining_budget !== null
       ? { remaining_budget: projection.remaining_budget }

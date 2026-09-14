@@ -1,5 +1,5 @@
 import { act, render, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSessionSummary } from "../api/types";
 import {
   useWorkspaceSessionObservers,
@@ -83,6 +83,10 @@ function renderObserverHook(initialOptions: WorkspaceSessionObserverOptions) {
   };
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("useWorkspaceSessionObservers", () => {
   it("enumerates REST sessions and replaces the watch window immediately when K changes", async () => {
     const replaceWatchedSessionIds = vi.fn();
@@ -129,7 +133,7 @@ describe("useWorkspaceSessionObservers", () => {
     expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["s2"]);
   });
 
-  it("does not count the current session when it falls outside K", async () => {
+  it("keeps the current session visible outside K without adding it to global counts", async () => {
     const replaceWatchedSessionIds = vi.fn();
     const view = renderObserverHook(observerOptions({
       currentSessionId: "outside",
@@ -161,15 +165,48 @@ describe("useWorkspaceSessionObservers", () => {
     }));
 
     await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["watched"]));
-    expect(view.result.records).toEqual([]);
-    expect(view.result.inbox).toEqual([]);
+    expect(view.result.records).toHaveLength(1);
+    expect(view.result.records[0]?.sessionId).toBe("outside");
+    expect(view.result.inbox).toHaveLength(1);
+    expect(view.result.countedInbox).toEqual([]);
     expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["watched"]);
+  });
+
+  it("refreshes the catalog and opens an observer for a session newly admitted to K", async () => {
+    let sessions = [summary("s1"), summary("s2")];
+    const replaceWatchedSessionIds = vi.fn();
+    let refreshCatalog: (() => void) | undefined;
+    const view = renderObserverHook(observerOptions({
+      createController: () => ({
+        replaceWatchedSessionIds,
+        updateRefreshIntervalMs: vi.fn(),
+        refresh: vi.fn(),
+        records: () => [],
+        dispose: vi.fn(),
+      }),
+      getIssueLifecycle: async () => ({ workspace_sessions: sessions }),
+      scheduleCatalogRefresh: (callback) => {
+        refreshCatalog = callback;
+        return 0;
+      },
+      cancelCatalogRefresh: vi.fn(),
+    }));
+
+    await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["s1", "s2"]));
+    sessions = [summary("s1"), summary("newly-admitted")];
+    await act(async () => {
+      refreshCatalog?.();
+    });
+
+    await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["s1", "newly-admitted"]));
+    expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["newly-admitted"]);
   });
 
   it("adds a manually watched child session to the observer controller", async () => {
     const replaceWatchedSessionIds = vi.fn();
     const view = renderObserverHook(observerOptions({
       watchLimit: 0,
+      refreshIntervalMs: 0,
       createController: () => ({
         replaceWatchedSessionIds,
         updateRefreshIntervalMs: vi.fn(),

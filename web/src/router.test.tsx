@@ -9,9 +9,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingAttemptAddress, ProviderHealthResponse } from "./api/types";
 import { useProviderAvailabilityStore } from "./state/provider-availability-store";
 import { createAppRouter, router } from "./router";
+import { useWorkspaceSessionObservers } from "./hooks/useWorkspaceSessionObservers";
+import type { CockpitInboxItem } from "./state/workspace-cockpit-projection";
 
 vi.mock("./app-shell", () => ({
   AppShell: () => <div data-testid="workbench-page">Workbench</div>,
+}));
+
+vi.mock("./hooks/useWorkspaceSessionObservers", () => ({
+  useWorkspaceSessionObservers: vi.fn(),
 }));
 
 vi.mock("./pages/ChatWorkspacePage", () => ({
@@ -76,6 +82,23 @@ const originalActions = {
   reset: useProviderAvailabilityStore.getState().reset,
 };
 
+const mockedUseWorkspaceSessionObservers = vi.mocked(useWorkspaceSessionObservers);
+
+function gateItem(sessionId: string): CockpitInboxItem {
+  return {
+    id: `${sessionId}:gate`,
+    kind: "gate",
+    severity: 3,
+    title: "需要人工确认",
+    summary: "等待处理",
+    triage: false,
+    source: "gate",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+  };
+}
+
 function blockedSnapshot(): ProviderHealthResponse {
   return {
     schema_version: 1,
@@ -120,6 +143,32 @@ describe("router", () => {
   beforeEach(() => {
     originalActions.reset();
     useProviderAvailabilityStore.setState(originalActions);
+    mockedUseWorkspaceSessionObservers.mockReturnValue({
+      records: [],
+      inbox: [],
+      countedInbox: [],
+      watchedSessionIds: [],
+      watchSession: vi.fn(),
+    });
+  });
+
+  it("navigates an inbox item from an unguarded root page to its workspace", async () => {
+    const sessionId = "session_inbox_001";
+    const history = createMemoryHistory({ initialEntries: ["/image-create"] });
+    mockedUseWorkspaceSessionObservers.mockReturnValue({
+      records: [],
+      inbox: [gateItem(sessionId)],
+      countedInbox: [gateItem(sessionId)],
+      watchedSessionIds: [sessionId],
+      watchSession: vi.fn(),
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+    await userEvent.click(await screen.findByRole("button", { name: "去处理" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(`/workbench/workspace/${sessionId}`);
+    });
   });
 
   it("registers the coding workspace route", () => {

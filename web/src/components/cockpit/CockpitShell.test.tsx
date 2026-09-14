@@ -45,23 +45,46 @@ function stoppedItem(sessionId: string): CockpitInboxItem {
   };
 }
 
-function ShellWithInbox({ inbox }: { inbox: readonly CockpitInboxItem[] }) {
+function ShellWithInbox({
+  inbox,
+  countedInbox = inbox,
+  onGoToInbox,
+}: {
+  inbox: readonly CockpitInboxItem[];
+  countedInbox?: readonly CockpitInboxItem[];
+  onGoToInbox?: (sessionId: string) => void;
+}) {
   mockedUseWorkspaceSessionObservers.mockReturnValue({
     records: [],
     inbox,
+    countedInbox,
     watchedSessionIds: ["s1", "s2", "s3", "s4"],
     watchSession: vi.fn(),
   });
 
   return (
-    <CockpitShell>
+    <CockpitShell onGoToInbox={onGoToInbox}>
       <CockpitInbox items={inbox} />
     </CockpitShell>
   );
 }
 
-function renderShell({ inbox }: { inbox: readonly CockpitInboxItem[] }) {
-  return render(<ShellWithInbox inbox={inbox} />);
+function renderShell({
+  inbox,
+  countedInbox,
+  onGoToInbox,
+}: {
+  inbox: readonly CockpitInboxItem[];
+  countedInbox?: readonly CockpitInboxItem[];
+  onGoToInbox?: (sessionId: string) => void;
+}) {
+  return render(
+    <ShellWithInbox
+      inbox={inbox}
+      countedInbox={countedInbox}
+      onGoToInbox={onGoToInbox}
+    />,
+  );
 }
 
 describe("CockpitShell", () => {
@@ -113,22 +136,18 @@ describe("CockpitShell", () => {
 
   it("adds a toast only for a newly opened item and clears its pulse after visit", () => {
     const onGoToInbox = vi.fn();
-    window.addEventListener("aria:cockpit:go-to-inbox", onGoToInbox);
-    const view = renderShell({ inbox: [] });
+    const view = renderShell({ inbox: [], onGoToInbox });
 
-    view.rerender(<ShellWithInbox inbox={[gateItem("s1")]} />);
+    view.rerender(<ShellWithInbox inbox={[gateItem("s1")]} onGoToInbox={onGoToInbox} />);
 
     expect(screen.getByRole("status")).toHaveTextContent("需要处理");
     fireEvent.click(screen.getByRole("button", { name: "去处理" }));
 
-    expect(onGoToInbox).toHaveBeenCalledWith(
-      expect.objectContaining({ detail: { sessionId: "s1" } }),
-    );
+    expect(onGoToInbox).toHaveBeenCalledWith("s1");
     expect(screen.getByTestId("cockpit-inbox-item-gate")).toHaveAttribute(
       "data-pulse",
       "false",
     );
-    window.removeEventListener("aria:cockpit:go-to-inbox", onGoToInbox);
   });
 
   it("clears an item pulse when its session becomes current", () => {
@@ -146,6 +165,14 @@ describe("CockpitShell", () => {
     );
   });
 
+  it("keeps the current-session inbox visible without increasing global alert surfaces", () => {
+    renderShell({ inbox: [gateItem("s1")], countedInbox: [] });
+
+    expect(screen.getByTestId("cockpit-inbox-item-gate")).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.title).toBe("Aria Web");
+  });
+
   it("alerts again when the same stopped item reopens after closing", () => {
     const view = renderShell({ inbox: [stoppedItem("s1")] });
 
@@ -160,6 +187,14 @@ describe("CockpitShell", () => {
     expect(screen.getByTestId("cockpit-inbox-item-stopped")).toHaveAttribute(
       "data-pulse",
       "true",
+    );
+  });
+
+  it("adds a reduced-motion-aware pulse class to newly opened items", () => {
+    renderShell({ inbox: [gateItem("s1")] });
+
+    expect(screen.getByTestId("cockpit-inbox-item-gate").className).toContain(
+      "motion-safe:animate-pulse",
     );
   });
 

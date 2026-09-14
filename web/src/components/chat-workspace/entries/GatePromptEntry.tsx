@@ -19,7 +19,7 @@ export function GatePromptEntry({
   actions?: CockpitActionFacade;
 }) {
   const [pendingTerminate, setPendingTerminate] = useState(false);
-  const [feedback, setFeedback] = useState("修复缺口");
+  const [feedback, setFeedback] = useState("");
 
   useEffect(() => {
     if (!pendingTerminate) {
@@ -50,7 +50,13 @@ export function GatePromptEntry({
   const remainingBudget = remainingBudgetFromEntry(entry);
   const failureMessage = failureMessageFromEntry(entry);
   const inlineError = inlineErrorFromEntry(entry);
-  const isContextBlockerGate = gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
+  const isContextBlockerGate =
+    gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
+  const actionFacade =
+    (entry.metadata as Record<string, unknown> | undefined)?.action_facade;
+  const typedGateAwaitingCommand =
+    actionFacade === "typed" &&
+    typeof (entry.metadata as Record<string, unknown> | undefined)?.command_id !== "string";
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
     : allowsCurrentVersion
@@ -119,7 +125,7 @@ export function GatePromptEntry({
           <ResolutionBadge resolution={entry.resolution} />
         ) : actions ? (
           <div className="space-y-2">
-            {(entry.metadata as Record<string, unknown> | undefined)?.action_facade === "typed" ? (
+            {actionFacade === "typed" && !typedGateAwaitingCommand ? (
               <div className="flex flex-wrap items-center gap-2">
                 <label className="sr-only" htmlFor={`gate-feedback-${entry.id}`}>
                   反馈内容
@@ -128,10 +134,12 @@ export function GatePromptEntry({
                   id={`gate-feedback-${entry.id}`}
                   value={feedback}
                   onChange={(event) => setFeedback(event.target.value)}
+                  placeholder="请输入反馈内容"
                   className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                 />
                 <button
                   type="button"
+                  disabled={!feedback.trim()}
                   onClick={() => actions.feedback(feedback)}
                   className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                 >
@@ -139,6 +147,11 @@ export function GatePromptEntry({
                   提交反馈
                 </button>
               </div>
+            ) : null}
+            {typedGateAwaitingCommand ? (
+              <p className="text-xs text-[var(--aria-ink-muted)]">
+                等待门禁命令同步后再提交反馈
+              </p>
             ) : null}
             <div className="flex flex-wrap justify-end gap-2">
               {isContextBlockerGate ? null : (
@@ -151,7 +164,7 @@ export function GatePromptEntry({
                   {confirmLabel}
                 </button>
               )}
-              {(entry.metadata as Record<string, unknown> | undefined)?.action_facade !== "typed" && requestChangeLabel ? (
+              {actionFacade !== "typed" && requestChangeLabel ? (
                 <button
                   type="button"
                   onClick={() => actions.requestChange(requestChangePayload(entry))}

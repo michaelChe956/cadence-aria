@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  actionFacadeForFlowKind,
   classifyProtocolError,
+  createCockpitActionFacade,
   type ProtocolErrorDisposition,
 } from "./cockpit-action-routing";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
@@ -68,5 +70,26 @@ describe("classifyProtocolError", () => {
     expect(classifyProtocolError("UNEXPECTED_FRAME", {}, emptyWorkspaceState())).toEqual({
       kind: "hard_error",
     } satisfies ProtocolErrorDisposition);
+  });
+});
+
+describe("cockpit gate action facade", () => {
+  it("classifies every single-candidate gate, including a snapshot gate, as typed", () => {
+    expect(actionFacadeForFlowKind("single_candidate")).toBe("typed");
+    expect(actionFacadeForFlowKind("legacy")).toBe("legacy");
+  });
+
+  it("does not dispatch snapshot feedback before the server provides a command id", () => {
+    const sendHumanGateFeedback = vi.fn(() => true);
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      sendHumanConfirm: vi.fn(() => true),
+      sendHumanGateFeedback,
+    });
+
+    actions.feedback("请补齐边界");
+
+    expect(sendHumanGateFeedback).not.toHaveBeenCalled();
   });
 });

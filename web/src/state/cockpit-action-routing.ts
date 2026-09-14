@@ -12,6 +12,12 @@ export type CockpitRequestChangePayload = {
   source: "human" | "review_findings";
 };
 
+export function actionFacadeForFlowKind(
+  flowKind: WorkspaceWsState["flowKind"],
+): "typed" | "legacy" {
+  return flowKind === "single_candidate" ? "typed" : "legacy";
+}
+
 export function createCockpitActionFacade(input: {
   flowKind: WorkspaceWsState["flowKind"];
   commandId: string | null;
@@ -26,13 +32,13 @@ export function createCockpitActionFacade(input: {
       input.sendHumanConfirm("confirm");
     },
     requestChange(payload) {
-      if (input.flowKind !== "single_candidate") {
+      if (actionFacadeForFlowKind(input.flowKind) === "legacy") {
         input.sendHumanConfirm("request-change", payload);
       }
     },
     feedback(feedback) {
-      if (input.flowKind === "single_candidate") {
-        input.sendHumanGateFeedback(feedback, input.commandId ?? undefined);
+      if (actionFacadeForFlowKind(input.flowKind) === "typed" && input.commandId !== null) {
+        input.sendHumanGateFeedback(feedback, input.commandId);
       }
     },
     terminate() {

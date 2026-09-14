@@ -93,7 +93,7 @@ function CockpitInboxRow({
       className={[
         "flex min-h-11 items-start gap-2 rounded-lg border-2 px-3 py-2",
         "motion-safe:transition-colors motion-safe:duration-200",
-        pulse ? "ring-2 ring-[var(--aria-danger)]" : "",
+        pulse ? "motion-safe:animate-pulse ring-2 ring-[var(--aria-danger)]" : "",
         KIND_CLASS[item.kind],
       ].join(" ")}
     >
@@ -208,8 +208,9 @@ function GateInboxActions({
 }) {
   const [pendingTerminate, setPendingTerminate] = useState(false);
   const [feedbackEditorOpen, setFeedbackEditorOpen] = useState(false);
-  const [feedback, setFeedback] = useState("修复缺口");
+  const [feedback, setFeedback] = useState("");
   const typed = item.gate?.flow_kind === "single_candidate";
+  const typedGateAwaitingCommand = typed && item.gate?.turn?.command_id === null;
 
   useEffect(() => {
     if (!pendingTerminate) {
@@ -222,18 +223,24 @@ function GateInboxActions({
   return (
     <div className="mt-2 flex flex-wrap gap-2">
       {typed ? (
-        feedbackEditorOpen ? (
+        typedGateAwaitingCommand ? (
+          <p className="text-xs text-[var(--aria-ink-muted)]">
+            等待门禁命令同步后再提交反馈
+          </p>
+        ) : feedbackEditorOpen ? (
           <>
             <textarea
               aria-label="门禁反馈"
               value={feedback}
               onChange={(event) => setFeedback(event.target.value)}
+              placeholder="请输入反馈内容"
               className="min-h-11 w-full rounded-md border border-[var(--aria-line-strong)] bg-white px-3 py-2 text-xs text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             />
             <button
               type="button"
+              disabled={!feedback.trim()}
               onClick={() => actions.feedback(feedback)}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
               提交反馈

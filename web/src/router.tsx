@@ -20,8 +20,16 @@ import { ImageCreatePage } from "./pages/ImageCreatePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 
 function RootRouteComponent() {
+  const navigate = useNavigate();
   return (
-    <CockpitShell>
+    <CockpitShell
+      onGoToInbox={(sessionId) =>
+        void navigate({
+          to: "/workbench/workspace/$sessionId",
+          params: { sessionId },
+        })
+      }
+    >
       <Outlet />
     </CockpitShell>
   );
