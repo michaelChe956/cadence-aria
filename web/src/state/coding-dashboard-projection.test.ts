@@ -160,6 +160,7 @@ describe("selectCodingBudgetGates", () => {
       elapsedMs: 1_800_000,
       remainingMs: CODING_BUDGET_WORK_ITEM_TOTAL_MS - 1_800_000,
       nearExhaustion: false,
+      frozen: false,
     });
 
     const coding = gates[1];
@@ -170,6 +171,7 @@ describe("selectCodingBudgetGates", () => {
       remainingMs: 0,
       ratio: 1,
       nearExhaustion: true,
+      frozen: false,
     });
   });
 
@@ -179,6 +181,7 @@ describe("selectCodingBudgetGates", () => {
       NOW,
     );
     expect(gates[0]?.elapsedMs).toBe(1_200_000);
+    expect(gates[0]?.frozen).toBe(true);
   });
 
   it("returns no gates before the coding stage begins", () => {

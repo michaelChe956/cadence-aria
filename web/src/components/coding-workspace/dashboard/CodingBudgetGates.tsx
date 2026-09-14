@@ -7,7 +7,7 @@ import { useCockpitSettings } from "../../cockpit/CockpitShell";
 
 export function CodingBudgetGates({ gates, nowMs }: { gates: readonly CodingBudgetGate[]; nowMs: number }) {
   const settings = useCockpitSettings();
-  const nearGates = gates.filter((gate) => gate.nearExhaustion && gate.anchorAtMs !== null);
+  const nearGates = gates.filter((gate) => gate.nearExhaustion && gate.anchorAtMs !== null && !gate.frozen);
   const [announceSeq, setAnnounceSeq] = useState(0);
 
   useEffect(() => {

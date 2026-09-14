@@ -197,6 +197,8 @@ export interface CodingBudgetGate {
   remainingMs: number;
   ratio: number;
   nearExhaustion: boolean;
+  /** 末个 coding 节点已 completed：预算冻结，前端不再推进也不再播报。 */
+  frozen: boolean;
 }
 
 // 60/90min 为 driver 约定口径、纯前端常量（引擎不发布预算事件，REQ-UI37-15）：
@@ -213,14 +215,15 @@ export function selectCodingBudgetGates(
   const last = codingNodes[codingNodes.length - 1];
   if (!first || !last) return [];
   const endMs = last.completed_at ? Date.parse(last.completed_at) : nowMs;
+  const frozen = last.completed_at !== null;
 
   const workItemAnchor = Date.parse(last.started_at);
   const codingAnchor = Date.parse(first.started_at);
   if (Number.isNaN(workItemAnchor) || Number.isNaN(codingAnchor) || Number.isNaN(endMs)) return [];
 
   return [
-    buildBudgetGate("work_item", "Work Item 预算门（60min）", CODING_BUDGET_WORK_ITEM_TOTAL_MS, workItemAnchor, endMs),
-    buildBudgetGate("coding", "Coding 预算门（90min）", CODING_BUDGET_CODING_TOTAL_MS, codingAnchor, endMs),
+    buildBudgetGate("work_item", "Work Item 预算门（60min）", CODING_BUDGET_WORK_ITEM_TOTAL_MS, workItemAnchor, endMs, frozen),
+    buildBudgetGate("coding", "Coding 预算门（90min）", CODING_BUDGET_CODING_TOTAL_MS, codingAnchor, endMs, frozen),
   ];
 }
 
@@ -230,6 +233,7 @@ function buildBudgetGate(
   totalMs: number,
   anchorAtMs: number,
   endMs: number,
+  frozen: boolean,
 ): CodingBudgetGate {
   const elapsedMs = Math.min(Math.max(0, endMs - anchorAtMs), totalMs);
   const remainingMs = totalMs - elapsedMs;
@@ -243,5 +247,6 @@ function buildBudgetGate(
     remainingMs,
     ratio: Math.min(1, elapsedMs / totalMs),
     nearExhaustion: remainingMs <= CODING_BUDGET_NEAR_EXHAUSTION_MS,
+    frozen,
   };
 }
