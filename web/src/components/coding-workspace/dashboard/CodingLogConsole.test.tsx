@@ -67,4 +67,35 @@ describe("CodingLogConsole", () => {
     });
     expect(scroller.scrollTop + scroller.clientHeight).toBeGreaterThanOrEqual(scroller.scrollHeight - 24);
   });
+
+  it("keeps pinning when appending past the tail limit keeps the length stable", () => {
+    act(() => {
+      useCodingLogStore.getState().appendLines(
+        Array.from({ length: CODING_LOG_TAIL_LIMIT }, (_, index) => line({ text: `log-${index}` })),
+      );
+    });
+    const { container } = render(<CodingLogConsole />);
+    const scroller = container.querySelector('[data-testid="coding-log-console-scroll"]') as HTMLElement;
+    // jsdom 无布局:自管 scrollTop 并让 scrollHeight 随新内容递增,断言贴底写入跟随新底。
+    let scrollTop = 0;
+    let totalHeight = 1000;
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      get: () => totalHeight,
+    });
+    scrollTop = totalHeight; // 用户已贴底
+    totalHeight = 1200; // 新行同步布局后总高递增(effect 运行前须已就绪)
+    act(() => {
+      useCodingLogStore.getState().appendLines([line({ text: "newest" })]);
+    });
+    expect(useCodingLogStore.getState().lines).toHaveLength(CODING_LOG_TAIL_LIMIT); // 长度稳态
+    expect(scroller.scrollTop).toBe(1200); // 尾行变化仍触发贴底
+  });
 });

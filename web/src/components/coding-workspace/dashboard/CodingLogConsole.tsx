@@ -22,6 +22,7 @@ export function CodingLogConsole() {
     [lines, nodeFilter],
   );
   const nodeOptions = useMemo(() => codingLogNodeOptions(lines), [lines]);
+  const latestLineId = visibleLines.at(-1)?.id ?? null; // 稳态(length 被 tail 上限钉死)仍随尾行变化
   const virtualizer = useVirtualizer({
     count: visibleLines.length,
     getScrollElement: () => scrollElement,
@@ -58,7 +59,7 @@ export function CodingLogConsole() {
   useEffect(() => {
     if (!scrollElement || !pinnedRef.current) return;
     scrollElement.scrollTop = scrollElement.scrollHeight;
-  }, [scrollElement, virtualizer, visibleLines.length]);
+  }, [scrollElement, virtualizer, visibleLines.length, latestLineId]);
 
   function handleScroll() {
     if (!scrollElement) return;
