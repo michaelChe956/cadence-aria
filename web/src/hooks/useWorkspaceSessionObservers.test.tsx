@@ -202,6 +202,65 @@ describe("useWorkspaceSessionObservers", () => {
     expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["newly-admitted"]);
   });
 
+  it("retains the last successful watch window and counted inbox when a catalog refresh fails", async () => {
+    const replaceWatchedSessionIds = vi.fn();
+    const getIssueLifecycle = vi.fn(async () => {
+      if (getIssueLifecycle.mock.calls.length > 1) {
+        throw new Error("temporary catalog failure");
+      }
+      return { workspace_sessions: [summary("s1"), summary("s2")] };
+    });
+    let refreshCatalog: (() => void) | undefined;
+    let onRecordsChange: ((records: readonly { sessionId: string; state: never }[]) => void) | undefined;
+    const view = renderObserverHook(observerOptions({
+      getIssueLifecycle,
+      createController: (onChange) => {
+        onRecordsChange = onChange as typeof onRecordsChange;
+        return {
+          replaceWatchedSessionIds,
+          updateRefreshIntervalMs: vi.fn(),
+          refresh: vi.fn(),
+          records: () => [],
+          dispose: vi.fn(),
+        };
+      },
+      scheduleCatalogRefresh: (callback) => {
+        refreshCatalog = callback;
+        return 0;
+      },
+      cancelCatalogRefresh: vi.fn(),
+    }));
+
+    await waitFor(() => expect(view.result.watchedSessionIds).toEqual(["s1", "s2"]));
+    act(() => {
+      onRecordsChange?.([{
+        sessionId: "s2",
+        state: {
+          sessionId: "s2",
+          sessionStatus: "stopped_needs_human",
+          stage: "running",
+          humanGateSnapshot: null,
+          humanGateTurn: null,
+          humanGateClosure: null,
+          flowKind: null,
+          pendingReviewerSummary: null,
+          chatEntries: [],
+          protocolError: null,
+          error: null,
+          advanceCommands: {},
+        } as never,
+      }]);
+    });
+    await waitFor(() => expect(view.result.countedInbox).toHaveLength(1));
+
+    act(() => refreshCatalog?.());
+
+    await waitFor(() => expect(getIssueLifecycle).toHaveBeenCalledTimes(2));
+    expect(view.result.watchedSessionIds).toEqual(["s1", "s2"]);
+    expect(view.result.countedInbox).toHaveLength(1);
+    expect(replaceWatchedSessionIds).toHaveBeenLastCalledWith(["s2"]);
+  });
+
   it("adds a manually watched child session to the observer controller", async () => {
     const replaceWatchedSessionIds = vi.fn();
     const view = renderObserverHook(observerOptions({

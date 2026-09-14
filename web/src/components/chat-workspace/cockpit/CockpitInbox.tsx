@@ -210,7 +210,8 @@ function GateInboxActions({
   const [feedbackEditorOpen, setFeedbackEditorOpen] = useState(false);
   const [feedback, setFeedback] = useState("");
   const typed = item.gate?.flow_kind === "single_candidate";
-  const typedGateAwaitingCommand = typed && item.gate?.turn?.command_id === null;
+  const typedGateAwaitingCommand =
+    typed && typeof item.gate?.turn?.command_id !== "string";
 
   useEffect(() => {
     if (!pendingTerminate) {

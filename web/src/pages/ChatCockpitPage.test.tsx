@@ -320,6 +320,28 @@ describe("ChatCockpitPage", () => {
     expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
   });
 
+  it("keeps a typed snapshot inbox gate waiting until its command synchronizes", () => {
+    useWorkspaceStore.setState({
+      flowKind: "single_candidate",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+
+    renderCockpit();
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("等待门禁命令同步后再提交反馈")).toBeVisible();
+    expect(within(inbox).queryByRole("button", { name: "编辑反馈" })).toBeNull();
+    expect(within(inbox).queryByRole("button", { name: "提交反馈" })).toBeNull();
+    expect(within(inbox).queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
+  });
+
   it("uses the shared shell inbox instead of a second session observer", () => {
     cockpitInbox.push({
       id: "other:gate",

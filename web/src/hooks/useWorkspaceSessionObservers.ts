@@ -132,9 +132,7 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
             setSessions(lifecycles.flatMap((lifecycle) => lifecycle.workspace_sessions));
           }
         } catch {
-          if (alive) {
-            setSessions([]);
-          }
+          // 保留上一次成功目录，避免瞬时 REST 失败拆除整个观察窗。
         } finally {
           if (alive && refreshIntervalMs > 0) {
             refreshTimer = scheduleRefresh(refreshCatalog, refreshIntervalMs);

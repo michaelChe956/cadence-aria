@@ -41,3 +41,16 @@
 ## 已知输出
 
 全量测试期间 `IssueLifecycleWorkbench.queue-density.test.tsx` 会打印 jsdom 对非 hash 页面导航未实现的既有 stderr；该测试本身通过，整套测试全绿。
+
+## 终审第二轮补修
+
+1. 收件箱 typed 快照改为以 `typeof item.gate?.turn?.command_id !== "string"` 判断命令是否已同步，覆盖 `turn: null` 的 durable snapshot，显示等待提示且不暴露反馈提交入口。
+2. 周期目录重拉失败保留最后一次成功的 `sessions`；继续安排下一次刷新，避免瞬时 REST 失败清空观察窗、重置 L1–L4 告警并触发重复通知。
+
+### 第二轮验证
+
+- `pnpm test src/pages/ChatCockpitPage.test.tsx src/hooks/useWorkspaceSessionObservers.test.tsx && pnpm exec tsc -b --pretty false`：27 测试通过，类型检查通过。
+- `pnpm test && pnpm exec tsc -b --pretty false`：145 文件、1228 测试通过，类型检查通过。
+- 已执行 `git diff --check`，无空白错误。
+
+全量测试仍会打印前述 jsdom 非 hash 页面导航 stderr；相关测试与全套测试均通过。
