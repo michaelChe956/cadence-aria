@@ -53,7 +53,7 @@ export function CodingBudgetGates({ gates, nowMs }: { gates: readonly CodingBudg
           >
             <div
               data-testid={`coding-budget-bar-${gate.kind}`}
-              className={gate.nearExhaustion ? "aria-pulse h-2 rounded-full transition-[width] duration-200" : "h-2 rounded-full transition-[width] duration-200"}
+              className={gate.nearExhaustion && !gate.frozen ? "aria-pulse h-2 rounded-full transition-[width] duration-200" : "h-2 rounded-full transition-[width] duration-200"}
               style={{
                 width: `${Math.round(gate.ratio * 100)}%`,
                 background: gate.nearExhaustion ? "var(--aria-warning)" : "var(--aria-primary)",

@@ -2,6 +2,7 @@ import { beforeEach, vi } from "vitest";
 import type { WorkItemExecutionPlan } from "../api/types";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
@@ -121,6 +122,7 @@ export function installCodingWorkspacePageTestHooks() {
     useCodingWorkspaceStore.getState().reset();
     useLinkedWorkspaceAmendmentStore.getState().reset(null);
     useWorkspaceStore.getState().reset();
+    useCodingLogStore.getState().reset();
     vi.clearAllMocks();
   });
 }

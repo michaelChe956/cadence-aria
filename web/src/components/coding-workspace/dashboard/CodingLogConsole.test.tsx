@@ -50,6 +50,16 @@ describe("CodingLogConsole", () => {
     expect(rendered.length).toBeLessThan(CODING_LOG_TAIL_LIMIT);
   });
 
+  it("caps the scroll container with an explicit max-height so its height stays content-independent", () => {
+    act(() => {
+      useCodingLogStore.getState().appendLines([line({ text: "only" })]);
+    });
+    const { container } = render(<CodingLogConsole />);
+    const scroller = container.querySelector('[data-testid="coding-log-console-scroll"]') as HTMLElement;
+    // jsdom 无布局,断言定高类存在:长日志下滚动容器高度不得跟随内容(否则虚拟化失效、外层被撑破)。
+    expect(scroller.className).toContain("max-h-[40vh]");
+  });
+
   it("shows an explicit empty state when no line matches", () => {
     render(<CodingLogConsole />);
     expect(screen.getByTestId("coding-log-empty")).toHaveTextContent("暂无日志");

@@ -8,7 +8,9 @@ import type {
   WorkspaceWsState,
 } from "./workspace-ws-store";
 
-// watch 候选 = 非终态活跃会话（REQ-UI37-07）；failed/terminated 为终态不占 K 槽（终审 P3 修复），其历史卡壳走 K 外降级语义。
+// watch 候选（REQ-UI37-07）= 活跃集合 {open, running, waiting_for_human, confirmed, change_requested, stopped_needs_human}。
+// 排除项:failed/terminated 为终态,不占 K 槽,历史卡壳走 K 外降级语义;blocked_provider_unavailable 为供给方
+// 临时不可用(非会话卡壳、无可交互动作),同样不占 K 槽。
 const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> = new Set([
   "open",
   "running",

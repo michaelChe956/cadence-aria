@@ -78,6 +78,16 @@ describe("CodingBudgetGates", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("剩余不足 10 分钟");
   });
 
+  it("stops pulsing a near-exhaustion bar once the gate freezes at completion", () => {
+    render(<CodingBudgetGates gates={[gate({ frozen: true })]} nowMs={NOW} />);
+    expect(screen.getByTestId("coding-budget-bar-work_item").className).not.toContain("aria-pulse");
+  });
+
+  it("keeps pulsing a near-exhaustion bar while the gate is still running", () => {
+    render(<CodingBudgetGates gates={[gate({ frozen: false })]} nowMs={NOW} />);
+    expect(screen.getByTestId("coding-budget-bar-work_item").className).toContain("aria-pulse");
+  });
+
   it("renders an explicit empty state before the coding stage begins", () => {
     render(<CodingBudgetGates gates={[]} nowMs={NOW} />);
     expect(screen.getByTestId("coding-budget-empty")).toHaveTextContent("尚未进入 Coding 阶段");

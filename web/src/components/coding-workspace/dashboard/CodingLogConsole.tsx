@@ -13,7 +13,6 @@ const PIN_THRESHOLD_PX = 24;
 export function CodingLogConsole() {
   const lines = useCodingLogStore((state) => state.lines);
   const [nodeFilter, setNodeFilter] = useState<string>(""); // "" = 全部节点
-  const scrollElementRef = useRef<HTMLDivElement | null>(null);
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
 
@@ -97,13 +96,10 @@ export function CodingLogConsole() {
         </div>
       ) : (
         <div
-          ref={(node) => {
-            scrollElementRef.current = node;
-            setScrollElement(node);
-          }}
+          ref={setScrollElement}
           data-testid="coding-log-console-scroll"
           onScroll={handleScroll}
-          className="min-h-0 overflow-auto rounded-md bg-[var(--aria-panel-subtle)]"
+          className="min-h-0 max-h-[40vh] overflow-auto rounded-md bg-[var(--aria-panel-subtle)]"
         >
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((item) => {
