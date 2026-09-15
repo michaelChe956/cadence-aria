@@ -84,27 +84,9 @@ function codingAuditRows(state: CodingWorkspaceState | null): OperationAuditRow[
   const completedFinalConfirm = state.timelineNodes.find(
     (node) => node.stage === "final_confirm" && node.status === "completed",
   );
-  if (completedFinalConfirm) {
-    return [codingTimelineRow(sessionId, completedFinalConfirm)];
-  }
-
-  if (state.status !== "completed" || state.pendingGates.length > 0) {
-    return [];
-  }
-
-  return [{
-    id: `rest_snapshot:coding-completed:${sessionId}`,
-    atMs: null,
-    atIso: null,
-    operator: OPERATOR_LABEL,
-    sessionId,
-    gateId: null,
-    operation: "final_confirm",
-    source: "system_recovery",
-    outcome: "completed",
-    detail: null,
-    evidence: "rest_snapshot",
-  }];
+  return completedFinalConfirm
+    ? [codingTimelineRow(sessionId, completedFinalConfirm)]
+    : [];
 }
 
 function codingTimelineRow(sessionId: string, node: CodingTimelineNode): OperationAuditRow {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { OperationAuditRecord } from "./cockpit-operation-semantics";
 import { selectOperationAuditRows } from "./operation-audit-projection";
+import type { CodingWorkspaceState } from "./coding-workspace-store";
+import { useCodingWorkspaceStore } from "./coding-workspace-store";
 import type { WorkspaceWsState } from "./workspace-ws-store";
 import { useWorkspaceStore } from "./workspace-ws-store";
 
@@ -26,6 +28,14 @@ function workspaceStateWith(overrides: Partial<WorkspaceWsState>): WorkspaceWsSt
   return {
     ...useWorkspaceStore.getState(),
     sessionId: "s1",
+    ...overrides,
+  };
+}
+
+function codingStateWith(overrides: Partial<CodingWorkspaceState>): CodingWorkspaceState {
+  return {
+    ...useCodingWorkspaceStore.getState(),
+    attemptId: "coding_attempt_1",
     ...overrides,
   };
 }
@@ -93,5 +103,52 @@ describe("operation audit projection", () => {
 
     expect(rows[0]?.evidence).toBe("local_command");
     expect(rows.at(-1)?.evidence).toBe("session_state");
+  });
+
+  it("does not invent final confirmation for a completed WorkItem review request without a timeline node", () => {
+    const rows = selectOperationAuditRows({
+      local: [],
+      workspaceState: null,
+      codingState: codingStateWith({
+        attemptScope: "work_item",
+        status: "completed",
+        stage: "code_review",
+        timelineNodes: [],
+        pendingGates: [],
+      }),
+      target: null,
+    });
+
+    expect(rows).toEqual([]);
+  });
+
+  it("derives final confirmation only from a completed timeline node", () => {
+    const rows = selectOperationAuditRows({
+      local: [],
+      workspaceState: null,
+      codingState: codingStateWith({
+        status: "completed",
+        timelineNodes: [{
+          id: "final_confirm_1",
+          attempt_id: "coding_attempt_1",
+          stage: "final_confirm",
+          title: "最终确认",
+          status: "completed",
+          agent_role: "system",
+          summary: null,
+          started_at: "2026-09-16T00:00:00.000Z",
+          completed_at: "2026-09-16T00:01:00.000Z",
+          artifact_refs: [],
+        }],
+      }),
+      target: null,
+    });
+
+    expect(rows).toEqual([expect.objectContaining({
+      id: "rest_snapshot:coding-final-confirm:coding_attempt_1:final_confirm_1",
+      operation: "final_confirm",
+      outcome: "completed",
+      evidence: "rest_snapshot",
+    })]);
   });
 });
