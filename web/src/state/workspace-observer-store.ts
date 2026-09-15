@@ -2,6 +2,11 @@ import type { WorkspaceSessionSummary, WsOutMessage } from "../api/types";
 import { workspaceSessionWebSocketUrl } from "../api/client";
 import type { CockpitInboxItem } from "./workspace-cockpit-projection";
 import { selectCockpitInbox } from "./workspace-cockpit-projection";
+import {
+  normalizeWorkspaceArtifact,
+  workItemPlanProjectionArtifactsFromVersions,
+  workItemPlanVersionsFromSession,
+} from "./workspace-ws-store-helpers";
 import type {
   AdvanceCommandState,
   HumanGateTurnState,
@@ -298,6 +303,22 @@ export function observerStateFromSessionState(
   message: WorkspaceSessionStateMessage,
 ): WorkspaceWsState {
   const timelineNodes = message.timeline_nodes ?? [];
+  // H2（计划双审裁决）：takeover 观测态同样补全 artifact 轮次与 plan projection，
+  // 供 ③ 区计划审批视图消费——session_state 本就携带版本摘要与结构化投影。
+  const fullArtifactVersions = (message.artifact_versions ?? []).map(
+    (version) => ({ ...version, markdown: version.markdown ?? "" }),
+  );
+  const artifactVersions =
+    message.artifact_version_summaries ?? fullArtifactVersions;
+  const { workItemPlanArtifact } = normalizeWorkspaceArtifact(message.artifact);
+  const workItemPlanArtifactVersions = workItemPlanVersionsFromSession(
+    artifactVersions,
+    fullArtifactVersions,
+    workItemPlanArtifact,
+    message.active_node_id ?? null,
+    message.providers.author,
+    message.providers.reviewer ?? null,
+  );
   return {
     sessionId: message.session_id,
     workspaceType: message.workspace_type,
@@ -324,6 +345,10 @@ export function observerStateFromSessionState(
     error: null,
     advanceCommands: {},
     snapshotGateOpenedAt: message.human_gate_snapshot ? new Date().toISOString() : null,
+    artifactVersions,
+    workItemPlanArtifactVersions,
+    workItemPlanProjectionArtifacts:
+      workItemPlanProjectionArtifactsFromVersions(workItemPlanArtifactVersions),
   } as unknown as WorkspaceWsState;
 }
 

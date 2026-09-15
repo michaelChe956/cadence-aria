@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WorkspaceSessionSummary } from "../api/types";
+import type { PlanProjectionBundle, WorkspaceSessionSummary } from "../api/types";
 import type { WorkspaceWsState } from "./workspace-ws-store";
 import {
   createObserverController,
@@ -284,6 +284,114 @@ describe("workspace observer store", () => {
     expect(state.chatEntries).toEqual([
       expect.objectContaining({ content: "子会话对话" }),
     ]);
+  });
+
+  it("derives artifact versions and plan projection for the takeover plan approval view", () => {
+    const planProjection: PlanProjectionBundle = {
+      id: "bundle_0001",
+      plan_revision_id: "plan_rev_0002",
+      dependency_graph_revision_id: "graph_rev_0001",
+      work_item_projection_bundle_refs: [],
+      human_group_projection: {
+        plan_id: "plan_0001",
+        goal: "g",
+        split_reason: "s",
+        work_items: [],
+        contract_flow: [],
+        risks: [],
+        source_refs: [],
+        normative: false,
+        used_by_provider: false,
+      },
+      coder_group_context: {
+        plan_id: "plan_0001",
+        ordered_logical_work_item_ids: [],
+        dependency_edges: [],
+        group_write_scopes: {},
+      },
+      reviewer_group_matrix: {
+        plan_id: "plan_0001",
+        work_items: [],
+        dependency_edges: [],
+        design_traceability_refs: [],
+      },
+      human_group_projection_hash: "h1",
+      coder_group_context_hash: "h2",
+      reviewer_group_matrix_hash: "h3",
+      compiler_version: "v1",
+      created_at: "2026-09-14T08:00:00Z",
+    };
+    const state = observerStateFromSessionState({
+      type: "session_state",
+      session_id: "child_plan_001",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      superpowers_enabled: false,
+      openspec_enabled: false,
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: false,
+          created_at: "2026-09-14T08:00:00Z",
+          source_node_id: "node_1",
+        },
+        {
+          version: 2,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-09-14T09:00:00Z",
+          source_node_id: "node_2",
+          plan_projection: planProjection,
+        },
+      ],
+      artifact_version_summaries: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          created_at: "2026-09-14T08:00:00Z",
+          source_node_id: "node_1",
+        },
+        {
+          version: 2,
+          generated_by: "claude_code",
+          created_at: "2026-09-14T09:00:00Z",
+          source_node_id: "node_2",
+          is_current: true,
+        },
+      ],
+      timeline_node_details: {},
+      active_run_id: null,
+      human_presentation_revisions: [],
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+    });
+
+    expect(state.artifactVersions.map((version) => version.version)).toEqual([1, 2]);
+    expect(state.workItemPlanProjectionArtifacts.planProjection?.id).toBe(
+      "bundle_0001",
+    );
   });
 
   it("keys merged inbox entries by session and sorts severity before session id", () => {

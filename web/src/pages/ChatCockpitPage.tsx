@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { takeoverWorkspaceSession } from "../api/client";
+import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
+import { PlanApprovalPanel } from "../components/chat-workspace/cockpit/PlanApprovalPanel";
 import {
   useCockpitObservedRecords,
   useCockpitSessionWatch,
@@ -21,7 +23,7 @@ import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { selectCockpitFlow } from "../state/workspace-cockpit-projection";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
-import { scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
+import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
@@ -75,6 +77,39 @@ export function ChatCockpitPage({
   const { loadContent, cacheContent: cacheCurrentContent } = useWorkspaceContentLoaders(selectedSessionId);
   const cacheContent = takeoverSessionId === null ? cacheCurrentContent : undefined;
   const [drilldownNodeId, setDrilldownNodeId] = useState<string | null>(null);
+  const [drilldownView, setDrilldownView] = useState<"conversation" | "plan">(
+    "conversation",
+  );
+  const [jumpEntryId, setJumpEntryId] = useState<string | null>(null);
+  const isPlanApprovalSession = selectedState?.workspaceType === "work_item_plan";
+  const artifactContentCacheValues = useMemo(
+    () =>
+      numericContentCacheValues(
+        selectedState?.artifactContentCache ?? state.artifactContentCache,
+      ),
+    [selectedState?.artifactContentCache, state.artifactContentCache],
+  );
+  const loadVersionMarkdown = useCallback(
+    async (version: number) => {
+      const response = await fetchWorkspaceArtifactVersion(selectedSessionId, version);
+      return response.markdown;
+    },
+    [selectedSessionId],
+  );
+  const cacheVersionMarkdown = useCallback(
+    (version: number, markdown: string) => {
+      const storeState = useWorkspaceStore.getState();
+      if (storeState.sessionId !== selectedSessionId) {
+        return;
+      }
+      storeState.setArtifactContentCacheEntry(version, markdown);
+    },
+    [selectedSessionId],
+  );
+  const handleJumpToEntry = useCallback((entryId: string) => {
+    setDrilldownView("conversation");
+    setJumpEntryId(entryId);
+  }, []);
   const actions = useMemo(
     () =>
       createCockpitActionFacade({
@@ -119,6 +154,14 @@ export function ChatCockpitPage({
       chatListRef.current?.scrollToEntry(drilldownEntryId);
     }
   }, [drilldownEntryId]);
+
+  useEffect(() => {
+    if (!jumpEntryId) {
+      return;
+    }
+    chatListRef.current?.scrollToEntry(jumpEntryId);
+    setJumpEntryId(null);
+  }, [jumpEntryId]);
 
   return (
     <div
@@ -180,19 +223,59 @@ export function ChatCockpitPage({
             aria-label="下钻对话流"
             className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
           >
-            <h2 className="px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
-              对话流
-            </h2>
-            <ChatEntryList
-              ref={chatListRef}
-              entries={selectedState?.chatEntries ?? []}
-              actions={takeoverSessionId === null ? actions : undefined}
-              contentCache={contentCacheValues}
-              loadContent={loadContent}
-              onCacheContent={cacheContent}
-              sessionId={selectedSessionId}
-              testId="cockpit-conversation-flow-list"
-            />
+            <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+              <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
+              {isPlanApprovalSession ? (
+                <div
+                  role="tablist"
+                  aria-label="下钻视图"
+                  className="ml-auto flex items-center gap-1"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={drilldownView === "conversation"}
+                    data-testid="cockpit-conversation-tab"
+                    onClick={() => setDrilldownView("conversation")}
+                    className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                  >
+                    对话流
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={drilldownView === "plan"}
+                    data-testid="cockpit-plan-approval-tab"
+                    onClick={() => setDrilldownView("plan")}
+                    className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                  >
+                    计划审批
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            {drilldownView === "plan" && isPlanApprovalSession ? (
+              <PlanApprovalPanel
+                key={selectedSessionId}
+                sessionId={selectedSessionId}
+                state={selectedState ?? state}
+                onJumpToEntry={handleJumpToEntry}
+                artifactContentCache={artifactContentCacheValues}
+                loadVersionMarkdown={loadVersionMarkdown}
+                onCacheVersionMarkdown={cacheVersionMarkdown}
+              />
+            ) : (
+              <ChatEntryList
+                ref={chatListRef}
+                entries={selectedState?.chatEntries ?? []}
+                actions={takeoverSessionId === null ? actions : undefined}
+                contentCache={contentCacheValues}
+                loadContent={loadContent}
+                onCacheContent={cacheContent}
+                sessionId={selectedSessionId}
+                testId="cockpit-conversation-flow-list"
+              />
+            )}
           </section>
         </div>
       </main>

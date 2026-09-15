@@ -81,7 +81,7 @@ export function ContractChecklistView({
                   <h4 className="text-[11px] font-semibold text-[var(--aria-ink-muted)]">
                     Required
                   </h4>
-                  <p className="mt-1 text-[var(--aria-ink)]">
+                  <p className="mt-1 break-all text-[var(--aria-ink)]">
                     {row.to} 需要 {row.capability}
                   </p>
                 </div>
