@@ -761,6 +761,82 @@ describe("ChatCockpitPage", () => {
         "当前计划没有 capability / 契约条目",
       );
     });
+
+    it("loads the observed child session's own artifact rounds instead of the parent cache", async () => {
+      const user = userEvent.setup();
+      vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+        workspace_session_id: "child_plan_002",
+      } as TakeoverResponse);
+      cockpitInbox.push(stoppedItem("session_001"));
+      // 操作者先在自己会话看过 v1/v2 轮次：主 store 缓存已持有主会话 markdown。
+      const store = useWorkspaceStore.getState();
+      store.setArtifactContentCacheEntry(1, "# 主会话\nAAA\n");
+      store.setArtifactContentCacheEntry(2, "# 主会话\nBBB\n");
+      cockpitObservedRecords.push({
+        sessionId: "child_plan_002",
+        state: observerStateFromSessionState({
+          type: "session_state",
+          session_id: "child_plan_002",
+          workspace_type: "work_item_plan",
+          stage: "human_confirm",
+          superpowers_enabled: false,
+          openspec_enabled: false,
+          messages: [],
+          checkpoints: [],
+          artifact: null,
+          providers: { author: "claude_code", reviewer: null },
+          timeline_nodes: [],
+          active_node_id: null,
+          artifact_versions: [],
+          artifact_version_summaries: [
+            {
+              version: 1,
+              generated_by: "claude_code",
+              created_at: "2026-09-14T08:00:00Z",
+              source_node_id: "node_1",
+            },
+            {
+              version: 2,
+              generated_by: "claude_code",
+              created_at: "2026-09-14T09:00:00Z",
+              source_node_id: "node_2",
+              is_current: true,
+            },
+          ],
+          timeline_node_details: {},
+          active_run_id: null,
+          human_presentation_revisions: [],
+          session_status: "waiting_for_human",
+          flow_kind: "legacy",
+          run_policy: "interactive",
+          run_history: {
+            seen_fingerprints: [],
+            repairs_used: 0,
+            manual_repairs_used: 0,
+            transitions_used: 0,
+            initial_review_count: 0,
+            verification_review_count: 0,
+          },
+        }),
+      });
+      vi.mocked(fetchWorkspaceArtifactVersion).mockReset();
+      vi.mocked(fetchWorkspaceArtifactVersion)
+        .mockResolvedValueOnce({ version: 1, markdown: "# 子会话\nCCC\n" })
+        .mockResolvedValueOnce({ version: 2, markdown: "# 子会话\nDDD\n" });
+
+      renderCockpit();
+      await user.click(screen.getByRole("button", { name: "接管" }));
+      await user.click(screen.getByRole("button", { name: "确认接管" }));
+      await user.click(await screen.findByTestId("cockpit-plan-approval-tab"));
+
+      const summary = await screen.findByTestId("revision-diff-summary");
+      expect(summary).toHaveTextContent("基准 v1 → 目标 v2");
+      // 防串显：渲染内容来自子会话 fetch，主会话缓存不得泄入。
+      expect(screen.getByTestId("revision-diff-hunk")).toHaveTextContent("DDD");
+      expect(screen.queryAllByText(/主会话/)).toHaveLength(0);
+      expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("child_plan_002", 1);
+      expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("child_plan_002", 2);
+    });
   });
 });
 function stoppedItem(sessionId: string): CockpitInboxItem {

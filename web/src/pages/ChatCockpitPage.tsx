@@ -84,10 +84,12 @@ export function ChatCockpitPage({
   const isPlanApprovalSession = selectedState?.workspaceType === "work_item_plan";
   const artifactContentCacheValues = useMemo(
     () =>
-      numericContentCacheValues(
-        selectedState?.artifactContentCache ?? state.artifactContentCache,
-      ),
-    [selectedState?.artifactContentCache, state.artifactContentCache],
+      // 轮次缓存键是裸版本号，跨会话会碰撞（P1，审查 fix round 1）：
+      // takeover 观测态不回退主 store 缓存，传空缓存走子会话 fetch——对齐 cacheContent 三元模式。
+      takeoverSessionId === null
+        ? numericContentCacheValues(state.artifactContentCache)
+        : {},
+    [takeoverSessionId, state.artifactContentCache],
   );
   const loadVersionMarkdown = useCallback(
     async (version: number) => {
