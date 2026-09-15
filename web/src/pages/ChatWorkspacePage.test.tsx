@@ -588,7 +588,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
 
     const submit = screen.getByRole("button", { name: "提交反馈" });
     expect(submit).toBeDisabled();
-    await userEvent.type(screen.getByLabelText("反馈内容"), "请补齐边界");
+    await userEvent.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
     await userEvent.click(submit);
     expect(feedback).toHaveBeenCalledWith("请补齐边界", "stable_command_001");
   });

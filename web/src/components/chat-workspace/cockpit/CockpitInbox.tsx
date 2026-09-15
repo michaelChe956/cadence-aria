@@ -1,7 +1,9 @@
-import { AlertTriangle, Check, ClipboardList, CircleAlert, RotateCcw, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { AlertTriangle, Check, ClipboardList, CircleAlert, RotateCcw } from "lucide-react";
+import { useState } from "react";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
+import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
+import { GateFeedbackEditor } from "./GateFeedbackEditor";
 import { useCockpitInboxPulse } from "../../cockpit/CockpitShell";
 
 const KIND_GLYPH = {
@@ -69,21 +71,8 @@ function CockpitInboxRow({
 }) {
   const pulse = useCockpitInboxPulse(item.id);
   const Glyph = KIND_GLYPH[item.kind];
-  const [pendingTerminate, setPendingTerminate] = useState(false);
-  const [pendingTakeover, setPendingTakeover] = useState(false);
   const [takeoverError, setTakeoverError] = useState<string | null>(null);
   const [takeoverDisabled, setTakeoverDisabled] = useState(false);
-
-  useEffect(() => {
-    if (!pendingTerminate && !pendingTakeover) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setPendingTerminate(false);
-      setPendingTakeover(false);
-    }, 10_000);
-    return () => window.clearTimeout(timer);
-  }, [pendingTakeover, pendingTerminate]);
 
   const sessionId = sessionIdForItem(item.id);
   return (
@@ -116,23 +105,23 @@ function CockpitInboxRow({
         ) : null}
         {item.kind === "stopped" && onTakeover ? (
           <div className="mt-2 flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={takeoverDisabled || sessionId === null}
-              title={sessionId === null ? "无法识别会话，不能接管" : undefined}
-              onClick={() => {
-                if (sessionId === null) {
-                  return;
-                }
-                if (!pendingTakeover) {
-                  setPendingTakeover(true);
-                  return;
-                }
-                void onTakeover(sessionId)
-                  .then(() => {
-                    setPendingTakeover(false);
-                  })
-                  .catch((error: unknown) => {
+            {takeoverDisabled ? (
+              <button
+                type="button"
+                disabled
+                className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              >
+                接管
+              </button>
+            ) : (
+              <ConfirmTwiceButton
+                label="接管"
+                confirmLabel="确认接管"
+                onConfirm={() => {
+                  if (sessionId === null) {
+                    return;
+                  }
+                  void onTakeover(sessionId).catch((error: unknown) => {
                     if (
                       typeof error === "object" &&
                       error !== null &&
@@ -151,18 +140,14 @@ function CockpitInboxRow({
                         `workspace_session_takeover_not_allowed${reason ? ` · ${reason}` : ""}`,
                       );
                       setTakeoverDisabled(true);
-                    } else {
-                      const message = error instanceof Error ? error.message : "未知错误";
-                      setTakeoverError(`接管失败：${message}`);
+                      return;
                     }
-                    setPendingTakeover(false);
+                    const message = error instanceof Error ? error.message : "未知错误";
+                    setTakeoverError(`接管失败：${message}`);
                   });
-              }}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            >
-              <CircleAlert className="h-3.5 w-3.5" aria-hidden="true" />
-              {pendingTakeover ? "确认接管" : "接管"}
-            </button>
+                }}
+              />
+            )}
           </div>
         ) : null}
         {item.kind === "hard_error" && actions && actionable ? (
@@ -177,21 +162,11 @@ function CockpitInboxRow({
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
               重试
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (pendingTerminate) {
-                  actions.terminate();
-                  setPendingTerminate(false);
-                  return;
-                }
-                setPendingTerminate(true);
-              }}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            >
-              <X className="h-3.5 w-3.5" aria-hidden="true" />
-              {pendingTerminate ? "确认终止" : "终止"}
-            </button>
+            <ConfirmTwiceButton
+              label="终止"
+              confirmLabel="确认终止"
+              onConfirm={actions.terminate}
+            />
           </div>
         ) : null}
       </div>
@@ -206,61 +181,26 @@ function GateInboxActions({
   item: CockpitInboxItem;
   actions: CockpitActionFacade;
 }) {
-  const [pendingTerminate, setPendingTerminate] = useState(false);
-  const [feedbackEditorOpen, setFeedbackEditorOpen] = useState(false);
   const [feedback, setFeedback] = useState("");
   const typed = item.gate?.flow_kind === "single_candidate";
   const typedGateAwaitingCommand =
     typed && typeof item.gate?.turn?.command_id !== "string";
-
-  useEffect(() => {
-    if (!pendingTerminate) {
-      return;
-    }
-    const timer = window.setTimeout(() => setPendingTerminate(false), 10_000);
-    return () => window.clearTimeout(timer);
-  }, [pendingTerminate]);
 
   return (
     <div className="mt-2 flex flex-wrap gap-2">
       {typed ? (
         <>
           {typedGateAwaitingCommand ? (
-            // 无活 turn（重连/刷新后仅剩快照门）：提示态而非禁用态——
-            // 引擎允许客户端自生成 command_id 开新回合提交反馈。
             <p className="w-full text-xs text-[var(--aria-ink-muted)]">
               未同步门命令，将以新命令提交
             </p>
           ) : null}
-          {feedbackEditorOpen ? (
-            <>
-              <textarea
-                aria-label="门禁反馈"
-                value={feedback}
-                onChange={(event) => setFeedback(event.target.value)}
-                placeholder="请输入反馈内容"
-                className="min-h-11 w-full rounded-md border border-[var(--aria-line-strong)] bg-white px-3 py-2 text-xs text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-              />
-              <button
-                type="button"
-                disabled={!feedback.trim()}
-                onClick={() => actions.feedback(feedback)}
-                className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-              >
-                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                提交反馈
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setFeedbackEditorOpen(true)}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            >
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              编辑反馈
-            </button>
-          )}
+          <GateFeedbackEditor
+            multiline
+            value={feedback}
+            onChange={setFeedback}
+            onSubmit={actions.feedback}
+          />
         </>
       ) : (
         <button
@@ -279,27 +219,17 @@ function GateInboxActions({
       )}
       <button
         type="button"
-        onClick={() => actions.confirm()}
+        onClick={actions.confirm}
         className="inline-flex min-h-11 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
       >
         <Check className="h-3.5 w-3.5" aria-hidden="true" />
         确认
       </button>
-      <button
-        type="button"
-        onClick={() => {
-          if (pendingTerminate) {
-            actions.terminate();
-            setPendingTerminate(false);
-            return;
-          }
-          setPendingTerminate(true);
-        }}
-        className="inline-flex min-h-11 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-      >
-        <X className="h-3.5 w-3.5" aria-hidden="true" />
-        {pendingTerminate ? "确认终止" : "终止"}
-      </button>
+      <ConfirmTwiceButton
+        label="终止"
+        confirmLabel="确认终止"
+        onConfirm={actions.terminate}
+      />
     </div>
   );
 }

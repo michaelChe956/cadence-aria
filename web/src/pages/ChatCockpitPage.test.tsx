@@ -168,6 +168,27 @@ describe("ChatCockpitPage", () => {
 
     expect(sendAdvance).toHaveBeenCalledWith("command_001");
   });
+
+  it("routes a manual advance through workspace sendAdvance only after a confirmed gate", async () => {
+    const sendAdvance = vi.fn(() => true);
+    mockWorkspaceWs({ sendAdvance });
+    useWorkspaceStore.setState({
+      humanGateClosure: { decision: "confirm", stage: "human_confirm" },
+    });
+    renderCockpit("session_001", false);
+
+    await userEvent.click(screen.getByRole("button", { name: "手动推进" }));
+    expect(sendAdvance).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render or send manual advance without a confirmed advance state", () => {
+    const sendAdvance = vi.fn(() => true);
+    mockWorkspaceWs({ sendAdvance });
+    renderCockpit("session_001", false);
+
+    expect(screen.queryByRole("button", { name: "手动推进" })).toBeNull();
+    expect(sendAdvance).not.toHaveBeenCalled();
+  });
   it("watches and selects the child session after a successful takeover", async () => {
     const user = userEvent.setup();
     vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
@@ -296,7 +317,7 @@ describe("ChatCockpitPage", () => {
     const gateEntry = screen.getByTestId("gate-prompt-entry");
     const submit = within(gateEntry).getByRole("button", { name: "提交反馈" });
     expect(submit).toBeDisabled();
-    await user.type(within(gateEntry).getByLabelText("反馈内容"), "请补齐边界");
+    await user.type(within(gateEntry).getByLabelText("门禁反馈"), "请补齐边界");
     await user.click(submit);
 
     expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
@@ -312,8 +333,7 @@ describe("ChatCockpitPage", () => {
     store.rebuildChatEntries();
 
     renderCockpit("session_001", false);
-    await user.click(screen.getByRole("button", { name: "编辑反馈" }));
-    const feedbackInput = screen.getByLabelText("门禁反馈");
+    const feedbackInput = within(screen.getByTestId("cockpit-inbox")).getByLabelText("门禁反馈");
     const submit = within(screen.getByTestId("cockpit-inbox")).getByRole("button", {
       name: "提交反馈",
     });
@@ -346,9 +366,8 @@ describe("ChatCockpitPage", () => {
     // 刷新/断连后仅剩快照门（无活 turn）：不阻断，给次要提示并允许提交。
     expect(within(inbox).getByText("未同步门命令，将以新命令提交")).toBeVisible();
     expect(within(inbox).queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
-    await user.click(within(inbox).getByRole("button", { name: "编辑反馈" }));
     const submit = within(inbox).getByRole("button", { name: "提交反馈" });
-    await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
+    await user.type(within(inbox).getByLabelText("门禁反馈"), "请补齐边界");
     await user.click(submit);
 
     expect(feedback).toHaveBeenCalledTimes(1);

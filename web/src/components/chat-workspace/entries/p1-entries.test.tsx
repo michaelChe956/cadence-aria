@@ -275,7 +275,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { summary: "可以进入人工确认" },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
     fireEvent.click(screen.getByRole("button", { name: "终止" }));
     fireEvent.click(screen.getByRole("button", { name: "确认终止" }));
@@ -296,7 +296,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { verdict: "needs_human", summary: "需要先确认弹窗触发时机" },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "提交人工确认" }));
 
     expect(screen.getAllByText("需要人工确认").length).toBeGreaterThanOrEqual(1);
@@ -317,7 +317,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认使用当前版本" }));
 
     expect(screen.queryByRole("button", { name: "采纳建议并返修" })).not.toBeInTheDocument();
@@ -346,7 +346,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "采纳建议并返修" }));
 
     expect(screen.getByRole("button", { name: "确认使用当前版本" })).toBeInTheDocument();
@@ -376,7 +376,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(screen.getByText("需要判断 reviewer 意图")).toBeInTheDocument();
@@ -406,7 +406,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "采纳建议并返修" }));
 
     expect(screen.queryByText("请在下方输入人工修改说明后发送返修。")).not.toBeInTheDocument();
@@ -445,7 +445,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
     expect(screen.queryByRole("button", { name: "按 reviewer 意见返修" })).not.toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
   });
@@ -456,6 +456,7 @@ describe("chat workspace p1 entries", () => {
       requestChange: vi.fn(),
       feedback: vi.fn(),
       terminate: vi.fn(),
+      advance: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -466,12 +467,14 @@ describe("chat workspace p1 entries", () => {
     });
 
     render(<GatePromptEntry entry={entry} actions={actions} />);
+    expect(screen.getByTestId("gate-feedback-editor")).toBeVisible();
+    expect(screen.getByTestId("confirm-twice-button")).toBeVisible();
     const submit = screen.getByRole("button", { name: "提交反馈" });
-    expect(screen.getByLabelText("反馈内容")).toHaveValue("");
+    expect(screen.getByLabelText("门禁反馈")).toHaveValue("");
     expect(submit).toBeDisabled();
     expect(screen.queryByRole("button", { name: /返修|请求变更/ })).toBeNull();
 
-    await user.type(screen.getByLabelText("反馈内容"), "请补齐边界");
+    await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
     await user.click(submit);
 
     expect(actions.feedback).toHaveBeenCalledWith("请补齐边界");
@@ -483,6 +486,7 @@ describe("chat workspace p1 entries", () => {
       requestChange: vi.fn(),
       feedback: vi.fn(),
       terminate: vi.fn(),
+      advance: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -504,7 +508,7 @@ describe("chat workspace p1 entries", () => {
     // 快照门仍不得走 legacy 返修路径。
     expect(screen.queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
 
-    await user.type(screen.getByLabelText("反馈内容"), "请补齐边界");
+    await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
     await user.click(submit);
 
     expect(actions.feedback).toHaveBeenCalledWith("请补齐边界");
@@ -517,6 +521,7 @@ describe("chat workspace p1 entries", () => {
       requestChange: vi.fn(),
       feedback: vi.fn(),
       terminate: vi.fn(),
+      advance: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -552,7 +557,7 @@ describe("chat workspace p1 entries", () => {
       resolution,
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
 
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认产物" })).not.toBeInTheDocument();
@@ -572,7 +577,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
 
     for (const confirmName of [
       "确认产物",
@@ -627,7 +632,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { workspace_type: workspaceType },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate") }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), requestChange: (payload) => onDecision("request-change", payload), feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
 
     fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
     expect(screen.getByRole("button", { name: "终止" })).toBeInTheDocument();

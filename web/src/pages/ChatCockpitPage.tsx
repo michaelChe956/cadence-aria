@@ -19,8 +19,8 @@ import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders"
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
+import { selectCockpitFlow, selectGateProjection } from "../state/workspace-cockpit-projection";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
-import { selectCockpitFlow } from "../state/workspace-cockpit-projection";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
@@ -120,16 +120,27 @@ export function ChatCockpitPage({
           typeof state.humanGateTurn?.command_id === "string"
             ? state.humanGateTurn.command_id
             : null,
-        sendHumanConfirm: workspaceWs.sendHumanConfirm,
+        sendHumanConfirm: (decision, payload) => {
+          if (selectGateProjection(state)?.closed !== null) {
+            return false;
+          }
+          return payload === undefined
+            ? workspaceWs.sendHumanConfirm(decision)
+            : workspaceWs.sendHumanConfirm(decision, payload);
+        },
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+        sendAdvance: workspaceWs.sendAdvance,
       }),
     [
-      state.flowKind,
+      state,
       state.humanGateTurn?.command_id,
+      workspaceWs.sendAdvance,
       workspaceWs.sendHumanConfirm,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
+  const canManualAdvance =
+    state.humanGateClosure?.decision === "confirm" || state.sessionStatus === "confirmed";
   const handleTakeover = async (parentSessionId: string) => {
     const child = await takeoverWorkspaceSession(parentSessionId);
     watchSession(child.workspace_session_id);
@@ -181,6 +192,15 @@ export function ChatCockpitPage({
         </button>
         <span className="aria-mono text-xs text-[var(--aria-ink-muted)]">{sessionId}</span>
         <span className="text-xs text-[var(--aria-ink-muted)]">{watchWindow}</span>
+        {canManualAdvance ? (
+          <button
+            type="button"
+            onClick={actions.advance}
+            className="inline-flex min-h-11 items-center rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            手动推进
+          </button>
+        ) : null}
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 lg:grid-cols-[20rem_minmax(0,1fr)]">

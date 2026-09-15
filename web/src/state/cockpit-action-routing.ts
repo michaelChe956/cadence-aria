@@ -6,6 +6,7 @@ export type CockpitActionFacade = {
   requestChange(payload: CockpitRequestChangePayload): void;
   feedback(feedback: string): void;
   terminate(): void;
+  advance(): void;
 };
 
 export type CockpitRequestChangePayload = {
@@ -27,6 +28,7 @@ export function createCockpitActionFacade(input: {
     payload?: unknown,
   ) => boolean;
   sendHumanGateFeedback: (feedback: string, commandId?: string) => boolean;
+  sendAdvance: (commandId?: string) => boolean;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -51,6 +53,9 @@ export function createCockpitActionFacade(input: {
     },
     terminate() {
       input.sendHumanConfirm("terminate");
+    },
+    advance() {
+      input.sendAdvance(newCommandId());
     },
   };
 }

@@ -1,5 +1,5 @@
-import { Check, RotateCcw, Send, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Check, RotateCcw } from "lucide-react";
+import { useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { GATE_TRIGGER_LABELS } from "../../../state/workspace-cockpit-projection";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
@@ -9,6 +9,8 @@ import type {
   CockpitRequestChangePayload,
 } from "../../../state/cockpit-action-routing";
 import { trustedReviewComments } from "../../../state/workspace-review-trust";
+import { ConfirmTwiceButton } from "../cockpit/ConfirmTwiceButton";
+import { GateFeedbackEditor } from "../cockpit/GateFeedbackEditor";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
 export function GatePromptEntry({
@@ -18,16 +20,7 @@ export function GatePromptEntry({
   entry: ChatEntry;
   actions?: CockpitActionFacade;
 }) {
-  const [pendingTerminate, setPendingTerminate] = useState(false);
   const [feedback, setFeedback] = useState("");
-
-  useEffect(() => {
-    if (!pendingTerminate) {
-      return;
-    }
-    const timer = window.setTimeout(() => setPendingTerminate(false), 10_000);
-    return () => window.clearTimeout(timer);
-  }, [pendingTerminate]);
   const summary = summaryFromEntry(entry);
   const verdict = verdictFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
@@ -126,27 +119,12 @@ export function GatePromptEntry({
         ) : actions ? (
           <div className="space-y-2">
             {actionFacade === "typed" ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="sr-only" htmlFor={`gate-feedback-${entry.id}`}>
-                  反馈内容
-                </label>
-                <input
-                  id={`gate-feedback-${entry.id}`}
-                  value={feedback}
-                  onChange={(event) => setFeedback(event.target.value)}
-                  placeholder="请输入反馈内容"
-                  className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                />
-                <button
-                  type="button"
-                  disabled={!feedback.trim()}
-                  onClick={() => actions.feedback(feedback)}
-                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                >
-                  <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                  提交反馈
-                </button>
-              </div>
+              <GateFeedbackEditor
+                multiline={false}
+                value={feedback}
+                onChange={setFeedback}
+                onSubmit={actions.feedback}
+              />
             ) : null}
             {typedGateAwaitingCommand ? (
               // 无活 turn（重连/刷新后仅剩快照门）：提示态而非禁用态——
@@ -176,21 +154,11 @@ export function GatePromptEntry({
                   {requestChangeLabel}
                 </button>
               ) : null}
-              <button
-                type="button"
-                onClick={() => {
-                  if (pendingTerminate) {
-                    actions.terminate();
-                    setPendingTerminate(false);
-                    return;
-                  }
-                  setPendingTerminate(true);
-                }}
-                className="inline-flex min-h-11 items-center gap-1 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-              >
-                <X className="h-3.5 w-3.5" aria-hidden="true" />
-                {pendingTerminate ? "确认终止" : "终止"}
-              </button>
+              <ConfirmTwiceButton
+                label="终止"
+                confirmLabel="确认终止"
+                onConfirm={actions.terminate}
+              />
             </div>
           </div>
         ) : null}

@@ -38,6 +38,7 @@ import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
+import { selectGateProjection } from "../state/workspace-cockpit-projection";
 import type {
   ChatEntry,
   ChoiceResponsePayload,
@@ -202,10 +203,24 @@ export function LegacyChatWorkspacePage({
       createCockpitActionFacade({
         flowKind,
         commandId: humanGateCommandId,
-        sendHumanConfirm,
+        sendHumanConfirm: (decision, payload) => {
+          if (selectGateProjection(useWorkspaceStore.getState())?.closed !== null) {
+            return false;
+          }
+          return payload === undefined
+            ? sendHumanConfirm(decision)
+            : sendHumanConfirm(decision, payload);
+        },
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+        sendAdvance: workspaceWs.sendAdvance,
       }),
-    [flowKind, humanGateCommandId, sendHumanConfirm, workspaceWs.sendHumanGateFeedback],
+    [
+      flowKind,
+      humanGateCommandId,
+      sendHumanConfirm,
+      workspaceWs.sendAdvance,
+      workspaceWs.sendHumanGateFeedback,
+    ],
   );
   const selectedEntryId = useMemo(
     () =>

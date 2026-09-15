@@ -88,6 +88,7 @@ describe("cockpit gate action facade", () => {
       commandId: null,
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback,
+      sendAdvance: vi.fn(() => true),
     });
 
     actions.feedback("请补齐边界");
@@ -110,8 +111,8 @@ describe("cockpit gate action facade", () => {
       commandId: "cmd_1",
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback,
+      sendAdvance: vi.fn(() => true),
     });
-
     actions.feedback("请补齐边界");
 
     expect(sendHumanGateFeedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
@@ -126,10 +127,24 @@ describe("cockpit gate action facade", () => {
       commandId: "cmd_1",
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback,
+      sendAdvance: vi.fn(() => true),
     });
-
     actions.feedback("请补齐边界");
 
     expect(sendHumanGateFeedback).not.toHaveBeenCalled();
+  });
+
+  it("sends a manual advance exactly once through the same facade", () => {
+    const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
+    createCockpitActionFacade({
+      flowKind: "legacy",
+      commandId: null,
+      sendHumanConfirm: vi.fn(() => true),
+      sendHumanGateFeedback: vi.fn(() => true),
+      sendAdvance,
+    }).advance();
+
+    expect(sendAdvance).toHaveBeenCalledTimes(1);
+    expect(sendAdvance.mock.calls[0]?.[0]).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
