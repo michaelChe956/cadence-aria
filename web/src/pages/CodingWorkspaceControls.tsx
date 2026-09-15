@@ -20,6 +20,17 @@ export const ACTIVE_ATTEMPT_STATUSES = new Set([
   "awaiting_manual_recovery",
 ]);
 
+export const CODING_START_REJECTION_COPY: Readonly<Record<string, string>> = {
+  coding_message_not_allowed: "当前阶段不允许开始 Coding",
+  SC_CODING_REQUIRES_ADVANCE: "请先在对话侧完成 advance",
+  coding_runner_already_started: "Coding runner 已在运行",
+  work_item_execution_plan_not_confirmed: "请先确认执行计划",
+};
+
+export function codingStartupRejectionCopy(code: string | null): string | null {
+  return code ? CODING_START_REJECTION_COPY[code] ?? null : null;
+}
+
 function blockedGateDisplayTitle(gate: CodingPendingGate) {
   return gate.title;
 }
@@ -80,6 +91,7 @@ export function CodingComposer({
   pendingGate,
   groupFinalReadinessStatus,
   groupFinalReadinessDiagnostics = [],
+  startupErrorCode = null,
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
@@ -88,6 +100,7 @@ export function CodingComposer({
   pendingGate?: CodingPendingGate | null;
   groupFinalReadinessStatus?: GroupFinalReadinessStatus | null;
   groupFinalReadinessDiagnostics?: GroupFinalReadinessDiagnostic[];
+  startupErrorCode?: string | null;
 }) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -157,6 +170,7 @@ export function CodingComposer({
             api={api}
             stage={stage}
             status={status}
+            startupErrorCode={startupErrorCode}
             compact
             groupFinalReadinessStatus={groupFinalReadinessStatus}
             groupFinalReadinessDiagnostics={groupFinalReadinessDiagnostics}
@@ -174,6 +188,7 @@ export function ActionButtons({
   compact = false,
   groupFinalReadinessStatus,
   groupFinalReadinessDiagnostics = [],
+  startupErrorCode = null,
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
@@ -181,41 +196,60 @@ export function ActionButtons({
   compact?: boolean;
   groupFinalReadinessStatus?: GroupFinalReadinessStatus | null;
   groupFinalReadinessDiagnostics?: GroupFinalReadinessDiagnostic[];
+  startupErrorCode?: string | null;
 }) {
   const buttonClass = compact
     ? "inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold hover:bg-[var(--aria-panel-muted)]"
     : "inline-flex h-8 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold hover:bg-[var(--aria-panel-muted)]";
-
   const finalConfirmReady =
     groupFinalReadinessStatus === "complete" && groupFinalReadinessDiagnostics.length === 0;
   const finalConfirmDiagnostic = groupFinalReadinessDiagnostics[0]?.message;
+  const startupCopy = codingStartupRejectionCopy(startupErrorCode);
 
   if (stage === "prepare_context") {
     return (
-      <button
-        type="button"
-        onClick={api.startCoding}
-        className={buttonClass}
-        aria-label={compact ? "底部开始 Coding" : undefined}
-      >
-        <Play className="h-3.5 w-3.5" />
-        开始 Coding
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={api.startCoding}
+          disabled={startupCopy !== null}
+          title={startupCopy ?? undefined}
+          className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
+          aria-label={compact ? "底部开始 Coding" : undefined}
+        >
+          <Play className="h-3.5 w-3.5" />
+          开始 Coding
+        </button>
+        {!compact && startupCopy ? (
+          <span role="status" className="text-xs text-[var(--aria-danger)]">
+            {startupCopy}
+          </span>
+        ) : null}
+      </div>
     );
   }
 
   if (stage === "review_request" && status && ACTIVE_ATTEMPT_STATUSES.has(status)) {
     return (
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={api.startCoding}
-          className={buttonClass}
-          aria-label={compact ? "底部继续 Coding" : undefined}
-        >
-          <Play className="h-3.5 w-3.5" />
-          继续 Coding
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={api.startCoding}
+            disabled={startupCopy !== null}
+            title={startupCopy ?? undefined}
+            className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
+            aria-label={compact ? "底部继续 Coding" : undefined}
+          >
+            <Play className="h-3.5 w-3.5" />
+            继续 Coding
+          </button>
+          {!compact && startupCopy ? (
+            <span role="status" className="text-xs text-[var(--aria-danger)]">
+              {startupCopy}
+            </span>
+          ) : null}
+        </div>
         <button
           type="button"
           onClick={api.abortAttempt}

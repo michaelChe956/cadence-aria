@@ -13,6 +13,8 @@ import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
 import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
+import { CODING_START_REJECTION_COPY } from "../pages/CodingWorkspaceControls";
 
 interface CodingWsServerMessage {
   type: string;
@@ -28,6 +30,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const startupAuditRecordIdsRef = useRef(new Map<string, string>());
 
   useLayoutEffect(() => {
     const ws = wsRef.current;
@@ -65,8 +68,18 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
   );
 
   const startCoding = useCallback(() => {
-    sendJson({ type: "start_coding" });
-  }, [sendJson]);
+    if (!attemptId || !sendJson({ type: "start_coding" })) return false;
+    const recordId = useOperationAuditStore.getState().record({
+      sessionId: attemptId,
+      gateId: null,
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+      detail: null,
+    });
+    startupAuditRecordIdsRef.current.set(attemptId, recordId);
+    return true;
+  }, [attemptId, sendJson]);
 
   const sendContextNote = useCallback(
     (content: string) => {
@@ -289,7 +302,9 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
       ws.onmessage = (event) => {
         if (disposed || wsRef.current !== ws) return;
         try {
-          handleCodingWsMessage(JSON.parse(event.data) as CodingWsServerMessage, streamBatcher);
+          const message = JSON.parse(event.data) as CodingWsServerMessage;
+          markStartupRejection(message, scopedAttemptId, startupAuditRecordIdsRef.current);
+          handleCodingWsMessage(message, streamBatcher);
         } catch {
           // Ignore malformed websocket messages; backend protocol errors are handled explicitly.
         }
@@ -566,6 +581,34 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
     case "coding_pong":
       break;
   }
+}
+
+function markStartupRejection(
+  message: CodingWsServerMessage,
+  attemptId: string,
+  startupAuditRecordIds: Map<string, string>,
+) {
+  if (
+    message.type !== "coding_protocol_error" ||
+    !CODING_START_REJECTION_COPY[message.code as string]
+  ) {
+    return;
+  }
+  const recordId = startupAuditRecordIds.get(attemptId);
+  if (!recordId) return;
+  const record = useOperationAuditStore
+    .getState()
+    .records
+    .find((candidate) =>
+      candidate.id === recordId &&
+      candidate.sessionId === attemptId &&
+      candidate.operation === "start_coding" &&
+      candidate.source === "coding" &&
+      candidate.outcome === "sent",
+    );
+  if (!record) return;
+  useOperationAuditStore.getState().markRejected(recordId, message.code as string);
+  startupAuditRecordIds.delete(attemptId);
 }
 
 function pendingContextNoteId() {

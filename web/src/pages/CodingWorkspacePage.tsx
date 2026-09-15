@@ -46,6 +46,7 @@ import {
   CodingComposer,
   CodingPanelTabs,
   GatePanel,
+  codingStartupRejectionCopy,
   errorMessage,
   lockedProviderRole,
   requestIdFromEntry,
@@ -157,6 +158,18 @@ export function CodingWorkspacePage({
     store.projectId === address.projectId &&
     store.issueId === address.issueId &&
     store.attemptId === address.attemptId;
+  const startupErrorCode = (() => {
+    const latestStartup = [...auditRecords]
+      .reverse()
+      .find((record) =>
+        record.sessionId === address.attemptId &&
+        record.operation === "start_coding" &&
+        record.source === "coding" &&
+        record.outcome === "sent",
+      );
+    const code = store.protocolError?.code ?? null;
+    return latestStartup && codingStartupRejectionCopy(code) ? code : null;
+  })();
   const linkedAmendmentTargets = {
     story: normalizedRefs(store.workItemExecutionPlan?.story_refs),
     design: normalizedRefs(store.workItemExecutionPlan?.design_refs),
@@ -467,6 +480,7 @@ export function CodingWorkspacePage({
               api={api}
               stage={store.stage}
               status={store.status}
+              startupErrorCode={startupErrorCode}
               groupFinalReadinessStatus={store.groupFinalReadiness?.status}
               groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
             />
@@ -628,6 +642,7 @@ export function CodingWorkspacePage({
                     : pendingGate?.title ?? "Coding Workspace"
                 }
                 pendingGate={pendingGate}
+                startupErrorCode={startupErrorCode}
                 groupFinalReadinessStatus={store.groupFinalReadiness?.status}
                 groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
               />

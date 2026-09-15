@@ -10,6 +10,7 @@ import {
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
   CODING_WORKSPACE_HOTKEYS,
   COCKPIT_HOTKEYS,
@@ -622,6 +623,54 @@ describe("CodingWorkspacePage shell and actions", () => {
     await userEvent.click(screen.getByRole("button", { name: "开始 Coding" }));
 
     expect(api.startCoding).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["coding_message_not_allowed", "当前阶段不允许开始 Coding"],
+    ["SC_CODING_REQUIRES_ADVANCE", "请先在对话侧完成 advance"],
+    ["coding_runner_already_started", "Coding runner 已在运行"],
+    ["work_item_execution_plan_not_confirmed", "请先确认执行计划"],
+  ] as const)(
+    "renders %s inline and disables repeated startup only with a pending startup record",
+    (code, copy) => {
+      mockCodingWs();
+      useOperationAuditStore.getState().reset();
+      useOperationAuditStore.getState().record({
+        sessionId: CODING_ATTEMPT_ADDRESS.attemptId,
+        gateId: null,
+        operation: "start_coding",
+        source: "coding",
+        outcome: "sent",
+        detail: null,
+      });
+      useCodingWorkspaceStore.setState({
+        ...readyCodingState(),
+        status: "created",
+        stage: "prepare_context",
+        protocolError: { code, message: "server" },
+      });
+
+      render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+      expect(screen.getByRole("status")).toHaveTextContent(copy);
+      expect(screen.getByRole("button", { name: "开始 Coding" })).toBeDisabled();
+    },
+  );
+
+  it("does not disable startup for a non-start command sharing coding_message_not_allowed", () => {
+    mockCodingWs();
+    useOperationAuditStore.getState().reset();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "created",
+      stage: "prepare_context",
+      protocolError: { code: "coding_message_not_allowed", message: "context note rejected" },
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("button", { name: "开始 Coding" })).not.toBeDisabled();
   });
 
   it("uses the same exported mapping object to start coding from prepare context", () => {

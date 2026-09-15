@@ -2,6 +2,7 @@ import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
   MockWebSocket,
   blockedGate,
@@ -52,16 +53,53 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
     ]);
   });
 
+  it("marks only an explicitly sent start_coding command as a user startup audit record", () => {
+    useOperationAuditStore.getState().reset();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.startCoding();
+      harness.ws.receive({
+        type: "coding_protocol_error",
+        code: "SC_CODING_REQUIRES_ADVANCE",
+        message: "advance first",
+      });
+    });
+
+    expect(useOperationAuditStore.getState().records.at(-1)).toMatchObject({
+      operation: "start_coding",
+      source: "coding",
+      outcome: "rejected",
+      detail: "SC_CODING_REQUIRES_ADVANCE",
+    });
+  });
+
+  it("does not create a user start audit record from a passive resumed snapshot", () => {
+    useOperationAuditStore.getState().reset();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(codingSessionState({ status: "running", stage: "coding" }));
+    });
+
+    expect(useOperationAuditStore.getState().records).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ operation: "start_coding", source: "coding" })]),
+    );
+  });
+
   it("respond gate waits for server snapshot before resolving gate", () => {
     const harness = renderCodingHook();
     useCodingWorkspaceStore.getState().addPendingGate(blockedGate());
-
+  
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
       harness.api.respondGate("gate_0001", "retry_review");
     });
-
+  
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
         type: "gate_response",
@@ -77,7 +115,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         errorCode: null,
       },
     ]);
-
+  
     act(() => {
       harness.ws.receive({
         type: "coding_protocol_error",
@@ -85,7 +123,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         message: "Gate response failed",
       });
     });
-
+  
     expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
       {
         gate_id: "gate_0001",
@@ -93,14 +131,14 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         errorCode: "coding_gate_response_failed",
       },
     ]);
-
+  
     act(() => {
       harness.api.respondGate("gate_0001", "retry_review");
       harness.ws.receive(codingSessionState({ pending_gates: [] }));
     });
-
+  
     expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
-
+  
     act(() => {
       useCodingWorkspaceStore.getState().addPendingGate(
         blockedGate({
@@ -117,7 +155,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       harness.ws.sent.length = 0;
       harness.api.respondGate("gate_0002", "manual_continue", "   ");
     });
-
+  
     expect(harness.ws.sent).toEqual([]);
     expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
       {
@@ -126,11 +164,11 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         errorCode: "coding_gate_extra_context_required",
       },
     ]);
-
+  
     act(() => {
       harness.api.respondGate("gate_0002", "manual_continue", " operator accepted risk ");
     });
-
+  
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
         type: "gate_response",
@@ -146,7 +184,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         errorCode: null,
       },
     ]);
-
+  
     act(() => {
       useCodingWorkspaceStore.getState().addPendingGate(
         blockedGate({
@@ -163,7 +201,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       harness.ws.sent.length = 0;
       harness.api.respondGate("gate_0003", "send_to_coder", "   ");
     });
-
+  
     expect(harness.ws.sent).toEqual([]);
     expect(useCodingWorkspaceStore.getState().pendingGates).toEqual(
       expect.arrayContaining([
@@ -174,7 +212,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         }),
       ]),
     );
-
+  
     act(() => {
       harness.api.respondGate(
         "gate_0003",
@@ -182,7 +220,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         " 人工意见：优先修最新 finding ",
       );
     });
-
+  
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
         type: "gate_response",
@@ -190,8 +228,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         action_id: "send_to_coder",
         extra_context: "人工意见：优先修最新 finding",
       }),
-    ]);
-  });
+    ]); });
 
   it("restores pending coding choices from session snapshots", () => {
     const harness = renderCodingHook();
