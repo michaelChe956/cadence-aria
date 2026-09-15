@@ -1,6 +1,7 @@
 import { AlertTriangle, Check, ClipboardList, CircleAlert, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useState, type Ref } from "react";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
+import type { ConfirmTwiceButtonHandle } from "../../../state/cockpit-operation-semantics";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { GateFeedbackEditor } from "./GateFeedbackEditor";
@@ -24,12 +25,14 @@ export function CockpitInbox({
   onTakeover,
   onRetry,
   actionableSessionId,
+  takeoverButtonRef,
 }: {
   items: readonly CockpitInboxItem[];
   actions?: CockpitActionFacade;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   actionableSessionId?: string;
+  takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
 }) {
   return (
     <section
@@ -49,6 +52,9 @@ export function CockpitInbox({
             onTakeover={onTakeover}
             onRetry={onRetry}
             actionable={actionableSessionId === sessionIdForItem(item.id)}
+            takeoverButtonRef={
+              actionableSessionId === sessionIdForItem(item.id) ? takeoverButtonRef : undefined
+            }
           />
         ))
       )}
@@ -62,12 +68,14 @@ function CockpitInboxRow({
   onTakeover,
   onRetry,
   actionable,
+  takeoverButtonRef,
 }: {
   item: CockpitInboxItem;
   actions?: CockpitActionFacade;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   actionable: boolean;
+  takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
 }) {
   const pulse = useCockpitInboxPulse(item.id);
   const Glyph = KIND_GLYPH[item.kind];
@@ -115,6 +123,7 @@ function CockpitInboxRow({
               </button>
             ) : (
               <ConfirmTwiceButton
+                ref={takeoverButtonRef}
                 label="接管"
                 confirmLabel="确认接管"
                 onConfirm={() => {

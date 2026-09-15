@@ -8,6 +8,7 @@ import {
 } from "../components/chat-workspace/ChatEntryList";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
+import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { PlanApprovalPanel } from "../components/chat-workspace/cockpit/PlanApprovalPanel";
 import {
   useCockpitObservedRecords,
@@ -17,12 +18,17 @@ import {
 } from "../components/cockpit/CockpitShell";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
+import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import { selectCockpitFlow, selectGateProjection } from "../state/workspace-cockpit-projection";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import {
+  COCKPIT_HOTKEYS,
+  type ConfirmTwiceButtonHandle,
+} from "../state/cockpit-operation-semantics";
 import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
@@ -132,8 +138,12 @@ export function ChatCockpitPage({
         sendAdvance: workspaceWs.sendAdvance,
       }),
     [
-      state,
+      state.flowKind,
       state.humanGateTurn?.command_id,
+      state.humanGateClosure,
+      state.humanGateSnapshot,
+      state.sessionStatus,
+      state.stage,
       workspaceWs.sendAdvance,
       workspaceWs.sendHumanConfirm,
       workspaceWs.sendHumanGateFeedback,
@@ -146,14 +156,70 @@ export function ChatCockpitPage({
     watchSession(child.workspace_session_id);
     setTakeoverSessionId(child.workspace_session_id);
   };
-  const handleRetry = (item: { id: string; source: string }) => {
+  const handleRetry = useCallback((item: { id: string; source: string }) => {
     if (item.source !== "advance") {
       return;
     }
     const commandId = item.id.slice(item.id.lastIndexOf(":") + 1);
     workspaceWs.sendAdvance(commandId);
-  };
+  }, [workspaceWs.sendAdvance]);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
+  const takeoverButtonRef = useRef<ConfirmTwiceButtonHandle | null>(null);
+  const takeoverTargetSessionId = useMemo(
+    () =>
+      observedInbox.find(
+        (item) =>
+          item.kind === "stopped" && item.id.startsWith(`${sessionId}:`),
+      )?.id.split(":")[0] ?? null,
+    [observedInbox, sessionId],
+  );
+  const hotkeyHandlers = useMemo(
+    () => ({
+      confirm: () => {
+        const current = useWorkspaceStore.getState();
+        if (selectGateProjection(current)?.closed === null) {
+          createCockpitActionFacade({
+            flowKind: current.flowKind,
+            commandId:
+              typeof current.humanGateTurn?.command_id === "string"
+                ? current.humanGateTurn.command_id
+                : null,
+            sendHumanConfirm: workspaceWs.sendHumanConfirm,
+            sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+            sendAdvance: workspaceWs.sendAdvance,
+          }).confirm();
+        }
+      },
+      feedback: () => {
+        document
+          .querySelector<HTMLElement>(
+            '[data-testid="gate-feedback-editor"] [aria-label="门禁反馈"]',
+          )
+          ?.focus();
+      },
+      takeover: () => {
+        if (takeoverTargetSessionId !== null) {
+          takeoverButtonRef.current?.arm();
+        }
+      },
+      advance: () => {
+        const current = useWorkspaceStore.getState();
+        if (
+          current.humanGateClosure?.decision === "confirm" ||
+          current.sessionStatus === "confirmed"
+        ) {
+          workspaceWs.sendAdvance();
+        }
+      },
+    }),
+    [
+      takeoverTargetSessionId,
+      workspaceWs.sendAdvance,
+      workspaceWs.sendHumanConfirm,
+      workspaceWs.sendHumanGateFeedback,
+    ],
+  );
+  useCockpitHotkeys(hotkeyHandlers);
   const drilldownEntryId = useMemo(
     () =>
       drilldownNodeId && selectedState
@@ -210,7 +276,9 @@ export function ChatCockpitPage({
           onTakeover={handleTakeover}
           onRetry={handleRetry}
           actionableSessionId={sessionId}
+          takeoverButtonRef={takeoverButtonRef}
         />
+
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
           <section
             data-testid="cockpit-execution-flow"

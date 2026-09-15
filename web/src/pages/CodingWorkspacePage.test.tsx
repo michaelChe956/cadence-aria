@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CodingExecutionUnit, CodingWsOutMessage } from "../api/types";
@@ -10,6 +10,10 @@ import {
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import {
+  CODING_WORKSPACE_HOTKEYS,
+  COCKPIT_HOTKEYS,
+} from "../state/cockpit-operation-semantics";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
   CODING_ATTEMPT_ADDRESS,
@@ -592,6 +596,38 @@ describe("CodingWorkspacePage shell and actions", () => {
     await userEvent.click(screen.getByRole("button", { name: "开始 Coding" }));
 
     expect(api.startCoding).toHaveBeenCalled();
+  });
+
+  it("uses the same exported mapping object to start coding from prepare context", () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "created",
+      stage: "prepare_context",
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
+
+    expect(api.startCoding).toHaveBeenCalledOnce();
+    expect(CODING_WORKSPACE_HOTKEYS).toBe(COCKPIT_HOTKEYS);
+  });
+
+  it("does not dispatch hotkeys from the coding composer textarea", () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "created",
+      stage: "prepare_context",
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+    fireEvent.keyDown(screen.getByLabelText("补充 Coding 上下文"), {
+      code: COCKPIT_HOTKEYS.advance.code,
+      ctrlKey: true,
+    });
+
+    expect(api.startCoding).not.toHaveBeenCalled();
   });
 
   it("resumes coding from review request when a group unit needs recovery", async () => {

@@ -33,6 +33,8 @@ export const COCKPIT_HOTKEYS: Readonly<Record<CockpitHotkeyAction, {
   advance: { code: "KeyA", ctrlOrMeta: true, shift: false },
 };
 
+export const CODING_WORKSPACE_HOTKEYS = COCKPIT_HOTKEYS;
+
 export const BULK_OPERATION_WHITELIST: ReadonlySet<CockpitOperation> = new Set(["confirm"]);
 
 export function canBulkApply(operation: CockpitOperation): boolean {

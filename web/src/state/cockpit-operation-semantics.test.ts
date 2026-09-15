@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BULK_OPERATION_WHITELIST,
+  CODING_WORKSPACE_HOTKEYS,
   COCKPIT_HOTKEYS,
   DANGEROUS_CONFIRM_TIMEOUT_MS,
   OPERATOR_LABEL,
@@ -21,6 +22,10 @@ describe("cockpit operation semantics", () => {
     expect(BULK_OPERATION_WHITELIST).toEqual(new Set(["confirm"]));
     expect(canBulkApply("confirm")).toBe(true);
     expect(canBulkApply("terminate")).toBe(false);
+  });
+
+  it("exports the same mapping object for both cockpit pages", () => {
+    expect(CODING_WORKSPACE_HOTKEYS).toBe(COCKPIT_HOTKEYS);
   });
 
   it("recognizes editable targets before hotkeys can act", () => {

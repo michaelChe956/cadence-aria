@@ -8,7 +8,7 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { deleteCodingAttempt } from "../api/client";
 import type { CodingAttemptAddress } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
@@ -24,11 +24,13 @@ import {
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
+import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
+import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
 import type { PlanRepairSessionState } from "../state/plan-repair-session";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingArtifactTabs } from "./CodingWorkspaceArtifacts";
@@ -343,6 +345,45 @@ export function CodingWorkspacePage({
       message: "Plan Repair 操作发送失败，请检查 Child Workspace 连接。",
     });
   }
+
+  const hotkeyHandlers = useMemo(
+    () => ({
+      confirm: () => {
+        if (store.activePlanRepair) {
+          handlePlanRepairAction("confirm");
+          return;
+        }
+        if (
+          store.stage === "final_confirm" &&
+          store.status === "waiting_for_human" &&
+          store.groupFinalReadiness?.status === "complete" &&
+          store.groupFinalReadiness.diagnostics.length === 0
+        ) {
+          api.finalConfirm();
+          return;
+        }
+        if (pendingGate?.kind === "stage_gate" && pendingGate.stage) {
+          api.confirmStageGate(pendingGate.stage);
+        }
+      },
+      feedback: () => {
+        document.querySelector<HTMLTextAreaElement>("textarea[aria-label='补充 Coding 上下文']")?.focus();
+      },
+      takeover: () => {},
+      advance: () => {
+        if (
+          store.stage === "prepare_context" ||
+          (store.stage === "review_request" &&
+            store.status !== null &&
+            ACTIVE_ATTEMPT_STATUSES.has(store.status))
+        ) {
+          api.startCoding();
+        }
+      },
+    }),
+    [api, pendingGate, store, COCKPIT_HOTKEYS],
+  );
+  useCockpitHotkeys(hotkeyHandlers);
 
   return (
     <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]">

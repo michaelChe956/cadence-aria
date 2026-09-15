@@ -2,7 +2,7 @@ import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
 import type { TakeoverResponse } from "../api/types";
 import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -21,6 +21,7 @@ import { planRepairSnapshotFixture } from "../state/workspace-plan-repair-test-f
 import { observerStateFromSessionState } from "../state/workspace-observer-store";
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
+import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
 import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceWsModule>()),
@@ -161,6 +162,7 @@ describe("ChatCockpitPage", () => {
       ...hardErrorItem("session_001"),
       id: "session_001:hard_error:advance:command_001",
       source: "advance",
+      gate: null,
     });
 
     renderCockpit("session_001", false);
@@ -188,6 +190,90 @@ describe("ChatCockpitPage", () => {
 
     expect(screen.queryByRole("button", { name: "手动推进" })).toBeNull();
     expect(sendAdvance).not.toHaveBeenCalled();
+  });
+
+  it("confirms only while a current gate is open and does nothing without a gate", () => {
+    const sendHumanConfirm = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm });
+    renderCockpit("session_001", false);
+
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+    expect(sendHumanConfirm).not.toHaveBeenCalled();
+
+    const store = useWorkspaceStore.getState();
+    store.setStage("human_confirm");
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+
+    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+
+    store.applyHumanGateClosed("confirm", "human_confirm");
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+    expect(sendHumanConfirm).toHaveBeenCalledOnce();
+  });
+
+  it("does not dispatch cockpit hotkeys from gate feedback editors", () => {
+    const sendHumanConfirm = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm });
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({ flowKind: "single_candidate" });
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
+    store.rebuildChatEntries();
+    renderCockpit("session_001", false);
+
+    const feedbackEditors = screen.getAllByLabelText("门禁反馈");
+    const gateCardInput = feedbackEditors.find((editor) => editor instanceof HTMLInputElement);
+    if (!(gateCardInput instanceof HTMLInputElement)) {
+      throw new Error("门卡反馈输入框缺失");
+    }
+    fireEvent.keyDown(gateCardInput, {
+      code: COCKPIT_HOTKEYS.confirm.code,
+      ctrlKey: true,
+    });
+    fireEvent.keyDown(
+      within(screen.getByTestId("cockpit-inbox")).getByLabelText("门禁反馈"),
+      { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true },
+    );
+
+    expect(sendHumanConfirm).not.toHaveBeenCalled();
+  });
+
+  it("advances only from a confirmed state", () => {
+    const sendAdvance = vi.fn(() => true);
+    mockWorkspaceWs({ sendAdvance });
+    renderCockpit("session_001", false);
+
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
+    expect(sendAdvance).not.toHaveBeenCalled();
+
+    useWorkspaceStore.setState({
+      humanGateClosure: { decision: "confirm", stage: "human_confirm" },
+    });
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
+
+    expect(sendAdvance).toHaveBeenCalledOnce();
+  });
+
+  it("arms takeover on the first hotkey and calls the existing takeover only on the second", () => {
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+    renderCockpit();
+
+    fireEvent.keyDown(document, {
+      code: COCKPIT_HOTKEYS.takeover.code,
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(takeoverWorkspaceSession).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "确认接管" })).toBeVisible();
+
+    fireEvent.keyDown(document, {
+      code: COCKPIT_HOTKEYS.takeover.code,
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(takeoverWorkspaceSession).toHaveBeenCalledWith("session_001");
   });
   it("watches and selects the child session after a successful takeover", async () => {
     const user = userEvent.setup();
