@@ -21,8 +21,14 @@ describe("cockpit operation semantics", () => {
     });
     expect(BULK_OPERATION_WHITELIST).toEqual(new Set(["confirm"]));
     expect(canBulkApply("confirm")).toBe(true);
-    expect(canBulkApply("terminate")).toBe(false);
   });
+
+  it.each(["terminate", "takeover", "feedback", "request_change"] as const)(
+    "does not whitelist dangerous %s for bulk execution",
+    (operation) => {
+      expect(canBulkApply(operation)).toBe(false);
+    },
+  );
 
   it("exports the same mapping object for both cockpit pages", () => {
     expect(CODING_WORKSPACE_HOTKEYS).toBe(COCKPIT_HOTKEYS);

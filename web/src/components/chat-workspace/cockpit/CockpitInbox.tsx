@@ -1,7 +1,10 @@
 import { AlertTriangle, Check, ClipboardList, CircleAlert, RotateCcw } from "lucide-react";
-import { useState, type Ref } from "react";
+import { useEffect, useMemo, useState, type Ref } from "react";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
-import type { ConfirmTwiceButtonHandle } from "../../../state/cockpit-operation-semantics";
+import {
+  canBulkApply,
+  type ConfirmTwiceButtonHandle,
+} from "../../../state/cockpit-operation-semantics";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { GateFeedbackEditor } from "./GateFeedbackEditor";
@@ -26,6 +29,7 @@ export function CockpitInbox({
   onRetry,
   actionableSessionId,
   takeoverButtonRef,
+  onBulkConfirm,
 }: {
   items: readonly CockpitInboxItem[];
   actions?: CockpitActionFacade;
@@ -33,7 +37,51 @@ export function CockpitInbox({
   onRetry?: (item: CockpitInboxItem) => void;
   actionableSessionId?: string;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
+  onBulkConfirm?: (items: readonly CockpitInboxItem[]) => void;
 }) {
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const selectableItems = useMemo(
+    () =>
+      actionableSessionId === undefined
+        ? []
+        : items.filter((item) => isSelectableGate(item, actionableSessionId)),
+    [actionableSessionId, items],
+  );
+  const selectableIds = useMemo(
+    () => new Set(selectableItems.map((item) => item.id)),
+    [selectableItems],
+  );
+  const selectedItems = useMemo(
+    () => selectableItems.filter((item) => selectedIds.has(item.id)),
+    [selectableItems, selectedIds],
+  );
+
+  useEffect(() => {
+    setSelectedIds((previous) => {
+      const next = new Set(Array.from(previous).filter((id) => selectableIds.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [selectableIds]);
+
+  const toggleSelected = (item: CockpitInboxItem) => {
+    if (!selectableIds.has(item.id)) {
+      return;
+    }
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(item.id)) {
+        next.delete(item.id);
+      } else {
+        next.add(item.id);
+      }
+      return next;
+    });
+  };
+
+  const handleBulkConfirm = () => {
+    setSelectedIds(new Set());
+    onBulkConfirm?.(selectedItems);
+  };
   return (
     <section
       data-testid="cockpit-inbox"
@@ -41,6 +89,18 @@ export function CockpitInbox({
       className="flex min-h-0 flex-col gap-2 overflow-auto rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)] p-3"
     >
       <h2 className="text-sm font-semibold text-[var(--aria-ink)]">待处理</h2>
+      <p className="text-xs text-[var(--aria-ink-muted)]">
+        同会话批量确认；当前引擎每会话仅一个开态门，通常只确认 1 项
+      </p>
+      {canBulkApply("confirm") && onBulkConfirm && selectedItems.length > 0 ? (
+        <button
+          type="button"
+          onClick={handleBulkConfirm}
+          className="min-h-11 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        >
+          批量确认 {selectedItems.length} 项
+        </button>
+      ) : null}
       {items.length === 0 ? (
         <p className="text-xs text-[var(--aria-ink-muted)]">暂无待处理项</p>
       ) : (
@@ -52,6 +112,9 @@ export function CockpitInbox({
             onTakeover={onTakeover}
             onRetry={onRetry}
             actionable={actionableSessionId === sessionIdForItem(item.id)}
+            selectable={actionableSessionId !== undefined && selectableIds.has(item.id)}
+            selected={selectedIds.has(item.id)}
+            onSelectionChange={() => toggleSelected(item)}
             takeoverButtonRef={
               actionableSessionId === sessionIdForItem(item.id) ? takeoverButtonRef : undefined
             }
@@ -68,6 +131,9 @@ function CockpitInboxRow({
   onTakeover,
   onRetry,
   actionable,
+  selectable,
+  selected,
+  onSelectionChange,
   takeoverButtonRef,
 }: {
   item: CockpitInboxItem;
@@ -75,6 +141,9 @@ function CockpitInboxRow({
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   actionable: boolean;
+  selectable: boolean;
+  selected: boolean;
+  onSelectionChange(): void;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
 }) {
   const pulse = useCockpitInboxPulse(item.id);
@@ -100,6 +169,17 @@ function CockpitInboxRow({
         <p className="mt-1 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
           {item.summary}
         </p>
+        {selectable ? (
+          <label className="flex min-h-11 min-w-11 items-center justify-center">
+            <input
+              type="checkbox"
+              aria-label={`选择 ${item.title}`}
+              checked={selected}
+              onChange={onSelectionChange}
+              className="h-5 w-5 accent-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            />
+          </label>
+        ) : null}
         {item.inlineError ? (
           <p className="aria-mono mt-1 text-xs text-[var(--aria-danger)]">
             {item.inlineError.code} · {item.inlineError.message}
@@ -252,4 +332,8 @@ function sessionIdForItem(itemId: string): string | null {
   return sessionId === "gate" || sessionId === "hard_error" || sessionId === "stopped"
     ? null
     : sessionId;
+}
+
+function isSelectableGate(item: CockpitInboxItem, sessionId: string): boolean {
+  return item.kind === "gate" && item.gate?.closed === null && item.id === `${sessionId}:gate:${item.gate.key}`;
 }

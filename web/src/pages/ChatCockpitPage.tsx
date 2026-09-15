@@ -21,7 +21,11 @@ import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
-import { selectCockpitFlow, selectGateProjection } from "../state/workspace-cockpit-projection";
+import {
+  selectCockpitFlow,
+  selectGateProjection,
+  type CockpitInboxItem,
+} from "../state/workspace-cockpit-projection";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
@@ -156,6 +160,25 @@ export function ChatCockpitPage({
     watchSession(child.workspace_session_id);
     setTakeoverSessionId(child.workspace_session_id);
   };
+  const handleBulkConfirm = useCallback((items: readonly CockpitInboxItem[]) => {
+    const current = useWorkspaceStore.getState();
+    const gate = selectGateProjection(current);
+    if (gate === null || gate.closed !== null) {
+      return;
+    }
+    const expectedId = `${sessionId}:gate:${gate.key}`;
+    const matchingItem = items.find(
+      (item) =>
+        item.id === expectedId &&
+        item.kind === "gate" &&
+        item.gate?.key === gate.key &&
+        item.gate.closed === null,
+    );
+    if (matchingItem === undefined) {
+      return;
+    }
+    actions.confirm();
+  }, [actions, sessionId]);
   const handleRetry = useCallback((item: { id: string; source: string }) => {
     if (item.source !== "advance") {
       return;
@@ -277,6 +300,7 @@ export function ChatCockpitPage({
           onRetry={handleRetry}
           actionableSessionId={sessionId}
           takeoverButtonRef={takeoverButtonRef}
+          onBulkConfirm={handleBulkConfirm}
         />
 
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">

@@ -192,6 +192,26 @@ describe("ChatCockpitPage", () => {
     expect(sendAdvance).not.toHaveBeenCalled();
   });
 
+  it("confirms the matching current gate once and ignores a cross-session selected entry", async () => {
+    const user = userEvent.setup();
+    const sendHumanConfirm = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm });
+    const store = useWorkspaceStore.getState();
+    store.applyHumanGateTurnOpen("g1", "confirm-g1", 1);
+    store.rebuildChatEntries();
+    cockpitInbox.push(gateItem("session_001", "g1"), gateItem("session_002", "g2"), stoppedItem("session_001"));
+
+    renderCockpit("session_001", false);
+
+    await user.click(screen.getByLabelText("选择 门禁等待"));
+    expect(screen.queryByLabelText("选择 g2")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "批量确认 1 项" }));
+
+    expect(sendHumanConfirm).toHaveBeenCalledTimes(1);
+    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(takeoverWorkspaceSession).not.toHaveBeenCalled();
+  });
+
   it("confirms only while a current gate is open and does nothing without a gate", () => {
     const sendHumanConfirm = vi.fn(() => true);
     mockWorkspaceWs({ sendHumanConfirm });
@@ -944,6 +964,36 @@ describe("ChatCockpitPage", () => {
     });
   });
 });
+function gateItem(sessionId: string, key: string): CockpitInboxItem {
+  return {
+    id: `${sessionId}:gate:${key}`,
+    kind: "gate",
+    severity: 1,
+    title: "门禁等待",
+    summary: "等待人工确认",
+    triage: false,
+    source: "gate",
+    createdAt: null,
+    gate: {
+      key,
+      turn_id: key,
+      stage: "human_confirm",
+      flow_kind: "single_candidate",
+      status: "open",
+      trigger: null,
+      remaining_budget: null,
+      findings: [],
+      resumable: false,
+      triage: false,
+      closed: null,
+      closure_stage: null,
+      opened_at: "2026-09-15T00:00:00.000Z",
+      turn: null,
+    },
+    inlineError: null,
+  };
+}
+
 function stoppedItem(sessionId: string): CockpitInboxItem {
   return {
     id: `${sessionId}:stopped:${sessionId}`,

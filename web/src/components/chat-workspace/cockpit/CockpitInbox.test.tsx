@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
@@ -80,5 +81,55 @@ describe("CockpitInbox", () => {
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByTestId("gate-feedback-editor")).toBeVisible();
     expect(within(inbox).getAllByTestId("confirm-twice-button")).toHaveLength(3);
+  });
+
+  it("selects the current session's projected gate and batch confirms it once", async () => {
+    const user = userEvent.setup();
+    const onBulkConfirm = vi.fn();
+    const current: CockpitInboxItem = {
+      ...gateItem,
+      id: "s1:gate:snapshot:2026-09-15T00:00:00Z:fp",
+      gate: {
+        ...gateItem.gate!,
+        key: "snapshot:2026-09-15T00:00:00Z:fp",
+      },
+    };
+    const observed: CockpitInboxItem = {
+      ...gateItem,
+      id: "s2:gate:g2",
+      gate: { ...gateItem.gate!, key: "g2" },
+    };
+    const stopped: CockpitInboxItem = {
+      ...gateItem,
+      id: "s1:stop",
+      kind: "stopped",
+      title: "stop",
+      gate: null,
+    };
+    const hardError: CockpitInboxItem = {
+      ...gateItem,
+      id: "s1:error",
+      kind: "hard_error",
+      title: "error",
+      gate: null,
+    };
+
+    render(
+      <CockpitInbox
+        items={[current, observed, stopped, hardError]}
+        actions={actions}
+        actionableSessionId="s1"
+        onBulkConfirm={onBulkConfirm}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("选择 门禁等待"));
+    expect(screen.queryByLabelText("选择 stop")).toBeNull();
+    expect(screen.queryByLabelText("选择 error")).toBeNull();
+    expect(screen.queryByLabelText("选择 g2")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "批量确认 1 项" }));
+
+    expect(onBulkConfirm).toHaveBeenCalledWith([current]);
+    expect(screen.queryByRole("button", { name: "批量确认 1 项" })).toBeNull();
   });
 });
