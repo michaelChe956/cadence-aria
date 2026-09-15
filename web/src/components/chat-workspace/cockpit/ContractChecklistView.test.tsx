@@ -86,18 +86,10 @@ describe("ContractChecklistView", () => {
 
   it("explains when no finding matches a gap instead of offering a dead jump", () => {
     renderView({ contract_metrics: null });
-    expect(screen.getByTestId("contract-checklist-view")).toHaveTextContent(
-      "无关联 finding（以门禁 finding 为准）",
-    );
+    expect(screen.getByText("无关联 finding")).toBeVisible();
     expect(screen.queryByRole("button", { name: "查看 finding" })).toBeNull();
   });
 
-  it("uses the gate-finding fallback copy when no target exists", () => {
-    renderView({ contract_metrics: null });
-    expect(screen.getByTestId("contract-checklist-view")).toHaveTextContent(
-      "无关联 finding（以门禁 finding 为准）",
-    );
-  });
 
   it("renders the empty state when the plan has no contract entries", () => {
     render(
