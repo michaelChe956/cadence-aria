@@ -1,8 +1,9 @@
 import { act } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { linkedWorkspaceAmendmentSnapshotFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
   installWorkspaceWsTestHooks,
   renderWorkspaceHook,
@@ -10,6 +11,9 @@ import {
 
 describe("useWorkspaceWs plan repair actions", () => {
   installWorkspaceWsTestHooks();
+  beforeEach(() => {
+    useOperationAuditStore.getState().reset();
+  });
 
   it("sends the authoritative plan amendment confirmation once", () => {
     const harness = renderWorkspaceHook("workspace_session_repair_0001");
@@ -26,6 +30,57 @@ describe("useWorkspaceWs plan repair actions", () => {
       JSON.stringify({
         type: "confirm_plan_amendment",
         amendment_id: "plan_amendment_0001",
+      }),
+    ]);
+  });
+
+  it("records a sent plan amendment confirmation against the current gate", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      useWorkspaceStore.getState().setStage("human_confirm");
+      harness.api.confirmPlanAmendment("plan_amendment_0001");
+    });
+
+    expect(useOperationAuditStore.getState().records).toEqual([
+      expect.objectContaining({
+        sessionId: "workspace_session_repair_0001",
+        gateId: "legacy:human_confirm",
+        operation: "confirm_plan_amendment",
+        outcome: "sent",
+        detail: "plan_amendment_0001",
+      }),
+    ]);
+  });
+
+  it("does not record an amendment confirmation when the socket cannot send", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    let sent = true;
+    act(() => {
+      sent = harness.api.confirmPlanAmendment("plan_amendment_0001");
+    });
+
+    expect(sent).toBe(false);
+    expect(useOperationAuditStore.getState().records).toEqual([]);
+  });
+
+  it("records a successful human confirmation with its projected gate id", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      useWorkspaceStore.getState().setStage("human_confirm");
+      harness.api.sendHumanConfirm("confirm");
+    });
+
+    expect(useOperationAuditStore.getState().records).toEqual([
+      expect.objectContaining({
+        sessionId: "workspace_session_repair_0001",
+        gateId: "legacy:human_confirm",
+        operation: "confirm",
+        outcome: "sent",
+        detail: "confirm",
       }),
     ]);
   });

@@ -33,6 +33,7 @@ import {
   COCKPIT_HOTKEYS,
   type ConfirmTwiceButtonHandle,
 } from "../state/cockpit-operation-semantics";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
@@ -157,6 +158,23 @@ export function ChatCockpitPage({
     state.humanGateClosure?.decision === "confirm" || state.sessionStatus === "confirmed";
   const handleTakeover = async (parentSessionId: string) => {
     const child = await takeoverWorkspaceSession(parentSessionId);
+    useOperationAuditStore.getState().recordTakeoverLink(
+      child.workspace_session_id,
+      child.parent_session_id,
+      child.takeover_event_id,
+    );
+    sessionStorage.setItem(
+      `aria.takeover-parent:${child.workspace_session_id}`,
+      child.parent_session_id,
+    );
+    useOperationAuditStore.getState().record({
+      sessionId: parentSessionId,
+      gateId: null,
+      operation: "takeover",
+      source: "takeover",
+      outcome: "completed",
+      detail: child.workspace_session_id,
+    });
     watchSession(child.workspace_session_id);
     setTakeoverSessionId(child.workspace_session_id);
   };

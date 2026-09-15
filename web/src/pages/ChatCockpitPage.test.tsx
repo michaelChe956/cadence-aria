@@ -22,6 +22,7 @@ import { observerStateFromSessionState } from "../state/workspace-observer-store
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceWsModule>()),
@@ -82,6 +83,8 @@ describe("ChatCockpitPage", () => {
     cockpitObservedRecords.splice(0);
     watchSession.mockReset();
     vi.mocked(takeoverWorkspaceSession).mockReset();
+    sessionStorage.clear();
+    useOperationAuditStore.getState().reset();
   });
   const renderCockpit = (sessionId = "session_001", mockWs = true) => {
     if (mockWs) {
@@ -336,6 +339,25 @@ describe("ChatCockpitPage", () => {
 
     expect(watchSession).toHaveBeenCalledWith("child_001");
     expect(await screen.findByText("子会话对话")).toBeVisible();
+  });
+
+  it("mirrors a successful takeover parent id and writes session-scoped storage", async () => {
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_001",
+      parent_session_id: "parent_001",
+      takeover_event_id: "event_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("parent_001"));
+    renderCockpit("parent_001");
+
+    await userEvent.click(screen.getByRole("button", { name: "接管" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(useOperationAuditStore.getState().takeoverLinks.child_001).toEqual({
+      parentSessionId: "parent_001",
+      takeoverEventId: "event_001",
+    });
+    expect(sessionStorage.getItem("aria.takeover-parent:child_001")).toBe("parent_001");
   });
 
   it("renders the three cockpit zones", () => {

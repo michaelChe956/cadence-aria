@@ -16,6 +16,8 @@ import type {
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
+import { selectGateProjection } from "../state/workspace-cockpit-projection";
 import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
@@ -378,15 +380,40 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const recordSentOperation = useCallback(
+    (
+      operation: "confirm" | "request_change" | "terminate" | "feedback" | "advance" | "confirm_plan_amendment",
+      detail: string | null,
+    ) => {
+      if (!sessionId) {
+        return;
+      }
+      const state = useWorkspaceStore.getState();
+      useOperationAuditStore.getState().record({
+        sessionId,
+        gateId: selectGateProjection(state)?.key ?? null,
+        operation,
+        source: "chat",
+        outcome: "sent",
+        detail,
+      });
+    },
+    [sessionId],
+  );
+
   const sendHumanConfirm = useCallback(
     (decision: HumanConfirmDecision, payload?: unknown) => {
       const sent = sendJson({ type: "human_confirm", decision, payload: payload ?? null });
       if (sent) {
+        recordSentOperation(
+          decision === "request-change" ? "request_change" : decision,
+          decision,
+        );
         useWorkspaceStore.getState().resolveGateEntry(decision);
       }
       return sent;
     },
-    [sendJson],
+    [recordSentOperation, sendJson],
   );
 
   const sendHumanGateFeedback = useCallback(
@@ -395,30 +422,44 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (!trimmed) {
         return false;
       }
-      return sendJson({
+      const sent = sendJson({
         type: "human_gate_feedback",
         command_id: commandId ?? newCommandId(),
         feedback: trimmed,
       });
+      if (sent) {
+        recordSentOperation("feedback", trimmed);
+      }
+      return sent;
     },
-    [sendJson],
+    [recordSentOperation, sendJson],
   );
 
   const sendAdvance = useCallback(
     (commandId?: string) => {
-      return sendJson({ type: "advance", command_id: commandId ?? newCommandId() });
+      const id = commandId ?? newCommandId();
+      const sent = sendJson({ type: "advance", command_id: id });
+      if (sent) {
+        recordSentOperation("advance", id);
+      }
+      return sent;
     },
-    [sendJson],
+    [recordSentOperation, sendJson],
   );
 
   const confirmPlanAmendment = useCallback(
     (amendmentId: string) => {
       const id = amendmentId.trim();
-      return id
-        ? sendJson({ type: "confirm_plan_amendment", amendment_id: id })
-        : false;
+      if (!id) {
+        return false;
+      }
+      const sent = sendJson({ type: "confirm_plan_amendment", amendment_id: id });
+      if (sent) {
+        recordSentOperation("confirm_plan_amendment", id);
+      }
+      return sent;
     },
-    [sendJson],
+    [recordSentOperation, sendJson],
   );
 
   const cancelPlanAmendment = useCallback(

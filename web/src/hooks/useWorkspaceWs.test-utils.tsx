@@ -2,6 +2,7 @@ import { render } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
 import type { WorkItemPlanCandidateDto } from "../api/types";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import { useWorkspaceWs } from "./useWorkspaceWs";
 
 export function makeWorkItemPlanCandidate(
@@ -228,6 +229,7 @@ export function installWorkspaceWsTestHooks() {
     MockWebSocket.instances = [];
     vi.stubGlobal("WebSocket", MockWebSocket);
     useWorkspaceStore.getState().reset();
+    useOperationAuditStore.getState().reset();
   });
 
   afterEach(() => {
