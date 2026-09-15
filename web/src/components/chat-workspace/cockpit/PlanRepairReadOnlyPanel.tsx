@@ -110,7 +110,7 @@ export function PlanRepairReadOnlyPanel({ model }: PlanRepairReadOnlyPanelProps)
               {model.amendment.dependencyGraphChangeCount}
             </dd>
             <dt className="text-[var(--aria-ink-muted)]">恢复目标</dt>
-            <dd className="aria-mono break-all">{model.amendment.resumeTarget}</dd>
+            <dd className="aria-mono break-all">{model.amendment.resumeTarget ?? "—"}</dd>
           </dl>
         ) : (
           <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">

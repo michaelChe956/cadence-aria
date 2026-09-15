@@ -44,6 +44,28 @@ describe("RevisionDiffView", () => {
     );
   });
 
+  it("does not request markdown for a single artifact round", () => {
+    const load = vi.fn().mockResolvedValue("# only\n");
+    renderView([version(1, "")], { load });
+    expect(screen.getByTestId("revision-diff-view")).toHaveTextContent("当前会话只有一个 artifact 轮次");
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("keeps a version single-flight while a sibling request updates cache", async () => {
+    let resolveSecond!: (markdown: string) => void;
+    const second = new Promise<string>((resolve) => { resolveSecond = resolve; });
+    const load = vi.fn((versionNo: number) =>
+      versionNo === 1 ? Promise.resolve("v1\n") : second,
+    );
+    renderView([version(1, ""), version(2, "")], { load });
+    await screen.findByText("正在加载轮次内容…");
+    resolveSecond("v2\n");
+    await screen.findByTestId("revision-diff-summary");
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(load).toHaveBeenCalledWith(1);
+    expect(load).toHaveBeenCalledWith(2);
+  });
+
   it("defaults to the two latest rounds, loads them, and shows the summary", async () => {
     const load = vi
       .fn()

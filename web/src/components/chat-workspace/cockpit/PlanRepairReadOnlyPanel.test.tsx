@@ -70,6 +70,14 @@ describe("PlanRepairReadOnlyPanel", () => {
     expect(view).toHaveTextContent("wi_backend · revalidate");
   });
 
+  it("renders a dash for an absent resume target", () => {
+    render(<PlanRepairReadOnlyPanel model={{
+      ...model,
+      amendment: { ...model.amendment!, resumeTarget: null },
+    }} />);
+    expect(screen.getByText("恢复目标").nextElementSibling).toHaveTextContent("—");
+  });
+
   it("exposes no write affordances of any kind (DEF-3 只读边界)", () => {
     const { container } = render(<PlanRepairReadOnlyPanel model={model} />);
     expect(

@@ -224,6 +224,22 @@ describe("selectFindingTargetEntryId", () => {
     ];
     expect(selectFindingTargetEntryId(entries, "contract_metrics")).toBeNull();
   });
+
+  it("does not invent a target for review findings without contract_field", () => {
+    const entries: ChatEntry[] = [
+      {
+        id: "review_without_contract_field",
+        type: "review_verdict",
+        role: "reviewer",
+        content: "需要补充契约实现",
+        timestamp: "2026-09-14T08:00:00Z",
+        metadata: {
+          findings: [{ severity: "must_fix", message: "缺少契约实现" }],
+        },
+      },
+    ];
+    expect(selectFindingTargetEntryId(entries, "contract_metrics")).toBeNull();
+  });
 });
 
 describe("planRepairStageLabel", () => {

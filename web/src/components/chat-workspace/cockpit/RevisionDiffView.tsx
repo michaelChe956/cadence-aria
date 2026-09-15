@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactVersionSummary, ReviewVerdictType } from "../../../api/types";
 import {
   REVISION_DIFF_MAX_LINES,
@@ -33,6 +33,9 @@ export function RevisionDiffView({
   const [localCache, setLocalCache] = useState<Record<number, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const inFlightVersionsRef = useRef(new Set<number>());
+  const loadedVersionsRef = useRef(new Set<number>());
+
   const sortedVersions = useMemo(
     () => [...versions].sort((left, right) => right.version - left.version),
     [versions],
@@ -54,29 +57,23 @@ export function RevisionDiffView({
 
   useEffect(() => {
     setLoadError(null);
-    if (!loadVersionMarkdown || !missingKey) {
-      return;
-    }
-    let cancelled = false;
+    if (sortedVersions.length < 2 || !loadVersionMarkdown || !missingKey) return;
     for (const versionNo of missingKey.split(",").map(Number)) {
-      loadVersionMarkdown(versionNo)
+      if (
+        inFlightVersionsRef.current.has(versionNo) ||
+        loadedVersionsRef.current.has(versionNo)
+      ) continue;
+      inFlightVersionsRef.current.add(versionNo);
+      void loadVersionMarkdown(versionNo)
         .then((markdown) => {
-          if (cancelled) {
-            return;
-          }
-          setLocalCache((prev) => ({ ...prev, [versionNo]: markdown }));
+          loadedVersionsRef.current.add(versionNo);
+          setLocalCache((previous) => ({ ...previous, [versionNo]: markdown }));
           onCacheVersionMarkdown?.(versionNo, markdown);
         })
-        .catch(() => {
-          if (!cancelled) {
-            setLoadError(`轮次 v${versionNo} 加载失败`);
-          }
-        });
+        .catch(() => setLoadError(`轮次 v${versionNo} 加载失败`))
+        .finally(() => inFlightVersionsRef.current.delete(versionNo));
     }
-    return () => {
-      cancelled = true;
-    };
-  }, [missingKey, loadVersionMarkdown, onCacheVersionMarkdown]);
+  }, [missingKey, loadVersionMarkdown, onCacheVersionMarkdown, sortedVersions.length]);
 
   const diff = useMemo(() => {
     if (effectiveBase === null || effectiveTarget === null) {

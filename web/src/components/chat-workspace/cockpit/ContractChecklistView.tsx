@@ -123,8 +123,7 @@ export function ContractChecklistView({
                 </button>
               ) : (
                 <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
-                  <span>无关联 finding</span>
-                  （当前对话流中没有指向该契约的门禁 / 评审 finding）
+                  无关联 finding（以门禁 finding 为准）
                 </p>
               )}
             </article>
