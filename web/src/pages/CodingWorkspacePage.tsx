@@ -31,7 +31,10 @@ import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
-import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
+import {
+  COCKPIT_HOTKEYS,
+  codingStartupRejectionCopy,
+} from "../state/cockpit-operation-semantics";
 import {
   selectOperationAuditRows,
   type OperationAuditTarget,
@@ -46,7 +49,6 @@ import {
   CodingComposer,
   CodingPanelTabs,
   GatePanel,
-  codingStartupRejectionCopy,
   errorMessage,
   lockedProviderRole,
   requestIdFromEntry,
@@ -159,16 +161,20 @@ export function CodingWorkspacePage({
     store.issueId === address.issueId &&
     store.attemptId === address.attemptId;
   const startupErrorCode = (() => {
+    const code = store.protocolError?.code ?? null;
+    if (!codingStartupRejectionCopy(code)) return null;
     const latestStartup = [...auditRecords]
       .reverse()
-      .find((record) =>
-        record.sessionId === address.attemptId &&
-        record.operation === "start_coding" &&
-        record.source === "coding" &&
-        record.outcome === "sent",
+      .find(
+        (record) =>
+          record.sessionId === address.attemptId &&
+          record.operation === "start_coding" &&
+          record.source === "coding",
       );
-    const code = store.protocolError?.code ?? null;
-    return latestStartup && codingStartupRejectionCopy(code) ? code : null;
+    return latestStartup?.outcome === "sent" ||
+      (latestStartup?.outcome === "rejected" && latestStartup.detail === code)
+      ? code
+      : null;
   })();
   const linkedAmendmentTargets = {
     story: normalizedRefs(store.workItemExecutionPlan?.story_refs),
@@ -402,16 +408,17 @@ export function CodingWorkspacePage({
       takeover: () => {},
       advance: () => {
         if (
-          store.stage === "prepare_context" ||
-          (store.stage === "review_request" &&
-            store.status !== null &&
-            ACTIVE_ATTEMPT_STATUSES.has(store.status))
+          startupErrorCode === null &&
+          (store.stage === "prepare_context" ||
+            (store.stage === "review_request" &&
+              store.status !== null &&
+              ACTIVE_ATTEMPT_STATUSES.has(store.status)))
         ) {
           api.startCoding();
         }
       },
     }),
-    [api, pendingGate, store, COCKPIT_HOTKEYS],
+    [api, pendingGate, startupErrorCode, store, COCKPIT_HOTKEYS],
   );
   useCockpitHotkeys(hotkeyHandlers);
 

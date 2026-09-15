@@ -16,6 +16,7 @@ export interface OperationAuditStore {
   takeoverLinks: Readonly<Record<string, TakeoverLink>>;
   record(input: Omit<OperationAuditRecord, "id" | "atMs" | "atIso" | "operator">): string;
   markRejected(recordId: string, code: string): void;
+  markCompleted(recordId: string): void;
   recordTakeoverLink(
     childSessionId: string,
     parentSessionId: string,
@@ -43,6 +44,12 @@ export const useOperationAuditStore = create<OperationAuditStore>((set) => ({
     set((state) => ({
       records: state.records.map((record) =>
         record.id === recordId ? { ...record, outcome: "rejected", detail: code } : record,
+      ),
+    })),
+  markCompleted: (recordId) =>
+    set((state) => ({
+      records: state.records.map((record) =>
+        record.id === recordId ? { ...record, outcome: "completed", detail: null } : record,
       ),
     })),
   recordTakeoverLink: (childSessionId, parentSessionId, takeoverEventId) =>

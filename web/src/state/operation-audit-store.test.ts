@@ -71,4 +71,30 @@ describe("operation audit store", () => {
       expect.objectContaining({ id: secondId, outcome: "sent", detail: null }),
     ]);
   });
+
+  it("marks only the specified local command as completed", () => {
+    const firstId = useOperationAuditStore.getState().record({
+      sessionId: "s1",
+      gateId: null,
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+      detail: null,
+    });
+    const secondId = useOperationAuditStore.getState().record({
+      sessionId: "s1",
+      gateId: null,
+      operation: "advance",
+      source: "chat",
+      outcome: "sent",
+      detail: null,
+    });
+
+    useOperationAuditStore.getState().markCompleted(firstId);
+
+    expect(useOperationAuditStore.getState().records).toEqual([
+      expect.objectContaining({ id: firstId, outcome: "completed", detail: null }),
+      expect.objectContaining({ id: secondId, outcome: "sent", detail: null }),
+    ]);
+  });
 });

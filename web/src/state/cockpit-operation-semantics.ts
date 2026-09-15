@@ -1,6 +1,17 @@
 export const OPERATOR_LABEL = "本地浏览器" as const;
 export const DANGEROUS_CONFIRM_TIMEOUT_MS = 10_000;
 
+
+export const CODING_START_REJECTION_COPY: Readonly<Record<string, string>> = {
+  coding_message_not_allowed: "当前阶段不允许开始 Coding",
+  SC_CODING_REQUIRES_ADVANCE: "请先在对话侧完成 advance",
+  coding_runner_already_started: "Coding runner 已在运行",
+  work_item_execution_plan_not_confirmed: "请先确认执行计划",
+};
+
+export function codingStartupRejectionCopy(code: string | null): string | null {
+  return code ? CODING_START_REJECTION_COPY[code] ?? null : null;
+}
 export type CockpitOperation =
   | "confirm"
   | "feedback"

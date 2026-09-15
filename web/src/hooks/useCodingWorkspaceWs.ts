@@ -14,7 +14,7 @@ import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
 import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
-import { CODING_START_REJECTION_COPY } from "../pages/CodingWorkspaceControls";
+import { CODING_START_REJECTION_COPY } from "../state/cockpit-operation-semantics";
 
 interface CodingWsServerMessage {
   type: string;
@@ -304,6 +304,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
         try {
           const message = JSON.parse(event.data) as CodingWsServerMessage;
           markStartupRejection(message, scopedAttemptId, startupAuditRecordIdsRef.current);
+          markStartupCompletion(message, scopedAttemptId, startupAuditRecordIdsRef.current);
           handleCodingWsMessage(message, streamBatcher);
         } catch {
           // Ignore malformed websocket messages; backend protocol errors are handled explicitly.
@@ -608,6 +609,34 @@ function markStartupRejection(
     );
   if (!record) return;
   useOperationAuditStore.getState().markRejected(recordId, message.code as string);
+  startupAuditRecordIds.delete(attemptId);
+}
+
+function markStartupCompletion(
+  message: CodingWsServerMessage,
+  attemptId: string,
+  startupAuditRecordIds: Map<string, string>,
+) {
+  if (
+    message.type !== "coding_session_state" ||
+    (message.status !== "running" && message.stage === "prepare_context")
+  ) {
+    return;
+  }
+  const recordId = startupAuditRecordIds.get(attemptId);
+  if (!recordId) return;
+  const record = useOperationAuditStore
+    .getState()
+    .records
+    .find((candidate) =>
+      candidate.id === recordId &&
+      candidate.sessionId === attemptId &&
+      candidate.operation === "start_coding" &&
+      candidate.source === "coding" &&
+      candidate.outcome === "sent",
+    );
+  if (!record) return;
+  useOperationAuditStore.getState().markCompleted(recordId);
   startupAuditRecordIds.delete(attemptId);
 }
 
