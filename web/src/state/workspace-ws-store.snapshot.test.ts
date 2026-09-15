@@ -14,6 +14,9 @@ import {
   makeOutlineArtifactPayload,
   makeWorkItemPlanCandidate,
 } from "./workspace-ws-store.test-utils";
+import { observerStateFromSessionState } from "./workspace-observer-store";
+import type { WorkspaceSessionStatePayload } from "./workspace-ws-store-types";
+import { planRepairSnapshotFixture } from "./workspace-plan-repair-test-fixtures";
 
 describe("workspace ws store snapshots", () => {
   installWorkspaceStoreTestHooks();
@@ -595,5 +598,67 @@ describe("workspace ws store snapshots", () => {
 
   it("does not show a context note before backend acknowledgement", () => {
     expect(selectPrepareContextNotes(useWorkspaceStore.getState())).toEqual([]);
+  });
+});
+
+describe("plan repair snapshot mirroring", () => {
+  installWorkspaceStoreTestHooks();
+
+  function sessionStateBase(
+    overrides: Partial<WorkspaceSessionStatePayload> = {},
+  ): WorkspaceSessionStatePayload {
+    return {
+      session_id: "session_child",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: null },
+      ...overrides,
+    };
+  }
+
+  it("mirrors the plan_repair snapshot from session_state", () => {
+    const snapshot = planRepairSnapshotFixture("session_child");
+    useWorkspaceStore.getState().setSessionState(
+      sessionStateBase({ plan_repair: snapshot }),
+    );
+    expect(useWorkspaceStore.getState().planRepair).toEqual(snapshot);
+  });
+
+  it("clears the mirror when a later snapshot has no plan repair", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(
+      sessionStateBase({ plan_repair: planRepairSnapshotFixture("session_child") }),
+    );
+    expect(useWorkspaceStore.getState().planRepair).not.toBeNull();
+
+    store.setSessionState(sessionStateBase({ plan_repair: null }));
+    expect(useWorkspaceStore.getState().planRepair).toBeNull();
+  });
+
+  it("defaults the mirror to null when the field is absent", () => {
+    useWorkspaceStore.getState().setSessionState(sessionStateBase());
+    expect(useWorkspaceStore.getState().planRepair).toBeNull();
+  });
+
+  it("mirrors plan repair into observer states for takeover sessions", () => {
+    const snapshot = planRepairSnapshotFixture("session_child");
+    const observerState = observerStateFromSessionState(
+      sessionStateBase({ plan_repair: snapshot }) as never,
+    );
+    expect(observerState.planRepair).toEqual(snapshot);
   });
 });

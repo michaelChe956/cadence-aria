@@ -1,0 +1,68 @@
+import type { PlanRepairSessionSnapshot } from "../api/types";
+
+export function planRepairSnapshotFixture(
+  childSessionId: string,
+  overrides: Partial<PlanRepairSessionSnapshot> = {},
+): PlanRepairSessionSnapshot {
+  return {
+    request: {
+      id: "repair_0001",
+      plan_id: "plan_0001",
+      base_plan_revision_id: "plan_rev_0001",
+      trigger_attempt_id: "coding_attempt_0001",
+      trigger_unit_run_id: "unit_run_0001",
+      trigger_review_id: null,
+      trigger_finding_id: "finding_0001",
+      amendment_id: null,
+      defect_class: "upstream_contract_invalid",
+      reason_code: "CONTRACT_CAPABILITY_MISSING",
+      repair_target: {
+        kind: "current_work_item",
+        logical_work_item_ids: ["wi_0001"],
+        work_item_revision_ids: ["rev_0001"],
+      },
+      contract_refs: ["contract_0001"],
+      capability_refs: ["cap_export_metrics"],
+      evidence: [],
+      fingerprint: "fp_0001",
+      status: "in_progress",
+      created_at: "2026-09-14T08:00:00Z",
+      updated_at: "2026-09-14T08:00:00Z",
+    },
+    link: {
+      id: "link_0001",
+      relation: "plan_repair",
+      parent_session_id: "session_parent",
+      child_session_id: childSessionId,
+      trigger: {
+        attempt_id: "coding_attempt_0001",
+        unit_run_id: "unit_run_0001",
+        review_id: null,
+        finding_id: "finding_0001",
+        repair_request_id: "repair_0001",
+        amendment_id: "amend_0001",
+        fingerprint: "fp_0001",
+        base_plan_revision_id: "plan_rev_0001",
+      },
+      return_context: {
+        original_attempt_id: "coding_attempt_0001",
+        original_unit_run_id: "unit_run_0001",
+        timeline_anchor_id: "anchor_0001",
+        original_route: "/workbench/projects/p1/issues/i1/coding/coding_attempt_0001",
+      },
+      created_at: "2026-09-14T08:00:00Z",
+    },
+    stage: "authoring_revision",
+    projection: null,
+    amendment: null,
+    validation: null,
+    impact: null,
+    plan_review: null,
+    package_identity: null,
+    candidate_package_artifact_id: null,
+    impact_scope_review: null,
+    timeline_nodes: [],
+    error: null,
+    ...overrides,
+  };
+}

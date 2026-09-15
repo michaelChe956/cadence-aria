@@ -455,6 +455,7 @@ export interface WorkspaceWsState {
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
   humanGateTurn: HumanGateTurnState | null;
+  planRepair: PlanRepairSessionSnapshot | null;
 
   snapshotGateIdentity: string | null;
   snapshotGateOpenedAt: string | null;
@@ -463,43 +464,45 @@ export interface WorkspaceWsState {
   protocolDiagnostics: ProtocolDiagnostic[];
 }
 
+export interface WorkspaceSessionStatePayload {
+  session_id: string;
+  workspace_type: string;
+  stage: string;
+  superpowers_enabled?: boolean;
+  openspec_enabled?: boolean;
+  session_status: WorkspaceSessionStatus;
+  flow_kind: WorkItemPlanFlowKind;
+  run_policy: WorkItemPlanRunPolicy;
+  run_history: WorkItemPlanRunHistory;
+  review_invocation_scope?: unknown | null;
+  human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
+  repair_reservation?: WorkItemPlanRepairReservation | null;
+  policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
+  provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
+  single_candidate_phase?: WorkItemPlanSingleCandidatePhase | null;
+  work_item_plan_source_revision_ref?: string | null;
+  plan_candidate_ir_ref?: string | null;
+  mechanical_report_ref?: string | null;
+  publication_provenance_ref?: string | null;
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: WorkspaceArtifact;
+  providers: WsProviderConfig;
+  timeline_nodes?: TimelineNode[];
+  active_node_id?: string | null;
+  artifact_versions?: ArtifactVersion[];
+  artifact_version_summaries?: ArtifactVersionSummary[];
+  timeline_node_details?: Record<string, TimelineNodeDetail>;
+  timeline_node_summaries?: Record<string, NodeDetailSummary>;
+  active_run_id?: string | null;
+  human_presentation_revisions?: HumanPresentationRevision[];
+  reviewer_enabled_at_start?: boolean | null;
+  recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+  plan_repair?: PlanRepairSessionSnapshot | null;
+}
+
 export interface WorkspaceWsActions {
-  setSessionState: (state: {
-    session_id: string;
-    workspace_type: string;
-    stage: string;
-    superpowers_enabled?: boolean;
-    openspec_enabled?: boolean;
-    session_status: WorkspaceSessionStatus;
-    flow_kind: WorkItemPlanFlowKind;
-    run_policy: WorkItemPlanRunPolicy;
-    run_history: WorkItemPlanRunHistory;
-    review_invocation_scope?: unknown | null;
-    human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
-    repair_reservation?: WorkItemPlanRepairReservation | null;
-    policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
-    provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
-    single_candidate_phase?: WorkItemPlanSingleCandidatePhase | null;
-    work_item_plan_source_revision_ref?: string | null;
-    plan_candidate_ir_ref?: string | null;
-    mechanical_report_ref?: string | null;
-    publication_provenance_ref?: string | null;
-    messages: WsMessage[];
-    checkpoints: WsCheckpoint[];
-    artifact: WorkspaceArtifact;
-    providers: WsProviderConfig;
-    timeline_nodes?: TimelineNode[];
-    active_node_id?: string | null;
-    artifact_versions?: ArtifactVersion[];
-    artifact_version_summaries?: ArtifactVersionSummary[];
-    timeline_node_details?: Record<string, TimelineNodeDetail>;
-    timeline_node_summaries?: Record<string, NodeDetailSummary>;
-    active_run_id?: string | null;
-    human_presentation_revisions?: HumanPresentationRevision[];
-    reviewer_enabled_at_start?: boolean | null;
-    recoverable_interrupted_run?: RecoverableInterruptedRun | null;
-    plan_repair?: PlanRepairSessionSnapshot | null;
-  }) => void;
+  setSessionState: (state: WorkspaceSessionStatePayload) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   appendBufferedStreamChunk: (content: string, nodeId: string, role: ChatEntryRole) => void;
   flushBufferedStream: (nodeId: string) => void;

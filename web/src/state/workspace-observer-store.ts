@@ -306,6 +306,7 @@ export function observerStateFromSessionState(
     flowKind: message.flow_kind,
     humanGateSnapshot: message.human_gate_snapshot ?? null,
     humanGateTurn: null,
+    planRepair: message.plan_repair ?? null,
     humanGateClosure: null,
     pendingReviewerSummary: null,
     chatEntries: message.messages.map((message, index) => ({
