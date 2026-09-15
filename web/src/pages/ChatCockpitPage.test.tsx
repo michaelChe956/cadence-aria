@@ -94,6 +94,35 @@ describe("ChatCockpitPage", () => {
     return render(<ChatCockpitPage sessionId={sessionId} onBack={vi.fn()} />);
   };
 
+  it("opens cockpit audit and filters the current gate", async () => {
+    const user = userEvent.setup();
+    const store = useWorkspaceStore.getState();
+    store.applyHumanGateTurnOpen("turn_001", "command_001", 1);
+    store.setHumanGateSnapshot({
+      findings: [],
+      repeated_fingerprints: [],
+      attempts_used: 1,
+      manual_repairs_remaining: 1,
+      trigger: "verification_new_findings",
+      resumable: true,
+    });
+    useOperationAuditStore.getState().record({
+      sessionId: "session_001",
+      gateId: "turn_001",
+      operation: "confirm",
+      source: "chat",
+      outcome: "sent",
+      detail: null,
+    });
+
+    renderCockpit();
+    await user.click(screen.getByRole("button", { name: "操作审计" }));
+
+    const audit = screen.getByTestId("operation-audit-view");
+    expect(audit).toBeVisible();
+    expect(audit).toHaveTextContent("session_001 · turn_001");
+  });
+
   it("shows takeover only on stopped and disables it with 409 code plus reason", async () => {
     const user = userEvent.setup();
     vi.mocked(takeoverWorkspaceSession).mockRejectedValue(
@@ -367,6 +396,24 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByTestId("cockpit-inbox")).toBeInTheDocument();
     expect(screen.getByTestId("cockpit-execution-flow")).toBeInTheDocument();
     expect(screen.getByTestId("cockpit-conversation-flow")).toBeInTheDocument();
+  });
+
+  it("shows a successful takeover through the shared audit view", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_001",
+      parent_session_id: "parent_001",
+      takeover_event_id: "event_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("parent_001"));
+    renderCockpit("parent_001");
+
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+    await user.click(screen.getByRole("button", { name: "操作审计" }));
+
+    expect(screen.getByTestId("operation-audit-view")).toHaveTextContent("takeover");
+    expect(screen.getByTestId("operation-audit-view")).toHaveTextContent("child_001");
   });
 
   it("projects an opened typed gate into the inbox with trigger and budget", () => {

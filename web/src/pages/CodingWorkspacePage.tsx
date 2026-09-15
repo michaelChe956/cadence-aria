@@ -19,6 +19,7 @@ import {
 } from "../components/coding-workspace/PlanRepairCenter";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
 import { RoleRunHistoryPanel } from "../components/coding-workspace/RoleRunHistoryPanel";
+import { OperationAuditView } from "../components/cockpit/OperationAuditView";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
@@ -31,6 +32,11 @@ import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
+import {
+  selectOperationAuditRows,
+  type OperationAuditTarget,
+} from "../state/operation-audit-projection";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import type { PlanRepairSessionState } from "../state/plan-repair-session";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingArtifactTabs } from "./CodingWorkspaceArtifacts";
@@ -48,7 +54,7 @@ import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
 import { planRepairActionGenerationKey } from "./plan-repair-action-generation";
 
-type CodingWorkspaceDrawer = "providers" | "runs";
+type CodingWorkspaceDrawer = "providers" | "runs" | "audit";
 type PendingRepairAction = {
   action: Exclude<PlanRepairAction, "adjust_scope" | "open_workspace">;
   childSessionId: string;
@@ -101,6 +107,8 @@ export function CodingWorkspacePage({
   const [pendingRepairAction, setPendingRepairAction] =
     useState<PendingRepairAction | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<CodingWorkspaceDrawer | null>(null);
+  const [auditTarget, setAuditTarget] = useState<OperationAuditTarget | null>(null);
+  const auditRecords = useOperationAuditStore((audit) => audit.records);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const addressKey = JSON.stringify([address.projectId, address.issueId, address.attemptId]);
   const addressKeyRef = useRef(addressKey);
@@ -154,6 +162,15 @@ export function CodingWorkspacePage({
     design: normalizedRefs(store.workItemExecutionPlan?.design_refs),
   };
 
+  const auditRows = useMemo(
+    () => selectOperationAuditRows({
+      local: auditRecords,
+      workspaceState: null,
+      codingState: store,
+      target: auditTarget,
+    }),
+    [auditRecords, auditTarget, store],
+  );
   useUnloadGuard({
     enabled: store.status === "running",
     message: "Coding attempt 运行中。刷新/关闭可能中断当前操作，是否继续？",
@@ -415,6 +432,18 @@ export function CodingWorkspacePage({
           ) : (
             <WifiOff aria-label="未连接" className="h-4 w-4 text-[var(--aria-danger)]" />
           )}
+          <button
+            type="button"
+            aria-label="操作审计"
+            onClick={() => {
+              setAuditTarget({ sessionId: store.attemptId ?? address.attemptId, gateId: null });
+              setActiveDrawer("audit");
+            }}
+            className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            <History aria-hidden="true" className="h-3.5 w-3.5" />
+            <span>操作审计</span>
+          </button>
         </div>
       </div>
 
@@ -618,16 +647,16 @@ export function CodingWorkspacePage({
           <aside
             role="dialog"
             aria-modal="true"
-            aria-label={activeDrawer === "providers" ? "Provider 设置" : "角色运行历史"}
+            aria-label={activeDrawer === "providers" ? "Provider 设置" : activeDrawer === "runs" ? "角色运行历史" : "操作审计"}
             className="relative grid h-full w-full max-w-[42rem] grid-rows-[auto_minmax(0,1fr)] overflow-hidden border-l border-[var(--aria-line)] bg-white shadow-xl"
           >
             <div className="flex h-12 min-w-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4">
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-[var(--aria-ink)]">
-                  {activeDrawer === "providers" ? "Provider 设置" : "角色运行历史"}
+                  {activeDrawer === "providers" ? "Provider 设置" : activeDrawer === "runs" ? "角色运行历史" : "操作审计"}
                 </div>
                 <div className="truncate text-xs text-[var(--aria-ink-muted)]">
-                  {activeDrawer === "providers" ? providerSummary : roleRunSummary}
+                  {activeDrawer === "providers" ? providerSummary : activeDrawer === "runs" ? roleRunSummary : "本地浏览器与会话快照"}
                 </div>
               </div>
               <button
@@ -653,12 +682,18 @@ export function CodingWorkspacePage({
                   onPermissionModeSelect={api.sendPermissionModeSelect}
                   onMaxAutoReworkSelect={api.sendMaxAutoReworkSelect}
                 />
-              ) : (
+              ) : activeDrawer === "runs" ? (
                 <RoleRunHistoryPanel
                   roleRuns={store.roleRuns}
                   timelineNodes={store.timelineNodes}
                   selectedNodeId={store.selectedNodeId}
                   onSelectNode={handleSelectTimelineNode}
+                />
+              ) : (
+                <OperationAuditView
+                  rows={auditRows}
+                  target={auditTarget}
+                  onTargetChange={setAuditTarget}
                 />
               )}
             </div>

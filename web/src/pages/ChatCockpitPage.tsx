@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, History } from "lucide-react";
 import { takeoverWorkspaceSession } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
@@ -34,6 +34,11 @@ import {
   type ConfirmTwiceButtonHandle,
 } from "../state/cockpit-operation-semantics";
 import { useOperationAuditStore } from "../state/operation-audit-store";
+import {
+  selectOperationAuditRows,
+  type OperationAuditTarget,
+} from "../state/operation-audit-projection";
+import { OperationAuditView } from "../components/cockpit/OperationAuditView";
 import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
@@ -65,6 +70,9 @@ export function ChatCockpitPage({
     sendAdvance: workspaceWs.sendAdvance,
   });
   const [takeoverSessionId, setTakeoverSessionId] = useState<string | null>(null);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditTarget, setAuditTarget] = useState<OperationAuditTarget | null>(null);
+  const auditRecords = useOperationAuditStore((audit) => audit.records);
   const observedInbox = useCockpitShellInbox();
   const observedRecords = useCockpitObservedRecords();
   const watchSession = useCockpitSessionWatch();
@@ -154,6 +162,23 @@ export function ChatCockpitPage({
       workspaceWs.sendHumanGateFeedback,
     ],
   );
+  const auditRows = useMemo(
+    () => selectOperationAuditRows({
+      local: auditRecords,
+      workspaceState: selectedState,
+      codingState: null,
+      target: auditTarget,
+    }),
+    [auditRecords, auditTarget, selectedState],
+  );
+  const openAudit = useCallback(() => {
+    const auditState = selectedState ?? state;
+    setAuditTarget({
+      sessionId: auditState.sessionId ?? sessionId,
+      gateId: selectGateProjection(auditState)?.key ?? null,
+    });
+    setAuditOpen(true);
+  }, [selectedState, sessionId, state]);
   const canManualAdvance =
     state.humanGateClosure?.decision === "confirm" || state.sessionStatus === "confirmed";
   const handleTakeover = async (parentSessionId: string) => {
@@ -299,6 +324,15 @@ export function ChatCockpitPage({
         </button>
         <span className="aria-mono text-xs text-[var(--aria-ink-muted)]">{sessionId}</span>
         <span className="text-xs text-[var(--aria-ink-muted)]">{watchWindow}</span>
+        <button
+          type="button"
+          aria-label="操作审计"
+          onClick={openAudit}
+          className="inline-flex min-h-11 items-center gap-1 rounded-md px-3 text-xs font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        >
+          <History aria-hidden="true" className="h-4 w-4" />
+          操作审计
+        </button>
         {canManualAdvance ? (
           <button
             type="button"
@@ -309,6 +343,25 @@ export function ChatCockpitPage({
           </button>
         ) : null}
       </header>
+      {auditOpen ? (
+        <div className="border-b border-[var(--aria-line)] bg-[var(--aria-panel)]">
+          <div className="flex items-center justify-between gap-2 border-b border-[var(--aria-line)] px-3 py-2">
+            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">操作审计</h2>
+            <button
+              type="button"
+              onClick={() => setAuditOpen(false)}
+              className="min-h-11 rounded-md px-3 text-xs font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            >
+              收起审计
+            </button>
+          </div>
+          <OperationAuditView
+            rows={auditRows}
+            target={auditTarget}
+            onTargetChange={setAuditTarget}
+          />
+        </div>
+      ) : null}
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 lg:grid-cols-[20rem_minmax(0,1fr)]">
         <CockpitInbox

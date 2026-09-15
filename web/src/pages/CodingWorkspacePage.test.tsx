@@ -135,6 +135,32 @@ describe("CodingWorkspacePage shell and actions", () => {
     });
   }
 
+  it("opens the coding audit drawer", async () => {
+    const user = userEvent.setup();
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      timelineNodes: [{
+        id: "final_confirm_1",
+        attempt_id: "coding_attempt_0001",
+        stage: "final_confirm",
+        title: "最终确认",
+        status: "completed",
+        agent_role: "system",
+        summary: null,
+        started_at: "2026-09-16T00:00:00.000Z",
+        completed_at: "2026-09-16T00:01:00.000Z",
+        artifact_refs: [],
+      }],
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "操作审计" }));
+
+    expect(screen.getByTestId("operation-audit-view")).toBeVisible();
+    expect(screen.getByTestId("operation-audit-view")).toHaveTextContent("REST 快照");
+  });
+
   it("renders coding workspace shell with timeline and keeps result tabs secondary until selected", async () => {
     mockCodingWs();
     vi.mocked(getCodingAttemptDiff).mockResolvedValue({
