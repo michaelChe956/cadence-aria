@@ -351,14 +351,33 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [workspaceConnectionStatus, sendPing]);
 
   useEffect(() => {
+    function handleVisibilityChange() {
+      sendPing();
+      if (!document.hidden) {
+        connect();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [connect, sendPing]);
+
+  useEffect(() => {
     if (workspaceConnectionStatus !== "connected") return;
 
     const interval = window.setInterval(() => {
       const ws = wsRef.current;
-      const stage = useWorkspaceStore.getState().stage;
+      const state = useWorkspaceStore.getState();
+      const hasInFlightHumanConfirm =
+        state.stage === "human_confirm" &&
+        state.activeNodeId !== null &&
+        state.timelineNodes.some(
+          (node) => node.node_id === state.activeNodeId && node.status === "active",
+        );
       if (
         ws?.readyState === WebSocket.OPEN &&
-        !ACTIVE_PROVIDER_STAGES.has(stage) &&
+        !ACTIVE_PROVIDER_STAGES.has(state.stage) &&
+        !hasInFlightHumanConfirm &&
         Date.now() - lastMessageAtRef.current >= SERVER_SILENCE_TIMEOUT_MS
       ) {
         ws.close(STALE_SOCKET_CLOSE_CODE);

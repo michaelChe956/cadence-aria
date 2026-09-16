@@ -349,6 +349,68 @@ describe("useWorkspaceWs outgoing actions", () => {
     expect(harness.ws.sent).toContain(JSON.stringify({ type: "ping" }));
   });
 
+  it("keeps an in-flight human confirmation socket open after 60 seconds of server silence", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_gate_001",
+          node_type: "human_confirm",
+          agent: null,
+          stage: "human_confirm",
+          status: "active",
+          title: "人工确认",
+          started_at: "2026-09-16T00:00:00Z",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({ type: "stage_change", stage: "human_confirm" });
+      vi.advanceTimersByTime(75_000);
+    });
+
+    expect(harness.ws.readyState).toBe(MockWebSocket.OPEN);
+    expect(harness.ws.closeCodes).not.toContain(4000);
+  });
+
+  it("sends an application ping whenever page visibility changes", () => {
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      harness.ws.sent.length = 0;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(harness.ws.sent).toEqual([JSON.stringify({ type: "ping" })]);
+  });
+
+  it("reconnects immediately when the page becomes visible with an abnormal closed socket", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1006);
+    });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+
+
   it("closes stale sockets after 60 seconds without any server message", () => {
     vi.useFakeTimers();
     const harness = renderWorkspaceHook("session_001");
