@@ -651,6 +651,18 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
   });
 
+  it("renders a target story session in legacy while the store holds another session's plan type", () => {
+    setWorkspaceType("work_item_plan");
+
+    mockWorkspaceWs();
+    render(
+      <ChatWorkspacePage sessionId="session_story" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+  });
+
   it("keeps a plan session in the legacy form when legacy is explicitly set", () => {
     window.localStorage.setItem("aria.chat.cockpit", "legacy");
     setWorkspaceType("work_item_plan");

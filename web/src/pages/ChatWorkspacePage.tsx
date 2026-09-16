@@ -14,7 +14,9 @@ export function ChatWorkspacePage({
   onBack: () => void;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const workspaceType = useWorkspaceStore((state) => state.workspaceType);
+  const workspaceType = useWorkspaceStore((state) =>
+    state.sessionId === sessionId ? state.workspaceType : null,
+  );
 
   if (readChatCockpitMode(workspaceType) === "cockpit") {
     return (
