@@ -2,11 +2,16 @@ export const CHAT_COCKPIT_STORAGE_KEY = "aria.chat.cockpit";
 
 export type ChatCockpitMode = "legacy" | "cockpit";
 
-// M5：默认 legacy（旧形态）。灰度 = parity 达标后只翻这里的默认值，不动路由、不新增开关组件。
-export function readChatCockpitMode(): ChatCockpitMode {
+// 显式设置始终优先；未设置时由会话类型选择默认形态。
+export function readChatCockpitMode(
+  workspaceType: string | null,
+): ChatCockpitMode {
   try {
     const stored = window.localStorage.getItem(CHAT_COCKPIT_STORAGE_KEY);
-    return stored === "cockpit" ? "cockpit" : "legacy";
+    if (stored === "cockpit" || stored === "legacy") {
+      return stored;
+    }
+    return workspaceType === "work_item_plan" ? "cockpit" : "legacy";
   } catch {
     return "legacy";
   }

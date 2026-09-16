@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
@@ -71,6 +71,9 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("ChatWorkspacePage chat actions", () => {
   installChatWorkspacePageTestHooks();
+  beforeEach(() => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+  });
 
   it("starts generation with provider config from the chat input", async () => {
     const api = mockWorkspaceWs();

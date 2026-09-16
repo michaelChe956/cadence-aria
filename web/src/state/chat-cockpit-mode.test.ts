@@ -6,20 +6,29 @@ import {
 } from "./chat-cockpit-mode";
 
 describe("chat cockpit mode switch", () => {
-  it("defaults to the legacy form when nothing is stored", () => {
-    expect(readChatCockpitMode()).toBe("legacy");
+  it("defaults according to the workspace type when nothing is stored", () => {
+    expect(readChatCockpitMode("work_item_plan")).toBe("cockpit");
+    expect(readChatCockpitMode("story")).toBe("legacy");
+    expect(readChatCockpitMode("design")).toBe("legacy");
+    expect(readChatCockpitMode(null)).toBe("legacy");
   });
 
   it("honours the cockpit value", () => {
     window.localStorage.setItem(CHAT_COCKPIT_STORAGE_KEY, "cockpit");
 
-    expect(readChatCockpitMode()).toBe("cockpit");
+    expect(readChatCockpitMode("story")).toBe("cockpit");
   });
 
-  it("falls back to legacy for unknown values", () => {
+  it("honours the legacy value", () => {
+    window.localStorage.setItem(CHAT_COCKPIT_STORAGE_KEY, "legacy");
+
+    expect(readChatCockpitMode("work_item_plan")).toBe("legacy");
+  });
+
+  it("falls back to the type-aware default for unknown values", () => {
     window.localStorage.setItem(CHAT_COCKPIT_STORAGE_KEY, "cockpit-v2");
 
-    expect(readChatCockpitMode()).toBe("legacy");
+    expect(readChatCockpitMode("work_item_plan")).toBe("cockpit");
   });
 
   it("persists an explicit mode", () => {
@@ -30,7 +39,7 @@ describe("chat cockpit mode switch", () => {
     expect(window.localStorage.getItem(CHAT_COCKPIT_STORAGE_KEY)).toBe("legacy");
   });
 
-  it("ignores a storage that throws", () => {
+  it("uses the safe legacy default when storage throws", () => {
     const original = window.localStorage.getItem;
     Object.defineProperty(window.localStorage, "getItem", {
       configurable: true,
@@ -39,7 +48,7 @@ describe("chat cockpit mode switch", () => {
       },
     });
 
-    expect(readChatCockpitMode()).toBe("legacy");
+    expect(readChatCockpitMode("work_item_plan")).toBe("legacy");
 
     Object.defineProperty(window.localStorage, "getItem", {
       configurable: true,

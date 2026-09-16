@@ -1,9 +1,10 @@
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { LegacyChatWorkspacePage } from "./ChatWorkspacePageLegacy";
 import { readChatCockpitMode } from "../state/chat-cockpit-mode";
+import { useWorkspaceStore } from "../state/workspace-ws-store";
 
-// M5：页内分支早返回——命中 cockpit 才渲染三区，否则渲染既有四块形态。
-// 不新增路由、不新增独立开关组件；旧代码路径原样保留在 ChatWorkspacePageLegacy.tsx 便于回滚。
+// 显式开关优先；类型到达前保持 legacy，避免未知会话抢先进入 cockpit。
+// 已知 work_item_plan 默认进入 cockpit，其他会话沿用 legacy。
 export function ChatWorkspacePage({
   sessionId,
   onBack,
@@ -13,7 +14,9 @@ export function ChatWorkspacePage({
   onBack: () => void;
   onOpenSession: (sessionId: string) => void;
 }) {
-  if (readChatCockpitMode() === "cockpit") {
+  const workspaceType = useWorkspaceStore((state) => state.workspaceType);
+
+  if (readChatCockpitMode(workspaceType) === "cockpit") {
     return (
       <ChatCockpitPage
         sessionId={sessionId}

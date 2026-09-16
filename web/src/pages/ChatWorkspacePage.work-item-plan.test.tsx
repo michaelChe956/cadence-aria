@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
@@ -72,6 +72,9 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("ChatWorkspacePage work item plan flow", () => {
   installChatWorkspacePageTestHooks();
+  beforeEach(() => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+  });
 
   it("shows empty state when work_item_plan candidate is missing", async () => {
     mockWorkspaceWs();

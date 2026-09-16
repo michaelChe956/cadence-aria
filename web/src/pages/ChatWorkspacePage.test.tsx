@@ -233,6 +233,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
   });
 
   it("loads missing typed work item plan artifact versions before displaying history", async () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
     mockWorkspaceWs();
     const outlineArtifact = {
       type: "outline_candidate" as const,
@@ -598,10 +599,10 @@ describe("ChatWorkspacePage shell and content loading", () => {
 describe("ChatWorkspacePage dual track switch", () => {
   installChatWorkspacePageTestHooks();
 
-  it("renders the legacy four-block form by default", () => {
+  function setWorkspaceType(workspaceType: "story" | "design" | "work_item_plan") {
     useWorkspaceStore.getState().setSessionState({
       session_id: "session_switch",
-      workspace_type: "story",
+      workspace_type: workspaceType,
       stage: "prepare_context",
       session_status: "open",
       flow_kind: "legacy",
@@ -619,43 +620,75 @@ describe("ChatWorkspacePage dual track switch", () => {
       artifact: null,
       providers: { author: "claude_code", reviewer: "codex" },
     });
+  }
+
+  function renderWorkspace() {
     mockWorkspaceWs();
+    return render(
+      <ChatWorkspacePage
+        sessionId="session_switch"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+      />,
+    );
+  }
 
-    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} onOpenSession={vi.fn()} />);
+  it("renders a plan session in the cockpit by default", () => {
+    setWorkspaceType("work_item_plan");
 
-    expect(screen.getByTestId("timeline-node-list")).toBeInTheDocument();
+    renderWorkspace();
+
+    expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("renders a story session in the legacy form by default", () => {
+    setWorkspaceType("story");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
   });
 
-  it("renders the three-zone cockpit when the switch is set to cockpit", () => {
-    window.localStorage.setItem("aria.chat.cockpit", "cockpit");
-    useWorkspaceStore.getState().setSessionState({
-      session_id: "session_switch",
-      workspace_type: "story",
-      stage: "prepare_context",
-      session_status: "open",
-      flow_kind: "legacy",
-      run_policy: "interactive",
-      run_history: {
-        seen_fingerprints: [],
-        repairs_used: 0,
-        manual_repairs_used: 0,
-        transitions_used: 0,
-        initial_review_count: 0,
-        verification_review_count: 0,
-      },
-      messages: [],
-      checkpoints: [],
-      artifact: null,
-      providers: { author: "claude_code", reviewer: "codex" },
-    });
-    mockWorkspaceWs();
+  it("keeps a plan session in the legacy form when legacy is explicitly set", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item_plan");
 
-    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} onOpenSession={vi.fn()} />);
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+  });
+
+  it("renders a story session in the cockpit when cockpit is explicitly set", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "cockpit");
+    setWorkspaceType("story");
+
+    renderWorkspace();
 
     expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
-    // brief 原写 `timeline-node-list` 为空，但 T10 驾驶舱 ② 区复用 TimelineNodeList
-    // （variant="flow"），该 testid 两种形态都在；改用 legacy 专有的状态栏作为排除判据。
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("keeps the safe legacy form until the workspace type arrives, then switches once for a plan", () => {
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+
+    act(() => {
+      setWorkspaceType("work_item_plan");
+    });
+
+    const cockpit = screen.getByTestId("cockpit-page");
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+
+    act(() => {
+      setWorkspaceType("work_item_plan");
+    });
+
+    expect(screen.getByTestId("cockpit-page")).toBe(cockpit);
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
   });
 });
