@@ -35,6 +35,27 @@
 - A 四拒绝码：`coding_runner_already_started` 最易复现（开始按钮双击）；其余三码需特殊状态，无法稳定制造时按方案登记「顶检未覆盖」即可，不影响 P0 验收。
 - E plan-repair：如有机会在真实使用中触发 plan repair（coding defect 修订），顺路验证「返回父会话」。
 
+
+## 补验轮（2026-09-16 下午，覆盖上表未覆盖项）
+
+> 设计：/tmp/aria-37-v16e/supplemental-verification-plan.md（V1-V8 矩阵）。种子=3 个 subagent 并行（minimal 留门链 / levels 链 / plan-repair 尽力链）+controller 浏览器验证；期间 pi 上游系统性劣化（provider_empty_output/挂起）致多链重试，levels 新链 5 次全死于 flash plan 质量（EARS/IR/契约缺口，模型质量族）。
+
+| # | 场景 | 结果 | 证据 |
+|---|---|---|---|
+| V1 | B 对话侧带门四键 | ✅ 全过 | 0429 断连恢复活门（SeedGate2 两条 request-change 留门+kill 竞态中止后靠 durable 快照恢复）：Ctrl+F 聚焦 TEXTAREA；批量确认发出 human_confirm 恰一次（WS 出站监听计数）；门未真关时 Ctrl+A **守卫拦截 0 发送**；当前会话无 stopped 时 Ctrl+Shift+T 无动作零请求 |
+| V2 | C 批量正向门关闭 | ✅ UI 侧全对；durable 门关闭被引擎恢复链缺口阻断 | confirm 恰一次+审计行在；引擎回 `WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID: human_confirm not allowed in stage human_confirm`（0429 修订轮中止恢复的快照门，phase/active_node 不匹配——3.6 rep1b-resume 同族 deferred「approval 失败后不回滚节点」，非 P4 前端缺陷，前端协议错误内联分流正确） |
+| V3 | A levels 多节点拓扑 | ✅ 过（用 3.6 历史 durable） | issue_0148（3.6 pi×重 levels 成功链 completed）：WI-001/002/003 三节点 SVG+「已完成」态+点击节点展开依赖链（上游无/下游 WI-002、WI-003）+预算门 60/90min 自计时+「非引擎事件数据」口径+实时日志面板 |
+| V4 | coding_runner_already_started | ✅ 防御得证（码不可达） | issue_0277 SC-ready attempt 双击「开始 Coding」（250ms 间隔）：WS 出站仅 1 次 start_coding——T7 置灰/门槛守卫在第二次点击前拦截；按方案记「UI 前置守卫拦截」，不伪称收到码 |
+| V5 | coding_message_not_allowed | ✅ 防御得证（码不可达） | 双 tab 同 attempt：第二 tab 连接即得 running 态实时快照（「中止」无「开始」）——SPA 无旧 prepare 快照可点，阶段竞态在 UI 层被状态同步防住 |
+| V6 | SC_CODING_REQUIRES_ADVANCE | ⏳ 窗口不可行 | advance record 从创建到 ready 为 group init 时长（亚秒级），页面打开时已 ready；毫秒窗口无法稳定命中，登记未覆盖 |
+| V7 | work_item_execution_plan_not_confirmed | ❌ 无种子入口 | driver 硬编码 require_execution_plan_confirm=false（workitem_run_campaign.mjs:114），无环境变量入口；按方案登记，不硬造 |
+| V8 | E plan-repair 返回父级 | ⏳ 未触发 | 两次种子均死于 pi 上游劣化（provider_empty_output，author 段）；F6 模型限制+无 durable 样本——留真实使用中验证 |
+
+### 补验发现
+
+4. **[引擎恢复链缺口·3.6 同族] 断连中止恢复的快照门 confirm 被拒**：0429 形态（修订轮 provider 运行中 driver 断连→aborted_by_disconnect→快照门 resumable=true 重连渲染+「未同步门命令，将以新命令提交」P1 提示正确）——但 confirm 到引擎后 `WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID`（stage=human_confirm 却拒 human_confirm：phase 停在 Evaluate 未回门节点）。与 3.6 rep1b-resume defer 项同根；建议与「投影层引擎终态守卫」一并进 backlog。
+5. **[防御性验证] 四拒绝码中两码在真实 UI 不可达**：already_started 被双击守卫拦截、message_not_allowed 被实时快照防住——T7 收口设计使真实用户走 UI 打不到这些错（比触发码更有价值的结论）。
+6. **[种子方法学] driver 留门语义**：ARIA_HUMAN_SCRIPT 耗尽后自动 confirm（human_script_exhausted_default）——留活门需「脚本条数<门动作次数时在门开窗口 kill」，毫秒窗口易杀进修订轮（0429 教训：kill 前 watch durable 门态为 waiting 且 provider idle）。
 ## 截图清单
 
-A-before-start / A-start-clicked / A-sticky-bottom / A-final-state / C-bulk-selected / C-bulk-confirmed / E-takeover-armed / E-back-to-parent / F-legacy / F-cockpit-back / G-terminate-armed（.png，同目录；另 /tmp/aria-37-v16e/ 有完整过程证据含 deploy-check/health/advance-record）
+A-before-start / A-start-clicked / A-sticky-bottom / A-final-state / C-bulk-selected / C-bulk-confirmed / E-takeover-armed / E-back-to-parent / F-legacy / F-cockpit-back / G-terminate-armed / V3-levels-topology / V1-gate-alive / V1-bulk-armed / V1-bulk-confirmed / V4-before / V4-double-click / V5-tab2（.png，同目录；另 /tmp/aria-37-v16e/ 有完整过程证据含 deploy-check/health/advance-record/supplemental-verification-plan）
