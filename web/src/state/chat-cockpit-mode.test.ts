@@ -6,8 +6,9 @@ import {
 } from "./chat-cockpit-mode";
 
 describe("chat cockpit mode switch", () => {
-  it("defaults according to the workspace type when nothing is stored", () => {
-    expect(readChatCockpitMode("work_item_plan")).toBe("cockpit");
+  it("defaults according to the workspace type and generation phase when nothing is stored", () => {
+    expect(readChatCockpitMode("work_item_plan")).toBe("legacy");
+    expect(readChatCockpitMode("work_item_plan", true)).toBe("cockpit");
     expect(readChatCockpitMode("story")).toBe("legacy");
     expect(readChatCockpitMode("design")).toBe("legacy");
     expect(readChatCockpitMode(null)).toBe("legacy");
@@ -22,13 +23,13 @@ describe("chat cockpit mode switch", () => {
   it("honours the legacy value", () => {
     window.localStorage.setItem(CHAT_COCKPIT_STORAGE_KEY, "legacy");
 
-    expect(readChatCockpitMode("work_item_plan")).toBe("legacy");
+    expect(readChatCockpitMode("work_item_plan", true)).toBe("legacy");
   });
 
   it("falls back to the type-aware default for unknown values", () => {
     window.localStorage.setItem(CHAT_COCKPIT_STORAGE_KEY, "cockpit-v2");
 
-    expect(readChatCockpitMode("work_item_plan")).toBe("cockpit");
+    expect(readChatCockpitMode("work_item_plan", true)).toBe("cockpit");
   });
 
   it("persists an explicit mode", () => {

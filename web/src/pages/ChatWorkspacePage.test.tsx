@@ -633,15 +633,25 @@ describe("ChatWorkspacePage dual track switch", () => {
     );
   }
 
-  it("renders a plan session in the cockpit by default", () => {
+  it("renders a plan session without timeline nodes in legacy form by default", () => {
     setWorkspaceType("work_item_plan");
+
+    renderWorkspace();
+
+    expect(screen.getByRole("button", { name: "开始生成" })).toBeInTheDocument();
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+  });
+
+  it("renders a plan session with timeline nodes in the cockpit by default", () => {
+    setWorkspaceType("work_item_plan");
+    useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode()]);
 
     renderWorkspace();
 
     expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
   });
-
   it("renders a story session in the legacy form by default", () => {
     setWorkspaceType("story");
 
@@ -683,7 +693,7 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
   });
 
-  it("keeps the safe legacy form until the workspace type arrives, then switches once for a plan", () => {
+  it("keeps the safe legacy form until a plan timeline node arrives, then switches once", () => {
     renderWorkspace();
 
     expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
@@ -693,11 +703,18 @@ describe("ChatWorkspacePage dual track switch", () => {
       setWorkspaceType("work_item_plan");
     });
 
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+
+    act(() => {
+      useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode()]);
+    });
+
     const cockpit = screen.getByTestId("cockpit-page");
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
 
     act(() => {
-      setWorkspaceType("work_item_plan");
+      useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode()]);
     });
 
     expect(screen.getByTestId("cockpit-page")).toBe(cockpit);

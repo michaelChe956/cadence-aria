@@ -4,7 +4,7 @@ import { readChatCockpitMode } from "../state/chat-cockpit-mode";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 
 // 显式开关优先；类型到达前保持 legacy，避免未知会话抢先进入 cockpit。
-// 已知 work_item_plan 默认进入 cockpit，其他会话沿用 legacy。
+// work_item_plan 在生成节点出现后默认进入 cockpit，其他会话沿用 legacy。
 export function ChatWorkspacePage({
   sessionId,
   onBack,
@@ -17,8 +17,12 @@ export function ChatWorkspacePage({
   const workspaceType = useWorkspaceStore((state) =>
     state.sessionId === sessionId ? state.workspaceType : null,
   );
+  const hasTimelineNodes = useWorkspaceStore(
+    (state) => state.sessionId === sessionId && state.timelineNodes.length > 0,
+  );
 
-  if (readChatCockpitMode(workspaceType) === "cockpit") {
+
+  if (readChatCockpitMode(workspaceType, hasTimelineNodes) === "cockpit") {
     return (
       <ChatCockpitPage
         sessionId={sessionId}
