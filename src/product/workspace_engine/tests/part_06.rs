@@ -60,10 +60,7 @@ async fn legacy_context_note_timeline_nodes_are_included_in_author_prompt() {
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(ImmediateOutputRecordingProvider {
         inputs: inputs.clone(),
-        output: complete_story_artifact(
-            "记录旧补充上下文。",
-            "author prompt 包含旧补充上下文。",
-        ),
+        output: complete_story_artifact("记录旧补充上下文。", "author prompt 包含旧补充上下文。"),
     });
 
     engine
@@ -168,7 +165,7 @@ async fn append_aborted_by_disconnect_creates_node() {
     let mut engine = WorkspaceEngine::new(store, tx, session);
 
     let node = engine
-        .append_aborted_by_disconnect("run-1".to_string())
+        .append_aborted_by_disconnect("run-1".to_string(), "connection-1".to_string())
         .await
         .unwrap();
 
@@ -178,6 +175,11 @@ async fn append_aborted_by_disconnect_creates_node() {
         node.summary
             .as_deref()
             .is_some_and(|summary| summary.contains("run-1"))
+    );
+    assert!(
+        node.summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("connection-1"))
     );
 }
 
@@ -290,7 +292,8 @@ async fn human_confirm_request_change_requires_context_after_untrusted_review() 
 }
 
 #[tokio::test]
-async fn human_confirm_request_change_requires_context_for_untrusted_review_across_workspace_routes() {
+async fn human_confirm_request_change_requires_context_for_untrusted_review_across_workspace_routes()
+ {
     enum HumanConfirmRoute {
         General(WorkspaceType),
         WorkItemPlanOutline,
@@ -381,7 +384,11 @@ async fn human_confirm_request_change_requires_context_for_untrusted_review_acro
             .expect_err("untrusted review without an explicit target must be rejected");
         assert!(error.contains("非空"), "{route_name}");
         assert!(error.contains("修改说明"), "{route_name}");
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm, "{route_name}");
+        assert_eq!(
+            engine.session().stage,
+            WorkspaceStage::HumanConfirm,
+            "{route_name}"
+        );
         assert!(
             !engine.timeline_nodes.iter().any(|node| {
                 node.status == TimelineNodeStatus::Active
@@ -402,7 +409,11 @@ async fn human_confirm_request_change_requires_context_for_untrusted_review_acro
                 .await
                 .expect_err("untrusted review must require source=human for every workspace route");
             assert!(error.contains("source"), "{route_name}");
-            assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm, "{route_name}");
+            assert_eq!(
+                engine.session().stage,
+                WorkspaceStage::HumanConfirm,
+                "{route_name}"
+            );
         }
 
         let outcome = engine
@@ -417,14 +428,26 @@ async fn human_confirm_request_change_requires_context_for_untrusted_review_acro
                 outcome,
                 ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
             ));
-            assert_eq!(engine.session().stage, WorkspaceStage::Running, "{route_name}");
+            assert_eq!(
+                engine.session().stage,
+                WorkspaceStage::Running,
+                "{route_name}"
+            );
             assert!(engine.timeline_nodes.iter().any(|node| {
                 node.node_type == TimelineNodeType::WorkItemPlanOutlineRun
                     && node.status == TimelineNodeStatus::Active
             }));
         } else {
-            assert_eq!(outcome, ReviewDecisionOutcome::StartRevision, "{route_name}");
-            assert_eq!(engine.session().stage, WorkspaceStage::Revision, "{route_name}");
+            assert_eq!(
+                outcome,
+                ReviewDecisionOutcome::StartRevision,
+                "{route_name}"
+            );
+            assert_eq!(
+                engine.session().stage,
+                WorkspaceStage::Revision,
+                "{route_name}"
+            );
             assert!(engine.timeline_nodes.iter().any(|node| {
                 node.node_type == TimelineNodeType::Revision
                     && node.status == TimelineNodeStatus::Active
@@ -696,7 +719,11 @@ impl StreamingProviderAdapter for RecordingStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -883,12 +910,15 @@ impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
                 .replacen("# Story Spec", "# Streamed Story Spec", 1)
             );
             let _ = event_tx
-                .send(ProviderEvent::TextDelta {
-                    content: streamed,
-                })
+                .send(ProviderEvent::TextDelta { content: streamed })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("Story Spec 候选已输出。等待 daemon 处理。".to_string(), None)))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        "Story Spec 候选已输出。等待 daemon 处理。".to_string(),
+                        None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {

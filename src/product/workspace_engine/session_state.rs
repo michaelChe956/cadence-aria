@@ -475,6 +475,7 @@ impl WorkspaceEngine {
 
         WsOutMessage::SessionState {
             session_id: self.session.session_id.clone(),
+            connection_id: None,
             workspace_type: self.session.workspace_type.clone(),
             stage: self.session.stage.as_str().to_string(),
             superpowers_enabled: self.session.superpowers_enabled,

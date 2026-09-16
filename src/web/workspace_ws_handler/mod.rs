@@ -75,6 +75,6 @@ pub(crate) use socket::{OutboundControl, send_json_outbound};
 
 #[cfg(test)]
 pub(crate) use socket::{
-    planning_resume_decision_with_fresh_index, planning_resume_run_kind, pump_outbound_controls,
-    spawn_idle_timeout_task,
+    ActivityTimestamp, planning_resume_decision_with_fresh_index, planning_resume_run_kind,
+    pump_outbound_controls, spawn_idle_timeout_task,
 };

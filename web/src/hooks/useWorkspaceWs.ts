@@ -60,6 +60,10 @@ export function useWorkspaceWs(sessionId: string | null) {
     source: null,
   });
   const lastMessageAtRef = useRef(Date.now());
+  const currentConnectionIdRef = useRef<string | null>(null);
+  const lastServerMessageAtRef = useRef<string | null>(null);
+  const lastPongOrServerMessageAtRef = useRef<string | null>(null);
+  const lastPingAtRef = useRef<string | null>(null);
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const [sessionSnapshot, setSessionSnapshot] = useState({
     sessionId: null as string | null,
@@ -151,6 +155,10 @@ export function useWorkspaceWs(sessionId: string | null) {
       ws.close();
     }, CONNECT_TIMEOUT_MS);
 
+    currentConnectionIdRef.current = null;
+    lastServerMessageAtRef.current = null;
+    lastPongOrServerMessageAtRef.current = null;
+    lastPingAtRef.current = null;
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
@@ -176,6 +184,16 @@ export function useWorkspaceWs(sessionId: string | null) {
       wsRef.current = null;
       socketSessionIdRef.current = null;
       setCloseCode(event.code);
+      useWorkspaceStore.getState().recordConnectionCloseDiagnostic({
+        connectionId: currentConnectionIdRef.current,
+        closeCode: event.code,
+        closeReason: event.reason,
+        wasClean: event.wasClean,
+        visibilityState: document.visibilityState,
+        lastPongOrServerMessageAt: lastPongOrServerMessageAtRef.current,
+        lastPingAt: lastPingAtRef.current,
+        at: new Date().toISOString(),
+      });
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
     };
 
@@ -195,10 +213,17 @@ export function useWorkspaceWs(sessionId: string | null) {
     ws.onmessage = (event) => {
       if (wsRef.current !== ws || socketSessionIdRef.current !== sessionId) return;
       lastMessageAtRef.current = Date.now();
+      const now = new Date().toISOString();
+      lastServerMessageAtRef.current = now;
+      lastPongOrServerMessageAtRef.current = now;
       try {
         const msg = JSON.parse(event.data) as WsServerMessage;
+        if (msg.type === "pong") {
+          lastPongOrServerMessageAtRef.current = now;
+        }
         if (msg.type === "session_state") {
           if (msg.session_id !== sessionId) return;
+          currentConnectionIdRef.current = msg.connection_id ?? null;
           setSessionSnapshot((current) =>
             current.sessionId === sessionId
               ? { sessionId, generation: current.generation + 1 }
@@ -235,6 +260,9 @@ export function useWorkspaceWs(sessionId: string | null) {
   useEffect(() => {
     planRepairSourceRef.current = { hasSnapshot: false, source: null };
     useLinkedWorkspaceAmendmentStore.getState().reset(sessionId);
+    if (useWorkspaceStore.getState().sessionId !== sessionId) {
+      useWorkspaceStore.setState({ connectionCloseDiagnostics: [] });
+    }
     if (!sessionId) {
       clearPendingStreams();
       useWorkspaceStore.getState().reset();
@@ -337,7 +365,9 @@ export function useWorkspaceWs(sessionId: string | null) {
   );
 
   const sendPing = useCallback(() => {
-    sendJson({ type: "ping" });
+    if (sendJson({ type: "ping" })) {
+      lastPingAtRef.current = new Date().toISOString();
+    }
   }, [sendJson]);
 
   useEffect(() => {

@@ -20,6 +20,81 @@ pub async fn workspace_ws(
         .into_response()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ActivityTimestamp {
+    pub(crate) instant: tokio::time::Instant,
+    pub(crate) recorded_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ActivityTimestamp {
+    pub(crate) fn now() -> Self {
+        Self {
+            instant: tokio::time::Instant::now(),
+            recorded_at: chrono::Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ReceiverExit {
+    CloseFrame(Option<CloseFrame>),
+    Eof,
+    ReadError(String),
+}
+
+impl ReceiverExit {
+    fn kind(&self, idle_timeout_triggered: bool) -> &'static str {
+        if idle_timeout_triggered {
+            "server_idle"
+        } else {
+            match self {
+                Self::CloseFrame(_) => "close_frame",
+                Self::Eof => "eof",
+                Self::ReadError(error) => {
+                    let _ = error;
+                    "read_error"
+                }
+            }
+        }
+    }
+
+    fn close_frame(&self) -> Option<&CloseFrame> {
+        match self {
+            Self::CloseFrame(frame) => frame.as_ref(),
+            Self::Eof | Self::ReadError(_) => None,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ConnectionDiagnostic {
+    connection_id: String,
+    session_id: String,
+    receiver_exit: String,
+    idle_timeout_triggered: bool,
+    close_code: Option<u16>,
+    close_reason: Option<String>,
+    current_run_id: Option<u64>,
+    current_run_token: Option<u64>,
+    provider_drive_depth: u32,
+    last_client_activity_at: String,
+    last_server_activity_at: String,
+    recorded_at: String,
+}
+
+impl WsOutMessage {
+    pub(super) fn with_connection_id(mut self, connection_id: &str) -> Self {
+        if let Self::SessionState {
+            connection_id: slot,
+            ..
+        } = &mut self
+        {
+            *slot = Some(connection_id.to_string());
+        }
+        self
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum OutboundControl {
     Text(String),
@@ -36,15 +111,40 @@ pub(crate) async fn send_json_outbound<T: serde::Serialize>(
         Err(_) => false,
     }
 }
+fn decorate_session_state_json(message: String, connection_id: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&message) else {
+        return message;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("session_state") {
+        return message;
+    }
+    value["connection_id"] = serde_json::Value::String(connection_id.to_string());
+    serde_json::to_string(&value).unwrap_or(message)
+}
+
+async fn forward_connection_outbound_controls(
+    mut outbound_rx: mpsc::Receiver<OutboundControl>,
+    socket_outbound_tx: mpsc::Sender<OutboundControl>,
+    connection_id: String,
+) {
+    while let Some(control) = outbound_rx.recv().await {
+        let control = match control {
+            OutboundControl::Text(message) => {
+                OutboundControl::Text(decorate_session_state_json(message, &connection_id))
+            }
+            other => other,
+        };
+        if socket_outbound_tx.send(control).await.is_err() {
+            break;
+        }
+    }
+}
 
 /// 出站写泵：socket 侧唯一的出站写入点。
-///
-/// 所有 `OutboundControl::Text` 都经此写向客户端（`send_json_outbound` 只投递到
-/// channel，真正的 socket 写出发生在这里）。
 pub(crate) async fn pump_outbound_controls<S>(
     mut outbound_rx: mpsc::Receiver<OutboundControl>,
     mut ws_sender: S,
-    last_client_message_at: Arc<Mutex<tokio::time::Instant>>,
+    last_server_activity_at: Arc<Mutex<ActivityTimestamp>>,
 ) where
     S: futures_util::Sink<Message> + Unpin + Send + 'static,
     S::Error: Send + 'static,
@@ -52,50 +152,13 @@ pub(crate) async fn pump_outbound_controls<S>(
     while let Some(control) = outbound_rx.recv().await {
         match control {
             OutboundControl::Text(msg) => {
-                let diag_type = serde_json::from_str::<serde_json::Value>(&msg)
-                    .ok()
-                    .and_then(|value| {
-                        let message_type = value.get("type")?.as_str()?.to_string();
-                        let id = value
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        Some((message_type, id))
-                    });
-                if let Some((message_type, id)) = diag_type.as_ref() {
-                    eprintln!(
-                        "[aria-choice-diag] ws send_task sending outbound type={} id={} bytes={}",
-                        message_type,
-                        id.as_deref().unwrap_or("<none>"),
-                        msg.len()
-                    );
-                }
                 if ws_sender.send(Message::Text(msg.into())).await.is_err() {
-                    if let Some((message_type, id)) = diag_type.as_ref() {
-                        eprintln!(
-                            "[aria-choice-diag] ws send_task failed outbound type={} id={}",
-                            message_type,
-                            id.as_deref().unwrap_or("<none>")
-                        );
-                    }
                     break;
                 }
-                // 双向活性（3.6 F7 项 1）：服务器成功出站 = 连接健康，刷新连接活跃
-                // 时间——静默客户端（auto 流 driver 只收不发）在 current_run=None
-                // 窗口不被误掐。写失败不刷新（对端不可达不是「成功出站」）；只有
-                // 服务器与客户端同时静默超过 idle 阈值才进入回收计时（真死连接
-                // 语义保持）。
-                *last_client_message_at.lock().await = tokio::time::Instant::now();
-                if let Some((message_type, id)) = diag_type.as_ref() {
-                    eprintln!(
-                        "[aria-choice-diag] ws send_task sent outbound type={} id={}",
-                        message_type,
-                        id.as_deref().unwrap_or("<none>")
-                    );
-                }
+                *last_server_activity_at.lock().await = ActivityTimestamp::now();
             }
             OutboundControl::CloseDueToIdleTimeout => {
-                let _ = ws_sender.close().await;
+                let _ = ws_sender.send(Message::Close(None)).await;
                 break;
             }
             OutboundControl::CloseForTestDrop => {
@@ -112,7 +175,9 @@ pub(crate) async fn pump_outbound_controls<S>(
 }
 
 pub(crate) fn spawn_idle_timeout_task(
-    last_client_message_at: Arc<Mutex<tokio::time::Instant>>,
+    last_client_activity_at: Arc<Mutex<ActivityTimestamp>>,
+    last_server_activity_at: Arc<Mutex<ActivityTimestamp>>,
+    idle_timeout_triggered: Arc<std::sync::atomic::AtomicBool>,
     outbound_tx: mpsc::Sender<OutboundControl>,
     is_active_run: Arc<dyn Fn() -> bool + Send + Sync>,
     timeout_after: std::time::Duration,
@@ -122,8 +187,11 @@ pub(crate) fn spawn_idle_timeout_task(
         let mut interval = tokio::time::interval(tick_every);
         loop {
             interval.tick().await;
-            let last_seen = *last_client_message_at.lock().await;
-            if last_seen.elapsed() > timeout_after && !is_active_run() {
+            let last_client_activity = last_client_activity_at.lock().await.instant;
+            let last_server_activity = last_server_activity_at.lock().await.instant;
+            let last_activity = last_client_activity.max(last_server_activity);
+            if last_activity.elapsed() > timeout_after && !is_active_run() {
+                idle_timeout_triggered.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = outbound_tx
                     .send(OutboundControl::CloseDueToIdleTimeout)
                     .await;
@@ -354,6 +422,7 @@ pub(crate) async fn handle_workspace_socket(
     state: WebAppState,
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let connection_id = uuid::Uuid::new_v4().to_string();
 
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -470,7 +539,9 @@ pub(crate) async fn handle_workspace_socket(
             return;
         }
         (
-            engine.build_session_state(),
+            engine
+                .build_session_state()
+                .with_connection_id(&connection_id),
             engine.pending_author_choice_request_message(),
         )
     };
@@ -483,20 +554,26 @@ pub(crate) async fn handle_workspace_socket(
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
 
-    let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let (outbound_tx, connection_outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let (socket_outbound_tx, outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let connection_outbound_task = tokio::spawn(forward_connection_outbound_controls(
+        connection_outbound_rx,
+        socket_outbound_tx,
+        connection_id.clone(),
+    ));
     let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
     state
         .test_controls
         .register_workspace_socket(session_id.clone(), socket_control_tx)
         .await;
-
-    // 双向活性口径：last_client_message_at 同时记录「客户端最近入站」与「服务器
-    // 最近成功出站」（出站写泵在写出成功后刷新），两者任一活跃即视为连接健康。
-    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    // 客户端入站和服务器成功出站由独立时钟记录；idle 仅在双方都静默时触发。
+    let last_client_activity_at = Arc::new(Mutex::new(ActivityTimestamp::now()));
+    let last_server_activity_at = Arc::new(Mutex::new(ActivityTimestamp::now()));
+    let idle_timeout_triggered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let send_task = tokio::spawn(pump_outbound_controls(
         outbound_rx,
         ws_sender,
-        last_client_message_at.clone(),
+        last_server_activity_at.clone(),
     ));
 
     let outbound_for_socket_controls = outbound_tx.clone();
@@ -583,7 +660,9 @@ pub(crate) async fn handle_workspace_socket(
     }
 
     let idle_timeout_task = spawn_idle_timeout_task(
-        last_client_message_at.clone(),
+        last_client_activity_at.clone(),
+        last_server_activity_at.clone(),
+        idle_timeout_triggered.clone(),
         outbound_tx.clone(),
         workspace_idle_activity_guard(
             current_run.clone(),
@@ -639,15 +718,6 @@ pub(crate) async fn handle_workspace_socket(
     };
     match outline_resume_kind {
         Ok(Some(run_kind)) if state.workspace_runs.run(&session_id).await.is_none() => {
-            // 逻辑代码库分支：resume 校验在 provider 启动前完成（REQ-PLN-03）。
-            // - None（传统单仓）/ SameContext（指纹一致）：沿用现有 session 审计与
-            //   prompt 上下文，照常续跑。
-            // - StaleContext（指纹漂移）：以 `WorkItemPlanOutlineRebuild` 真正启动全新
-            //   run —— 使用 rebuilt cwd/inventory/policy、新建 OutlineRun 节点，不沿用
-            //   中断会话节点/旧内容。rebuilt snapshot 不在启动前落盘，而是由 run 在
-            //   provider 成功启动后才 commit（新 BLOCKER 修复：provider 失败不落盘，
-            //   重连仍 StaleContext）。
-            // - 校验失败：fail-closed 拒绝续跑。
             match planning_resume_decision_with_fresh_index(
                 &app_paths,
                 &session_record.project_id,
@@ -683,88 +753,149 @@ pub(crate) async fn handle_workspace_socket(
         Ok(Some(_)) | Ok(None) => {}
     }
 
-    while let Some(Ok(msg)) = ws_receiver.next().await {
-        let text = match msg {
-            Message::Text(t) => t.to_string(),
-            Message::Close(_) => break,
-            _ => continue,
-        };
-
-        let envelope = match parse_workspace_inbound_text(&text) {
-            Ok(envelope) => envelope,
-            Err(e) => {
-                let err = WsOutMessage::Error {
-                    message: format!("invalid message: {e}"),
+    let idle_receiver_exit = idle_timeout_triggered.clone();
+    let receiver_exit = tokio::select! {
+        receiver_exit = async {
+            loop {
+                let msg = match ws_receiver.next().await {
+                    Some(Ok(message)) => message,
+                    Some(Err(error)) => {
+                        if error
+                            .to_string()
+                            .contains("reset without closing handshake")
+                        {
+                            break ReceiverExit::Eof;
+                        }
+                        break ReceiverExit::ReadError(error.to_string());
+                    }
+                    None => break ReceiverExit::Eof,
                 };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-                continue;
-            }
-        };
-        let in_msg = &envelope.message;
-        *last_client_message_at.lock().await = tokio::time::Instant::now();
+                let text = match msg {
+                    Message::Text(text) => text.to_string(),
+                    Message::Close(frame) => break ReceiverExit::CloseFrame(frame),
+                    _ => continue,
+                };
 
-        let stage_type_and_cancel_replay = if requires_stage_validation(in_msg)
-            && !single_candidate_generation_decision_bypasses_stage_validation(
-                session_record.flow_kind,
-                in_msg,
-            ) {
-            Some({
-                let engine = engine.lock().await;
-                let completed_cancel_replay = matches!(
-                    in_msg,
-                    WsInMessage::CancelPlanAmendment { amendment_id, .. }
-                        if engine.current_stage() == WorkspaceStage::Completed
-                            && engine.is_cancelled_plan_amendment_replay(amendment_id)
-                );
-                (
-                    engine.current_stage(),
-                    engine.session().workspace_type.clone(),
-                    completed_cancel_replay,
-                )
-            })
-        } else {
-            None
-        };
-        if let Some((stage, workspace_type, completed_cancel_replay)) =
-            stage_type_and_cancel_replay.as_ref()
-            && !is_message_valid_for_stage_with_flow(session_record.flow_kind, in_msg, stage)
-            && !completed_cancel_replay
-            && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
-                && *stage == WorkspaceStage::AuthorConfirm
-                && *workspace_type == WorkspaceType::WorkItemPlan)
-        {
-            let err = if let Some(err) =
-                human_gate_message_boundary_error(session_record.flow_kind, stage.clone(), in_msg)
-            {
-                err
-            } else {
-                match in_msg {
-                    WsInMessage::HumanGateFeedback { .. } => {
-                        conversational_gate_stage_error(session_record.flow_kind, stage, in_msg)
+                let envelope = match parse_workspace_inbound_text(&text) {
+                    Ok(envelope) => {
+                        *last_client_activity_at.lock().await = ActivityTimestamp::now();
+                        envelope
                     }
-                    WsInMessage::Advance { command_id } => {
-                        advance_stage_error(command_id.clone(), stage, session_record.flow_kind)
+                    Err(e) => {
+                        let err = WsOutMessage::Error {
+                            message: format!("invalid message: {e}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                        continue;
                     }
-                    _ => WsOutMessage::ProtocolError {
-                        code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
-                        message: format!(
-                            "message {} not allowed in stage {}",
-                            message_type(in_msg),
-                            stage.as_str()
-                        ),
-                        context: Some(serde_json::json!({
-                            "stage": stage.as_str(),
-                            "received": message_type(in_msg),
-                        })),
-                    },
+                };
+                let in_msg = &envelope.message;
+
+                let stage_type_and_cancel_replay = if requires_stage_validation(in_msg)
+                    && !single_candidate_generation_decision_bypasses_stage_validation(
+                        session_record.flow_kind,
+                        in_msg,
+                    ) {
+                    Some({
+                        let engine = engine.lock().await;
+                        let completed_cancel_replay = matches!(
+                            in_msg,
+                            WsInMessage::CancelPlanAmendment { amendment_id, .. }
+                                if engine.current_stage() == WorkspaceStage::Completed
+                                    && engine.is_cancelled_plan_amendment_replay(amendment_id)
+                        );
+                        (
+                            engine.current_stage(),
+                            engine.session().workspace_type.clone(),
+                            completed_cancel_replay,
+                        )
+                    })
+                } else {
+                    None
+                };
+                if let Some((stage, workspace_type, completed_cancel_replay)) =
+                    stage_type_and_cancel_replay.as_ref()
+                    && !is_message_valid_for_stage_with_flow(session_record.flow_kind, in_msg, stage)
+                    && !completed_cancel_replay
+                    && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
+                        && *stage == WorkspaceStage::AuthorConfirm
+                        && *workspace_type == WorkspaceType::WorkItemPlan)
+                {
+                    let err = if let Some(err) = human_gate_message_boundary_error(
+                        session_record.flow_kind,
+                        stage.clone(),
+                        in_msg,
+                    ) {
+                        err
+                    } else {
+                        match in_msg {
+                            WsInMessage::HumanGateFeedback { .. } => conversational_gate_stage_error(
+                                session_record.flow_kind,
+                                stage,
+                                in_msg,
+                            ),
+                            WsInMessage::Advance { command_id } => advance_stage_error(
+                                command_id.clone(),
+                                stage,
+                                session_record.flow_kind,
+                            ),
+                            _ => WsOutMessage::ProtocolError {
+                                code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
+                                message: format!(
+                                    "message {} not allowed in stage {}",
+                                    message_type(in_msg),
+                                    stage.as_str()
+                                ),
+                                context: Some(serde_json::json!({
+                                    "stage": stage.as_str(),
+                                    "received": message_type(in_msg),
+                                })),
+                            },
+                        }
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                    continue;
                 }
-            };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-            continue;
-        }
 
-        handle_workspace_inbound_message(inbound_context.clone(), envelope).await;
-    }
+                handle_workspace_inbound_message(inbound_context.clone(), envelope).await;
+            }
+        } => receiver_exit,
+        _ = async {
+            loop {
+                if idle_receiver_exit.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        } => ReceiverExit::Eof,
+    };
+
+    let idle_timeout_triggered = idle_timeout_triggered.load(std::sync::atomic::Ordering::SeqCst);
+    let active_for_diagnostic = current_run.lock().await.clone();
+    let close_frame = receiver_exit.close_frame();
+    let last_client_activity_at = last_client_activity_at.lock().await.recorded_at;
+    let last_server_activity_at = last_server_activity_at.lock().await.recorded_at;
+    let diagnostic = ConnectionDiagnostic {
+        connection_id: connection_id.clone(),
+        session_id: session_id.clone(),
+        receiver_exit: receiver_exit.kind(idle_timeout_triggered).to_string(),
+        idle_timeout_triggered,
+        close_code: close_frame.map(|frame| frame.code),
+        close_reason: close_frame.map(|frame| frame.reason.to_string()),
+        current_run_id: active_for_diagnostic.as_ref().map(|run| run.id),
+        current_run_token: active_for_diagnostic.as_ref().map(|run| run.token),
+        provider_drive_depth: state.workspace_runs.provider_drive_depth(&session_id),
+        last_client_activity_at: last_client_activity_at.to_rfc3339(),
+        last_server_activity_at: last_server_activity_at.to_rfc3339(),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let diagnostic_json =
+        serde_json::to_value(&diagnostic).expect("connection diagnostic serializes");
+    eprintln!("[aria-connection-diagnostic] {diagnostic_json}");
+    state
+        .test_controls
+        .record_connection_diagnostic(&session_id, diagnostic_json)
+        .await;
 
     let active = { current_run.lock().await.take() };
     if let Some(run) = active {
@@ -773,33 +904,28 @@ pub(crate) async fn handle_workspace_socket(
             .workspace_runs
             .remove_if_token(&session_id, run.token)
             .await;
-        // 断连不再取消 run（claude×轻 五连败终局修复，用户已批）：此前这里无条件
-        // abort_workspace_run，慢握手（60-120s 静默）期间客户端断连/重连即杀死
-        // runner token，握手以「cancelled」收口。现在 run 跨断连存活，驱动至自然
-        // 兜底口径注意（disconnect-fix-review Minor2）：存活 run 的服务端上界是 provider 超时 DEFAULT_PROVIDER_TIMEOUT_SECS=3h（provider_adapter.rs:10）；35min 仅为 driver 侧矩阵口径。本清理任务在 engine 锁上等待 run 自然结束（≤3h）。
-        // engine.lock() 会等 run 结束后才追加 aborted_by_disconnect 审计节点
-        //（留痕语义不变，仍记 last_active_run_id）。
-        eprintln!(
-            "[aria-disconnect] workspace ws_disconnect_cleanup session_id={} run_id={last_active_run_id} owned_registry_run={owned_registry_run} run_not_cancelled=true",
-            session_id
-        );
+        // 断连清理保留既有 run/registry 语义；归因只补 detail 中的 connection id。
         if owned_registry_run {
             let mut engine = engine.lock().await;
             let _ = engine
-                .append_aborted_by_disconnect(last_active_run_id)
+                .append_aborted_by_disconnect(last_active_run_id, connection_id.clone())
                 .await;
             engine
                 .transition_to_prepare_context_after_disconnect()
                 .await;
-            let state_msg = engine.build_session_state();
+            let state_msg = engine
+                .build_session_state()
+                .with_connection_id(&connection_id);
             let _ = send_json_outbound(&outbound_tx, &state_msg).await;
         }
     }
     drop(outbound_tx);
+    connection_outbound_task.abort();
     idle_timeout_task.abort();
     socket_control_task.abort();
     event_forward_task.abort();
     send_task.abort();
+    let _ = connection_outbound_task.await;
     let _ = socket_control_task.await;
     let _ = event_forward_task.await;
     let _ = send_task.await;

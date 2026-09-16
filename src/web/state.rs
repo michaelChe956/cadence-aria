@@ -124,6 +124,14 @@ impl WorkspaceRunRegistry {
         }
     }
 
+    /// 当前 provider drive 嵌套深度，只读供连接诊断观察；锁中毒时保守返回 0。
+    pub fn provider_drive_depth(&self, session_id: &str) -> u32 {
+        self.provider_drive_depth
+            .lock()
+            .map(|depth| depth.get(session_id).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
     pub async fn take(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
         self.runs.lock().await.remove(session_id)
     }
@@ -937,30 +945,25 @@ mod tests {
     #[test]
     fn workspace_run_registry_provider_drive_depth_tracks_begin_and_guard_drop() {
         let runs = WorkspaceRunRegistry::default();
-        assert!(!runs.provider_drive_in_progress("session_a"));
+        assert_eq!(runs.provider_drive_depth("session_a"), 0);
 
         let drive = runs.begin_provider_drive("session_a");
-        assert!(runs.provider_drive_in_progress("session_a"));
+        assert_eq!(runs.provider_drive_depth("session_a"), 1);
 
         let second_drive = runs.begin_provider_drive("session_a");
+        assert_eq!(runs.provider_drive_depth("session_a"), 2);
         drop(drive);
-        assert!(
-            runs.provider_drive_in_progress("session_a"),
-            "嵌套 drive 计数应保留（深度 2 → 1 仍视为进行中）"
-        );
+        assert_eq!(runs.provider_drive_depth("session_a"), 1);
 
         drop(second_drive);
-        assert!(!runs.provider_drive_in_progress("session_a"));
+        assert_eq!(runs.provider_drive_depth("session_a"), 0);
     }
 
     #[test]
     fn workspace_run_registry_provider_drive_depth_is_per_session() {
         let runs = WorkspaceRunRegistry::default();
         let _drive = runs.begin_provider_drive("session_a");
-        assert!(runs.provider_drive_in_progress("session_a"));
-        assert!(
-            !runs.provider_drive_in_progress("session_b"),
-            "其它 session 的 drive 不应压制本 session 的 idle 回收"
-        );
+        assert_eq!(runs.provider_drive_depth("session_a"), 1);
+        assert_eq!(runs.provider_drive_depth("session_b"), 0);
     }
 }

@@ -158,6 +158,8 @@ pub enum WsOutMessage {
         reason: String,
     },
     SessionState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_id: Option<String>,
         session_id: String,
         workspace_type: WorkspaceType,
         stage: String,
@@ -233,6 +235,7 @@ mod tests {
 
     fn work_item_plan_session_state() -> WsOutMessage {
         WsOutMessage::SessionState {
+            connection_id: None,
             session_id: "session_0001".to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             stage: "prepare_context".to_string(),
@@ -293,6 +296,18 @@ mod tests {
                 "review_cycles": {},
             })
         );
+    }
+    #[test]
+    fn session_state_serializes_optional_connection_id() {
+        let mut message = work_item_plan_session_state();
+        let WsOutMessage::SessionState { connection_id, .. } = &mut message else {
+            unreachable!("fixture must be a session_state message");
+        };
+        *connection_id = Some("conn-1".to_string());
+
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(value["connection_id"], "conn-1");
     }
 
     #[test]

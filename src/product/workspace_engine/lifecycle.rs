@@ -845,6 +845,7 @@ impl WorkspaceEngine {
     pub async fn append_aborted_by_disconnect(
         &mut self,
         last_active_run_id: String,
+        connection_id: String,
     ) -> Result<TimelineNode, String> {
         if let Some(node_id) = self.active_node_id.clone() {
             self.update_timeline_node(
@@ -860,7 +861,9 @@ impl WorkspaceEngine {
                 TimelineNodeType::AbortedByDisconnect,
                 WorkspaceStage::PrepareContext,
                 "运行因断开中止".to_string(),
-                Some(format!("last_active_run_id: {last_active_run_id}")),
+                Some(format!(
+                    "last_active_run_id: {last_active_run_id}; connection_id: {connection_id}"
+                )),
                 TimelineNodeStatus::Failed,
                 true,
             )
@@ -895,7 +898,9 @@ impl WorkspaceEngine {
                 .active_run_id
                 .clone()
                 .unwrap_or_else(|| "stale-connection".to_string());
-            let _ = self.append_aborted_by_disconnect(run_id).await;
+            let _ = self
+                .append_aborted_by_disconnect(run_id, "stale-connection".to_string())
+                .await;
         }
         self.transition_to_prepare_context_after_disconnect().await;
     }

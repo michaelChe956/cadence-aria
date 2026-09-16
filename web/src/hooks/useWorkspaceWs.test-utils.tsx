@@ -173,10 +173,10 @@ export class MockWebSocket {
     this.sent.push(data);
   }
 
-  close(code = 1000) {
+  close(code = 1000, reason = "", wasClean = true) {
     this.closeCodes.push(code);
     this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.(new CloseEvent("close", { code }));
+    this.onclose?.(new CloseEvent("close", { code, reason, wasClean }));
   }
 
   open() {

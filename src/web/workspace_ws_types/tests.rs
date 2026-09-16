@@ -209,6 +209,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
     ));
 
     let state = serde_json::to_value(WsOutMessage::SessionState {
+        connection_id: None,
         session_id: "workspace_session_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         stage: "review_decision".to_string(),
@@ -832,6 +833,7 @@ fn artifact_update_with_markdown_payload_serializes_flat() {
 #[test]
 fn session_state_artifact_accepts_markdown_payload() {
     let state = WsOutMessage::SessionState {
+        connection_id: None,
         session_id: "workspace_session_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         stage: "author_confirm".to_string(),

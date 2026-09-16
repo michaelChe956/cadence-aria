@@ -51,6 +51,7 @@ pub struct TestControls {
 struct TestControlsInner {
     workspace_sockets: Mutex<HashMap<String, Vec<mpsc::Sender<WorkspaceSocketControl>>>>,
     workspace_socket_rejects: Mutex<HashMap<String, u32>>,
+    connection_diagnostics: Mutex<HashMap<String, Vec<Value>>>,
     permission_fixture_sessions: Mutex<HashSet<String>>,
     review_fixture_sessions: Mutex<HashMap<String, VecDeque<ReviewFixture>>>,
     permission_timeout: Mutex<Option<Duration>>,

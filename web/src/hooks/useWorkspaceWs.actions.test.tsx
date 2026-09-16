@@ -349,6 +349,58 @@ describe("useWorkspaceWs outgoing actions", () => {
     expect(harness.ws.sent).toContain(JSON.stringify({ type: "ping" }));
   });
 
+  it("records browser close attribution with the latest session connection id", () => {
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_001",
+        connection_id: "conn-browser-4000",
+        workspace_type: "story",
+        stage: "prepare_context",
+        session_status: "open",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [], repairs_used: 0, manual_repairs_used: 0, transitions_used: 0,
+          initial_review_count: 0, verification_review_count: 0,
+        },
+        messages: [], checkpoints: [], artifact: null,
+        providers: { author: "fake", reviewer: null },
+        timeline_nodes: [], active_node_id: null, artifact_versions: [],
+        timeline_node_details: {}, active_run_id: null, human_presentation_revisions: [],
+      });
+      harness.ws.close(4000, "stale socket", false);
+    });
+
+    expect(useWorkspaceStore.getState().connectionCloseDiagnostics).toEqual([
+      expect.objectContaining({
+        connectionId: "conn-browser-4000",
+        closeCode: 4000,
+        closeReason: "stale socket",
+        wasClean: false,
+        lastPongOrServerMessageAt: expect.any(String),
+        lastPingAt: null,
+      }),
+    ]);
+  });
+
+  it("keeps close diagnostics within one session and clears them on session replacement", () => {
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1000, "page unload", true);
+    });
+    expect(useWorkspaceStore.getState().connectionCloseDiagnostics).toHaveLength(1);
+
+    act(() => harness.switchSession("session_002"));
+
+    expect(useWorkspaceStore.getState().connectionCloseDiagnostics).toEqual([]);
+  });
+
   it("keeps an in-flight human confirmation socket open after 60 seconds of server silence", () => {
     vi.useFakeTimers();
     const harness = renderWorkspaceHook("session_001");

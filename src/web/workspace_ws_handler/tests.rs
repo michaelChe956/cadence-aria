@@ -133,11 +133,12 @@ fn hello_and_ping_are_valid_for_every_stage() {
 
 #[tokio::test]
 async fn idle_timeout_sends_close_control_after_client_quiet() {
-    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let (tx, mut rx) = mpsc::channel(1);
 
     let task = spawn_idle_timeout_task(
-        last_client_message_at,
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(AtomicBool::new(false)),
         tx,
         Arc::new(|| false),
         std::time::Duration::from_millis(5),
@@ -155,13 +156,14 @@ async fn idle_timeout_sends_close_control_after_client_quiet() {
 
 #[tokio::test]
 async fn idle_timeout_waits_while_provider_run_is_active() {
-    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let (tx, mut rx) = mpsc::channel(1);
     let active = Arc::new(AtomicBool::new(true));
     let active_for_task = active.clone();
 
     let task = spawn_idle_timeout_task(
-        last_client_message_at,
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(AtomicBool::new(false)),
         tx,
         Arc::new(move || active_for_task.load(Ordering::SeqCst)),
         std::time::Duration::from_millis(5),

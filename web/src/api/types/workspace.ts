@@ -636,6 +636,7 @@ export type WsOutMessage =
   | {
       type: "session_state";
       session_id: string;
+      connection_id?: string;
       workspace_type: string;
       stage: string;
       superpowers_enabled: boolean;

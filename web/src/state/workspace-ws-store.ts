@@ -151,6 +151,7 @@ const initialState: WorkspaceWsState = {
   humanGateClosure: null,
   advanceCommands: {},
   protocolDiagnostics: [],
+  connectionCloseDiagnostics: [],
 };
 
 function snapshotIdentityFor(
@@ -295,6 +296,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
             : null,
         advanceCommands: sameSession ? prev.advanceCommands : {},
         protocolDiagnostics: sameSession ? prev.protocolDiagnostics : [],
+        connectionCloseDiagnostics: sameSession ? prev.connectionCloseDiagnostics : [],
         reviewerEnabled: state.reviewer_enabled_at_start ?? prev.reviewerEnabled,
       };
       return {
@@ -564,6 +566,11 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set((prev) => ({
       protocolDiagnostics: [...prev.protocolDiagnostics, diagnostic].slice(-50),
     })),
+  recordConnectionCloseDiagnostic: (diagnostic) =>
+    set((prev) => ({
+      connectionCloseDiagnostics: [...prev.connectionCloseDiagnostics, diagnostic].slice(-50),
+    })),
+
 
   applyGateProtocolError: (turnId, error) =>
     set((prev) =>

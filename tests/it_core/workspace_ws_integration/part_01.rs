@@ -17,6 +17,7 @@ use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::test_controls::TestControls;
 use cadence_aria::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType,
     TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,

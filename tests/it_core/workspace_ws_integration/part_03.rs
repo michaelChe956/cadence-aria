@@ -151,6 +151,173 @@ async fn workspace_ws_abort_discards_partial_stream_without_completion() {
     panic!("abort did not return workspace to prepare_context");
 }
 
+static CONNECTION_DIAGNOSTIC_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn wait_for_connection_diagnostic(
+    controls: &TestControls,
+    expected_receiver_exit: &str,
+) -> Value {
+    for _ in 0..160 {
+        if let Some(diagnostic) = controls
+            .connection_diagnostics("workspace_session_0001")
+            .into_iter()
+            .find(|diagnostic| diagnostic["receiver_exit"] == expected_receiver_exit)
+        {
+            assert!(diagnostic["connection_id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert!(diagnostic["last_client_activity_at"].as_str().is_some());
+            assert!(diagnostic["last_server_activity_at"].as_str().is_some());
+            assert!(diagnostic["provider_drive_depth"].as_u64().is_some());
+            return diagnostic;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("connection diagnostic with receiver_exit={expected_receiver_exit} was not recorded");
+}
+
+struct ConnectionDiagnosticTestControlsGuard;
+
+impl ConnectionDiagnosticTestControlsGuard {
+    async fn enable() -> (tokio::sync::MutexGuard<'static, ()>, Self) {
+        let lock = CONNECTION_DIAGNOSTIC_TEST_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+        }
+        (lock, Self)
+    }
+}
+
+impl Drop for ConnectionDiagnosticTestControlsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+        }
+    }
+}
+
+#[tokio::test]
+async fn workspace_ws_idle_timeout_records_server_idle_connection_diagnostic() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    controls
+        .set_server_idle_timeout(Duration::from_millis(30))
+        .await;
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    let closed = timeout(Duration::from_secs(7), ws.next())
+        .await
+        .expect("server idle close timeout")
+        .expect("server idle close result")
+        .expect("server idle close frame");
+    assert!(matches!(closed, Message::Close(_)));
+    let diagnostic = wait_for_connection_diagnostic(&controls, "server_idle").await;
+    assert_eq!(diagnostic["idle_timeout_triggered"], true);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_client_close_4000_records_connection_diagnostic() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    ws.send(Message::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Library(4000),
+        reason: "stale socket".into(),
+    })))
+    .await
+    .expect("send client close");
+
+    let diagnostic = wait_for_connection_diagnostic(&controls, "close_frame").await;
+    assert_eq!(diagnostic["idle_timeout_triggered"], false);
+    assert_eq!(diagnostic["close_code"], 4000);
+    assert_eq!(diagnostic["close_reason"], "stale socket");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_page_unload_close_1000_records_connection_diagnostic() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    ws.close(None).await.expect("send page unload close");
+
+    let diagnostic = wait_for_connection_diagnostic(&controls, "close_frame").await;
+    assert_eq!(diagnostic["idle_timeout_triggered"], false);
+    assert!(diagnostic["close_code"].is_null() || diagnostic["close_code"] == 1000);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_tcp_drop_records_eof_connection_diagnostic() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    drop(ws);
+
+    let diagnostic = wait_for_connection_diagnostic(&controls, "eof").await;
+    assert_eq!(diagnostic["idle_timeout_triggered"], false);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect() {
     let root = tempdir().expect("root");

@@ -369,6 +369,17 @@ export interface ProtocolDiagnostic {
   at: string;
   type: string;
 }
+export interface ConnectionCloseDiagnostic {
+  connectionId: string | null;
+  closeCode: number;
+  closeReason: string;
+  wasClean: boolean;
+  visibilityState: DocumentVisibilityState;
+  lastPongOrServerMessageAt: string | null;
+  lastPingAt: string | null;
+  at: string;
+}
+
 
 export interface WorkItemPlanRepairReservation {
   token: string;
@@ -462,10 +473,12 @@ export interface WorkspaceWsState {
   humanGateClosure: HumanGateClosure | null;
   advanceCommands: Record<string, AdvanceCommandState>;
   protocolDiagnostics: ProtocolDiagnostic[];
+  connectionCloseDiagnostics: ConnectionCloseDiagnostic[];
 }
 
 export interface WorkspaceSessionStatePayload {
   session_id: string;
+  connection_id?: string;
   workspace_type: string;
   stage: string;
   superpowers_enabled?: boolean;
@@ -585,6 +598,7 @@ export interface WorkspaceWsActions {
   ) => void;
   applyAdvanceRejected: (commandId: string, code: string, reason: string) => void;
   recordProtocolDiagnostic: (diagnostic: ProtocolDiagnostic) => void;
+  recordConnectionCloseDiagnostic: (diagnostic: ConnectionCloseDiagnostic) => void;
 
   applyGateProtocolError: (turnId: string, error: InlineProtocolError) => void;
   applyAdvanceProtocolError: (commandId: string, error: InlineProtocolError) => void;

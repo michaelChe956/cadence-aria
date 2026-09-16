@@ -60,11 +60,13 @@ impl futures_util::Sink<Message> for FailingOutboundSink {
 async fn outbound_writer_keeps_silent_client_alive_while_server_writes() {
     // F3 运营验证实证（run1b/1c）：静默客户端在 current_run=None 窗口被
     // 1005 掐线。服务器持续出站期间连接是健康的，不得掐线。
-    let liveness = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let liveness = Arc::new(Mutex::new(ActivityTimestamp::now()));
     let (writer_tx, writer_rx) = mpsc::channel::<OutboundControl>(8);
     let (idle_tx, mut idle_rx) = mpsc::channel::<OutboundControl>(1);
     let idle_task = spawn_idle_timeout_task(
         liveness.clone(),
+        liveness.clone(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
         idle_tx,
         Arc::new(|| false), // current_run=None 窗口：is_active_run=false
         std::time::Duration::from_millis(40),
@@ -114,11 +116,11 @@ async fn outbound_writer_keeps_silent_client_alive_while_server_writes() {
 
 #[tokio::test]
 async fn outbound_writer_failed_write_does_not_refresh_liveness() {
-    // 写失败（对端不可达）不算「成功出站」，不得刷新连接活跃时间：
-    // 真死连接仍进入 idle 回收计时。
-    let liveness = Arc::new(Mutex::new(
-        tokio::time::Instant::now() - std::time::Duration::from_secs(600),
-    ));
+    let liveness = Arc::new(Mutex::new(ActivityTimestamp {
+        instant: tokio::time::Instant::now() - std::time::Duration::from_secs(600),
+        recorded_at: chrono::Utc::now()
+            - chrono::Duration::from_std(std::time::Duration::from_secs(600)).unwrap(),
+    }));
     let (writer_tx, writer_rx) = mpsc::channel::<OutboundControl>(1);
     let task = tokio::spawn(pump_outbound_controls(
         writer_rx,
@@ -133,7 +135,7 @@ async fn outbound_writer_failed_write_does_not_refresh_liveness() {
     let _ = task.await;
 
     assert!(
-        liveness.lock().await.elapsed() > std::time::Duration::from_secs(300),
+        liveness.lock().await.instant.elapsed() > std::time::Duration::from_secs(300),
         "failed outbound writes must not refresh connection liveness"
     );
 }
