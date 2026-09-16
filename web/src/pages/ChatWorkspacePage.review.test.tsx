@@ -118,7 +118,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -189,7 +189,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -260,7 +260,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await userEvent.click(
@@ -332,7 +332,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await userEvent.click(
@@ -363,7 +363,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -408,7 +408,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByTestId("chat-entry-list")).toHaveTextContent(
@@ -451,7 +451,7 @@ describe("ChatWorkspacePage review decisions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 

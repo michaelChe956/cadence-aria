@@ -21,7 +21,18 @@ vi.mock("./hooks/useWorkspaceSessionObservers", () => ({
 }));
 
 vi.mock("./pages/ChatWorkspacePage", () => ({
-  ChatWorkspacePage: () => <div data-testid="chat-workspace-page">Chat Workspace</div>,
+  ChatWorkspacePage: ({
+    onOpenSession,
+  }: {
+    onOpenSession: (sessionId: string) => void;
+  }) => (
+    <div data-testid="chat-workspace-page">
+      Chat Workspace
+      <button type="button" onClick={() => onOpenSession("session_parent")}>
+        返回父会话
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("./pages/CodingWorkspacePage", () => ({
@@ -183,6 +194,32 @@ describe("router", () => {
       ],
     ).toBeDefined();
     expect(router.routesByPath["/workbench/workspace/$sessionId"]).toBeDefined();
+  });
+
+  it("navigates a parent session through the existing workspace route", async () => {
+    const health = {
+      ...blockedSnapshot(),
+      real_workflow_blocked: false,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+    const history = createMemoryHistory({
+      initialEntries: ["/workbench/workspace/child_001"],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+    await userEvent.click(await screen.findByRole("button", { name: "返回父会话" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench/workspace/session_parent");
+    });
   });
 
   it("replaces a legacy coding workspace address with the scoped address", async () => {

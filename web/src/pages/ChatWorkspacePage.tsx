@@ -7,12 +7,20 @@ import { readChatCockpitMode } from "../state/chat-cockpit-mode";
 export function ChatWorkspacePage({
   sessionId,
   onBack,
+  onOpenSession,
 }: {
   sessionId: string;
   onBack: () => void;
+  onOpenSession: (sessionId: string) => void;
 }) {
   if (readChatCockpitMode() === "cockpit") {
-    return <ChatCockpitPage sessionId={sessionId} onBack={onBack} />;
+    return (
+      <ChatCockpitPage
+        sessionId={sessionId}
+        onBack={onBack}
+        onOpenSession={onOpenSession}
+      />
+    );
   }
   return <LegacyChatWorkspacePage sessionId={sessionId} onBack={onBack} />;
 }

@@ -127,7 +127,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Provider 配置" }));
 
@@ -159,7 +159,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -209,7 +209,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -302,7 +302,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
     await userEvent.selectOptions(screen.getByLabelText("Artifact phase"), "unknown");
@@ -351,7 +351,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
     await waitFor(() =>
@@ -422,7 +422,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(
       screen.getByRole("button", { name: /Execution Output/ }),
@@ -493,7 +493,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -549,7 +549,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -565,7 +565,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
   it("uses the stable typed gate command after a session snapshot arrives", async () => {
     const feedback = vi.fn(() => true);
     mockWorkspaceWs({ sendHumanGateFeedback: feedback });
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />);
 
     act(() => {
       useWorkspaceStore.getState().setSessionState({
@@ -621,7 +621,7 @@ describe("ChatWorkspacePage dual track switch", () => {
     });
     mockWorkspaceWs();
 
-    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} />);
+    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} onOpenSession={vi.fn()} />);
 
     expect(screen.getByTestId("timeline-node-list")).toBeInTheDocument();
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
@@ -651,7 +651,7 @@ describe("ChatWorkspacePage dual track switch", () => {
     });
     mockWorkspaceWs();
 
-    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} />);
+    render(<ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} onOpenSession={vi.fn()} />);
 
     expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
     // brief 原写 `timeline-node-list` 为空，但 T10 驾驶舱 ② 区复用 TimelineNodeList

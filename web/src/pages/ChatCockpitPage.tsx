@@ -39,6 +39,7 @@ import {
   type OperationAuditTarget,
 } from "../state/operation-audit-projection";
 import { OperationAuditView } from "../components/cockpit/OperationAuditView";
+import { parentSessionIdFor } from "../state/parent-session-navigation";
 import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
@@ -55,9 +56,11 @@ function useNowTicker(intervalMs = 1000): number {
 export function ChatCockpitPage({
   sessionId,
   onBack,
+  onOpenSession,
 }: {
   sessionId: string;
   onBack: () => void;
+  onOpenSession: (sessionId: string) => void;
 }) {
   const workspaceWs = useWorkspaceWs(sessionId);
   const state = useWorkspaceStore();
@@ -73,6 +76,11 @@ export function ChatCockpitPage({
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditTarget, setAuditTarget] = useState<OperationAuditTarget | null>(null);
   const auditRecords = useOperationAuditStore((audit) => audit.records);
+  const parentSessionId = parentSessionIdFor(
+    state.planRepair,
+    useOperationAuditStore.getState().takeoverLinks,
+    sessionId,
+  );
   const observedInbox = useCockpitShellInbox();
   const observedRecords = useCockpitObservedRecords();
   const watchSession = useCockpitSessionWatch();
@@ -322,6 +330,15 @@ export function ChatCockpitPage({
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           返回
         </button>
+        {parentSessionId !== null && parentSessionId !== sessionId ? (
+          <button
+            type="button"
+            onClick={() => onOpenSession(parentSessionId)}
+            className="btn-secondary h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            返回父会话
+          </button>
+        ) : null}
         <span className="aria-mono text-xs text-[var(--aria-ink-muted)]">{sessionId}</span>
         <span className="text-xs text-[var(--aria-ink-muted)]">{watchWindow}</span>
         <button

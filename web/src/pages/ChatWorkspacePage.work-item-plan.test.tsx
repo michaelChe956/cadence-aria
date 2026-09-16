@@ -84,7 +84,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -120,7 +120,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -168,7 +168,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByRole("textbox")).toHaveAttribute(
@@ -224,7 +224,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -259,7 +259,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -380,7 +380,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -433,7 +433,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByRole("textbox")).toHaveAttribute(
@@ -493,7 +493,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -560,7 +560,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -623,7 +623,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -700,7 +700,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 

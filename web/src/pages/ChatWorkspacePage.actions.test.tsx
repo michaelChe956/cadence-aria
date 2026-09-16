@@ -83,7 +83,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     useWorkspaceStore.setState({
       providers: { author: "fake", reviewer: "codex" },
@@ -130,7 +130,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.queryByRole("button", { name: "开始生成" })).not.toBeInTheDocument();
@@ -195,7 +195,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     const grid = screen.getByTestId("review-split-grid");
@@ -233,7 +233,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -258,7 +258,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -281,7 +281,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -332,10 +332,8 @@ describe("ChatWorkspacePage chat actions", () => {
         });
 
         render(
-          <ChatWorkspacePage
-            sessionId="workspace_session_0001"
-            onBack={vi.fn()}
-          />,
+          <ChatWorkspacePage sessionId="workspace_session_0001"
+          onBack={vi.fn()} onOpenSession={vi.fn()} />,
         );
 
         expect(
@@ -358,7 +356,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       expect(
@@ -380,7 +378,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       // 输入聚焦（<1440px，jsdom 默认 innerWidth=1024）→ overlay 遮挡输入框，收起。
@@ -421,7 +419,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
       try {
         render(
-          <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+          <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
         );
         expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
         act(() => {
@@ -457,7 +455,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       const adoptButton = screen.getByRole("button", { name: "采纳 Review 意见" });
@@ -490,7 +488,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       expect(
@@ -541,10 +539,8 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage
-          sessionId="workspace_session_0001"
-          onBack={vi.fn()}
-        />,
+        <ChatWorkspacePage sessionId="workspace_session_0001"
+        onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       expect(
@@ -598,7 +594,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await userEvent.click(screen.getByRole("button", { name: "允许" }));
@@ -640,7 +636,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await userEvent.click(screen.getByTestId("timeline-node-author_run"));
@@ -702,10 +698,8 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage
-          sessionId="workspace_session_0001"
-          onBack={vi.fn()}
-        />,
+        <ChatWorkspacePage sessionId="workspace_session_0001"
+        onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
       scrolledEntryIds.length = 0;
 
@@ -763,10 +757,8 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage
-          sessionId="workspace_session_0001"
-          onBack={vi.fn()}
-        />,
+        <ChatWorkspacePage sessionId="workspace_session_0001"
+        onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
       scrolledEntryIds.length = 0;
 
@@ -788,7 +780,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByTestId("protocol-error-alert")).toHaveTextContent(
@@ -820,7 +812,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByTestId("review-verdict-entry")).toBeInTheDocument();

@@ -110,6 +110,12 @@ function WorkspaceRouteComponent() {
     <ChatWorkspacePage
       sessionId={sessionId}
       onBack={() => void navigate({ to: "/workbench" })}
+      onOpenSession={(parentSessionId) =>
+        void navigate({
+          to: "/workbench/workspace/$sessionId",
+          params: { sessionId: parentSessionId },
+        })
+      }
     />
   );
 }

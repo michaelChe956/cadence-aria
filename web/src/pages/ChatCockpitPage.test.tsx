@@ -86,13 +86,51 @@ describe("ChatCockpitPage", () => {
     sessionStorage.clear();
     useOperationAuditStore.getState().reset();
   });
-  const renderCockpit = (sessionId = "session_001", mockWs = true) => {
+  const renderCockpit = (
+    sessionId = "session_001",
+    mockWs = true,
+    onOpenSession = vi.fn(),
+  ) => {
     if (mockWs) {
       mockWorkspaceWs();
     }
     useWorkspaceStore.getState().setSessionIdForTest(sessionId);
-    return render(<ChatCockpitPage sessionId={sessionId} onBack={vi.fn()} />);
+    return render(
+      <ChatCockpitPage
+        sessionId={sessionId}
+        onBack={vi.fn()}
+        onOpenSession={onOpenSession}
+      />,
+    );
   };
+
+  it("returns a plan-repair child through durable parent_session_id", async () => {
+    const onOpenSession = vi.fn();
+    useWorkspaceStore.setState({ planRepair: planRepairSnapshotFixture("child_001") });
+
+    renderCockpit("child_001", true, onOpenSession);
+
+    await userEvent.click(screen.getByRole("button", { name: "返回父会话" }));
+
+    expect(onOpenSession).toHaveBeenCalledWith("session_parent");
+  });
+
+  it("restores a takeover parent only for this browser session", async () => {
+    const onOpenSession = vi.fn();
+    sessionStorage.setItem("aria.takeover-parent:child_002", "parent_002");
+
+    renderCockpit("child_002", true, onOpenSession);
+
+    await userEvent.click(screen.getByRole("button", { name: "返回父会话" }));
+
+    expect(onOpenSession).toHaveBeenCalledWith("parent_002");
+  });
+
+  it("does not show a parent action on an ordinary session", () => {
+    renderCockpit("ordinary");
+
+    expect(screen.queryByRole("button", { name: "返回父会话" })).toBeNull();
+  });
 
   it("opens cockpit audit and filters the current gate", async () => {
     const user = userEvent.setup();
@@ -488,7 +526,13 @@ describe("ChatCockpitPage", () => {
     store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
     store.rebuildChatEntries();
 
-    render(<ChatCockpitPage sessionId="session_001" onBack={vi.fn()} />);
+    render(
+      <ChatCockpitPage
+        sessionId="session_001"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+      />,
+    );
     const gateEntry = screen.getByTestId("gate-prompt-entry");
     const submit = within(gateEntry).getByRole("button", { name: "提交反馈" });
     expect(submit).toBeDisabled();
