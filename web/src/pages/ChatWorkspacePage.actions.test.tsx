@@ -7,6 +7,7 @@ import {
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import {
   emptyWorkspaceContentCache,
@@ -31,7 +32,8 @@ import {
   workItemPlanOutlinePayload,
 } from "./ChatWorkspacePage.test-utils";
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -73,6 +75,14 @@ describe("ChatWorkspacePage chat actions", () => {
   installChatWorkspacePageTestHooks();
   beforeEach(() => {
     window.localStorage.setItem("aria.chat.cockpit", "legacy");
+  });
+
+  it("keeps the real command id generator through the module mock", async () => {
+    // 验证 Vitest mock 的运行时导出，静态导入无法覆盖该模块边界。
+    const { newCommandId } = await import("../hooks/useWorkspaceWs");
+
+    expect(typeof newCommandId).toBe("function");
+    expect(newCommandId()).not.toBe(newCommandId());
   });
 
   it("starts generation with provider config from the chat input", async () => {

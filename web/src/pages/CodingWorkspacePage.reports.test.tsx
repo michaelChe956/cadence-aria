@@ -7,6 +7,7 @@ import {
   getCodingAttemptDiff,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { repairAwaitingConfirmationFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
@@ -32,7 +33,8 @@ vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
 }));
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 

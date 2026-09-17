@@ -6,6 +6,7 @@ import {
   repairAwaitingConfirmationFixture,
 } from "../components/coding-workspace/plan-repair-test-fixtures";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
@@ -27,7 +28,8 @@ vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
 }));
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 

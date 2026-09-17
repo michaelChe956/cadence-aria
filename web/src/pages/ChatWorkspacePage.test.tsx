@@ -35,7 +35,8 @@ import {
   workItemPlanOutlinePayload,
 } from "./ChatWorkspacePage.test-utils";
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -661,6 +662,16 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
   });
 
+  it("keeps the legacy start-generation flow usable when legacy is explicitly set", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("story");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("start-generation")).toBeInTheDocument();
+  });
+
   it("renders a known session in the cockpit when cockpit is explicitly set", () => {
     window.localStorage.setItem("aria.chat.cockpit", "cockpit");
     setWorkspaceType("story");
@@ -676,6 +687,18 @@ describe("ChatWorkspacePage dual track switch", () => {
 
     render(
       <ChatWorkspacePage sessionId="session_story" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("keeps the connection shell for a session following a cockpit-form session", () => {
+    setWorkspaceType("story");
+
+    render(
+      <ChatWorkspacePage sessionId="session_next" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
@@ -705,6 +728,26 @@ describe("ChatWorkspacePage dual track switch", () => {
 
     act(() => {
       setWorkspaceType("story");
+    });
+
+    expect(screen.getByTestId("cockpit-page")).toBeVisible();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0]?.closeCodes).not.toContain(1000);
+  });
+
+  it("keeps one socket and the cockpit form when a started generation moves to running", async () => {
+    const { useWorkspaceWs: realUseWorkspaceWs } =
+      await vi.importActual<typeof WorkspaceWsModule>("../hooks/useWorkspaceWs");
+    MockWebSocket.instances = [];
+    vi.mocked(useWorkspaceWs).mockImplementation(realUseWorkspaceWs);
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    setWorkspaceType("design");
+    renderWorkspace(false);
+
+    expect(screen.getByTestId("cockpit-page")).toBeVisible();
+    act(() => {
+      useWorkspaceStore.setState({ stage: "running", providerStatus: "running" });
     });
 
     expect(screen.getByTestId("cockpit-page")).toBeVisible();
