@@ -1,10 +1,9 @@
 use std::fs;
-use std::path::Path;
 
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{IssuePhase, IssueRecord, IssueStatus};
 
@@ -110,8 +109,9 @@ impl IssueStore {
             validate_relative_id(lc_id)?;
         }
         let issues_root = self.paths.project_root(&input.project_id).join("issues");
-        let existing_len = count_entries(&issues_root)?;
-        let id = next_sequential_id("issue", existing_len);
+        let id = next_sequential_id_in_directory("issue", &issues_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", issues_root.display()))
+        })?;
         let now = Utc::now().to_rfc3339();
         let change_id = input.change_id.unwrap_or_else(|| {
             let slug = slugify(&input.title);
@@ -176,20 +176,6 @@ impl IssueStore {
     }
 }
 
-fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
-    if !path.exists() {
-        return Ok(0);
-    }
-
-    fs::read_dir(path)
-        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-        .try_fold(0usize, |count, entry| {
-            entry.map(|_| count + 1).map_err(|error| {
-                ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
-            })
-        })
-}
-
 fn slugify(value: &str) -> String {
     value
         .to_ascii_lowercase()
@@ -228,6 +214,41 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn create_assigns_first_issue_id_in_empty_directory() {
+        let (_tmp, store) = setup_store();
+
+        assert_eq!(seed_issue(&store).id, "issue_0001");
+    }
+
+    #[test]
+    fn create_after_deleting_middle_issue_uses_id_above_existing_maximum() {
+        let (_tmp, store) = setup_store();
+        let first = seed_issue(&store);
+        let middle = seed_issue(&store);
+        let last = seed_issue(&store);
+        store.delete(PROJECT_ID, &middle.id).unwrap();
+
+        let created = seed_issue(&store);
+
+        assert_eq!(created.id, "issue_0004");
+        assert_eq!(store.get(PROJECT_ID, &first.id).unwrap().id, first.id);
+        assert_eq!(store.get(PROJECT_ID, &last.id).unwrap().id, last.id);
+    }
+
+    #[test]
+    fn create_with_non_contiguous_existing_ids_uses_id_above_maximum() {
+        let (_tmp, store) = setup_store();
+        let _first = seed_issue(&store);
+        let second = seed_issue(&store);
+        let _third = seed_issue(&store);
+        let _fourth = seed_issue(&store);
+        let fifth = seed_issue(&store);
+        store.delete(PROJECT_ID, &second.id).unwrap();
+        store.delete(PROJECT_ID, &fifth.id).unwrap();
+
+        assert_eq!(seed_issue(&store).id, "issue_0005");
+    }
     #[test]
     fn update_status_persists_new_status_and_is_idempotent() {
         let (_tmp, store) = setup_store();
