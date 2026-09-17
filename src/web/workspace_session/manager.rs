@@ -320,6 +320,7 @@ impl WorkspaceSessionManager {
         ),
         String,
     > {
+        self.abort_active_run().await;
         self.start_run_from_attachment(None, None, requested_node_id)
             .await
     }
