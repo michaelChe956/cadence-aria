@@ -1,3 +1,4 @@
+use crate::product::id::next_sequential_id_from_existing;
 use super::coding::CoderExecutionOutcome;
 use super::*;
 
@@ -86,7 +87,12 @@ impl CodingWorkspaceEngine {
             &current.id,
         )?;
         let instruction = CodingReworkInstruction {
-            id: next_sequential_id("coding_rework_instruction", existing_instructions.len()),
+            id: next_sequential_id_from_existing(
+                "coding_rework_instruction",
+                existing_instructions
+                    .iter()
+                    .map(|instruction| instruction.id.as_str()),
+            ),
             attempt_id: current.id.clone(),
             source_stage: CodingExecutionStage::CodeReview,
             rework_round,
@@ -355,7 +361,10 @@ impl CodingWorkspaceEngine {
             &current.id,
         )?;
         let instruction = CodingReworkInstruction {
-            id: next_sequential_id("coding_rework_instruction", existing.len()),
+            id: next_sequential_id_from_existing(
+                "coding_rework_instruction",
+                existing.iter().map(|instruction| instruction.id.as_str()),
+            ),
             attempt_id: current.id.clone(),
             source_stage: CodingExecutionStage::CodeReview,
             rework_round: current.rework_count + 1,
@@ -446,7 +455,10 @@ impl CodingWorkspaceEngine {
             &current.id,
         )?;
         let instruction = CodingReworkInstruction {
-            id: next_sequential_id("coding_rework_instruction", existing.len()),
+            id: next_sequential_id_from_existing(
+                "coding_rework_instruction",
+                existing.iter().map(|instruction| instruction.id.as_str()),
+            ),
             attempt_id: current.id.clone(),
             source_stage: CodingExecutionStage::CodeReview,
             rework_round: current.rework_count + 1,

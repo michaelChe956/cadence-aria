@@ -1,3 +1,4 @@
+use crate::product::id::next_sequential_id_from_existing;
 use super::*;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingExecutionUnit, CodingExecutionUnitStatus,
@@ -261,7 +262,10 @@ impl CodingWorkspaceEngine {
         )?;
         let payload = parse_code_review_outcome(&outcome);
         Ok(CodeReviewReport {
-            id: next_sequential_id("code_review", existing.len()),
+            id: next_sequential_id_from_existing(
+                "code_review",
+                existing.iter().map(|report| report.id.as_str()),
+            ),
             attempt_id: attempt.id.clone(),
             round: existing.len() as u32 + 1,
             verdict: payload.verdict,
@@ -296,7 +300,10 @@ impl CodingWorkspaceEngine {
         )?;
         let payload = parse_review_payload(full_output, CodingExecutionStage::InternalPrReview);
         Ok(InternalPrReview {
-            id: next_sequential_id("internal_review", existing.len()),
+            id: next_sequential_id_from_existing(
+                "internal_review",
+                existing.iter().map(|review| review.id.as_str()),
+            ),
             attempt_id: attempt.id.clone(),
             review_request_id: review_request.id.clone(),
             verdict: payload.verdict,
