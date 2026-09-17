@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
-use crate::product::id::{next_sequential_id, repo_hash_for_path};
+use crate::product::id::{next_sequential_id_from_existing, repo_hash_for_path};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityMigrationExecutor,

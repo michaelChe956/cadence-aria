@@ -501,6 +501,32 @@ mod tests {
         ));
     }
 
+
+    #[test]
+    fn legacy_create_after_deleting_middle_repository_uses_id_above_existing_maximum() {
+        let fixture = repository_fixture();
+        let project = fixture.create_project("legacy");
+        let store = RepositoryStore::for_project(fixture.paths.clone(), &project);
+        let _first = store.create(fixture.input(&project, "first")).unwrap();
+        let middle = store.create(fixture.input(&project, "middle")).unwrap();
+        let _last = store.create(fixture.input(&project, "last")).unwrap();
+        store
+            .delete(
+                &project.id,
+                &middle.id,
+                DeleteRepositoryCommand {
+                    operation_id: "delete-middle".to_string(),
+                    expected_updated_at: None,
+                    allow_tombstone_reactivation: false,
+                },
+            )
+            .unwrap();
+
+        let replacement = store.create(fixture.input(&project, "replacement")).unwrap();
+
+        assert_eq!(replacement.id, "repository_0004");
+    }
+
     #[test]
     fn repository_initialization_launch_is_nameable_through_repository_store() {
         let _: Option<crate::product::repository_store::RepositoryInitializationLaunch> = None;

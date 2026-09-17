@@ -19,8 +19,10 @@ impl RepositoryStore {
     ) -> Result<RepositoryRecord, ProductStoreError> {
         let project_id = input.project_id;
         let mut repositories = self.list(&project_id)?;
-        let existing_len = repositories.len();
-        let id = next_sequential_id("repository", existing_len);
+        let id = next_sequential_id_from_existing(
+            "repository",
+            repositories.iter().map(|repository| repository.id.as_str()),
+        );
         let now = Utc::now().to_rfc3339();
         let canonical_path = canonicalize_repo_path(&input.path)?;
         let repo_path_text = canonical_path.to_string_lossy();
