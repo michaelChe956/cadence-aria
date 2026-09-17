@@ -4,7 +4,7 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::LogicalCodebaseStore;
 use crate::product::models::ProjectRecord;
@@ -70,8 +70,10 @@ impl ProjectStore {
     }
 
     pub fn create(&self, input: CreateProjectInput) -> Result<ProjectRecord, ProductStoreError> {
-        let existing_len = count_entries(&self.paths.projects_root())?;
-        let id = next_sequential_id("project", existing_len);
+        let projects_root = self.paths.projects_root();
+        let id = next_sequential_id_in_directory("project", &projects_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", projects_root.display()))
+        })?;
         let now = Utc::now().to_rfc3339();
         let project = ProjectRecord {
             id: id.clone(),
@@ -126,19 +128,6 @@ impl ProjectStore {
     }
 }
 
-fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
-    if !path_exists(path)? {
-        return Ok(0);
-    }
-
-    fs::read_dir(path)
-        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-        .try_fold(0usize, |count, entry| {
-            entry.map(|_| count + 1).map_err(|error| {
-                ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
-            })
-        })
-}
 
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     path.try_exists()
@@ -185,5 +174,39 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "legacy");
+    }
+
+    #[test]
+    fn create_after_deleting_middle_project_uses_id_above_existing_maximum() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let _first = store
+            .create(CreateProjectInput {
+                name: "First".into(),
+                description: None,
+            })
+            .unwrap();
+        let middle = store
+            .create(CreateProjectInput {
+                name: "Middle".into(),
+                description: None,
+            })
+            .unwrap();
+        let _last = store
+            .create(CreateProjectInput {
+                name: "Last".into(),
+                description: None,
+            })
+            .unwrap();
+        store.delete(&middle.id).unwrap();
+
+        let replacement = store
+            .create(CreateProjectInput {
+                name: "Replacement".into(),
+                description: None,
+            })
+            .unwrap();
+
+        assert_eq!(replacement.id, "project_0004");
     }
 }
