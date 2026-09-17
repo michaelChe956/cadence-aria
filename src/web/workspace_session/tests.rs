@@ -372,12 +372,17 @@ async fn manager_degrades_only_full_attachment_without_backpressure() {
     );
 
     let fast_sequences = (0..3)
-        .map(|_| match fast_rx.try_recv().expect("fast attachment receives every event") {
-            OutboundControl::Text(json) => serde_json::from_str::<serde_json::Value>(&json)
-                .expect("broadcast JSON")["event_seq"]
-                .as_u64()
-                .expect("event sequence"),
-            other => panic!("unexpected fast attachment control: {other:?}"),
+        .map(|_| {
+            match fast_rx
+                .try_recv()
+                .expect("fast attachment receives every event")
+            {
+                OutboundControl::Text(json) => serde_json::from_str::<serde_json::Value>(&json)
+                    .expect("broadcast JSON")["event_seq"]
+                    .as_u64()
+                    .expect("event sequence"),
+                other => panic!("unexpected fast attachment control: {other:?}"),
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(fast_sequences, vec![1, 2, 3]);

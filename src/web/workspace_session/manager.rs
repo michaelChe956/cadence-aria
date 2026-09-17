@@ -1190,7 +1190,6 @@ impl WorkspaceSessionManager {
             .is_some_and(|attachment| attachment.degraded)
     }
 
-
     #[cfg(test)]
     pub(crate) async fn attach(
         &self,
