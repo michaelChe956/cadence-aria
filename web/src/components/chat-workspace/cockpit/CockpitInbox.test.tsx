@@ -121,6 +121,20 @@ describe("CockpitInbox", () => {
     expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
   });
 
+  it("does not render optional gate details when no optional props are supplied", () => {
+    render(
+      <CockpitInbox
+        items={[gateItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).queryByText("等待确认的内容")).toBeNull();
+    expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
+  });
+
   it("only warns about a new feedback command while a typed gate has a repair reservation", () => {
     render(
       <CockpitInbox

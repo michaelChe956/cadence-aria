@@ -141,7 +141,7 @@ describe("ChatCockpitPage", () => {
   };
 
 
-  it("renders a streaming block immediately, coalesces its visual updates, and replaces it on completion", () => {
+  it("renders only the unflushed stream increment beside the active streamed entry", () => {
     const streamingEntry = {
       id: "node-stream:stream-active",
       type: "provider_stream" as const,
@@ -153,7 +153,7 @@ describe("ChatCockpitPage", () => {
     useWorkspaceStore.setState({
       stage: "running",
       activeNodeId: "node-stream",
-      chatEntries: [],
+      chatEntries: [streamingEntry],
       streamBuffers: {
         "node-stream": {
           chunks: [" 尚未刷到正式条目"],
@@ -164,8 +164,14 @@ describe("ChatCockpitPage", () => {
     });
 
     const { rerender } = renderCockpit();
+    expect(screen.getByTestId("cockpit-conversation-flow-list")).toHaveTextContent(
+      "正在起草第一段",
+    );
     expect(screen.getByTestId("cockpit-streaming-content")).toHaveTextContent(
-      "正在起草第一段 尚未刷到正式条目",
+      "尚未刷到正式条目",
+    );
+    expect(screen.getByTestId("cockpit-streaming-content")).not.toHaveTextContent(
+      "正在起草第一段",
     );
     expect(screen.getByTestId("cockpit-streaming-content")).toHaveAttribute(
       "data-frame-window-ms",
@@ -1256,14 +1262,46 @@ describe("cockpit generation status identity and boundaries", () => {
     const submit = within(screen.getByTestId("cockpit-inbox")).getByRole("button", {
       name: "提交反馈",
     });
-    expect(submit).toBeDisabled();
     await user.type(feedbackInput, "请补齐边界");
     await user.click(submit);
 
     expect(feedback).toHaveBeenCalledWith("请补齐边界", "cmd_1");
   });
+  it("renders the current artifact and review summary in the actionable inbox gate", () => {
+    useWorkspaceStore.setState({
+      artifactVersions: [
+        {
+          version: 3,
+          markdown: "# 发布方案 v3\n\n- 修复 Issue 索引\n- 补齐流式渲染",
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-09-17T10:00:00Z",
+          source_node_id: "node-artifact",
+        },
+      ],
+      chatEntries: [
+        {
+          id: "review-1",
+          type: "review_verdict",
+          role: "reviewer",
+          content: "审核通过，允许人工确认",
+          timestamp: "2026-09-17T10:00:00Z",
+        },
+      ],
+    });
 
-  it("submits typed snapshot inbox feedback with a freshly generated command id", async () => {
+    renderCockpit();
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("等待确认的内容")).toBeVisible();
+    expect(within(inbox).getByText("发布方案 v3")).toBeVisible();
+    expect(within(inbox).getByText("审核通过，允许人工确认")).toBeVisible();
+  });
+
+  it("renders typed snapshot inbox guidance when the active repair reservation needs a new command", async () => {
     const user = userEvent.setup();
     const feedback = vi.fn((_feedback: string, _commandId?: string) => true);
     mockWorkspaceWs({ sendHumanGateFeedback: feedback });
@@ -1277,13 +1315,20 @@ describe("cockpit generation status identity and boundaries", () => {
         trigger: "verification_new_findings",
         resumable: true,
       },
+      repairReservation: {
+        token: "reservation-1",
+        owner_session_id: "session_001",
+        owner_run_id: "run-1",
+        provider_start_idempotency_key: "start-1",
+        state: "reserved",
+        commit_id: null,
+      },
     });
 
     renderCockpit("session_001", false);
 
     const inbox = screen.getByTestId("cockpit-inbox");
-    // 刷新/断连后仅剩快照门（无活 turn）：不阻断，直接提交新 command id。
-    expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
+    expect(within(inbox).getByText("未同步门命令，将以新命令提交")).toBeVisible();
     expect(within(inbox).queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
     const submit = within(inbox).getByRole("button", { name: "提交反馈" });
     await user.type(within(inbox).getByLabelText("门禁反馈"), "请补齐边界");
@@ -1295,6 +1340,34 @@ describe("cockpit generation status identity and boundaries", () => {
     expect(commandId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
+  });
+
+  it("keeps typed snapshot inbox guidance hidden without a repair reservation", async () => {
+    const user = userEvent.setup();
+    const feedback = vi.fn((_feedback: string, _commandId?: string) => true);
+    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
+    useWorkspaceStore.setState({
+      flowKind: "single_candidate",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+      repairReservation: null,
+    });
+
+    renderCockpit("session_001", false);
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
+    const submit = within(inbox).getByRole("button", { name: "提交反馈" });
+    await user.type(within(inbox).getByLabelText("门禁反馈"), "请补齐边界");
+    await user.click(submit);
+
+    expect(feedback).toHaveBeenCalledTimes(1);
   });
 
   it("uses the shared shell inbox instead of a second session observer", () => {

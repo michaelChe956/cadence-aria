@@ -187,6 +187,7 @@ export function IssueLifecycleWorkbench({
     Record<string, boolean>
   >({});
   const refreshRequestId = useRef(0);
+  const createdIssuesRef = useRef<ProductIssue[]>([]);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
   );
@@ -271,15 +272,22 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
-      const materializedIssues = [...(issueResponse.issues ?? []), ...optimisticIssues]
+      const listedIssues = issueResponse.issues ?? [];
+      const pendingCreatedIssues = createdIssuesRef.current.filter(
+        (createdIssue) => !listedIssues.some((issue) => issue.issue_id === createdIssue.issue_id),
+      );
+      createdIssuesRef.current = pendingCreatedIssues;
+      const materializedIssues = [...listedIssues, ...pendingCreatedIssues, ...optimisticIssues]
         .reduce<ProductIssue[]>((issues, issue) =>
           issues.some((candidate) => candidate.issue_id === issue.issue_id)
             ? issues
             : [...issues, issue],
-        [])
-        .sort((left, right) =>
+        []);
+      if (optimisticIssues.length > 0) {
+        materializedIssues.sort((left, right) =>
           (right.updated_at ?? right.created_at).localeCompare(left.updated_at ?? left.created_at),
         );
+      }
       const lifecycleResponses = await Promise.all(
         materializedIssues.map(async (issue) =>
           normalizeLifecycleResponse(
@@ -759,6 +767,10 @@ export function IssueLifecycleWorkbench({
       repository_id: payload.repository_id,
       logical_codebase_id: payload.logical_codebase_id,
     });
+    createdIssuesRef.current = [
+      ...createdIssuesRef.current.filter((issue) => issue.issue_id !== createdIssue.issue_id),
+      createdIssue,
+    ];
     setDialogOpen(false);
     await refresh(selectedProjectId, [createdIssue]);
   }

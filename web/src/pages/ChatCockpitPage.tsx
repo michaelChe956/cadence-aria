@@ -728,6 +728,9 @@ export function ChatCockpitPage({
           takeoverButtonRef={takeoverButtonRef}
           onBulkConfirm={handleBulkConfirm}
           emptyHint={inboxEmptyHint}
+          artifactVersions={selectedState?.artifactVersions}
+          latestReviewSummary={latestReviewReport ?? null}
+          repairReservation={state.repairReservation}
         />
 
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
@@ -934,12 +937,9 @@ export function ChatCockpitPage({
                 testId="cockpit-conversation-flow-list"
               />
             )}
-            {takeoverSessionId === null && state.streamBuffers[state.activeNodeId ?? ""] ? (
+            {takeoverSessionId === null && state.streamBuffers[state.activeNodeId ?? ""]?.chunks.length ? (
               <StreamingConversationBlock
-                content={[
-                  state.streamBuffers[state.activeNodeId ?? ""]?.visibleText ?? "",
-                  ...(state.streamBuffers[state.activeNodeId ?? ""]?.chunks ?? []),
-                ].join("")}
+                content={state.streamBuffers[state.activeNodeId ?? ""]?.chunks.join("") ?? ""}
                 role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
               />
             ) : null}

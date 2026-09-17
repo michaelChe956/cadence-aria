@@ -34,7 +34,7 @@ import {
 type WorkspaceWsSendMessage =
   | WsInMessage
   | { type: "provider_select"; role: string; provider: string };
-const CONNECT_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 5_000;
 const PING_INTERVAL_MS = 25_000;
 const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;

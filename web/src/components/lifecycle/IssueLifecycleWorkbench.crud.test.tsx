@@ -560,6 +560,96 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     expect(screen.getByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
   });
 
+  it("keeps a durably created issue visible across later stale refreshes", async () => {
+    const baseFetch = lifecycleFetch();
+    const createdIssue = {
+      issue_id: "issue_0277",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "P1 补丁批",
+      description: "索引延迟期间仍应可见",
+      change_id: "p1-patch",
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-09-17T10:00:00Z",
+      updated_at: "2026-09-17T10:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
+        return jsonResponseValue(createdIssue);
+      }
+      if (url === "/api/issues/issue_0277/lifecycle?project_id=project_0001") {
+        return jsonResponseValue({
+          issue: createdIssue,
+          story_specs: [], design_specs: [], work_item_plans: [], work_items: [],
+          work_item_repository_groups: [], workspace_sessions: [], coding_attempts: [],
+        });
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
+    await user.type(within(dialog).getByLabelText("Issue 标题"), "P1 补丁批");
+    await user.selectOptions(within(dialog).getByLabelText("代码库"), "repo:repository_0001");
+    await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
+
+    expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+  });
+
+  it("preserves the service issue order when no created issue remains pending", async () => {
+    const olderIssue = {
+      issue_id: "issue_0001",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "服务端第一项",
+      description: "描述",
+      change_id: "first",
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-09-16T10:00:00Z",
+      updated_at: "2026-09-16T10:00:00Z",
+    };
+    const newerIssue = {
+      ...olderIssue,
+      issue_id: "issue_0002",
+      title: "服务端第二项",
+      change_id: "second",
+      created_at: "2026-09-17T10:00:00Z",
+      updated_at: "2026-09-17T10:00:00Z",
+    };
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        issuesByProject: { project_0001: [olderIssue, newerIssue] },
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    const rows = await screen.findAllByTestId("issue-queue-row");
+    expect(rows.map((row) => row.getAttribute("data-issue-id"))).toEqual([
+      "issue_0001",
+      "issue_0002",
+    ]);
+  });
+
   it("shows an alert for invalid lifecycle responses", async () => {
     vi.stubGlobal("fetch", lifecycleFetch({ invalidLifecycle: true }));
 

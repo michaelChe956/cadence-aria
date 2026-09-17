@@ -42,3 +42,15 @@ pnpm test
 结果：`168 passed` 测试文件，`1473 passed` 测试。
 
 测试输出保留了既有 jsdom `navigation (except hash changes)` stderr 噪声，但 Vitest 退出码为 0，全部断言通过。
+
+## 审查修复（round 1/5）
+
+- P1 门卡接线：`ChatCockpitPage` 向 `CockpitInbox` 传入当前选中会话的 `artifactVersions`、派生的 `latestReviewSummary` 与当前 `repairReservation`；真实页面现在展示待确认产物/审核摘要，并仅在活跃预留要求新命令时提示未同步门命令。
+- P2 流式去重：驾驶舱临时流块只展示尚未 flush 的 `chunks`；已落盘 `stream-active` 内容仅由对话列表展示。
+- P2 overlay 持久：新建 Issue 写入组件级 ref，在后续每一次列表刷新中持续并入，直到列表实际包含该 Issue。
+- P3 排序还原：无 overlay 时保持服务端 Issue 顺序；仅有新建 overlay 时按更新时间排序。
+- P3 超时还原：`CONNECT_TIMEOUT_MS` 维持 5 秒。
+
+### 定向验证
+
+在 `web/` 执行 `pnpm vitest run src/pages/ChatCockpitPage.test.tsx src/components/lifecycle/IssueLifecycleWorkbench.crud.test.tsx`：2 个测试文件、98 项断言通过。

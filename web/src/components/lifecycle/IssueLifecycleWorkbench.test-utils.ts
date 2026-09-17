@@ -45,6 +45,7 @@ export function lifecycleFetch(options?: {
   issueDescription?: string;
   issueTitles?: string[];
   issueTitlesByProject?: Record<string, string>;
+  issuesByProject?: Record<string, Array<Record<string, unknown>>>;
   projects?: Array<ReturnType<typeof projectRecord>>;
   repositoriesByProject?: Record<string, ReturnType<typeof repositoryRecord>[]>;
   projectResponses?: Array<Promise<Response>>;
@@ -733,6 +734,10 @@ export function lifecycleFetch(options?: {
               ]
             : [],
         });
+      }
+      const configuredIssues = options?.issuesByProject?.[projectId];
+      if (configuredIssues) {
+        return jsonResponse({ issues: configuredIssues });
       }
       return jsonResponse({
         issues: [
