@@ -303,9 +303,9 @@ impl WorkspaceSessionManager {
         );
     }
 
-    /// 内部 engine relay 的启动路径保留既有 supersede 语义。socket 路径先通过
-    /// `abort_active_run_from_attachment` 在同一临界区完成 lease epoch 校验和中止，
-    /// 再在 provider 启动前由 `start_run_from_attachment` 复检 epoch 后登记新 run。
+    /// 每次启动都在 `start_run_from_attachment` 的同一 manager 临界区内完成
+    /// lease epoch 校验、旧 run 取出与新 run 登记。socket 路径额外在取得 engine 锁前
+    /// 通过 `abort_active_run_from_attachment` 低延迟中止当前 run；启动前仍复检 epoch。
     pub async fn start_run(
         &self,
         _kind: ProviderRunKind,
@@ -320,7 +320,6 @@ impl WorkspaceSessionManager {
         ),
         String,
     > {
-        self.abort_active_run().await;
         self.start_run_from_attachment(None, None, requested_node_id)
             .await
     }
@@ -352,8 +351,9 @@ impl WorkspaceSessionManager {
         Ok(())
     }
 
-    /// 在 provider 启动前再次检查 socket attachment 的 lease epoch，避免连接在
-    /// supersede 已触发后被新 driver 接管时，旧连接仍登记新的 run。
+    /// 在 provider 启动前再次检查 socket attachment 的 lease epoch，并在同一 manager
+    /// 临界区内取出被覆盖的 run、登记新 run，避免并发 relay/socket 启动覆盖 run 时
+    /// 遗留未受 manager 管理且未取消的 provider task。
     pub async fn start_run_from_attachment(
         &self,
         connection_id: Option<&str>,
@@ -369,34 +369,41 @@ impl WorkspaceSessionManager {
         ),
         String,
     > {
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let cancel = CancellationToken::new();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(connection_id) = connection_id
-            && (state.lease.holder.as_deref() != Some(connection_id)
-                || attachment_epoch != Some(state.lease.epoch))
-        {
-            return Err("STALE_DRIVER_LEASE".to_string());
+        let (replaced_run, run) = {
+            let (command_tx, command_rx) = mpsc::channel(8);
+            let cancel = CancellationToken::new();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(connection_id) = connection_id
+                && (state.lease.holder.as_deref() != Some(connection_id)
+                    || attachment_epoch != Some(state.lease.epoch))
+            {
+                return Err("STALE_DRIVER_LEASE".to_string());
+            }
+            let replaced_run = state.active_run.take();
+            state.next_run_id += 1;
+            let run_id = state.next_run_id;
+            let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let node_id = requested_node_id;
+            let lease_epoch = state.lease.epoch;
+            state.active_run = Some(ActiveRun {
+                id: run_id,
+                token,
+                node_id: node_id.clone(),
+                cancel: cancel.clone(),
+                command_tx,
+                pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
+                lease_epoch,
+            });
+            (replaced_run, (run_id, token, cancel, command_rx, node_id))
+        };
+        if let Some(run) = replaced_run {
+            Self::cancel_run(&run);
         }
-        state.next_run_id += 1;
-        let run_id = state.next_run_id;
-        let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let node_id = requested_node_id;
-        let lease_epoch = state.lease.epoch;
-        state.active_run = Some(ActiveRun {
-            id: run_id,
-            token,
-            node_id: node_id.clone(),
-            cancel: cancel.clone(),
-            command_tx,
-            pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
-            lease_epoch,
-        });
-        Ok((run_id, token, cancel, command_rx, node_id))
+        Ok(run)
     }
 
     pub(crate) fn lease_epoch_for_connection(&self, connection_id: &str) -> Option<u64> {

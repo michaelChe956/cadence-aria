@@ -32,6 +32,65 @@ async fn start_run_supersedes_active_run_with_token_equality_guard() {
     assert!(manager.active_run().await.is_none());
 }
 
+/// socket supersede 先取消 R1 后会等待 engine 锁；等待期间内部 relay 可登记 R2。
+/// socket 恢复登记 R3 时必须取消 R2，否则 R2 将脱离 manager 继续驱动同一 engine。
+#[tokio::test]
+async fn socket_supersede_resuming_after_relay_start_cancels_relay_run() {
+    let manager = WorkspaceSessionManager::test_fixture("session_orphaned_relay_run");
+    let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(1);
+    manager.register_attachment("socket-holder", outbound_tx);
+    let lease_epoch = manager
+        .lease_epoch_for_connection("socket-holder")
+        .expect("registered holder lease epoch");
+
+    let (_r1_id, _r1_token, r1_cancel, _r1_rx, _) = manager
+        .start_run(ProviderRunKind::ReviewOnly, Some("r1".to_string()))
+        .await
+        .expect("start R1");
+    manager
+        .abort_active_run_from_attachment(Some("socket-holder"), Some(lease_epoch))
+        .await
+        .expect("socket supersede cancels R1 before engine lock");
+    tokio::time::timeout(std::time::Duration::from_millis(500), r1_cancel.cancelled())
+        .await
+        .expect("socket supersede cancelled R1");
+
+    let (_r2_id, r2_token, r2_cancel, _r2_rx, _) = manager
+        .start_run(
+            ProviderRunKind::WorkItemPlanRevision { feedback: None },
+            Some("r2".to_string()),
+        )
+        .await
+        .expect("relay starts R2 while socket waits for engine lock");
+    let (_r3_id, r3_token, _r3_cancel, _r3_rx, _) = manager
+        .start_run_from_attachment(
+            Some("socket-holder"),
+            Some(lease_epoch),
+            Some("r3".to_string()),
+        )
+        .await
+        .expect("socket resumes and starts R3");
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), r2_cancel.cancelled())
+        .await
+        .expect("R3 must cancel relay R2 instead of orphaning it");
+    assert_eq!(
+        manager.active_run().await.expect("active R3").token,
+        r3_token,
+        "R3 remains the single manager-owned active run"
+    );
+    manager.finish_run(r2_token).await;
+    assert_eq!(
+        manager
+            .active_run()
+            .await
+            .expect("R3 survives R2 finish")
+            .token,
+        r3_token
+    );
+    manager.abort_active_run().await;
+}
+
 #[tokio::test]
 async fn abort_active_run_cancels_token_and_clears_state() {
     let manager = WorkspaceSessionManager::test_fixture("session_abort");
