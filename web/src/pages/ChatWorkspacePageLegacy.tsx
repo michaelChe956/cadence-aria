@@ -56,6 +56,8 @@ import {
   ProviderConfigDialogButton,
   ReviewDecisionActionBar,
   StatusBar,
+  UNLOAD_GUARDED_STAGES,
+  UNLOAD_GUARD_MESSAGE,
   WorkspacePanelTabs,
   clampReviewRounds,
   entityTypeLabel,
@@ -68,9 +70,6 @@ import {
   scrollTargetEntryIdForNode,
 } from "./ChatWorkspacePageParts";
 
-const UNLOAD_GUARDED_STAGES = new Set(["running", "cross_review", "revision"]);
-const UNLOAD_GUARD_MESSAGE =
-  "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？";
 
 export function LegacyChatWorkspacePage({
   sessionId,

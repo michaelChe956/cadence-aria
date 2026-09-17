@@ -416,3 +416,7 @@ function formatDuration(durationMs: number) {
   }
   return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
 }
+
+export const UNLOAD_GUARDED_STAGES = new Set(["running", "cross_review", "revision"]);
+export const UNLOAD_GUARD_MESSAGE =
+  "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？";

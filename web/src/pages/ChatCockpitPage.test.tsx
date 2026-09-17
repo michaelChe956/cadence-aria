@@ -11,6 +11,7 @@ import {
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
 import { useWorkspaceWs, type WorkspaceWsApi } from "../hooks/useWorkspaceWs";
+import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import {
   useWorkspaceStore,
   type TimelineNode,
@@ -33,6 +34,7 @@ vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
+vi.mock("../hooks/useUnloadGuard", () => ({ useUnloadGuard: vi.fn() }));
 
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -1350,6 +1352,94 @@ describe("ChatCockpitPage", () => {
       expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("child_plan_002", 1);
       expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("child_plan_002", 2);
     });
+  });
+
+  it("surfaces a recoverable interrupted run and retries it through the ws api", async () => {
+    const user = userEvent.setup();
+    const retryInterruptedRun = vi.fn(() => true);
+    const workspaceWs = mockWorkspaceWs({ retryInterruptedRun });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      recoverableInterruptedRun: {
+        failed_node_id: "node-9",
+        operation: "review",
+        label: "恢复审核运行",
+      },
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(screen.getByText("检测到可恢复的中断任务")).toBeVisible();
+    expect(screen.queryByTestId("start-generation")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "恢复审核运行" }));
+
+    expect(retryInterruptedRun).toHaveBeenCalledWith("node-9");
+  });
+
+  it("acknowledges an aborted-by-disconnect node and drills down to it", async () => {
+    const user = userEvent.setup();
+    const workspaceWs = mockWorkspaceWs();
+    const startedAt = new Date("2026-09-17T10:00:00Z").toISOString();
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node-aborted",
+          node_type: "aborted_by_disconnect",
+          title: "作者生成",
+          status: "failed",
+          started_at: startedAt,
+          completed_at: startedAt,
+        }),
+      ],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(screen.getByText(/上次运行因断开被中止/)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "查看 Timeline" }));
+    expect(screen.getByTestId("timeline-node-aborted_by_disconnect")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+
+    await user.click(screen.getByRole("button", { name: "我知道了" }));
+    expect(screen.queryByText(/上次运行因断开被中止/)).toBeNull();
+    expect(useWorkspaceStore.getState().acknowledgedAbortedNodes).toContain("node-aborted");
+  });
+
+  it("shows the reconnecting banner with manual retry while reconnecting", () => {
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "disconnected",
+      isReconnecting: true,
+      reconnectAttemptCount: 2,
+    });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(screen.getByText(/连接断开，重连中（尝试 2 次）/)).toBeVisible();
+  });
+
+  it("arms the unload guard only during provider running stages", () => {
+    const workspaceWs = mockWorkspaceWs();
+
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+    const { unmount } = renderCockpitWith(workspaceWs);
+    expect(vi.mocked(useUnloadGuard)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ enabled: false }),
+    );
+
+    act(() => useWorkspaceStore.setState({ stage: "running" }));
+    expect(vi.mocked(useUnloadGuard)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        enabled: true,
+        message: expect.stringContaining("中止当前 Provider 运行"),
+      }),
+    );
+    unmount();
   });
 });
 function gateItem(sessionId: string, key: string): CockpitInboxItem {

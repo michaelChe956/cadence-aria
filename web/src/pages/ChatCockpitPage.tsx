@@ -8,6 +8,10 @@ import {
 } from "../components/chat-workspace/ChatEntryList";
 import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
+import {
+  DisconnectBanner,
+  loadAcknowledgedAbortedNodes,
+} from "../components/workspace/DisconnectBanner";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { PlanApprovalPanel } from "../components/chat-workspace/cockpit/PlanApprovalPanel";
@@ -20,6 +24,7 @@ import {
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
+import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
@@ -45,10 +50,13 @@ import { parentSessionIdFor } from "../state/parent-session-navigation";
 import { workspaceStageLabel } from "../state/workspace-stage-labels";
 import {
   clampReviewRounds,
+  latestUnacknowledgedAbortedNode,
   numericContentCacheValues,
   providerConfigFor,
   ProviderConfigDialogButton,
   scrollTargetEntryIdForNode,
+  UNLOAD_GUARDED_STAGES,
+  UNLOAD_GUARD_MESSAGE,
 } from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
@@ -154,6 +162,18 @@ export function ChatCockpitPage({
       ? `Reviewer：${selectedState.providers?.reviewer ?? "codex"}`
       : "未启用交叉审核",
   ].join(" · ");
+  const abortedByDisconnectNode = useMemo(
+    () =>
+      latestUnacknowledgedAbortedNode(
+        state.timelineNodes,
+        state.acknowledgedAbortedNodes,
+      ),
+    [state.acknowledgedAbortedNodes, state.timelineNodes],
+  );
+  useUnloadGuard({
+    enabled: UNLOAD_GUARDED_STAGES.has(state.stage),
+    message: UNLOAD_GUARD_MESSAGE,
+  });
   const handleStartGeneration = useCallback(() => {
     const { providers, reviewerEnabled, reviewRounds, permissionModes } =
       useWorkspaceStore.getState();
@@ -367,6 +387,14 @@ export function ChatCockpitPage({
       chatListRef.current?.scrollToEntry(drilldownEntryId);
     }
   }, [drilldownEntryId]);
+  useEffect(() => {
+    const acknowledgedNodes = loadAcknowledgedAbortedNodes();
+    if (acknowledgedNodes.length > 0) {
+      useWorkspaceStore
+        .getState()
+        .setAcknowledgedAbortedNodes(acknowledgedNodes);
+    }
+  }, []);
 
   useEffect(() => {
     if (!jumpEntryId) {
@@ -420,6 +448,38 @@ export function ChatCockpitPage({
           </button>
         ) : null}
       </header>
+      {isCurrentSession ? (
+        <DisconnectBanner
+          isReconnecting={workspaceWs.isReconnecting}
+          attemptCount={workspaceWs.reconnectAttemptCount}
+          onManualReconnect={workspaceWs.retryNow}
+          abortedByDisconnect={
+            abortedByDisconnectNode
+              ? {
+                  nodeId: abortedByDisconnectNode.node_id,
+                  ts:
+                    abortedByDisconnectNode.completed_at ??
+                    abortedByDisconnectNode.started_at,
+                }
+              : null
+          }
+          onAcknowledge={(nodeIds) =>
+            useWorkspaceStore.getState().setAcknowledgedAbortedNodes(nodeIds)
+          }
+          onViewTimeline={
+            abortedByDisconnectNode
+              ? () => setDrilldownNodeId(abortedByDisconnectNode.node_id)
+              : undefined
+          }
+          recoverableInterruptedRun={state.recoverableInterruptedRun}
+          onRetryInterruptedRun={workspaceWs.retryInterruptedRun}
+          retryResetKey={
+            state.protocolError
+              ? `${state.protocolError.code}:${state.protocolError.message}`
+              : state.error
+          }
+        />
+      ) : null}
       {auditOpen ? (
         <div className="border-b border-[var(--aria-line)] bg-[var(--aria-panel)]">
           <div className="flex items-center justify-between gap-2 border-b border-[var(--aria-line)] px-3 py-2">
