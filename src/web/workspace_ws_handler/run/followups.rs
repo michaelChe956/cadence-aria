@@ -60,6 +60,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
         $outbound_tx_for_task:ident,
         $manager_for_task:ident,
         $run_token:ident,
+        $provider_drive_guard:ident,
         $feedback:ident
     ) => {{
                 let lifecycle_for_run = LifecycleStore::new($run_context_clone.app_paths.clone());
@@ -256,12 +257,14 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             $engine.mark_active_run_finished(&$run_label);
                             drop($engine);
+                            drop($provider_drive_guard.take());
                             $manager_for_task.finish_run($run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             $engine.mark_active_run_finished(&$run_label);
                             drop($engine);
+                            drop($provider_drive_guard.take());
                             $manager_for_task.finish_run($run_token).await;
                             return;
                         }
@@ -446,7 +449,8 @@ macro_rules! workspace_ws_provider_run_followups {
         $run_label:ident,
         $outbound_tx_for_task:ident,
         $run_cancel:ident,
-        $run_context_clone:ident
+        $run_context_clone:ident,
+        $provider_drive_guard:ident
     ) => {{
         loop {
             if $engine.session().stage != WorkspaceStage::CrossReview {
@@ -506,6 +510,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     message: format!("provider unavailable: {author_name:?}"),
                 };
                 let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                drop($provider_drive_guard.take());
                 $manager_for_task.finish_run($run_token).await;
                 return;
             };
@@ -532,6 +537,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: "work item plan outline auto revision after review is not supported in follow-up run".to_string(),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 }
@@ -540,6 +546,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     drop($engine);
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 }
@@ -561,6 +568,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     message: format!("provider unavailable: {author_name:?}"),
                 };
                 let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                drop($provider_drive_guard.take());
                 $manager_for_task.finish_run($run_token).await;
                 return;
             };
@@ -579,6 +587,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: "work item draft run node unavailable".to_string(),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 };
@@ -591,6 +600,7 @@ macro_rules! workspace_ws_provider_run_followups {
                             message: format!("logical plan launch failed: {error}"),
                         };
                         let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        drop($provider_drive_guard.take());
                         $manager_for_task.finish_run($run_token).await;
                         return;
                     }
@@ -610,6 +620,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         drop($engine);
                         let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        drop($provider_drive_guard.take());
                         $manager_for_task.finish_run($run_token).await;
                         return;
                     }
@@ -658,6 +669,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: format!("work item draft generate failed: {message}"),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 }
@@ -671,6 +683,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: format!("work item draft parse failed: {}", error.message),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 }
@@ -689,6 +702,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     drop($engine);
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
                     $manager_for_task.finish_run($run_token).await;
                     return;
                 }

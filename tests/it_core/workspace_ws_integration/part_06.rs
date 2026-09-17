@@ -237,6 +237,18 @@ async fn workspace_session_manager_recycled_after_terminal_without_subscribers()
     )
     .await;
     let _chunk = recv_until_stream_chunk(&mut ws).await;
+    assert!(
+        state
+            .test_controls
+            .drop_workspace_socket("workspace_session_0001")
+            .await,
+        "测试必须先让服务端完成 detach，再通知 run 终态"
+    );
+    tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("服务端 test drop 超时")
+        .expect("服务端 test drop 应返回 close frame")
+        .expect("有效 close frame");
     drop(ws);
     assert_eq!(state.workspace_sessions.session_ids().await.len(), 1);
 

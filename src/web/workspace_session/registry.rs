@@ -2,18 +2,18 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+use crate::web::workspace_ws_handler::OutboundControl;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::WorkspaceSessionManager;
 
 /// 每个 durable workspace session 仅保留一个运行期 manager。
 ///
-/// factory 在 map 锁外运行，避免慢 I/O 阻塞其他 session；同 session 的并发创建由
-/// `creating` 互斥序列化，从而保证 engine 只会构建一次。
+/// 附着注册与 idle 摘除在同一 `sessions` 互斥下完成：已通过身份核对的 manager
+/// 不会在新连接登记 attachment 的间隙被回收。
 #[derive(Clone, Default)]
 pub struct WorkspaceSessionRegistry {
     sessions: Arc<AsyncMutex<HashMap<String, Arc<WorkspaceSessionManager>>>>,
-    creating: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
 impl WorkspaceSessionRegistry {
@@ -26,29 +26,43 @@ impl WorkspaceSessionRegistry {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<WorkspaceSessionManager>, String>>,
     {
-        if let Some(manager) = self.sessions.lock().await.get(session_id).cloned() {
-            return Ok(manager);
-        }
-
-        let creation_lock = {
-            let mut creating = self.creating.lock().await;
-            creating
-                .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-                .clone()
-        };
-        let _creation_guard = creation_lock.lock().await;
-
-        if let Some(manager) = self.sessions.lock().await.get(session_id).cloned() {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(manager) = sessions.get(session_id).cloned() {
             return Ok(manager);
         }
 
         let manager = factory().await?;
-        let mut sessions = self.sessions.lock().await;
         Ok(sessions
             .entry(session_id.to_string())
             .or_insert_with(|| manager.clone())
             .clone())
+    }
+
+    /// 原子地获取或创建 manager 并登记 attachment。摘除使用同一互斥，从而不会把
+    /// 已登记新连接的 manager 从 registry 中移走。
+    pub(crate) async fn get_or_create_and_attach<F, Fut>(
+        &self,
+        session_id: &str,
+        connection_id: &str,
+        outbound_tx: tokio::sync::mpsc::Sender<OutboundControl>,
+        factory: F,
+    ) -> Result<Arc<WorkspaceSessionManager>, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<WorkspaceSessionManager>, String>>,
+    {
+        let mut sessions = self.sessions.lock().await;
+        let manager = if let Some(manager) = sessions.get(session_id).cloned() {
+            manager
+        } else {
+            let manager = factory().await?;
+            sessions
+                .entry(session_id.to_string())
+                .or_insert_with(|| manager.clone())
+                .clone()
+        };
+        manager.register_attachment(connection_id, outbound_tx);
+        Ok(manager)
     }
 
     /// 返回已创建的 session manager，供集成测试观察运行期单例状态。
@@ -69,9 +83,25 @@ impl WorkspaceSessionRegistry {
         ids
     }
 
-    /// Task 3 将在满足回收不变式后调用；Task 1 只提供入口，不引入回收策略。
+    /// 仅当 session 仍指向该 manager 且其在锁内复核为 idle 时摘除。
+    pub async fn remove_if_idle(
+        &self,
+        session_id: &str,
+        expected: &Arc<WorkspaceSessionManager>,
+    ) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        let Some(current) = sessions.get(session_id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(current, expected) || !expected.is_recyclable() {
+            return false;
+        }
+        sessions.remove(session_id);
+        true
+    }
+
+    /// 仅供单元测试验证幂等移除。
     pub async fn remove(&self, session_id: &str) {
         self.sessions.lock().await.remove(session_id);
-        self.creating.lock().await.remove(session_id);
     }
 }

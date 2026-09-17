@@ -409,9 +409,10 @@ pub(crate) async fn handle_workspace_socket(
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let connection_id = uuid::Uuid::new_v4().to_string();
 
+    let (outbound_tx, connection_outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let manager = match state
         .workspace_sessions
-        .get_or_create(&session_id, || {
+        .get_or_create_and_attach(&session_id, &connection_id, outbound_tx.clone(), || {
             WorkspaceSessionManager::create(&state, &session_id)
         })
         .await
@@ -428,15 +429,13 @@ pub(crate) async fn handle_workspace_socket(
     let session_record = manager.session_record.clone();
     let engine = manager.engine();
 
-    let (outbound_tx, connection_outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let (socket_outbound_tx, outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let connection_outbound_task = tokio::spawn(forward_connection_outbound_controls(
         connection_outbound_rx,
         socket_outbound_tx,
         connection_id.clone(),
     ));
-    let (session_state, restored_choice_request) =
-        manager.attach(&connection_id, outbound_tx.clone()).await;
+    let (session_state, restored_choice_request) = manager.attached_session_state().await;
     if let Ok(json) = serde_json::to_string(&session_state.with_connection_id(&connection_id)) {
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }

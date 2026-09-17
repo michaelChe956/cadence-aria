@@ -441,6 +441,10 @@ async fn corrupt_outline_revision_journal_fails_closed_without_starting_provider
         .as_str()
         .expect("websocket error message")
         .contains("outline revision recovery failed"));
+    assert!(
+        messages.iter().any(|message| message["type"] == "session_state"),
+        "恢复错误不得使 manager 创建失败；连接仍应收到 session_state"
+    );
     assert!(messages.iter().all(|message| {
         !(message["type"] == "execution_event"
             && message["event"]["title"] == "Provider Prompt")

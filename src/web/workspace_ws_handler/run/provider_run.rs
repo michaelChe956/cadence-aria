@@ -137,8 +137,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
         ProviderRunKind::WorkItemPlanOutlineRevision { .. }
     );
     tokio::spawn(async move {
-        // 声明在首位 → 任务体结束时最后 drop：drive 标记覆盖整个 provider 驱动期。
-        let _provider_drive_guard = provider_drive_guard;
+        let mut provider_drive_guard = Some(provider_drive_guard);
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
         // B3：StaleContext 重建携带的 rebuilt planning context（provider run 构造新会话
@@ -449,12 +448,14 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
+                            drop(provider_drive_guard.take());
                             manager_for_task.finish_run(run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
+                            drop(provider_drive_guard.take());
                             manager_for_task.finish_run(run_token).await;
                             return;
                         }
@@ -608,6 +609,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     Ok(single_candidate::SingleCandidateProviderRunOutcome::AlreadyReserved) => {
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
+                        drop(provider_drive_guard.take());
                         manager_for_task.finish_run(run_token).await;
                         return;
                     }
@@ -892,6 +894,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     outbound_tx_for_task,
                     manager_for_task,
                     run_token,
+                    provider_drive_guard,
                     feedback
                 );
             }
@@ -1104,11 +1107,12 @@ pub(crate) async fn spawn_provider_run_from_handler(
             run_label,
             outbound_tx_for_task,
             run_cancel,
-            run_context_clone
+            run_context_clone,
+            provider_drive_guard
         );
         engine.mark_active_run_finished(&run_label);
         drop(engine);
-
+        drop(provider_drive_guard.take());
         manager_for_task.finish_run(run_token).await;
     });
 
