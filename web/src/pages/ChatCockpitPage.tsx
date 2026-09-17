@@ -42,6 +42,7 @@ import {
 } from "../state/operation-audit-projection";
 import { OperationAuditView } from "../components/cockpit/OperationAuditView";
 import { parentSessionIdFor } from "../state/parent-session-navigation";
+import { workspaceStageLabel } from "../state/workspace-stage-labels";
 import {
   clampReviewRounds,
   numericContentCacheValues,
@@ -59,6 +60,26 @@ function useNowTicker(intervalMs = 1000): number {
   }, [intervalMs]);
 
   return now;
+}
+
+function generationStatusText(providerStatus: string, stage: string) {
+  const stageLabel = workspaceStageLabel(stage);
+  switch (providerStatus) {
+    case "running":
+      return `正在生成 · ${stageLabel}`;
+    case "starting":
+      return `正在启动生成 · ${stageLabel}`;
+    case "waiting_approval":
+      return `等待生成确认 · ${stageLabel}`;
+    case "completed":
+      return `生成完成 · ${stageLabel}`;
+    case "failed":
+      return `生成失败 · ${stageLabel}`;
+    case "aborted":
+      return `生成已终止 · ${stageLabel}`;
+    default:
+      return stageLabel;
+  }
 }
 
 export function ChatCockpitPage({
@@ -437,6 +458,16 @@ export function ChatCockpitPage({
             className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
           >
             <div className="flex items-center justify-between gap-2 px-3 py-2">
+              <p
+                data-testid="cockpit-generation-status"
+                role="status"
+                className="text-xs text-[var(--aria-ink-muted)]"
+              >
+                {generationStatusText(
+                  selectedState?.providerStatus ?? state.providerStatus,
+                  selectedState?.stage ?? state.stage,
+                )}
+              </p>
               <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
               <button
                 type="button"

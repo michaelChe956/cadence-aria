@@ -672,6 +672,43 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByTestId("cockpit-conversation-flow")).toBeInTheDocument();
   });
 
+  it("shows running state, timeline progress, and provider stream through existing cockpit zones", () => {
+    useWorkspaceStore.setState({
+      providerStatus: "running",
+      stage: "running",
+      activeNodeId: "author-1",
+      timelineNodes: [timelineNode({ node_id: "author-1", title: "author-1", status: "active" })],
+      chatEntries: [
+        {
+          id: "author-1:stream",
+          type: "provider_stream",
+          role: "author",
+          content: "正在输出第一段",
+          timestamp: "2026-09-13T00:00:00Z",
+          node_id: "author-1",
+        },
+      ],
+    });
+
+    renderCockpitWith(mockWorkspaceWs());
+
+    expect(screen.getByTestId("cockpit-generation-status")).toHaveTextContent("正在生成");
+    expect(screen.getByTestId("cockpit-execution-flow")).toHaveTextContent("author-1");
+    expect(screen.getByTestId("cockpit-conversation-flow")).toHaveTextContent("正在输出第一段");
+  });
+
+  it.each([
+    ["failed", "生成失败"],
+    ["completed", "生成完成"],
+  ] as const)("describes a %s provider state without opening another progress view", (providerStatus, text) => {
+    useWorkspaceStore.setState({ providerStatus, stage: "completed", chatEntries: [] });
+
+    renderCockpitWith(mockWorkspaceWs());
+
+    expect(screen.getByTestId("cockpit-generation-status")).toHaveTextContent(text);
+    expect(screen.getByTestId("cockpit-conversation-flow")).toHaveTextContent("暂无聊天记录");
+  });
+
   it("shows a successful takeover through the shared audit view", async () => {
     useWorkspaceStore.setState({ stage: "running" });
     const user = userEvent.setup();
