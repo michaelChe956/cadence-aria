@@ -1,3 +1,5 @@
+use crate::web::workspace_ws_types::HelloRole;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionRole {
     Driver,
@@ -5,9 +7,25 @@ pub enum ConnectionRole {
 }
 
 impl ConnectionRole {
-    /// Task 6 将根据 wire role 显式归一；本阶段保持 legacy driver 等价。
-    pub const fn normalize(_role: Option<Self>) -> Self {
-        Self::Driver
+    /// 缺席 role 的唯一归一目标，保持旧客户端为 driver 的既有语义。
+    const LEGACY_DEFAULT: Self = Self::Driver;
+
+    /// 缺席 role 在协议入口归一为 legacy driver，后续仲裁仅消费内部角色。
+    pub const fn normalize(role: Option<HelloRole>) -> Self {
+        match role {
+            None => Self::LEGACY_DEFAULT,
+            Some(HelloRole::Driver) => Self::Driver,
+            Some(HelloRole::Observer) => Self::Observer,
+        }
+    }
+}
+
+impl ConnectionRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Driver => "driver",
+            Self::Observer => "observer",
+        }
     }
 }
 

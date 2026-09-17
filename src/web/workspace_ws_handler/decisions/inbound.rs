@@ -587,7 +587,16 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
         WsInMessage::Ping => {
             let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Pong).await;
         }
-        WsInMessage::Hello { .. } => {
+        WsInMessage::Hello {
+            role,
+            after_event_seq,
+            ..
+        } => {
+            run_context.manager.bind_role(
+                &outbound_tx,
+                crate::web::workspace_session::ConnectionRole::normalize(role),
+                after_event_seq,
+            );
             let engine_for_hello = engine.clone();
             let outbound_for_hello = outbound_tx.clone();
             tokio::spawn(async move {

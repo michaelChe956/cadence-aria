@@ -1,8 +1,9 @@
 use crate::product::models::{ProviderName, WorkspaceType};
+use crate::web::workspace_session::ConnectionRole;
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, AuthorDecision, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
-    ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdict, ReviewVerdictType,
-    TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
+    HelloRole, ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdict,
+    ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
     VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
     WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemGenerationModeDto,
     WorkItemPlanCandidateDto, WorkItemPlanDto, WorkItemPlanReviewAction,
@@ -562,6 +563,8 @@ fn hello_ping_roundtrip() {
     let hello = WsInMessage::Hello {
         session_id: "sess-1".to_string(),
         last_seen_node_id: Some("node-1".to_string()),
+        role: None,
+        after_event_seq: None,
     };
 
     let json = serde_json::to_value(&hello).unwrap();
@@ -573,6 +576,69 @@ fn hello_ping_roundtrip() {
     let ping = WsInMessage::Ping;
     let json = serde_json::to_value(&ping).unwrap();
     assert_eq!(json["type"], "ping");
+}
+
+#[test]
+fn hello_without_optional_fields_parses_with_defaults() {
+    let json = r#"{"type":"hello","session_id":"s1","last_seen_node_id":null}"#;
+    let msg: WsInMessage = serde_json::from_str(json).expect("legacy hello parses");
+
+    match msg {
+        WsInMessage::Hello {
+            role,
+            after_event_seq,
+            ..
+        } => {
+            assert_eq!(role, None);
+            assert_eq!(after_event_seq, None);
+        }
+        other => panic!("expected hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn hello_with_role_and_cursor_round_trips() {
+    let msg = WsInMessage::Hello {
+        session_id: "s1".into(),
+        last_seen_node_id: None,
+        role: Some(HelloRole::Observer),
+        after_event_seq: Some(42),
+    };
+    let json = serde_json::to_string(&msg).expect("serialize");
+
+    assert!(json.contains(r#""role":"observer""#));
+    assert!(json.contains(r#""after_event_seq":42"#));
+    match serde_json::from_str::<WsInMessage>(&json).expect("parse") {
+        WsInMessage::Hello {
+            role,
+            after_event_seq,
+            ..
+        } => {
+            assert_eq!(role, Some(HelloRole::Observer));
+            assert_eq!(after_event_seq, Some(42));
+        }
+        other => panic!("expected hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn hello_tolerates_unknown_extra_fields() {
+    let json = r#"{"type":"hello","session_id":"s1","last_seen_node_id":null,"future_field":"x"}"#;
+
+    assert!(serde_json::from_str::<WsInMessage>(json).is_ok());
+}
+
+#[test]
+fn connection_role_normalize_maps_absent_to_driver() {
+    assert_eq!(ConnectionRole::normalize(None), ConnectionRole::Driver);
+    assert_eq!(
+        ConnectionRole::normalize(Some(HelloRole::Driver)),
+        ConnectionRole::Driver
+    );
+    assert_eq!(
+        ConnectionRole::normalize(Some(HelloRole::Observer)),
+        ConnectionRole::Observer
+    );
 }
 
 #[test]

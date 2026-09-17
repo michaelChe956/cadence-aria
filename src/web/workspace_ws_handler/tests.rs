@@ -105,6 +105,8 @@ fn hello_and_ping_are_valid_for_every_stage() {
     let hello = WsInMessage::Hello {
         session_id: "session-1".to_string(),
         last_seen_node_id: Some("node-1".to_string()),
+        role: None,
+        after_event_seq: None,
     };
     let ping = WsInMessage::Ping;
 
@@ -373,6 +375,8 @@ fn control_and_legacy_messages_do_not_require_stage_lock_validation() {
     assert!(!requires_stage_validation(&WsInMessage::Hello {
         session_id: "session-1".to_string(),
         last_seen_node_id: None,
+        role: None,
+        after_event_seq: None,
     }));
     assert!(!requires_stage_validation(&WsInMessage::Ping));
     assert!(requires_stage_validation(&WsInMessage::ContextNote {

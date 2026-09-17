@@ -49,6 +49,31 @@ function observedState(
   } as WorkspaceWsState;
 }
 
+class ObserverMockWebSocket {
+  static instances: ObserverMockWebSocket[] = [];
+
+  readonly sent: string[] = [];
+  readyState = 0;
+  onopen: (() => void) | null = null;
+
+  constructor(_url: string) {
+    ObserverMockWebSocket.instances.push(this);
+  }
+
+  send(message: string) {
+    this.sent.push(message);
+  }
+
+  close() {
+    this.readyState = 3;
+  }
+
+  open() {
+    this.readyState = 1;
+    this.onopen?.();
+  }
+}
+
 describe("workspace observer store", () => {
   it("counts only watched records and tells the user K-external events are not real-time", () => {
     const ids = selectWatchedSessionIds(
@@ -95,6 +120,27 @@ describe("workspace observer store", () => {
         2,
       ),
     ).toEqual(["a1", "a2"]);
+  });
+
+  it("declares observer role in the opening hello", async () => {
+    ObserverMockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", ObserverMockWebSocket);
+    const controller = createObserverController();
+
+    try {
+      await controller.replaceWatchedSessionIds(["s1"]);
+      const socket = ObserverMockWebSocket.instances[0];
+      if (!socket) throw new Error("observer socket was not created");
+      socket.open();
+
+      expect(JSON.parse(socket.sent[0] ?? "")).toMatchObject({
+        type: "hello",
+        role: "observer",
+      });
+    } finally {
+      controller.dispose();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("opens only entries newly admitted to K and closes entries leaving K", async () => {

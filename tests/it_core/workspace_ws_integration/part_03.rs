@@ -225,6 +225,7 @@ async fn workspace_ws_idle_timeout_records_server_idle_connection_diagnostic() {
     assert!(matches!(closed, Message::Close(_)));
     let diagnostic = wait_for_connection_diagnostic(&controls, "server_idle").await;
     assert_eq!(diagnostic["idle_timeout_triggered"], true);
+    assert_eq!(diagnostic["role"], "driver");
 
     server.abort();
 }
@@ -259,6 +260,7 @@ async fn workspace_ws_client_close_4000_records_connection_diagnostic() {
     assert_eq!(diagnostic["idle_timeout_triggered"], false);
     assert_eq!(diagnostic["close_code"], 4000);
     assert_eq!(diagnostic["close_reason"], "stale socket");
+    assert_eq!(diagnostic["role"], "driver");
 
     server.abort();
 }
@@ -918,6 +920,8 @@ async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response
         &WsInMessage::Hello {
             session_id: "workspace_session_0001".to_string(),
             last_seen_node_id: None,
+            role: None,
+            after_event_seq: None,
         },
     )
     .await;

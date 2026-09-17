@@ -8,6 +8,13 @@ use crate::product::workspace_engine::LinkedWorkspaceAmendmentTarget;
 use super::common::{ChoiceAnswer, ProviderConfigSnapshot, StructuredFeedback};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HelloRole {
+    Driver,
+    Observer,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsInMessage {
     UserMessage {
@@ -26,6 +33,10 @@ pub enum WsInMessage {
     Hello {
         session_id: String,
         last_seen_node_id: Option<String>,
+        #[serde(default)]
+        role: Option<HelloRole>,
+        #[serde(default)]
+        after_event_seq: Option<u64>,
     },
     Rollback {
         checkpoint_id: String,

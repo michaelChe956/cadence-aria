@@ -70,6 +70,7 @@ impl ReceiverExit {
 struct ConnectionDiagnostic {
     connection_id: String,
     session_id: String,
+    role: String,
     receiver_exit: String,
     idle_timeout_triggered: bool,
     close_code: Option<u16>,
@@ -615,6 +616,7 @@ pub(crate) async fn handle_workspace_socket(
     let diagnostic = ConnectionDiagnostic {
         connection_id: connection_id.clone(),
         session_id: session_id.clone(),
+        role: manager.connection_role(&connection_id).as_str().to_string(),
         receiver_exit: receiver_exit.kind(idle_timeout_triggered).to_string(),
         idle_timeout_triggered,
         close_code: close_frame.map(|frame| frame.code),

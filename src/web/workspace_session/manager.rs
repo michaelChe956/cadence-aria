@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
@@ -12,18 +14,23 @@ use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSe
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
 use crate::web::workspace_context::ensure_workspace_context_message;
-use crate::web::workspace_session::{LeaseState, WorkspaceSessionRegistry};
+use crate::web::workspace_session::{ConnectionRole, LeaseState, WorkspaceSessionRegistry};
 use crate::web::workspace_ws_handler::{
     OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind, map_engine_event,
     planning_resume_decision_with_fresh_index, planning_resume_run_kind,
     spawn_provider_run_from_event, spawn_provider_run_from_handler,
 };
 use crate::web::workspace_ws_types::WsOutMessage;
-use tokio::sync::{Mutex, mpsc};
-use tokio_util::sync::CancellationToken;
+
+struct Attachment {
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    // Hello 前的一个 RTT 内，连接维持 legacy driver 等价，待 Hello 归一后覆盖。
+    role: ConnectionRole,
+    after_event_seq: Option<u64>,
+}
 
 struct ManagerState {
-    attachments: HashMap<String, mpsc::Sender<OutboundControl>>,
+    attachments: HashMap<String, Attachment>,
     next_run_id: u64,
     active_run: Option<ActiveRun>,
     lease: LeaseState,
@@ -406,9 +413,44 @@ impl WorkspaceSessionManager {
                 }),
             ));
         }
-        state
+        state.attachments.insert(
+            connection_id.to_string(),
+            Attachment {
+                outbound_tx,
+                role: ConnectionRole::Driver,
+                after_event_seq: None,
+            },
+        );
+    }
+
+    /// Hello 入口完成 wire role 的一次归一；每个 attachment 的出站通道唯一对应连接。
+    pub(crate) fn bind_role(
+        &self,
+        outbound_tx: &mpsc::Sender<OutboundControl>,
+        role: ConnectionRole,
+        after_event_seq: Option<u64>,
+    ) {
+        if let Some(attachment) = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .attachments
-            .insert(connection_id.to_string(), outbound_tx);
+            .values_mut()
+            .find(|attachment| attachment.outbound_tx.same_channel(outbound_tx))
+        {
+            attachment.role = role;
+            attachment.after_event_seq = after_event_seq;
+        }
+    }
+
+    pub(crate) fn connection_role(&self, connection_id: &str) -> ConnectionRole {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .attachments
+            .get(connection_id)
+            .map(|attachment| attachment.role)
+            .unwrap_or(ConnectionRole::Driver)
     }
 
     /// 返回已登记 attachment 的 initial snapshot 与已恢复 choice。
@@ -613,7 +655,7 @@ impl WorkspaceSessionManager {
                             .attachments
                             .values()
                             .next()
-                            .cloned();
+                            .map(|attachment| attachment.outbound_tx.clone());
                         let Some(outbound) = outbound else {
                             eprintln!(
                                 "[aria-broadcast] provider run requested without attachment session={}",
@@ -706,7 +748,9 @@ impl WorkspaceSessionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .attachments
             .iter()
-            .map(|(connection_id, sender)| (connection_id.clone(), sender.clone()))
+            .map(|(connection_id, attachment)| {
+                (connection_id.clone(), attachment.outbound_tx.clone())
+            })
             .collect::<Vec<_>>();
         for (connection_id, sender) in attachments {
             if sender

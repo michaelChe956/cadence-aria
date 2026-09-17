@@ -272,7 +272,14 @@ function createWorkspaceObserverSocket(
   };
 
   socket.onopen = () => {
-    socket.send(JSON.stringify({ type: "hello", session_id: sessionId, last_seen_node_id: null }));
+    socket.send(
+      JSON.stringify({
+        type: "hello",
+        session_id: sessionId,
+        last_seen_node_id: null,
+        role: "observer",
+      }),
+    );
     pingTimer = setInterval(() => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "ping" }));
