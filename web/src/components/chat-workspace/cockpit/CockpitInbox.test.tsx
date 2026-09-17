@@ -14,7 +14,7 @@ const actions: CockpitActionFacade = {
 };
 
 const gateItem: CockpitInboxItem = {
-  id: "session_001:gate",
+  id: "session_001:gate:gate_001",
   kind: "gate",
   severity: 2,
   title: "门禁等待",
@@ -41,6 +41,20 @@ const gateItem: CockpitInboxItem = {
   },
   inlineError: null,
 };
+
+const artifactVersions = [
+  {
+    version: 3,
+    markdown: "# 发布方案 v3\n\n- 修复 Issue 索引\n- 补齐流式渲染",
+    generated_by: "claude_code" as const,
+    reviewed_by: "codex" as const,
+    review_verdict: "pass" as const,
+    confirmed_by: null,
+    is_current: true,
+    created_at: "2026-09-17T10:00:00Z",
+    source_node_id: "node-artifact",
+  },
+] as const;
 
 describe("CockpitInbox", () => {
   it("uses the shared dangerous confirmation and feedback editor for all actionable cards", () => {
@@ -82,6 +96,49 @@ describe("CockpitInbox", () => {
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByTestId("gate-feedback-editor")).toBeVisible();
     expect(within(inbox).getAllByTestId("confirm-twice-button")).toHaveLength(3);
+  });
+
+  it("explains the current plan, exposes bulk selection text, and makes confirmation primary", () => {
+    render(
+      <CockpitInbox
+        items={[gateItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onBulkConfirm={vi.fn()}
+        artifactVersions={artifactVersions}
+        latestReviewSummary="审核通过，允许人工确认"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("等待确认的内容")).toBeVisible();
+    expect(within(inbox).getByText("发布方案 v3")).toBeVisible();
+    expect(within(inbox).getByText("版本 3 · 审核通过")).toBeVisible();
+    expect(within(inbox).getByText("修复 Issue 索引；补齐流式渲染")).toBeVisible();
+    expect(within(inbox).getByText("审核通过，允许人工确认")).toBeVisible();
+    expect(within(inbox).getByText("选择此门以批量确认")).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "确认" })).toHaveClass("btn-primary");
+    expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
+  });
+
+  it("only warns about a new feedback command while a typed gate has a repair reservation", () => {
+    render(
+      <CockpitInbox
+        items={[gateItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+        repairReservation={{
+          token: "reservation-1",
+          owner_session_id: "session_001",
+          owner_run_id: "run-1",
+          provider_start_idempotency_key: "start-1",
+          state: "reserved",
+          commit_id: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("未同步门命令，将以新命令提交")).toBeVisible();
   });
 
   it("renders the block reason instead of any gate controls for a stale projection", () => {

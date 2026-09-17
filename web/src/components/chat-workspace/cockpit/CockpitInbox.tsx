@@ -1,5 +1,7 @@
 import { AlertTriangle, Check, ClipboardList, CircleAlert, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState, type Ref } from "react";
+import type { ArtifactVersionSummary } from "../../../state/workspace-ws-store-types";
+import type { WorkItemPlanRepairReservation } from "../../../state/workspace-ws-store-types";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import {
   canBulkApply,
@@ -34,6 +36,9 @@ export function CockpitInbox({
   takeoverButtonRef,
   onBulkConfirm,
   emptyHint,
+  artifactVersions = [],
+  latestReviewSummary = null,
+  repairReservation = null,
 }: {
   items: readonly CockpitInboxItem[];
   actions?: CockpitActionFacade;
@@ -44,6 +49,9 @@ export function CockpitInbox({
   onBulkConfirm?: (items: readonly CockpitInboxItem[]) => void;
   /** 空收件箱时的引导文案；缺省渲染既有「暂无待处理项」。 */
   emptyHint?: string | null;
+  artifactVersions?: readonly ArtifactVersionSummary[];
+  latestReviewSummary?: string | null;
+  repairReservation?: WorkItemPlanRepairReservation | null;
 }) {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
@@ -121,6 +129,9 @@ export function CockpitInbox({
             selectable={actionableSessionId !== undefined && selectableIds.has(item.id)}
             selected={selectedIds.has(item.id)}
             onSelectionChange={() => toggleSelected(item)}
+            artifactVersions={artifactVersions}
+            latestReviewSummary={latestReviewSummary}
+            repairReservation={repairReservation}
             takeoverButtonRef={
               actionableSessionId === sessionIdForItem(item.id) ? takeoverButtonRef : undefined
             }
@@ -140,6 +151,9 @@ function CockpitInboxRow({
   selectable,
   selected,
   onSelectionChange,
+  artifactVersions,
+  latestReviewSummary,
+  repairReservation,
   takeoverButtonRef,
 }: {
   item: CockpitInboxItem;
@@ -150,6 +164,9 @@ function CockpitInboxRow({
   selectable: boolean;
   selected: boolean;
   onSelectionChange(): void;
+  artifactVersions: readonly ArtifactVersionSummary[];
+  latestReviewSummary: string | null;
+  repairReservation: WorkItemPlanRepairReservation | null;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
 }) {
   const pulse = useCockpitInboxPulse(item.id);
@@ -176,7 +193,7 @@ function CockpitInboxRow({
           {item.summary}
         </p>
         {selectable ? (
-          <label className="flex min-h-11 min-w-11 items-center justify-center">
+          <label className="mt-2 flex min-h-11 items-center gap-2 text-xs font-medium text-[var(--aria-ink)]">
             <input
               type="checkbox"
               aria-label={`选择 ${item.title}`}
@@ -184,6 +201,7 @@ function CockpitInboxRow({
               onChange={onSelectionChange}
               className="h-5 w-5 accent-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             />
+            选择此门以批量确认
           </label>
         ) : null}
         {item.inlineError ? (
@@ -195,7 +213,13 @@ function CockpitInboxRow({
           <p className="aria-mono mt-1 text-xs text-[var(--aria-danger)]">{takeoverError}</p>
         ) : null}
         {item.kind === "gate" && actions && actionable ? (
-          <GateInboxActions item={item} actions={actions} />
+          <GateInboxActions
+            item={item}
+            actions={actions}
+            artifactVersions={artifactVersions}
+            latestReviewSummary={latestReviewSummary}
+            repairReservation={repairReservation}
+          />
         ) : null}
         {item.kind === "stopped" && onTakeover ? (
           <div className="mt-2 flex flex-wrap gap-2">
@@ -272,9 +296,15 @@ function CockpitInboxRow({
 function GateInboxActions({
   item,
   actions,
+  artifactVersions,
+  latestReviewSummary,
+  repairReservation,
 }: {
   item: CockpitInboxItem;
   actions: CockpitActionFacade;
+  artifactVersions: readonly ArtifactVersionSummary[];
+  latestReviewSummary: string | null;
+  repairReservation: WorkItemPlanRepairReservation | null;
 }) {
   const [feedback, setFeedback] = useState("");
   const actionBlockReason = item.gate?.action_block_reason ?? null;
@@ -287,54 +317,106 @@ function GateInboxActions({
   }
 
   const typed = item.gate?.flow_kind === "single_candidate";
-  const typedGateAwaitingCommand =
-    typed && typeof item.gate?.turn?.command_id !== "string";
+  const typedGateNeedsNewCommand =
+    typed &&
+    typeof item.gate?.turn?.command_id !== "string" &&
+    repairReservation?.owner_session_id === sessionIdForItem(item.id) &&
+    (repairReservation.state === "reserved" || repairReservation.state === "provider_started");
+  const summary = gateSummary(artifactVersions, latestReviewSummary);
 
   return (
-    <div className="mt-2 flex flex-wrap gap-2">
-      {typed ? (
-        <>
-          {typedGateAwaitingCommand ? (
-            <p className="w-full text-xs text-[var(--aria-ink-muted)]">
-              未同步门命令，将以新命令提交
-            </p>
-          ) : null}
-          <GateFeedbackEditor
-            multiline
-            value={feedback}
-            onChange={setFeedback}
-            onSubmit={actions.feedback}
-          />
-        </>
-      ) : (
+    <div className="mt-3 space-y-3">
+      {summary ? <GateSummary {...summary} /> : null}
+      <div className="flex flex-wrap gap-2">
+        {typed ? (
+          <>
+            {typedGateNeedsNewCommand ? (
+              <p className="w-full text-xs text-[var(--aria-ink-muted)]">
+                未同步门命令，将以新命令提交
+              </p>
+            ) : null}
+            <GateFeedbackEditor
+              multiline
+              value={feedback}
+              onChange={setFeedback}
+              onSubmit={actions.feedback}
+            />
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() =>
+              actions.requestChange({
+                description: "采用 findings",
+                source: "review_findings",
+              })
+            }
+            className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+            采纳建议并返修
+          </button>
+        )}
         <button
           type="button"
-          onClick={() =>
-            actions.requestChange({
-              description: "采用 findings",
-              source: "review_findings",
-            })
-          }
-          className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          onClick={actions.confirm}
+          className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
         >
-          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-          采纳建议并返修
+          <Check className="h-3.5 w-3.5" aria-hidden="true" />
+          确认
         </button>
-      )}
-      <button
-        type="button"
-        onClick={actions.confirm}
-        className="inline-flex min-h-11 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-      >
-        <Check className="h-3.5 w-3.5" aria-hidden="true" />
-        确认
-      </button>
-      <ConfirmTwiceButton
-        label="终止"
-        confirmLabel="确认终止"
-        onConfirm={actions.terminate}
-      />
+        <ConfirmTwiceButton
+          label="终止"
+          confirmLabel="确认终止"
+          onConfirm={actions.terminate}
+        />
+      </div>
     </div>
+  );
+}
+
+function gateSummary(
+  versions: readonly ArtifactVersionSummary[],
+  reviewSummary: string | null,
+): { title: string; version: number; verdict: string | null; changes: string; review: string | null } | null {
+  const current = versions.find((version) => version.is_current) ??
+    [...versions].sort((left, right) => right.version - left.version)[0];
+  const markdown = current?.markdown?.trim();
+  if (!current || !markdown) {
+    return null;
+  }
+  const lines = markdown.split("\n").map((line) => line.trim()).filter(Boolean);
+  const title = lines.find((line) => line.startsWith("#"))?.replace(/^#+\s*/u, "") ?? "当前方案";
+  const changes = lines
+    .filter((line) => /^[-*]\s+/u.test(line))
+    .map((line) => line.replace(/^[-*]\s+/u, ""))
+    .slice(0, 3)
+    .join("；");
+  return { title, version: current.version, verdict: current.review_verdict ?? null, changes, review: reviewSummary };
+}
+
+function GateSummary({
+  title,
+  version,
+  verdict,
+  changes,
+  review,
+}: {
+  title: string;
+  version: number;
+  verdict: string | null;
+  changes: string;
+  review: string | null;
+}) {
+  const verdictLabel = verdict === "pass" ? "审核通过" : verdict === "revise" ? "需要返修" : verdict === "needs_human" ? "需要人工判断" : "待审核";
+  return (
+    <section aria-label="等待确认的内容" className="rounded-md border border-[var(--aria-line)] bg-white/70 p-3">
+      <p className="text-xs font-semibold text-[var(--aria-ink-muted)]">等待确认的内容</p>
+      <p className="mt-1 text-sm font-semibold text-[var(--aria-ink)]">{title}</p>
+      <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">版本 {version} · {verdictLabel}</p>
+      {changes ? <p className="mt-2 text-xs leading-5 text-[var(--aria-ink)]">{changes}</p> : null}
+      {review ? <p className="mt-2 text-xs leading-5 text-[var(--aria-ink-muted)]">{review}</p> : null}
+    </section>
   );
 }
 

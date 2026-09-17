@@ -1232,8 +1232,8 @@ describe("cockpit generation status identity and boundaries", () => {
     renderCockpit("session_001", false);
 
     const inbox = screen.getByTestId("cockpit-inbox");
-    // 刷新/断连后仅剩快照门（无活 turn）：不阻断，给次要提示并允许提交。
-    expect(within(inbox).getByText("未同步门命令，将以新命令提交")).toBeVisible();
+    // 刷新/断连后仅剩快照门（无活 turn）：不阻断，直接提交新 command id。
+    expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
     expect(within(inbox).queryByRole("button", { name: "采纳建议并返修" })).toBeNull();
     const submit = within(inbox).getByRole("button", { name: "提交反馈" });
     await user.type(within(inbox).getByLabelText("门禁反馈"), "请补齐边界");
