@@ -369,6 +369,18 @@ async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect(
                             .as_deref()
                             .is_some_and(|summary| summary.contains("run-1"))
                     );
+                    assert!(
+                        last.summary
+                            .as_deref()
+                            .is_some_and(|summary| summary.contains("connection_id:"))
+                    );
+                    assert_eq!(
+                        timeline_nodes
+                            .iter()
+                            .filter(|node| node.node_type == TimelineNodeType::AbortedByDisconnect)
+                            .count(),
+                        1
+                    );
                     verified = true;
                 }
             }
