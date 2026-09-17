@@ -318,6 +318,140 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByRole("dialog", { name: "Provider 配置" })).toBeVisible();
   });
 
+  it("saves the current provider selection as the workspace default", async () => {
+    const user = userEvent.setup();
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      providers: { author: "pi", reviewer: "codex" } as const,
+      reviewerEnabled: true,
+    });
+
+    renderCockpitWith(workspaceWs);
+    await user.click(screen.getByTestId("save-provider-defaults"));
+
+    expect(window.localStorage.getItem("aria.workspace.provider-defaults")).toContain(
+      '"author":"pi"',
+    );
+    expect(screen.getByText("已设为默认")).toBeVisible();
+  });
+
+  it("applies remembered defaults once when a fresh session enters the editable window", () => {
+    window.localStorage.setItem(
+      "aria.workspace.provider-defaults",
+      JSON.stringify({ author: "pi", reviewer: "kimi_code", reviewerEnabled: true }),
+    );
+    const selectProvider = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ selectProvider });
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      stage: "prepare_context",
+      providers: { author: "claude_code", reviewer: "codex" } as const,
+      reviewerEnabled: false,
+    });
+
+    renderCockpitWith(workspaceWs, "session_001");
+
+    expect(selectProvider).toHaveBeenCalledWith("author", "pi");
+    expect(selectProvider).toHaveBeenCalledWith("reviewer", "kimi_code");
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+
+    act(() => {
+      useWorkspaceStore.setState({
+        providers: { author: "codex", reviewer: "codex" } as const,
+      });
+    });
+    expect(selectProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not apply defaults outside the editable window or for observed sessions", async () => {
+    window.localStorage.setItem(
+      "aria.workspace.provider-defaults",
+      JSON.stringify({ author: "pi", reviewer: "kimi_code", reviewerEnabled: true }),
+    );
+    const selectProvider = vi.fn();
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      stage: "running",
+      providers: { author: "codex", reviewer: "codex" } as const,
+      reviewerEnabled: false,
+    });
+    const runningView = renderCockpitWith(mockWorkspaceWs({ selectProvider }));
+    expect(selectProvider).not.toHaveBeenCalled();
+    runningView.unmount();
+
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_defaults_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+    cockpitObservedRecords.push({
+      sessionId: "child_defaults_001",
+      state: observerStateFromSessionState({
+        type: "session_state",
+        session_id: "child_defaults_001",
+        workspace_type: "work_item",
+        stage: "prepare_context",
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        messages: [
+          {
+            id: "message_001",
+            role: "author",
+            content: "子会话待发起",
+            created_at: "2026-09-17T00:00:00Z",
+          },
+        ],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: null },
+        timeline_nodes: [],
+        active_node_id: null,
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: null,
+        human_presentation_revisions: [],
+        session_status: "running",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
+      }),
+    });
+    useWorkspaceStore.setState({ stage: "prepare_context", providers: null });
+    renderCockpitWith(mockWorkspaceWs({ selectProvider }));
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+    expect(await screen.findByText(/Author：claude_code/)).toBeVisible();
+
+    act(() => {
+      useWorkspaceStore.setState({
+        providers: { author: "codex", reviewer: "codex" } as const,
+      });
+    });
+
+    expect(selectProvider).not.toHaveBeenCalled();
+  });
+
+  it("keeps provider configuration read-only while running", () => {
+    useWorkspaceStore.setState({
+      stage: "running",
+      providers: { author: "pi", reviewer: "codex" } as const,
+    });
+
+    renderCockpitWith(mockWorkspaceWs());
+
+    expect(screen.queryByTestId("save-provider-defaults")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Provider 配置" })).toBeNull();
+    expect(screen.getByText(/Author：pi/)).toBeVisible();
+  });
+
   it("selects providers through the injected workspace websocket", async () => {
     const user = userEvent.setup();
     const selectProvider = vi.fn();

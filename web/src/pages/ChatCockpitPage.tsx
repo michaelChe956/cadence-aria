@@ -55,6 +55,11 @@ import {
 import { OperationAuditView } from "../components/cockpit/OperationAuditView";
 import { parentSessionIdFor } from "../state/parent-session-navigation";
 import { workspaceStageLabel } from "../state/workspace-stage-labels";
+import { useStageUI } from "../hooks/useStageUI";
+import {
+  readWorkspaceProviderDefaults,
+  writeWorkspaceProviderDefaults,
+} from "../state/workspace-provider-defaults";
 import {
   clampReviewRounds,
   latestUnacknowledgedAbortedNode,
@@ -215,10 +220,13 @@ export function ChatCockpitPage({
     "conversation" | "plan" | "artifact"
   >("conversation");
   const [jumpEntryId, setJumpEntryId] = useState<string | null>(null);
+  const [defaultsSavedAt, setDefaultsSavedAt] = useState<number | null>(null);
+  const appliedDefaultsSessionRef = useRef<string | null>(null);
   const isCurrentSession = takeoverSessionId === null;
+  const stageConfig = useStageUI(state.stage);
   const canConfigureProviders =
     isCurrentSession &&
-    state.stage === "prepare_context" &&
+    stageConfig.providerEditable &&
     workspaceWs.connectionStatus === "connected";
   const inboxEmptyHint =
     isCurrentSession && state.stage === "prepare_context" && (state.timelineNodes?.length ?? 0) === 0
@@ -255,6 +263,19 @@ export function ChatCockpitPage({
       reviewerEnabled,
     );
   }, [workspaceWs.sendStartGeneration]);
+  const handleSaveProviderDefaults = useCallback(() => {
+    const { providers, reviewerEnabled } = useWorkspaceStore.getState();
+    if (!providers) {
+      return;
+    }
+
+    writeWorkspaceProviderDefaults({
+      author: providers.author,
+      reviewer: providers.reviewer ?? "codex",
+      reviewerEnabled,
+    });
+    setDefaultsSavedAt(Date.now());
+  }, []);
   const handlePermissionResponse = useCallback(
     (entry: ChatEntry, approved: boolean) => {
       const requestId = requestIdFromEntry(entry);
@@ -535,6 +556,40 @@ export function ChatCockpitPage({
       setDrilldownView("artifact");
     }
   }, [selectedState?.stage, selectedState?.workspaceType]);
+  useEffect(() => {
+    if (
+      takeoverSessionId !== null ||
+      state.sessionId !== sessionId ||
+      !stageConfig.providerEditable ||
+      workspaceWs.connectionStatus !== "connected" ||
+      appliedDefaultsSessionRef.current === sessionId
+    ) {
+      return;
+    }
+
+    const defaults = readWorkspaceProviderDefaults();
+    if (!defaults || !state.providers) {
+      return;
+    }
+
+    appliedDefaultsSessionRef.current = sessionId;
+    if (state.providers.author !== defaults.author) {
+      workspaceWs.selectProvider("author", defaults.author);
+    }
+    if (defaults.reviewerEnabled && state.providers.reviewer !== defaults.reviewer) {
+      workspaceWs.selectProvider("reviewer", defaults.reviewer);
+    }
+    if (useWorkspaceStore.getState().reviewerEnabled !== defaults.reviewerEnabled) {
+      useWorkspaceStore.setState({ reviewerEnabled: defaults.reviewerEnabled });
+    }
+  }, [
+    sessionId,
+    stageConfig.providerEditable,
+    state.providers,
+    state.sessionId,
+    takeoverSessionId,
+    workspaceWs,
+  ]);
 
   return (
     <div
@@ -692,27 +747,42 @@ export function ChatCockpitPage({
             <div className="flex min-w-0 items-center gap-2 px-3 py-2">
               <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
               {canConfigureProviders ? (
-                <ProviderConfigDialogButton
-                  providers={state.providers}
-                  editable={true}
-                  onSelectProvider={(role, provider) =>
-                    workspaceWs.selectProvider(role, provider)
-                  }
-                  reviewerEnabled={state.reviewerEnabled}
-                  onToggleReviewer={(enabled) =>
-                    useWorkspaceStore.setState({ reviewerEnabled: enabled })
-                  }
-                  permissionModes={state.permissionModes}
-                  onPermissionModeSelect={(role, mode) =>
-                    useWorkspaceStore.getState().setPermissionMode(role, mode)
-                  }
-                  rounds={state.reviewRounds}
-                  onChangeRounds={(rounds) =>
-                    useWorkspaceStore.setState({
-                      reviewRounds: clampReviewRounds(rounds),
-                    })
-                  }
-                />
+                <>
+                  <ProviderConfigDialogButton
+                    providers={state.providers}
+                    editable={true}
+                    onSelectProvider={(role, provider) =>
+                      workspaceWs.selectProvider(role, provider)
+                    }
+                    reviewerEnabled={state.reviewerEnabled}
+                    onToggleReviewer={(enabled) =>
+                      useWorkspaceStore.setState({ reviewerEnabled: enabled })
+                    }
+                    permissionModes={state.permissionModes}
+                    onPermissionModeSelect={(role, mode) =>
+                      useWorkspaceStore.getState().setPermissionMode(role, mode)
+                    }
+                    rounds={state.reviewRounds}
+                    onChangeRounds={(rounds) =>
+                      useWorkspaceStore.setState({
+                        reviewRounds: clampReviewRounds(rounds),
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    data-testid="save-provider-defaults"
+                    onClick={handleSaveProviderDefaults}
+                    className="btn-secondary h-9"
+                  >
+                    设为默认
+                  </button>
+                  {defaultsSavedAt !== null ? (
+                    <span role="status" className="text-xs text-[var(--aria-ink-muted)]">
+                      已设为默认
+                    </span>
+                  ) : null}
+                </>
               ) : (
                 <span className="text-xs text-[var(--aria-ink-muted)]">
                   {providerSummary}
