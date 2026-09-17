@@ -21,7 +21,10 @@ async fn workspace_ws_multiple_connections_share_one_session_manager() {
         sockets.push(ws);
     }
     for ws in &mut sockets {
-        assert!(matches!(recv_json(ws).await, WsOutMessage::SessionState { .. }));
+        assert!(matches!(
+            recv_json(ws).await,
+            WsOutMessage::SessionState { .. }
+        ));
     }
     assert_eq!(
         state.workspace_sessions.session_ids().await,
@@ -58,7 +61,10 @@ async fn workspace_ws_second_connection_attaches_while_run_holds_engine_lock() {
 
     let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
     let (mut driver, _) = connect_async(url.clone()).await.expect("driver ws");
-    assert!(matches!(recv_json(&mut driver).await, WsOutMessage::SessionState { .. }));
+    assert!(matches!(
+        recv_json(&mut driver).await,
+        WsOutMessage::SessionState { .. }
+    ));
     send_json(
         &mut driver,
         &WsInMessage::UserMessage {
@@ -75,13 +81,16 @@ async fn workspace_ws_second_connection_attaches_while_run_holds_engine_lock() {
         .await
         .expect("driver attach creates session manager");
     let run_before = manager.active_run().await.map(|run| run.token);
-    assert!(run_before.is_some(), "driver run must be registered before observer attaches");
+    assert!(
+        run_before.is_some(),
+        "driver run must be registered before observer attaches"
+    );
 
     let attach_started = tokio::time::Instant::now();
     let (mut observer, _) = connect_async(url.clone()).await.expect("observer ws");
     let state_message = tokio::time::timeout(Duration::from_secs(2), recv_json(&mut observer))
         .await
-        .expect("run 进行中第二连接 attach 被阻塞超过 2s") ;
+        .expect("run 进行中第二连接 attach 被阻塞超过 2s");
     assert!(matches!(state_message, WsOutMessage::SessionState { .. }));
     assert!(attach_started.elapsed() < Duration::from_secs(2));
 
@@ -133,7 +142,10 @@ async fn workspace_ws_passive_connection_receives_live_stream_events() {
 
     let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
     let (mut driver, _) = connect_async(url.clone()).await.expect("driver ws");
-    assert!(matches!(recv_json(&mut driver).await, WsOutMessage::SessionState { .. }));
+    assert!(matches!(
+        recv_json(&mut driver).await,
+        WsOutMessage::SessionState { .. }
+    ));
     send_json(
         &mut driver,
         &WsInMessage::UserMessage {
@@ -144,7 +156,10 @@ async fn workspace_ws_passive_connection_receives_live_stream_events() {
     let _chunk = recv_until_stream_chunk(&mut driver).await;
 
     let (mut observer, _) = connect_async(url.clone()).await.expect("observer ws");
-    assert!(matches!(recv_json(&mut observer).await, WsOutMessage::SessionState { .. }));
+    assert!(matches!(
+        recv_json(&mut observer).await,
+        WsOutMessage::SessionState { .. }
+    ));
     complete.notify_one();
 
     let live_event = tokio::time::timeout(Duration::from_secs(10), async {
@@ -173,7 +188,11 @@ async fn workspace_ws_passive_connection_receives_live_stream_events() {
 }
 
 fn durable_tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-    fn visit(base: &std::path::Path, current: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+    fn visit(
+        base: &std::path::Path,
+        current: &std::path::Path,
+        out: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) {
         let mut entries = std::fs::read_dir(current)
             .unwrap_or_else(|error| panic!("read durable directory {}: {error}", current.display()))
             .collect::<Result<Vec<_>, _>>()
@@ -185,9 +204,12 @@ fn durable_tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec
                 visit(base, &path, out);
             } else {
                 out.push((
-                    path.strip_prefix(base).expect("relative durable path").to_path_buf(),
-                    std::fs::read(&path)
-                        .unwrap_or_else(|error| panic!("read durable file {}: {error}", path.display())),
+                    path.strip_prefix(base)
+                        .expect("relative durable path")
+                        .to_path_buf(),
+                    std::fs::read(&path).unwrap_or_else(|error| {
+                        panic!("read durable file {}: {error}", path.display())
+                    }),
                 ));
             }
         }
@@ -201,6 +223,168 @@ fn durable_tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec
 
 #[allow(dead_code)]
 fn _registry_type_is_public(_: WorkspaceSessionRegistry) {}
+
+/// 以历史 durable 形状植入断连标记，验证读取、往返和关闭都不会把历史事实改写成
+/// 新一次断连终态。
+fn seed_historical_aborted_marker(root: &TempDir) {
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut nodes = lifecycle
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("load existing timeline nodes");
+    nodes.push(cadence_aria::web::workspace_ws_types::TimelineNode {
+        node_id: "timeline_node_historical_disconnect".to_string(),
+        node_type: TimelineNodeType::AbortedByDisconnect,
+        agent: None,
+        stage: cadence_aria::web::workspace_ws_types::WorkspaceStage::PrepareContext,
+        round: None,
+        status: TimelineNodeStatus::Failed,
+        title: "历史连接断开".to_string(),
+        summary: Some("连接断开，运行已中止".to_string()),
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        completed_at: Some("2026-01-01T00:00:01Z".to_string()),
+        duration_ms: Some(1),
+        artifact_ref: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Fake,
+            reviewer: None,
+            review_rounds: 0,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(
+            ),
+        },
+        retry: None,
+    });
+    lifecycle
+        .save_timeline_nodes("workspace_session_0001", &nodes)
+        .expect("seed historical disconnect marker");
+}
+
+/// REQ-WCR-03：provider 完成和服务端关闭清理并发发生时，关闭路径不得追加
+/// `aborted_by_disconnect`；唯一 terminal 来自业务完成。
+#[tokio::test]
+async fn workspace_ws_completion_and_close_race_yields_single_terminal() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    let app = build_web_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url).await.expect("ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("race_terminal"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut ws).await;
+
+    complete.notify_one();
+    assert!(
+        state
+            .test_controls
+            .drop_workspace_socket("workspace_session_0001")
+            .await,
+        "完成与关闭必须在同一活动 run 窗口交错"
+    );
+    drop(ws);
+
+    let mut terminal = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let nodes = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+            .load_timeline_nodes("workspace_session_0001")
+            .expect("timeline nodes");
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect),
+            "完成与关闭并发不得写入断连伪终态"
+        );
+        if persisted_workspace_messages(root.path())
+            .iter()
+            .any(|message| message.role == "assistant" && message.content.contains("# Story Spec"))
+        {
+            terminal = true;
+            break;
+        }
+    }
+    assert!(terminal, "provider 完成必须落真实业务终态");
+    server.abort();
+}
+
+/// REQ-WCR-06：存量 `aborted_by_disconnect` 是不可变历史事实；新会话必须照常服务，
+/// 且关闭后既不误判也不改写该 durable 标记。
+#[tokio::test]
+async fn workspace_ws_historical_disconnect_marker_is_preserved_not_misjudged() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    seed_historical_aborted_marker(&root);
+
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url).await.expect("ws");
+    match recv_json(&mut ws).await {
+        WsOutMessage::SessionState { timeline_nodes, .. } => {
+            assert!(
+                timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::AbortedByDisconnect),
+                "历史标记必须原样呈现，而非被当作当前连接终态"
+            );
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+    let durable_after_read = durable_tree_snapshot(root.path());
+
+    send_json(&mut ws, &WsInMessage::Ping).await;
+    assert!(matches!(recv_json(&mut ws).await, WsOutMessage::Pong));
+    drop(ws);
+    let _diagnostic = wait_for_connection_diagnostic(&controls, "eof").await;
+
+    assert_eq!(
+        durable_tree_snapshot(root.path()),
+        durable_after_read,
+        "正常往返和关闭不得改写含历史标记的 durable"
+    );
+    let nodes = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("timeline nodes");
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|node| node.node_type == TimelineNodeType::AbortedByDisconnect)
+            .count(),
+        1,
+        "历史断连标记必须保持单个，不得被误判为新标记"
+    );
+    server.abort();
+}
 
 /// REQ-WCR-03（0437 形态根治）：human_confirm 门刚开启即断连，
 /// 活动节点不得被标「连接断开，运行已中止」，门等待正常呈现。
@@ -334,10 +518,7 @@ async fn workspace_session_manager_recycled_after_terminal_without_subscribers()
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
-    assert!(
-        recycled.await.is_ok(),
-        "终态且无订阅者后 manager 应被回收"
-    );
+    assert!(recycled.await.is_ok(), "终态且无订阅者后 manager 应被回收");
 
     let (mut again, _) = connect_async(url).await.expect("reconnect ws");
     match recv_json(&mut again).await {

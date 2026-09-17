@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{WorkspaceSessionManager, WorkspaceSessionRegistry};
 use crate::product::workspace_engine::ProviderRunKind;
+use crate::web::workspace_ws_handler::OutboundControl;
+use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn start_run_supersedes_active_run_with_token_equality_guard() {
@@ -125,4 +127,38 @@ async fn registry_session_ids_are_sorted_and_remove_is_idempotent() {
 
     registry.remove("missing").await;
     assert!(registry.session_ids().await.is_empty());
+}
+
+/// `finish_run` 与连接关闭可任意交错：仅匹配的 token 可清理活动 run，关闭只会
+/// 摘除 attachment，最终状态必须可回收。
+#[tokio::test]
+async fn finish_run_and_connection_close_interleaving_clears_run_and_attachment() {
+    for _ in 0..100 {
+        let manager = WorkspaceSessionManager::test_fixture("session_finish_close");
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(1);
+        manager.register_attachment("connection", outbound_tx);
+        let (_run_id, token, _cancel, _command_rx, _node_id) = manager
+            .start_run(ProviderRunKind::ReviewOnly, None)
+            .await
+            .expect("start run");
+
+        tokio::join!(
+            manager.finish_run(token),
+            manager.handle_connection_closed("connection")
+        );
+
+        let cleared = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                if manager.active_run().await.is_none() && manager.is_recyclable() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            cleared.is_ok(),
+            "交错后不得遗留 active_run 或 attachment，manager 必须可回收"
+        );
+    }
 }
