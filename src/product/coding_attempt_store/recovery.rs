@@ -9,7 +9,6 @@ use crate::product::coding_models::{
     CodingRoleRun, CodingRoleRunEventType, CodingRoleRunRetryMetadata, CodingRoleRunStatus,
     CodingRoleRunTrigger,
 };
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -483,7 +482,10 @@ impl super::CodingAttemptStore {
             validate_retry_role_run(&run, journal)?;
             run
         } else {
-            let id = next_sequential_id("coding_role_run", existing.len());
+            let id = crate::product::id::next_sequential_id_from_existing(
+                "coding_role_run",
+                existing.iter().map(|run| run.id.as_str()),
+            );
             let run_no = existing
                 .iter()
                 .filter(|run| {

@@ -48,7 +48,6 @@ use crate::product::coding_models::{
     ReviewVerdict,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
@@ -750,7 +749,10 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     ))
                 })?;
         let review = InternalPrReview {
-            id: next_sequential_id("internal_review", existing.len()),
+            id: crate::product::id::next_sequential_id_from_existing(
+                "internal_review",
+                existing.iter().map(|review| review.id.as_str()),
+            ),
             attempt_id: snapshot.attempt_id.clone(),
             review_request_id: snapshot.review_request_id.clone(),
             verdict: reduction.verdict.clone(),

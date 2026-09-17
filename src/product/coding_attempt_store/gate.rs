@@ -13,7 +13,7 @@ use crate::product::coding_models::{
     CodingStageGateState, CodingStageGateStatus, CodingUnitRun, CodingUnitRunStatus,
     QualityGateBypassAudit,
 };
-use crate::product::id::next_sequential_id_in_directory;
+use crate::product::id::{next_sequential_id_from_existing, next_sequential_id_in_directory};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 use super::locking::with_exclusive_lock;
@@ -406,9 +406,7 @@ impl super::CodingAttemptStore {
             return Ok(gate);
         }
 
-        let gate_id = next_sequential_id_in_directory("coding_choice_gate", &gates_root).map_err(
-            |error| ProductStoreError::Io(format!("read {}: {error}", gates_root.display())),
-        )?;
+        let gate_id = next_sequential_id_in_gate_directories("coding_choice_gate", &gates_root)?;
         let now = Utc::now().to_rfc3339();
         let gate = CodingChoiceGate {
             gate_id: gate_id.clone(),
@@ -761,9 +759,7 @@ fn create_blocked_gate_unlocked(
         write_json(&existing_path, &record)?;
         return Ok(record.gate);
     }
-    let gate_id = next_sequential_id_in_directory("coding_blocked_gate", gates_root).map_err(
-        |error| ProductStoreError::Io(format!("read {}: {error}", gates_root.display())),
-    )?;
+    let gate_id = next_sequential_id_in_gate_directories("coding_blocked_gate", gates_root)?;
     let now = Utc::now().to_rfc3339();
     let gate = CodingGateRequired {
         gate_id: gate_id.clone(),
@@ -792,6 +788,24 @@ fn create_blocked_gate_unlocked(
     Ok(gate)
 }
 
+
+fn next_sequential_id_in_gate_directories(
+    prefix: &str,
+    gates_root: &Path,
+) -> Result<String, ProductStoreError> {
+    let resolved_root = gates_root.join("resolved");
+    let paths = [
+        super::json_file_paths(gates_root)?,
+        super::json_file_paths(&resolved_root)?,
+    ];
+    Ok(next_sequential_id_from_existing(
+        prefix,
+        paths
+            .iter()
+            .flatten()
+            .filter_map(|path| path.file_stem()?.to_str()),
+    ))
+}
 fn matching_open_blocked_gate_path(
     gates_root: &Path,
     input: &CreateBlockedGateInput,
