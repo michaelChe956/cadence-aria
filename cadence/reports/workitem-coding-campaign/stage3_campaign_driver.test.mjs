@@ -780,6 +780,26 @@ test('campaign_stage3_group_snapshot_readback_after_advance_completed', async ()
   assert.equal(evidence.source, 'group_attempt_snapshot_readback');
 });
 
+test('campaign_stage3_group_snapshot_readback_passes_elapsed_callback_to_request_layer', async () => {
+  const { stage3GroupAttemptSnapshotFixture } = await import('./stage3_campaign_fixtures.mjs');
+  const { stage3GroupSnapshotReadback } = await import('./workitem_run_campaign.mjs');
+  let receivedElapsed;
+
+  await stage3GroupSnapshotReadback({
+    snapshotUrl: 'http://127.0.0.1:4317/snapshot',
+    requestJson: async (_url, _headers, elapsedMs) => {
+      receivedElapsed = elapsedMs;
+      return { body: stage3GroupAttemptSnapshotFixture() };
+    },
+    elapsedMs: () => 321,
+    attemptId: 'attempt_fixture_0001',
+    commandId: 'cmd-adv-0',
+  });
+
+  assert.equal(typeof receivedElapsed, 'function');
+  assert.equal(receivedElapsed(), 321);
+});
+
 test('campaign_stage3_group_snapshot_evidence_fails_closed_on_mismatched_attempt', async () => {
   const { stage3GroupAttemptSnapshotFixture } = await import('./stage3_campaign_fixtures.mjs');
   const { stage3GroupSnapshotEvidence } = await import('./workitem_run_campaign.mjs');

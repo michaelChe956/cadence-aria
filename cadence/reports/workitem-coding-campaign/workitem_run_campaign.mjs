@@ -742,6 +742,51 @@ export function stage3GroupSnapshotEvidence({
   };
 }
 
+// group snapshot readback 通过依赖注入与 driver 的 HTTP 超时预算对接；调用侧仅负责
+// 绑定本轮 campaign 状态，避免让 readback 重复持有 stage3 主循环。
+export async function stage3GroupSnapshotReadback({
+  snapshotUrl,
+  requestJson,
+  elapsedMs,
+  attemptId,
+  commandId,
+  readDurableAdvanceForAttempt = () => null,
+  readDurableIssueWorktree = () => null,
+  providerStartLedgerBefore = [],
+  providerStartLedgerAfter = [],
+  recordEvidence = () => {},
+  writeLog = () => {},
+  writeHandoffAndFinish = () => {},
+}) {
+  try {
+    const snapshotResponse = await requestJson(snapshotUrl, {}, elapsedMs);
+    const evidence = stage3GroupSnapshotEvidence({
+      snapshot: {
+        ...snapshotResponse.body,
+        advance_record: readDurableAdvanceForAttempt(attemptId),
+        issue_shared_worktree: readDurableIssueWorktree(),
+      },
+      advanceMessage: {
+        type: 'advance_completed',
+        command_id: commandId,
+        attempt_id: attemptId,
+        workspace_entry: null,
+      },
+      providerStartLedgerBefore,
+      providerStartLedgerAfter,
+    });
+    if (evidence) {
+      recordEvidence(evidence);
+      writeLog({ event: 'stage3_group_snapshot_readback', ...evidence });
+    } else {
+      writeLog({ event: 'stage3_group_snapshot_readback_failed', attempt_id: attemptId });
+    }
+  } catch (readbackError) {
+    writeLog({ event: 'stage3_group_snapshot_readback_failed', error: errorText(readbackError) });
+  }
+  writeHandoffAndFinish();
+}
+
 // advance 等待期的收尾决策（task 8.1 修复轮 M2）：rejected 不消费脚本动作，但对 rejected
 // 无条件清 advanceFinishPending 并按既定策略收尾（plan 已 Confirmed，不悬挂至 hard timeout；
 // 语义对齐断线分支 stage3_advance_outcome_unknown）；completed 仍要求动作确认消费后才收尾。
@@ -2788,42 +2833,29 @@ async function runCampaign({
               // readback 是异步 HTTP，收尾延后到 readback 落账后执行（ended 守卫幂等）；
               // rejected 不做 readback，立即按既定策略收尾。
               if (advanceFinishPlan.event === 'stage3_advance_simulation') {
-                void (async () => {
-                  try {
-                    const attemptId = advanceFinishPlan.attempt_id;
-                    const snapshotUrl = stage3GroupSnapshotUrl({
-                      base: BASE,
-                      projectId: PROJECT_ID,
-                      issueId: result.issue_id,
-                      attemptId,
-                    });
-                    const snapshotResponse = await requestJson(snapshotUrl, {}, elapsedMs());
-                    const evidence = stage3GroupSnapshotEvidence({
-                      snapshot: {
-                        ...snapshotResponse.body,
-                        advance_record: readDurableAdvanceForAttempt(attemptId),
-                        issue_shared_worktree: readDurableIssueWorktree(),
-                      },
-                      advanceMessage: {
-                        type: 'advance_completed',
-                        command_id: advanceFinishPlan.command_id,
-                        attempt_id: attemptId,
-                        workspace_entry: null,
-                      },
-                      providerStartLedgerBefore: result.provider_start_ledger ?? [],
-                      providerStartLedgerAfter: result.provider_start_ledger ?? [],
-                    });
-                    if (evidence) {
-                      result.stage3_group_snapshot = evidence;
-                      writeLog({ event: 'stage3_group_snapshot_readback', ...evidence });
-                    } else {
-                      writeLog({ event: 'stage3_group_snapshot_readback_failed', attempt_id: attemptId });
-                    }
-                  } catch (readbackError) {
-                    writeLog({ event: 'stage3_group_snapshot_readback_failed', error: errorText(readbackError) });
-                  }
-                  writeHandoffAndFinish();
-                })();
+                const attemptId = advanceFinishPlan.attempt_id;
+                const snapshotUrl = stage3GroupSnapshotUrl({
+                  base: BASE,
+                  projectId: PROJECT_ID,
+                  issueId: result.issue_id,
+                  attemptId,
+                });
+                void stage3GroupSnapshotReadback({
+                  snapshotUrl,
+                  requestJson,
+                  elapsedMs,
+                  attemptId,
+                  commandId: advanceFinishPlan.command_id,
+                  readDurableAdvanceForAttempt,
+                  readDurableIssueWorktree,
+                  providerStartLedgerBefore: result.provider_start_ledger ?? [],
+                  providerStartLedgerAfter: result.provider_start_ledger ?? [],
+                  recordEvidence: (evidence) => {
+                    result.stage3_group_snapshot = evidence;
+                  },
+                  writeLog,
+                  writeHandoffAndFinish,
+                });
               } else {
                 writeHandoffAndFinish();
               }
