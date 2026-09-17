@@ -437,16 +437,11 @@ pub(crate) async fn handle_workspace_socket(
         connection_id.clone(),
     ));
     let (session_state, restored_choice_request) = manager.attached_session_state().await;
-    if let Some(json) =
-        manager.serialize_attach_session_state(session_state.with_connection_id(&connection_id))
-    {
-        let _ = ws_sender.send(Message::Text(json.into())).await;
-    }
-    if let Some(choice_request) = restored_choice_request
-        && let Ok(json) = serde_json::to_string(&choice_request)
-    {
-        let _ = ws_sender.send(Message::Text(json.into())).await;
-    }
+    let pending_initial = Arc::new(Mutex::new(
+        manager
+            .serialize_attach_session_state(session_state.with_connection_id(&connection_id))
+            .map(|session_state| (session_state, restored_choice_request)),
+    ));
 
     let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
     state
@@ -482,6 +477,7 @@ pub(crate) async fn handle_workspace_socket(
         outbound_tx: outbound_tx.clone(),
         session_id: session_id.clone(),
     };
+    let configured_idle_timeout = state.test_controls.server_idle_timeout();
     let idle_timeout_task = spawn_idle_timeout_task(
         last_client_activity_at.clone(),
         last_server_activity_at.clone(),
@@ -492,10 +488,41 @@ pub(crate) async fn handle_workspace_socket(
             state.workspace_runs.clone(),
             session_id.clone(),
         ),
-        state.test_controls.server_idle_timeout(),
+        configured_idle_timeout,
         std::time::Duration::from_secs(5),
     );
     let idle_receiver_exit = idle_timeout_triggered.clone();
+    let initial_for_inbound = pending_initial.clone();
+    let manager_for_grace = manager.clone();
+    let connection_for_grace = connection_id.clone();
+    let initial_for_grace = pending_initial;
+    let outbound_for_grace = outbound_tx.clone();
+    let initial_push_grace_task = tokio::spawn(async move {
+        tokio::time::sleep(
+            if configured_idle_timeout < std::time::Duration::from_millis(500) {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_millis(500)
+            },
+        )
+        .await;
+        let initial = initial_for_grace.lock().await.take();
+        if let Some((session_state, choice)) = initial {
+            eprintln!(
+                "[aria-cursor-resubscribe] initial attach grace elapsed; sending baseline before live registration"
+            );
+            let _ = outbound_for_grace
+                .send(OutboundControl::Text(session_state))
+                .await;
+            if let Some(choice) = choice
+                && let Ok(json) = serde_json::to_string(&choice)
+            {
+                let _ = outbound_for_grace.send(OutboundControl::Text(json)).await;
+            }
+        }
+        manager_for_grace.activate_attachment(&connection_for_grace);
+    });
+
     let receiver_exit = tokio::select! {
         receiver_exit = async {
             loop {
@@ -532,6 +559,28 @@ pub(crate) async fn handle_workspace_socket(
                     }
                 };
                 let in_msg = &envelope.message;
+                let is_cursor_hello = matches!(
+                    in_msg,
+                    WsInMessage::Hello {
+                        after_event_seq: Some(_),
+                        ..
+                    }
+                );
+                let initial = initial_for_inbound.lock().await.take();
+                if is_cursor_hello {
+                    if initial.is_none() {
+                        eprintln!("[aria-cursor-resubscribe] cursor Hello arrived after initial attach grace; client cursor retry absorbs disclosed narrow window");
+                    }
+                } else if let Some((session_state, choice)) = initial {
+                    let _ = outbound_tx.send(OutboundControl::Text(session_state)).await;
+                    if let Some(choice) = choice
+                        && let Ok(json) = serde_json::to_string(&choice)
+                    {
+                        let _ = outbound_tx.send(OutboundControl::Text(json)).await;
+                    }
+                    manager.activate_attachment(&connection_id);
+                }
+                initial_push_grace_task.abort();
                 if let Err(role) = manager.arbitrate(&connection_id, in_msg) {
                     let stale_driver = role == crate::web::workspace_session::ConnectionRole::Driver;
                     let err = WsOutMessage::ProtocolError {
@@ -672,6 +721,7 @@ pub(crate) async fn handle_workspace_socket(
     connection_outbound_task.abort();
     idle_timeout_task.abort();
     socket_control_task.abort();
+    initial_push_grace_task.abort();
     send_task.abort();
     let _ = connection_outbound_task.await;
     let _ = socket_control_task.await;

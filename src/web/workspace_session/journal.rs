@@ -15,6 +15,8 @@ pub(crate) struct EventJournal {
     pub(crate) entries: VecDeque<(u64, String)>,
     pub(crate) truncated: bool,
     pub(crate) run_active: bool,
+    /// 当前 run 启动时的下一事件序号，用于将活跃 run 补发与历史尾窗隔离。
+    run_start_seq: Option<u64>,
 }
 
 impl EventJournal {
@@ -29,12 +31,14 @@ impl EventJournal {
         }
     }
 
-    pub(crate) fn mark_run_started(&mut self) {
+    pub(crate) fn mark_run_started(&mut self, next_event_seq: u64) {
         self.run_active = true;
+        self.run_start_seq = Some(next_event_seq);
     }
 
     pub(crate) fn mark_run_terminal(&mut self) {
         self.run_active = false;
+        self.run_start_seq = None;
         self.trim_to_tail();
     }
 
@@ -62,6 +66,25 @@ impl EventJournal {
     #[allow(dead_code)]
     pub(crate) fn oldest_seq(&self) -> Option<u64> {
         self.entries.front().map(|(seq, _)| *seq)
+    }
+
+    /// 当前活跃 run 的完整补发窗口。hard cap 已截断时，仍从实际保留的最早事件诚实
+    /// 补发；调用方使用该最早序号减一作为 snapshot 基线，避免前端吞掉补发文本。
+    pub(crate) fn active_run_window(&self) -> Option<(u64, Vec<String>)> {
+        let run_start_seq = self.run_start_seq?;
+        let events = self
+            .entries
+            .iter()
+            .filter(|(seq, _)| *seq >= run_start_seq)
+            .collect::<Vec<_>>();
+        let (first_seq, _) = events.first()?;
+        Some((
+            *first_seq,
+            events
+                .into_iter()
+                .map(|(_, stamped)| stamped.clone())
+                .collect(),
+        ))
     }
 
     fn trim_to_tail(&mut self) {

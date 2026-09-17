@@ -597,15 +597,22 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 crate::web::workspace_session::ConnectionRole::normalize(role),
                 after_event_seq,
             );
-            let engine_for_hello = engine.clone();
-            let outbound_for_hello = outbound_tx.clone();
-            tokio::spawn(async move {
-                let state_msg = {
-                    let engine = engine_for_hello.lock().await;
-                    engine.build_session_state()
-                };
-                let _ = send_json_outbound(&outbound_for_hello, &state_msg).await;
-            });
+            if let Some(after_event_seq) = after_event_seq {
+                run_context
+                    .manager
+                    .resubscribe(&outbound_tx, after_event_seq)
+                    .await;
+            } else {
+                let engine_for_hello = engine.clone();
+                let outbound_for_hello = outbound_tx.clone();
+                tokio::spawn(async move {
+                    let state_msg = {
+                        let engine = engine_for_hello.lock().await;
+                        engine.build_session_state()
+                    };
+                    let _ = send_json_outbound(&outbound_for_hello, &state_msg).await;
+                });
+            }
         }
         WsInMessage::ContextNote { content } => {
             let result = {

@@ -36,6 +36,9 @@ struct Attachment {
 }
 
 struct ManagerState {
+    /// 尚未由首条入站或宽限期裁决的连接不可接收直播帧，保证初帧/回放顺序。
+    pending_attachments: HashMap<String, Attachment>,
+    /// 已完成首帧或 cursor 回放裁决的连接接收直播帧。
     attachments: HashMap<String, Attachment>,
     next_run_id: u64,
     active_run: Option<ActiveRun>,
@@ -91,6 +94,7 @@ impl WorkspaceSessionManager {
             engine: Arc::new(Mutex::new(engine)),
             engine_tx,
             state: StdMutex::new(ManagerState {
+                pending_attachments: HashMap::new(),
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
@@ -120,6 +124,7 @@ impl WorkspaceSessionManager {
             engine,
             engine_tx,
             state: StdMutex::new(ManagerState {
+                pending_attachments: HashMap::new(),
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
@@ -244,6 +249,7 @@ impl WorkspaceSessionManager {
             engine,
             engine_tx,
             state: StdMutex::new(ManagerState {
+                pending_attachments: HashMap::new(),
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
@@ -281,7 +287,8 @@ impl WorkspaceSessionManager {
             session_record: self.session_record.clone(),
         }
     }
-    /// registry 在 sessions 互斥中调用，保证 attachment 登记与 idle 摘除不可交错。
+    /// registry 在 sessions 互斥中调用。新连接先进入 pending 表：在首条入站裁决
+    /// 前绝不接收直播，避免直播帧越过初帧或 cursor 回放。
     pub(crate) fn register_attachment(
         &self,
         connection_id: &str,
@@ -303,7 +310,7 @@ impl WorkspaceSessionManager {
         let provisional_lease = state.lease.clone();
         state.lease.acquire(connection_id);
         let lease_epoch = state.lease.epoch;
-        state.attachments.insert(
+        state.pending_attachments.insert(
             connection_id.to_string(),
             Attachment {
                 outbound_tx,
@@ -313,6 +320,19 @@ impl WorkspaceSessionManager {
                 provisional_lease: Some(provisional_lease),
             },
         );
+    }
+
+    /// 仅在初帧已排队、或 cursor 分支即将冻结 journal 时转为直播 attachment。
+    pub(crate) fn activate_attachment(&self, connection_id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(attachment) = state.pending_attachments.remove(connection_id) {
+            state
+                .attachments
+                .insert(connection_id.to_string(), attachment);
+        }
     }
 
     /// 每次启动都在 `start_run_from_attachment` 的同一 manager 临界区内完成
@@ -414,7 +434,9 @@ impl WorkspaceSessionManager {
                 pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
                 lease_epoch,
             });
-            state.journal.mark_run_started();
+            state
+                .journal
+                .mark_run_started(self.next_event_seq.load(Ordering::Relaxed));
             (replaced_run, (run_id, token, cancel, command_rx, node_id))
         };
         if let Some(run) = replaced_run {
@@ -424,11 +446,14 @@ impl WorkspaceSessionManager {
     }
 
     pub(crate) fn lease_epoch_for_connection(&self, connection_id: &str) -> Option<u64> {
-        self.state
+        let state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
             .attachments
             .get(connection_id)
+            .or_else(|| state.pending_attachments.get(connection_id))
             .map(|attachment| attachment.lease_epoch)
     }
     pub async fn finish_run(self: &Arc<Self>, token: u64) {
@@ -522,6 +547,7 @@ impl WorkspaceSessionManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.lease.revoke_if_holder(connection_id);
+            state.pending_attachments.remove(connection_id);
             state.attachments.remove(connection_id);
         }
         self.maybe_recycle().await;
@@ -535,8 +561,8 @@ impl WorkspaceSessionManager {
         self.engine_tx.clone()
     }
 
-    /// Hello 入口完成 wire role 的一次归一。显式或 legacy Driver 在绑定时获取 lease；
-    /// observer 只记录读面角色，绝不获取或接管 lease。
+    /// Hello 入口完成 wire role 的一次归一。pending 期间的连接也必须先归一，
+    /// 随后 cursor 分支会在同一状态锁内将其转为直播 attachment。
     pub(crate) fn bind_role(
         &self,
         outbound_tx: &mpsc::Sender<OutboundControl>,
@@ -548,26 +574,42 @@ impl WorkspaceSessionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let connection_id = state
-            .attachments
-            .iter_mut()
+            .pending_attachments
+            .iter()
             .find_map(|(connection_id, attachment)| {
-                if attachment.outbound_tx.same_channel(outbound_tx) {
-                    attachment.role = role;
-                    attachment.after_event_seq = after_event_seq;
-                    Some(connection_id.clone())
-                } else {
-                    None
-                }
+                attachment
+                    .outbound_tx
+                    .same_channel(outbound_tx)
+                    .then(|| connection_id.clone())
+            })
+            .or_else(|| {
+                state
+                    .attachments
+                    .iter()
+                    .find_map(|(connection_id, attachment)| {
+                        attachment
+                            .outbound_tx
+                            .same_channel(outbound_tx)
+                            .then(|| connection_id.clone())
+                    })
             });
         let Some(connection_id) = connection_id else {
             return;
         };
+        let provisional_lease =
+            if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
+                attachment.role = role;
+                attachment.after_event_seq = after_event_seq;
+                attachment.provisional_lease.take()
+            } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
+                attachment.role = role;
+                attachment.after_event_seq = after_event_seq;
+                attachment.provisional_lease.take()
+            } else {
+                return;
+            };
         if role == ConnectionRole::Observer {
-            let rollback = state
-                .attachments
-                .get_mut(&connection_id)
-                .and_then(|attachment| attachment.provisional_lease.take());
-            if let Some(rollback) = rollback
+            if let Some(rollback) = provisional_lease
                 && state.lease.holder.as_deref() == Some(connection_id.as_str())
             {
                 state.lease = rollback;
@@ -576,18 +618,22 @@ impl WorkspaceSessionManager {
         }
         state.lease.acquire(&connection_id);
         let lease_epoch = state.lease.epoch;
-        if let Some(attachment) = state.attachments.get_mut(&connection_id) {
+        if let Some(attachment) = state.pending_attachments.get_mut(&connection_id) {
             attachment.lease_epoch = lease_epoch;
-            attachment.provisional_lease = None;
+        } else if let Some(attachment) = state.attachments.get_mut(&connection_id) {
+            attachment.lease_epoch = lease_epoch;
         }
     }
 
     pub(crate) fn connection_role(&self, connection_id: &str) -> ConnectionRole {
-        self.state
+        let state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
             .attachments
             .get(connection_id)
+            .or_else(|| state.pending_attachments.get(connection_id))
             .map(|attachment| attachment.role)
             .unwrap_or(ConnectionRole::Driver)
     }
@@ -606,6 +652,7 @@ impl WorkspaceSessionManager {
         let (role, lease_epoch) = state
             .attachments
             .get(connection_id)
+            .or_else(|| state.pending_attachments.get(connection_id))
             .map(|attachment| (attachment.role, attachment.lease_epoch))
             // attachment 只会在 socket 收尾时摘除；若发生内部竞态，写面保守拒绝。
             .unwrap_or((ConnectionRole::Observer, 0));
@@ -649,12 +696,129 @@ impl WorkspaceSessionManager {
         inject_event_seq(serde_json::to_string(&message).ok()?, seq)
     }
 
+    /// 完成 cursor 重订阅：先在同一状态锁内确认 attachment 在直播表中，再冻结
+    /// journal 窗口；锁外投递使 broadcaster 可以继续推进。重叠帧由客户端按
+    /// `event_seq` 去重，因此该顺序没有遗漏窗口。
+    pub(crate) async fn resubscribe(
+        &self,
+        outbound_tx: &mpsc::Sender<OutboundControl>,
+        after_event_seq: u64,
+    ) {
+        enum Resubscription {
+            Replay(Vec<String>),
+            ActiveRunWindow { baseline: u64, events: Vec<String> },
+            Snapshot { baseline: u64 },
+        }
+
+        let subscription = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection_id =
+                state
+                    .pending_attachments
+                    .iter()
+                    .find_map(|(connection_id, attachment)| {
+                        attachment
+                            .outbound_tx
+                            .same_channel(outbound_tx)
+                            .then(|| connection_id.clone())
+                    });
+            if let Some(connection_id) = connection_id
+                && let Some(attachment) = state.pending_attachments.remove(&connection_id)
+            {
+                state.attachments.insert(connection_id, attachment);
+            }
+            match state.journal.replay_after(after_event_seq) {
+                Some(events) => Resubscription::Replay(events),
+                None => match state.journal.active_run_window() {
+                    Some((first_seq, events)) => Resubscription::ActiveRunWindow {
+                        baseline: first_seq.saturating_sub(1),
+                        events,
+                    },
+                    None => Resubscription::Snapshot {
+                        baseline: self
+                            .next_event_seq
+                            .load(Ordering::Relaxed)
+                            .saturating_sub(1),
+                    },
+                },
+            }
+        };
+
+        match subscription {
+            Resubscription::Replay(events) => {
+                for event in events {
+                    if outbound_tx
+                        .send(OutboundControl::Text(event))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            Resubscription::ActiveRunWindow { baseline, events } => {
+                let (snapshot, choice) = self.attached_session_state().await;
+                if !self
+                    .send_snapshot_with_baseline(outbound_tx, snapshot, baseline)
+                    .await
+                {
+                    return;
+                }
+                if !send_optional_message(outbound_tx, choice).await {
+                    return;
+                }
+                for event in events {
+                    if outbound_tx
+                        .send(OutboundControl::Text(event))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            Resubscription::Snapshot { baseline } => {
+                let (snapshot, choice) = self.attached_session_state().await;
+                if !self
+                    .send_snapshot_with_baseline(outbound_tx, snapshot, baseline)
+                    .await
+                {
+                    return;
+                }
+                let _ = send_optional_message(outbound_tx, choice).await;
+            }
+        }
+    }
+
+    async fn send_snapshot_with_baseline(
+        &self,
+        outbound_tx: &mpsc::Sender<OutboundControl>,
+        snapshot: WsOutMessage,
+        baseline: u64,
+    ) -> bool {
+        let Some(json) = inject_event_seq(
+            match serde_json::to_string(&snapshot) {
+                Ok(json) => json,
+                Err(_) => return false,
+            },
+            baseline,
+        ) else {
+            return false;
+        };
+        outbound_tx.send(OutboundControl::Text(json)).await.is_ok()
+    }
+
     pub async fn detach(self: &Arc<Self>, connection_id: &str) {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .attachments
-            .remove(connection_id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.attachments.remove(connection_id);
+        state.pending_attachments.remove(connection_id);
+        drop(state);
         self.maybe_recycle().await;
     }
 
@@ -665,6 +829,7 @@ impl WorkspaceSessionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.active_run.is_none()
             && state.attachments.is_empty()
+            && state.pending_attachments.is_empty()
             && !self
                 .workspace_runs
                 .provider_drive_in_progress(&self.session_id)
@@ -975,6 +1140,19 @@ impl WorkspaceSessionManager {
     ) {
         self.broadcast(WsOutMessage::ProviderStatus { status });
     }
+}
+
+async fn send_optional_message(
+    outbound_tx: &mpsc::Sender<OutboundControl>,
+    message: Option<WsOutMessage>,
+) -> bool {
+    let Some(message) = message else {
+        return true;
+    };
+    let Ok(json) = serde_json::to_string(&message) else {
+        return false;
+    };
+    outbound_tx.send(OutboundControl::Text(json)).await.is_ok()
 }
 
 /// 保持 `WsOutMessage` schema 不变，在 JSON 顶层增加可选 `event_seq`。

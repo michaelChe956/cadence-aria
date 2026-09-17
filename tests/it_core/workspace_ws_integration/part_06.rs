@@ -1,5 +1,301 @@
 use cadence_aria::web::workspace_session::WorkspaceSessionRegistry;
 
+/// 逐步放行流式文本，供 cursor 回放与活跃 run 窗口恢复用例精确控制事件窗口。
+struct GatedChunkStreamingProvider {
+    step: Arc<Notify>,
+    complete: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for GatedChunkStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let step = self.step.clone();
+        let complete = self.complete.clone();
+        tokio::spawn(async move {
+            let mut index = 0_u64;
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: format!("gated chunk {index}"),
+                })
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = step.notified() => {
+                        index += 1;
+                        if event_tx.send(ProviderEvent::TextDelta {
+                            content: format!("gated chunk {index}"),
+                        }).await.is_err() {
+                            return;
+                        }
+                    }
+                    _ = complete.notified() => {
+                        let _ = event_tx.send(ProviderEvent::Completed(
+                            cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                                VALID_STORY_SPEC.to_string(),
+                                None,
+                            ),
+                        )).await;
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+/// REQ-WCR-04：携带可回放 cursor 的重连仅收到严格晚于 cursor 的事件，且 attach
+/// snapshot 基线不得先于回放帧到达。
+#[tokio::test]
+async fn workspace_ws_reconnect_with_cursor_replays_without_snapshot_baseline() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let step = Arc::new(Notify::new());
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(GatedChunkStreamingProvider {
+            step: step.clone(),
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
+    assert_eq!(recv_json_value(&mut ws).await["type"], "session_state");
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("cursor_replay"),
+        },
+    )
+    .await;
+    let initial = recv_until_stream_chunk_value(&mut ws).await;
+    let cursor = initial["event_seq"].as_u64().expect("initial chunk seq");
+
+    drop(ws);
+    for _ in 0..3 {
+        step.notify_one();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    let (mut ws2, _) = connect_async(url.clone()).await.expect("reconnect");
+    send_json(
+        &mut ws2,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: Some(cursor),
+        },
+    )
+    .await;
+
+    let mut replayed = Vec::new();
+    for _ in 0..3 {
+        let message = recv_json_value(&mut ws2).await;
+        assert_ne!(
+            message["type"], "session_state",
+            "cursor 重连的回放前不得注入 snapshot 基线"
+        );
+        assert_eq!(message["type"], "stream_chunk");
+        replayed.push(
+            message["content"]
+                .as_str()
+                .expect("chunk content")
+                .to_string(),
+        );
+    }
+    assert_eq!(
+        replayed,
+        vec!["gated chunk 1", "gated chunk 2", "gated chunk 3"],
+        "断连窗口严格回放一次且顺序不变"
+    );
+
+    step.notify_one();
+    assert_eq!(
+        recv_until_stream_chunk_value(&mut ws2).await["content"],
+        "gated chunk 4",
+        "回放结束后无缝续接直播"
+    );
+    complete.notify_one();
+    drop(ws2);
+    server.abort();
+}
+
+/// REQ-WCR-04/F2：cursor 已落在上一个 run 的尾窗外时，活跃 run 不能只发送快照；
+/// 它必须以本 run 窗口起点减一建立基线并补发已产生的流式文本。
+#[tokio::test]
+async fn workspace_ws_stale_cursor_during_active_run_replays_current_run_window() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let step = Arc::new(Notify::new());
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(GatedChunkStreamingProvider {
+            step: step.clone(),
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
+    let _initial = recv_json_value(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("stale_cursor_active_run"),
+        },
+    )
+    .await;
+    let old_cursor = recv_until_stream_chunk_value(&mut ws).await["event_seq"]
+        .as_u64()
+        .expect("old cursor");
+
+    for _ in 0..1_030 {
+        step.notify_one();
+        let _ = recv_until_stream_chunk_value(&mut ws).await;
+    }
+    complete.notify_one();
+    for _ in 0..40 {
+        if recv_json_value(&mut ws).await["type"] == "message_complete" {
+            break;
+        }
+    }
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("active_run_window"),
+        },
+    )
+    .await;
+    let _run_two_initial = recv_until_stream_chunk_value(&mut ws).await;
+    step.notify_one();
+    let _run_two_second = recv_until_stream_chunk_value(&mut ws).await;
+    drop(ws);
+    let (mut ws2, _) = connect_async(url.clone()).await.expect("reconnect");
+    send_json(
+        &mut ws2,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: Some(old_cursor),
+        },
+    )
+    .await;
+
+    let baseline = recv_json_value(&mut ws2).await;
+    assert_eq!(baseline["type"], "session_state");
+    let baseline_seq = baseline["event_seq"]
+        .as_u64()
+        .expect("snapshot baseline seq");
+    let first_replayed = recv_until_stream_chunk_value(&mut ws2).await;
+    assert!(
+        baseline_seq < first_replayed["event_seq"].as_u64().expect("replayed seq"),
+        "活跃 run 快照基线不得抬高至补发事件之后"
+    );
+    assert_eq!(first_replayed["content"], "gated chunk 0");
+    assert_eq!(
+        recv_until_stream_chunk_value(&mut ws2).await["content"],
+        "gated chunk 1",
+        "当前活跃 run 已流出的第二条文本也必须补发"
+    );
+
+    step.notify_one();
+    assert_eq!(
+        recv_until_stream_chunk_value(&mut ws2).await["content"],
+        "gated chunk 2",
+        "补发后继续接收直播"
+    );
+    complete.notify_one();
+    drop(ws2);
+    server.abort();
+}
+
+/// REQ-WCR-04：非活跃 session 的过旧 cursor 退化为当前 event_seq 的 snapshot 基线，
+/// 之后连接继续接收新的直播帧。
+#[tokio::test]
+async fn workspace_ws_stale_cursor_without_active_run_falls_back_to_snapshot_baseline() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
+    let initial = recv_json_value(&mut ws).await;
+    let baseline = initial["event_seq"].as_u64().expect("initial baseline");
+    drop(ws);
+
+    let (mut ws2, _) = connect_async(url).await.expect("reconnect");
+    send_json(
+        &mut ws2,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: Some(baseline.saturating_add(1)),
+        },
+    )
+    .await;
+    let snapshot = recv_json_value(&mut ws2).await;
+    assert_eq!(snapshot["type"], "session_state");
+    assert_eq!(snapshot["event_seq"], baseline);
+
+    drop(ws2);
+    server.abort();
+}
+
 /// T1 单实例：多个 attachment 必须复用同一个 session-owned manager/engine。
 #[tokio::test]
 async fn workspace_ws_multiple_connections_share_one_session_manager() {
