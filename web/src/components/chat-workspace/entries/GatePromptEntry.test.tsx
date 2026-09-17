@@ -5,6 +5,10 @@ import type { ChatEntry } from "../../../state/chat-entries";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "../../../state/workspace-ws-store.test-utils";
+import {
+  handleWorkspaceWsMessage,
+  type WsServerMessage,
+} from "../../../hooks/workspace-ws-message-handler";
 import { GatePromptEntry } from "./GatePromptEntry";
 
 function gateEntry(
@@ -65,6 +69,35 @@ describe("GatePromptEntry actionability", () => {
     expect(screen.getByRole("button", { name: "确认产物" })).toBeVisible();
 
     act(() => useWorkspaceStore.getState().setStage("compile_plan"));
+
+    expect(screen.getByText("已离开人工确认门")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+  });
+  it("locks a rebuilt typed gate card when the live stage leaves human confirmation", () => {
+    const gateActions = actions();
+    const store = useWorkspaceStore.getState();
+    store.setStage("human_confirm");
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, "turn_1")}
+        actions={gateActions}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "确认产物" })).toBeVisible();
+
+    act(() =>
+      handleWorkspaceWsMessage(
+        { type: "stage_change", stage: "compile_plan" } as WsServerMessage,
+        {
+          invalidatedPreStageNodeIds: new Set<string>(),
+          scheduleFlush: vi.fn(),
+          streamFlushTimeouts: {},
+        },
+      ),
+    );
 
     expect(screen.getByText("已离开人工确认门")).toBeVisible();
     expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();

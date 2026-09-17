@@ -64,7 +64,9 @@ export function GatePromptEntry({
     }
     const projection = selectGateProjection(state);
     if (projection?.key === gateIdentity) {
-      return projection.action_block_reason ?? null;
+      return projection.turn && state.stage !== "human_confirm"
+        ? "terminal_stage"
+        : projection.action_block_reason ?? null;
     }
     return gateIdentity === "legacy:human_confirm" && state.stage !== "human_confirm"
       ? "terminal_stage"
