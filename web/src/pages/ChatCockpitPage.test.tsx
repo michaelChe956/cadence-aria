@@ -1,3 +1,4 @@
+import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
 import type { TakeoverResponse } from "../api/types";
@@ -9,7 +10,7 @@ import {
   selectCockpitInbox,
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
-import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { useWorkspaceWs, type WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import {
   useWorkspaceStore,
   type TimelineNode,
@@ -113,6 +114,138 @@ describe("ChatCockpitPage", () => {
       />,
     );
   };
+
+  const renderCockpitWith = (
+    workspaceWs: WorkspaceWsApi,
+    sessionId = "session_001",
+  ) => {
+    useWorkspaceStore.getState().setSessionIdForTest(sessionId);
+    return render(
+      <ChatCockpitPage
+        sessionId={sessionId}
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+        workspaceWs={workspaceWs}
+      />,
+    );
+  };
+
+  it("starts generation from cockpit with the legacy provider payload and one optimistic entry", async () => {
+    const user = userEvent.setup();
+    const sendStartGeneration = vi.fn();
+    const workspaceWs = mockWorkspaceWs({
+      sendStartGeneration,
+      connectionStatus: "connected",
+    });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      providers: { author: "pi", reviewer: "codex" },
+      reviewerEnabled: true,
+      reviewRounds: 2,
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(sendStartGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ author: "pi", reviewer: "codex", review_rounds: 2 }),
+      true,
+    );
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.filter((entry) => entry.type === "start_generation"),
+    ).toHaveLength(1);
+  });
+
+  it("opens the shared provider configuration dialog during prepare context", async () => {
+    const user = userEvent.setup();
+    const workspaceWs = mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "Provider 配置" }));
+
+    expect(screen.getByRole("dialog", { name: "Provider 配置" })).toBeVisible();
+  });
+
+  it("selects providers through the injected workspace websocket", async () => {
+    const user = userEvent.setup();
+    const selectProvider = vi.fn();
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "connected",
+      selectProvider,
+    });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+    useProviderAvailabilityStore.setState({
+      snapshot: {
+        schema_version: 1,
+        generation: 1,
+        checked_at: "2026-09-17T00:00:00Z",
+        state_status: "ready",
+        state_error: null,
+        real_workflow_blocked: false,
+        test_provider_enabled: false,
+        providers: [
+          {
+            provider: "claude_code",
+            display_name: "Claude Code",
+            available: true,
+            version: "1.0.0",
+            reason_code: null,
+            reason: null,
+            checked_at: "2026-09-17T00:00:00Z",
+            install_hint: "",
+          },
+          {
+            provider: "codex",
+            display_name: "Codex",
+            available: true,
+            version: "1.0.0",
+            reason_code: null,
+            reason: null,
+            checked_at: "2026-09-17T00:00:00Z",
+            install_hint: "",
+          },
+          {
+            provider: "pi",
+            display_name: "Pi",
+            available: true,
+            version: "1.0.0",
+            reason_code: null,
+            reason: null,
+            checked_at: "2026-09-17T00:00:00Z",
+            install_hint: "",
+          },
+        ],
+      },
+    });
+
+    renderCockpitWith(workspaceWs);
+    await user.click(screen.getByRole("button", { name: "Provider 配置" }));
+    await user.selectOptions(screen.getByLabelText("Author"), "pi");
+
+    expect(selectProvider).toHaveBeenCalledWith("author", "pi");
+  });
+
+  it("hides editable generation controls while running and disables start generation when disconnected", () => {
+    const runningWorkspaceWs = mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({ stage: "running" });
+
+    const view = renderCockpitWith(runningWorkspaceWs);
+
+    expect(screen.queryByRole("button", { name: "Provider 配置" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "开始生成" })).toBeNull();
+
+    view.unmount();
+    const disconnectedWorkspaceWs = mockWorkspaceWs({ connectionStatus: "disconnected" });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+    renderCockpitWith(disconnectedWorkspaceWs);
+
+    expect(screen.getByRole("button", { name: "开始生成" })).toBeDisabled();
+  });
 
   it("returns a plan-repair child through durable parent_session_id", async () => {
     const onOpenSession = vi.fn();

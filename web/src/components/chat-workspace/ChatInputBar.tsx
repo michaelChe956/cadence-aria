@@ -42,6 +42,8 @@ interface ChatInputBarProps {
   ) => void;
   onAbort: () => void;
   disabled?: boolean;
+  /** Host-provided guard for human-confirm actions that are not currently actionable. */
+  humanConfirmDisabled?: boolean;
   hideStartGeneration?: boolean;
   /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
   onInputFocus?: () => void;
@@ -73,6 +75,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   onAbort,
   disabled = false,
   hideStartGeneration = false,
+  humanConfirmDisabled = false,
   onInputFocus,
 }, ref) {
   const [input, setInput] = useState("");
@@ -87,7 +90,8 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   const isBusy = BUSY_STAGES.has(stage);
   // spec-design-dialog-revision T8：author_confirm 反馈输入开放（原为禁用）；
   // 发送仍走「发送反馈」按钮而非表单提交。
-  const inputDisabled = disabled || isBusy || stage === "completed";
+  const inputDisabled =
+    disabled || (isHumanConfirm && humanConfirmDisabled) || isBusy || stage === "completed";
   const canSend = !inputDisabled && (isPrepareContext || isHumanConfirm) && trimmedInput.length > 0;
   const showSend = isPrepareContext || isHumanConfirm;
   const draftPayload =

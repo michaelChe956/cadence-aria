@@ -186,4 +186,42 @@ describe("ChatInputBar", () => {
       }),
     ]);
   });
+
+  it("prevents a host-blocked human confirmation from sending a decision", () => {
+    const onSendHumanDecision = vi.fn();
+
+    render(
+      <ChatInputBar
+        stage="human_confirm"
+        humanConfirmDisabled={true}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={onSendHumanDecision}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "补充失败路径" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送修改意见" }));
+
+    expect(input).toBeDisabled();
+    expect(onSendHumanDecision).not.toHaveBeenCalled();
+    expect(useWorkspaceStore.getState().chatEntries).toHaveLength(0);
+  });
+
+  it("scopes the host actionability guard to human confirmation", () => {
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        humanConfirmDisabled={true}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
 });

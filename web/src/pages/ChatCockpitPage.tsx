@@ -6,6 +6,7 @@ import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
+import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
@@ -22,6 +23,7 @@ import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
+  gateActionBlockReason as gateActionBlockReasonForState,
   selectCockpitFlow,
   selectGateProjection,
   type CockpitInboxItem,
@@ -40,7 +42,13 @@ import {
 } from "../state/operation-audit-projection";
 import { OperationAuditView } from "../components/cockpit/OperationAuditView";
 import { parentSessionIdFor } from "../state/parent-session-navigation";
-import { numericContentCacheValues, scrollTargetEntryIdForNode } from "./ChatWorkspacePageParts";
+import {
+  clampReviewRounds,
+  numericContentCacheValues,
+  providerConfigFor,
+  ProviderConfigDialogButton,
+  scrollTargetEntryIdForNode,
+} from "./ChatWorkspacePageParts";
 
 function useNowTicker(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
@@ -64,6 +72,11 @@ export function ChatCockpitPage({
   onOpenSession: (sessionId: string) => void;
   workspaceWs: WorkspaceWsApi;
 }) {
+  const gateActionBlockReason = useWorkspaceStore((workspaceState) =>
+    workspaceState.stage === "human_confirm"
+      ? gateActionBlockReasonForState(workspaceState)
+      : null,
+  );
   const state = useWorkspaceStore();
   const now = useNowTicker(1000);
   const cockpitSettings = useCockpitSettings();
@@ -109,6 +122,30 @@ export function ChatCockpitPage({
     "conversation",
   );
   const [jumpEntryId, setJumpEntryId] = useState<string | null>(null);
+  const isCurrentSession = takeoverSessionId === null;
+  const canConfigureProviders =
+    isCurrentSession &&
+    state.stage === "prepare_context" &&
+    workspaceWs.connectionStatus === "connected";
+  const providerSummary = [
+    `Author：${selectedState?.providers?.author ?? "claude_code"}`,
+    selectedState?.reviewerEnabled
+      ? `Reviewer：${selectedState.providers?.reviewer ?? "codex"}`
+      : "未启用交叉审核",
+  ].join(" · ");
+  const handleStartGeneration = useCallback(() => {
+    const { providers, reviewerEnabled, reviewRounds, permissionModes } =
+      useWorkspaceStore.getState();
+    workspaceWs.sendStartGeneration(
+      providerConfigFor(
+        providers,
+        reviewerEnabled,
+        reviewRounds,
+        permissionModes,
+      ),
+      reviewerEnabled,
+    );
+  }, [workspaceWs.sendStartGeneration]);
   const isPlanApprovalSession = selectedState?.workspaceType === "work_item_plan";
   const artifactContentCacheValues = useMemo(
     () =>
@@ -425,10 +462,37 @@ export function ChatCockpitPage({
           <section
             data-testid="cockpit-conversation-flow"
             aria-label="下钻对话流"
-            className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+            className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
           >
             <div className="flex min-w-0 items-center gap-2 px-3 py-2">
               <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
+              {canConfigureProviders ? (
+                <ProviderConfigDialogButton
+                  providers={state.providers}
+                  editable={true}
+                  onSelectProvider={(role, provider) =>
+                    workspaceWs.selectProvider(role, provider)
+                  }
+                  reviewerEnabled={state.reviewerEnabled}
+                  onToggleReviewer={(enabled) =>
+                    useWorkspaceStore.setState({ reviewerEnabled: enabled })
+                  }
+                  permissionModes={state.permissionModes}
+                  onPermissionModeSelect={(role, mode) =>
+                    useWorkspaceStore.getState().setPermissionMode(role, mode)
+                  }
+                  rounds={state.reviewRounds}
+                  onChangeRounds={(rounds) =>
+                    useWorkspaceStore.setState({
+                      reviewRounds: clampReviewRounds(rounds),
+                    })
+                  }
+                />
+              ) : (
+                <span className="text-xs text-[var(--aria-ink-muted)]">
+                  {providerSummary}
+                </span>
+              )}
               {isPlanApprovalSession ? (
                 <div
                   role="tablist"
@@ -480,6 +544,18 @@ export function ChatCockpitPage({
                 testId="cockpit-conversation-flow-list"
               />
             )}
+            {isCurrentSession && state.stage === "prepare_context" ? (
+              <ChatInputBar
+                stage={state.stage}
+                disabled={workspaceWs.connectionStatus !== "connected"}
+                humanConfirmDisabled={gateActionBlockReason !== null}
+                hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
+                onSendContextNote={workspaceWs.sendContextNote}
+                onStartGeneration={handleStartGeneration}
+                onSendHumanDecision={actions.requestChange}
+                onAbort={workspaceWs.abort}
+              />
+            ) : null}
           </section>
         </div>
       </main>
