@@ -3,7 +3,7 @@ use chrono::Utc;
 use crate::product::coding_models::{
     CodingChatEntry, CodingContextNote, CodingExecutionAttempt, CodingReworkInstruction,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
@@ -21,7 +21,9 @@ impl super::CodingAttemptStore {
         let notes_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("context-notes");
-        let id = next_sequential_id("coding_context_note", super::count_json_files(&notes_root)?);
+        let id = next_sequential_id_in_directory("coding_context_note", &notes_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", notes_root.display())),
+        )?;
         let note = CodingContextNote {
             id: id.clone(),
             attempt_id: attempt.id.clone(),
