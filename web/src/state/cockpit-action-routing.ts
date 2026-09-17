@@ -1,12 +1,13 @@
 import { newCommandId } from "../hooks/useWorkspaceWs";
+import { gateActionBlockReason } from "./workspace-cockpit-projection";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export type CockpitActionFacade = {
-  confirm(): void;
-  requestChange(payload: CockpitRequestChangePayload): void;
-  feedback(feedback: string): void;
-  terminate(): void;
-  advance(): void;
+  confirm(): boolean | void;
+  requestChange(payload: CockpitRequestChangePayload): boolean | void;
+  feedback(feedback: string): boolean | void;
+  terminate(): boolean | void;
+  advance(): boolean | void;
 };
 
 export type CockpitRequestChangePayload = {
@@ -23,6 +24,7 @@ export function actionFacadeForFlowKind(
 export function createCockpitActionFacade(input: {
   flowKind: WorkspaceWsState["flowKind"];
   commandId: string | null;
+  getState: () => WorkspaceWsState;
   sendHumanConfirm: (
     decision: "confirm" | "request-change" | "terminate",
     payload?: unknown,
@@ -32,16 +34,26 @@ export function createCockpitActionFacade(input: {
 }): CockpitActionFacade {
   return {
     confirm() {
-      input.sendHumanConfirm("confirm");
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
+      }
+      return input.sendHumanConfirm("confirm");
     },
     requestChange(payload) {
-      if (actionFacadeForFlowKind(input.flowKind) === "legacy") {
-        input.sendHumanConfirm("request-change", payload);
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
       }
+      if (actionFacadeForFlowKind(input.flowKind) === "legacy") {
+        return input.sendHumanConfirm("request-change", payload);
+      }
+      return false;
     },
     feedback(feedback) {
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
+      }
       if (actionFacadeForFlowKind(input.flowKind) !== "typed") {
-        return;
+        return false;
       }
       // 协议依据（cadence/reports/workitem-conversational-gate-advance/evidence/
       // amendment-wire-notes.md §40-42）：human_gate_feedback 的 command_id 完全由
@@ -49,13 +61,20 @@ export function createCockpitActionFacade(input: {
       // turn（Reserved+扣预算）。重连/刷新后 typed 门只剩 session_state 快照、无活
       // turn 提供既有 command_id 时，凭新生成的 command_id 提交反馈而非拒发。
       // 有活 turn 时仍复用其 command_id（重试/重连重放同 id，不重新生成）。
-      input.sendHumanGateFeedback(feedback, input.commandId ?? newCommandId());
+      return input.sendHumanGateFeedback(feedback, input.commandId ?? newCommandId());
     },
     terminate() {
-      input.sendHumanConfirm("terminate");
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
+      }
+      return input.sendHumanConfirm("terminate");
     },
     advance() {
-      input.sendAdvance(newCommandId());
+      const reason = gateActionBlockReason(input.getState());
+      if (reason !== null && reason !== "closed") {
+        return false;
+      }
+      return input.sendAdvance(newCommandId());
     },
   };
 }

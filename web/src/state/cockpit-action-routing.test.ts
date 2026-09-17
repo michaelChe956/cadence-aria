@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   actionFacadeForFlowKind,
   classifyProtocolError,
@@ -6,6 +6,8 @@ import {
   type ProtocolErrorDisposition,
 } from "./cockpit-action-routing";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
+import { useWorkspaceStore } from "./workspace-ws-store";
+import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 
 function stateWithAdvance(commandId: string): Pick<WorkspaceWsState, "humanGateTurn" | "advanceCommands"> {
   return {
@@ -74,16 +76,27 @@ describe("classifyProtocolError", () => {
 });
 
 describe("cockpit gate action facade", () => {
+  installWorkspaceStoreTestHooks();
   it("classifies every single-candidate gate, including a snapshot gate, as typed", () => {
     expect(actionFacadeForFlowKind("single_candidate")).toBe("typed");
     expect(actionFacadeForFlowKind("legacy")).toBe("legacy");
   });
 
+  beforeEach(() => {
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+      humanGateClosure: null,
+      humanGateSnapshot: null,
+    });
+  });
   it("dispatches typed snapshot feedback with a freshly generated command id", () => {
     const sendHumanGateFeedback = vi.fn(
       (_feedback: string, _commandId?: string) => true,
     );
     const actions = createCockpitActionFacade({
+      getState: useWorkspaceStore.getState,
       flowKind: "single_candidate",
       commandId: null,
       sendHumanConfirm: vi.fn(() => true),
@@ -108,6 +121,7 @@ describe("cockpit gate action facade", () => {
     );
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
+      getState: useWorkspaceStore.getState,
       commandId: "cmd_1",
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback,
@@ -125,6 +139,7 @@ describe("cockpit gate action facade", () => {
     const actions = createCockpitActionFacade({
       flowKind: "legacy",
       commandId: "cmd_1",
+      getState: useWorkspaceStore.getState,
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
@@ -135,10 +150,15 @@ describe("cockpit gate action facade", () => {
   });
 
   it("sends a manual advance exactly once through the same facade", () => {
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      humanGateClosure: { decision: "confirm", stage: "human_confirm" },
+    });
     const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
     createCockpitActionFacade({
       flowKind: "legacy",
       commandId: null,
+      getState: useWorkspaceStore.getState,
       sendHumanConfirm: vi.fn(() => true),
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance,
@@ -146,5 +166,40 @@ describe("cockpit gate action facade", () => {
 
     expect(sendAdvance).toHaveBeenCalledTimes(1);
     expect(sendAdvance.mock.calls[0]?.[0]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("re-reads actionability before every action so a stale snapshot cannot send", () => {
+    const sendHumanConfirm = vi.fn(() => true);
+    const sendHumanGateFeedback = vi.fn(() => true);
+    const sendAdvance = vi.fn(() => true);
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: "cmd_1",
+      getState: useWorkspaceStore.getState,
+      sendHumanConfirm,
+      sendHumanGateFeedback,
+      sendAdvance,
+    });
+    useWorkspaceStore.setState({
+      stage: "running",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "generate",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+
+    expect(actions.confirm()).toBe(false);
+    expect(actions.feedback("请补齐边界")).toBe(false);
+    expect(actions.terminate()).toBe(false);
+    expect(actions.advance()).toBe(false);
+    expect(sendHumanConfirm).not.toHaveBeenCalled();
+    expect(sendHumanGateFeedback).not.toHaveBeenCalled();
+    expect(sendAdvance).not.toHaveBeenCalled();
   });
 });

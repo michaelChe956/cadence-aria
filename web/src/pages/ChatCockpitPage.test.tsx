@@ -85,6 +85,11 @@ describe("ChatCockpitPage", () => {
     vi.mocked(takeoverWorkspaceSession).mockReset();
     sessionStorage.clear();
     useOperationAuditStore.getState().reset();
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+    });
   });
   const renderCockpit = (
     sessionId = "session_001",
@@ -286,6 +291,7 @@ describe("ChatCockpitPage", () => {
     const sendHumanConfirm = vi.fn(() => true);
     mockWorkspaceWs({ sendHumanConfirm });
     renderCockpit("session_001", false);
+    useWorkspaceStore.getState().setStage("running");
 
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
     expect(sendHumanConfirm).not.toHaveBeenCalled();
@@ -331,16 +337,101 @@ describe("ChatCockpitPage", () => {
     const sendAdvance = vi.fn(() => true);
     mockWorkspaceWs({ sendAdvance });
     renderCockpit("session_001", false);
+    useWorkspaceStore.getState().setStage("running");
 
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
     expect(sendAdvance).not.toHaveBeenCalled();
 
     useWorkspaceStore.setState({
+      stage: "human_confirm",
       humanGateClosure: { decision: "confirm", stage: "human_confirm" },
     });
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
 
     expect(sendAdvance).toHaveBeenCalledOnce();
+  });
+
+  it("blocks stale non-gate snapshots across card, hotkeys, bulk, and advance", () => {
+    const sendHumanConfirm = vi.fn(() => true);
+    const sendHumanGateFeedback = vi.fn(() => true);
+    const sendAdvance = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm, sendHumanGateFeedback, sendAdvance });
+    useWorkspaceStore.setState({
+      stage: "running",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "generate",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+    renderCockpit("session_001", false);
+
+    expect(screen.getAllByText("已离开人工确认门").length).toBeGreaterThan(0);
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
+    expect(sendHumanConfirm).not.toHaveBeenCalled();
+    expect(sendHumanGateFeedback).not.toHaveBeenCalled();
+    expect(sendAdvance).not.toHaveBeenCalled();
+  });
+
+  it("blocks phase-mismatched gate actions from hotkeys", () => {
+    const sendHumanConfirm = vi.fn(() => true);
+    const sendHumanGateFeedback = vi.fn(() => true);
+    const sendAdvance = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm, sendHumanGateFeedback, sendAdvance });
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "generate",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+    renderCockpit("session_001", false);
+
+    expect(screen.getAllByText("门相位与当前阶段不一致").length).toBeGreaterThan(0);
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
+    expect(sendHumanConfirm).not.toHaveBeenCalled();
+    expect(sendHumanGateFeedback).not.toHaveBeenCalled();
+    expect(sendAdvance).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["approval", "human_confirm"],
+    ["evaluate", "human_confirm"],
+    ["completed", "completed"],
+  ] as const)("allows typed confirm for %s gate shape", (singleCandidatePhase, stage) => {
+    const sendHumanConfirm = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm });
+    useWorkspaceStore.setState({
+      stage,
+      flowKind: "single_candidate",
+      singleCandidatePhase,
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 1,
+        trigger: "verification_new_findings",
+        resumable: true,
+      },
+    });
+    renderCockpit("session_001", false);
+
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+
+    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
   });
 
   it("arms takeover on the first hotkey and calls the existing takeover only on the second", () => {
@@ -437,6 +528,7 @@ describe("ChatCockpitPage", () => {
   });
 
   it("shows a successful takeover through the shared audit view", async () => {
+    useWorkspaceStore.setState({ stage: "running" });
     const user = userEvent.setup();
     vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
       workspace_session_id: "child_001",
@@ -1102,6 +1194,7 @@ function gateItem(sessionId: string, key: string): CockpitInboxItem {
       closure_stage: null,
       opened_at: "2026-09-15T00:00:00.000Z",
       turn: null,
+      action_block_reason: null,
     },
     inlineError: null,
   };

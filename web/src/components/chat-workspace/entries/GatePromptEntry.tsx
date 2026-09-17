@@ -1,7 +1,11 @@
 import { Check, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
-import { GATE_TRIGGER_LABELS } from "../../../state/workspace-cockpit-projection";
+import {
+  gateActionBlockCopy,
+  type GateActionBlockReason,
+  GATE_TRIGGER_LABELS,
+} from "../../../state/workspace-cockpit-projection";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
 import type {
@@ -50,6 +54,7 @@ export function GatePromptEntry({
   const typedGateAwaitingCommand =
     actionFacade === "typed" &&
     typeof (entry.metadata as Record<string, unknown> | undefined)?.command_id !== "string";
+  const actionBlockReason = actionBlockReasonFromEntry(entry);
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
     : allowsCurrentVersion
@@ -116,6 +121,10 @@ export function GatePromptEntry({
         ) : null}
         {isResolved ? (
           <ResolutionBadge resolution={entry.resolution} />
+        ) : actionBlockReason ? (
+          <p className="text-xs text-[var(--aria-ink-muted)]">
+            {gateActionBlockCopy(actionBlockReason)}
+          </p>
         ) : actions ? (
           <div className="space-y-2">
             {actionFacade === "typed" ? (
@@ -127,8 +136,6 @@ export function GatePromptEntry({
               />
             ) : null}
             {typedGateAwaitingCommand ? (
-              // 无活 turn（重连/刷新后仅剩快照门）：提示态而非禁用态——
-              // 引擎允许客户端自生成 command_id 开新回合提交反馈。
               <p className="text-xs text-[var(--aria-ink-muted)]">
                 未同步门命令，将以新命令提交
               </p>
@@ -212,6 +219,12 @@ function gateKindFromEntry(entry: ChatEntry) {
   return typeof metadata?.gate_kind === "string" ? metadata.gate_kind : null;
 }
 
+function actionBlockReasonFromEntry(entry: ChatEntry): Exclude<GateActionBlockReason, null> | null {
+  const value = (entry.metadata as Record<string, unknown> | undefined)?.action_block_reason;
+  return value === "terminal_stage" || value === "phase_mismatch" || value === "closed"
+    ? value
+    : null;
+}
 function gateTriggerFromEntry(
   entry: ChatEntry,
 ): WorkItemPlanHumanGateSnapshot["trigger"] | null {

@@ -568,6 +568,7 @@ export function buildGatePromptEntry(
       : {}),
     ...(projection.turn?.inlineError ? { inline_error: projection.turn.inlineError } : {}),
     gate_status: projection.closed ?? projection.status,
+    action_block_reason: projection.action_block_reason,
     ...(contextBlockerGate
       ? {
           gate_kind: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND,

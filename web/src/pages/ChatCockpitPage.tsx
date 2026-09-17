@@ -147,14 +147,11 @@ export function ChatCockpitPage({
           typeof state.humanGateTurn?.command_id === "string"
             ? state.humanGateTurn.command_id
             : null,
-        sendHumanConfirm: (decision, payload) => {
-          if (selectGateProjection(state)?.closed !== null) {
-            return false;
-          }
-          return payload === undefined
+        getState: useWorkspaceStore.getState,
+        sendHumanConfirm: (decision, payload) =>
+          payload === undefined
             ? workspaceWs.sendHumanConfirm(decision)
-            : workspaceWs.sendHumanConfirm(decision, payload);
-        },
+            : workspaceWs.sendHumanConfirm(decision, payload),
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
         sendAdvance: workspaceWs.sendAdvance,
       }),
@@ -214,7 +211,7 @@ export function ChatCockpitPage({
   const handleBulkConfirm = useCallback((items: readonly CockpitInboxItem[]) => {
     const current = useWorkspaceStore.getState();
     const gate = selectGateProjection(current);
-    if (gate === null || gate.closed !== null) {
+    if (gate === null || gate.action_block_reason !== null) {
       return;
     }
     const expectedId = `${sessionId}:gate:${gate.key}`;
@@ -223,7 +220,7 @@ export function ChatCockpitPage({
         item.id === expectedId &&
         item.kind === "gate" &&
         item.gate?.key === gate.key &&
-        item.gate.closed === null,
+        item.gate.action_block_reason === null,
     );
     if (matchingItem === undefined) {
       return;
@@ -251,18 +248,17 @@ export function ChatCockpitPage({
     () => ({
       confirm: () => {
         const current = useWorkspaceStore.getState();
-        if (selectGateProjection(current)?.closed === null) {
-          createCockpitActionFacade({
-            flowKind: current.flowKind,
-            commandId:
-              typeof current.humanGateTurn?.command_id === "string"
-                ? current.humanGateTurn.command_id
-                : null,
-            sendHumanConfirm: workspaceWs.sendHumanConfirm,
-            sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
-            sendAdvance: workspaceWs.sendAdvance,
-          }).confirm();
-        }
+        createCockpitActionFacade({
+          flowKind: current.flowKind,
+          commandId:
+            typeof current.humanGateTurn?.command_id === "string"
+              ? current.humanGateTurn.command_id
+              : null,
+          getState: useWorkspaceStore.getState,
+          sendHumanConfirm: workspaceWs.sendHumanConfirm,
+          sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+          sendAdvance: workspaceWs.sendAdvance,
+        }).confirm();
       },
       feedback: () => {
         document
@@ -278,12 +274,17 @@ export function ChatCockpitPage({
       },
       advance: () => {
         const current = useWorkspaceStore.getState();
-        if (
-          current.humanGateClosure?.decision === "confirm" ||
-          current.sessionStatus === "confirmed"
-        ) {
-          workspaceWs.sendAdvance();
-        }
+        createCockpitActionFacade({
+          flowKind: current.flowKind,
+          commandId:
+            typeof current.humanGateTurn?.command_id === "string"
+              ? current.humanGateTurn.command_id
+              : null,
+          getState: useWorkspaceStore.getState,
+          sendHumanConfirm: workspaceWs.sendHumanConfirm,
+          sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
+          sendAdvance: workspaceWs.sendAdvance,
+        }).advance();
       },
     }),
     [

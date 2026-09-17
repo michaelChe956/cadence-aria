@@ -5,7 +5,10 @@ import {
   canBulkApply,
   type ConfirmTwiceButtonHandle,
 } from "../../../state/cockpit-operation-semantics";
-import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
+import {
+  gateActionBlockCopy,
+  type CockpitInboxItem,
+} from "../../../state/workspace-cockpit-projection";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { GateFeedbackEditor } from "./GateFeedbackEditor";
 import { useCockpitInboxPulse } from "../../cockpit/CockpitShell";
@@ -271,6 +274,15 @@ function GateInboxActions({
   actions: CockpitActionFacade;
 }) {
   const [feedback, setFeedback] = useState("");
+  const actionBlockReason = item.gate?.action_block_reason ?? null;
+  if (actionBlockReason) {
+    return (
+      <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
+        {gateActionBlockCopy(actionBlockReason)}
+      </p>
+    );
+  }
+
   const typed = item.gate?.flow_kind === "single_candidate";
   const typedGateAwaitingCommand =
     typed && typeof item.gate?.turn?.command_id !== "string";
@@ -335,5 +347,8 @@ function sessionIdForItem(itemId: string): string | null {
 }
 
 function isSelectableGate(item: CockpitInboxItem, sessionId: string): boolean {
-  return item.kind === "gate" && item.gate?.closed === null && item.id === `${sessionId}:gate:${item.gate.key}`;
+  return item.kind === "gate" &&
+    item.gate?.closed === null &&
+    item.gate.action_block_reason === null &&
+    item.id === `${sessionId}:gate:${item.gate.key}`;
 }

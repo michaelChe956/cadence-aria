@@ -38,7 +38,10 @@ import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
-import { selectGateProjection } from "../state/workspace-cockpit-projection";
+import {
+  gateActionBlockReason as gateActionBlockReasonForState,
+  selectGateProjection,
+} from "../state/workspace-cockpit-projection";
 import type {
   ChatEntry,
   ChoiceResponsePayload,
@@ -109,6 +112,11 @@ export function LegacyChatWorkspacePage({
   const humanGateCommandId = useWorkspaceStore(
     (state) => state.humanGateTurn?.command_id ?? null,
   );
+  const gateActionBlockReason = useWorkspaceStore((state) =>
+    state.stage === "human_confirm"
+      ? gateActionBlockReasonForState(state)
+      : null,
+  );
   const providers = useWorkspaceStore((state) => state.providers);
   const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
   const permissionModes = useWorkspaceStore((state) => state.permissionModes);
@@ -167,6 +175,7 @@ export function LegacyChatWorkspacePage({
   ] = useState<number | null>(null);
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
+  const gateInputDisabled = inputDisabled || gateActionBlockReason !== null;
   // spec-workbench-canvas-experience T4：面板可见性完全由 stage 驱动——
   // stage === "author_confirm" 且 story/design 时自动展开；userDismissed 仅为
   // 组件本地状态（输入聚焦 / 收起钮 / 采纳预填置 true），stage 重新进入
@@ -203,14 +212,11 @@ export function LegacyChatWorkspacePage({
       createCockpitActionFacade({
         flowKind,
         commandId: humanGateCommandId,
-        sendHumanConfirm: (decision, payload) => {
-          if (selectGateProjection(useWorkspaceStore.getState())?.closed !== null) {
-            return false;
-          }
-          return payload === undefined
+        getState: useWorkspaceStore.getState,
+        sendHumanConfirm: (decision, payload) =>
+          payload === undefined
             ? sendHumanConfirm(decision)
-            : sendHumanConfirm(decision, payload);
-        },
+            : sendHumanConfirm(decision, payload),
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
         sendAdvance: workspaceWs.sendAdvance,
       }),
@@ -651,7 +657,7 @@ export function LegacyChatWorkspacePage({
                   stage={stage}
                   activeNodeType={activeNode?.node_type ?? null}
                   workItemPlanArtifact={workItemPlanArtifact}
-                  disabled={inputDisabled}
+                  disabled={gateInputDisabled}
                   onInputFocus={() => {
                     // spec-workbench-canvas-experience 测试反馈：≥1440px 三栏并存时
                     // 聚焦不收起面板（用户对照 artifact 内容提修改意见）；
@@ -663,9 +669,7 @@ export function LegacyChatWorkspacePage({
                   onSendContextNote={sendContextNote}
                   onStartGeneration={handleStartGeneration}
                   hideStartGeneration={Boolean(recoverableInterruptedRun)}
-                  onSendHumanDecision={(payload) =>
-                    sendHumanConfirm("request-change", payload)
-                  }
+                  onSendHumanDecision={gateActions.requestChange}
                   onAuthorDecision={handleAuthorDecision}
                   onSelectWorkItemGenerationMode={
                     sendSelectWorkItemGenerationMode
@@ -867,13 +871,11 @@ export function LegacyChatWorkspacePage({
                 stage={stage}
                 activeNodeType={activeNode?.node_type ?? null}
                 workItemPlanArtifact={workItemPlanArtifact}
-                disabled={inputDisabled}
+                disabled={gateInputDisabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
-                onSendHumanDecision={(payload) =>
-                  sendHumanConfirm("request-change", payload)
-                }
+                onSendHumanDecision={gateActions.requestChange}
                 onAuthorDecision={handleAuthorDecision}
                 onSelectWorkItemGenerationMode={
                   sendSelectWorkItemGenerationMode

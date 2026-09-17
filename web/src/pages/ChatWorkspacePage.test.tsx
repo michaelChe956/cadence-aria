@@ -572,9 +572,10 @@ describe("ChatWorkspacePage shell and content loading", () => {
       useWorkspaceStore.getState().setSessionState({
         session_id: "workspace_session_0001",
         workspace_type: "work_item_plan",
-        stage: "running",
+        stage: "human_confirm",
         session_status: "waiting_for_human",
         flow_kind: "single_candidate",
+        single_candidate_phase: "approval",
         run_policy: "interactive",
         run_history: {
           seen_fingerprints: [], repairs_used: 0, manual_repairs_used: 0,

@@ -4,6 +4,8 @@ import { useWorkspaceStore, type TimelineNode } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 import {
   formatFlowElapsed,
+  gateActionBlockCopy,
+  gateActionBlockReason,
   selectCockpitFlow,
   selectCockpitInbox,
   selectGateProjection,
@@ -71,6 +73,17 @@ function snapshotGateState(overrides: {
     checkpoints: [],
     artifact: null,
     providers: { author: "claude_code" as const, reviewer: null },
+  };
+}
+
+function humanGateSnapshotFixture() {
+  return {
+    findings: [],
+    repeated_fingerprints: [],
+    attempts_used: 1,
+    manual_repairs_remaining: 1,
+    trigger: "verification_new_findings" as const,
+    resumable: true,
   };
 }
 
@@ -181,6 +194,59 @@ describe("workspace cockpit gate projection", () => {
     store.appendChatEntry(reviewVerdictEntry({ review_gate: "user_triage_required" }));
 
     expect(selectGateProjection(useWorkspaceStore.getState())?.triage).toBe(true);
+  });
+
+  it("blocks a stale gate snapshot while the engine stage is a non-gate stage without reopen path", () => {
+    useWorkspaceStore.setState({
+      stage: "running",
+      humanGateSnapshot: humanGateSnapshotFixture(),
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("terminal_stage");
+    expect(gateActionBlockCopy("terminal_stage")).toContain("已离开人工确认门");
+  });
+
+  it("blocks a single-candidate gate while phase is outside the engine-authorized set", () => {
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "generate",
+      humanGateSnapshot: humanGateSnapshotFixture(),
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("phase_mismatch");
+  });
+
+  it("allows a single-candidate gate in the evaluate phase (close CAS accepts Approval|Evaluate)", () => {
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "evaluate",
+      humanGateSnapshot: humanGateSnapshotFixture(),
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBeNull();
+  });
+
+  it("keeps a completed-stage gate operable for the amendment reopen shape (0017-indistinguishable)", () => {
+    useWorkspaceStore.setState({
+      stage: "completed",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "completed",
+      humanGateSnapshot: humanGateSnapshotFixture(),
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBeNull();
+  });
+
+  it("prioritizes the closed reason over a stale stage", () => {
+    useWorkspaceStore.setState({
+      stage: "running",
+      humanGateClosure: { decision: "confirm", stage: "human_confirm" },
+      humanGateSnapshot: humanGateSnapshotFixture(),
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("closed");
   });
 });
 

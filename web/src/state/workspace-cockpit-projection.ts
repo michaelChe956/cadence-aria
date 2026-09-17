@@ -24,6 +24,49 @@ export function isAdvanceReplayCode(code: string): boolean {
   return ADVANCE_REPLAY_CODES.has(code);
 }
 
+export type GateActionBlockReason =
+  | "terminal_stage"
+  | "phase_mismatch"
+  | "closed"
+  | null;
+
+const TERMINAL_GATE_STAGES: Record<string, true> = {
+  prepare_context: true,
+  running: true,
+  author_confirm: true,
+  cross_review: true,
+  review_decision: true,
+  revision: true,
+};
+
+export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockReason {
+  if (state.humanGateClosure?.decision) {
+    return "closed";
+  }
+  if (state.stage === "human_confirm") {
+    return state.flowKind !== "single_candidate" ||
+      state.singleCandidatePhase === "approval" ||
+      state.singleCandidatePhase === "evaluate"
+      ? null
+      : "phase_mismatch";
+  }
+  if (state.stage === "completed" && state.humanGateSnapshot) {
+    return null;
+  }
+  return TERMINAL_GATE_STAGES[state.stage] ? "terminal_stage" : null;
+}
+
+export function gateActionBlockCopy(reason: Exclude<GateActionBlockReason, null>): string {
+  switch (reason) {
+    case "terminal_stage":
+      return "已离开人工确认门";
+    case "phase_mismatch":
+      return "门相位与当前阶段不一致";
+    case "closed":
+      return "该人工确认门已关闭";
+  }
+}
+
 export interface GateProjection {
   key: string;
   turn_id: string | null;
@@ -39,6 +82,7 @@ export interface GateProjection {
   closure_stage: string | null;
   opened_at: string;
   turn: HumanGateTurnState | null;
+  action_block_reason?: GateActionBlockReason;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -69,6 +113,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   const closure = state.humanGateClosure;
   const triage = isGateTriage(state);
   const turn = state.humanGateTurn;
+  const actionBlockReason = gateActionBlockReason(state);
 
   if (turn) {
     return {
@@ -86,6 +131,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       closure_stage: closure?.stage ?? null,
       opened_at: turn.opened_at,
       turn,
+      action_block_reason: actionBlockReason,
     };
   }
 
@@ -105,6 +151,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       closure_stage: closure?.stage ?? null,
       opened_at: state.snapshotGateOpenedAt ?? "",
       turn: null,
+      action_block_reason: actionBlockReason,
     };
   }
 
@@ -127,6 +174,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
     closure_stage: closure?.stage ?? null,
     opened_at: "",
     turn: null,
+    action_block_reason: actionBlockReason,
   };
 }
 

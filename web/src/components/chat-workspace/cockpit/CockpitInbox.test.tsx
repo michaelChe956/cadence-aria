@@ -37,6 +37,7 @@ const gateItem: CockpitInboxItem = {
     closure_stage: null,
     opened_at: "2026-09-15T00:00:00.000Z",
     turn: null,
+    action_block_reason: null,
   },
   inlineError: null,
 };
@@ -81,6 +82,29 @@ describe("CockpitInbox", () => {
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByTestId("gate-feedback-editor")).toBeVisible();
     expect(within(inbox).getAllByTestId("confirm-twice-button")).toHaveLength(3);
+  });
+
+  it("renders the block reason instead of any gate controls for a stale projection", () => {
+    render(
+      <CockpitInbox
+        items={[
+          {
+            ...gateItem,
+            gate: { ...gateItem.gate!, action_block_reason: "terminal_stage" },
+          },
+        ]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onBulkConfirm={vi.fn()}
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("已离开人工确认门")).toBeVisible();
+    expect(within(inbox).queryByLabelText("选择 门禁等待")).toBeNull();
+    expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
+    expect(within(inbox).queryByRole("button", { name: "确认" })).toBeNull();
+    expect(within(inbox).queryByRole("button", { name: "终止" })).toBeNull();
   });
 
   it("selects the current session's projected gate and batch confirms it once", async () => {
