@@ -19,7 +19,7 @@ import {
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
-import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   selectCockpitFlow,
@@ -57,12 +57,13 @@ export function ChatCockpitPage({
   sessionId,
   onBack,
   onOpenSession,
+  workspaceWs,
 }: {
   sessionId: string;
   onBack: () => void;
   onOpenSession: (sessionId: string) => void;
+  workspaceWs: WorkspaceWsApi;
 }) {
-  const workspaceWs = useWorkspaceWs(sessionId);
   const state = useWorkspaceStore();
   const now = useNowTicker(1000);
   const cockpitSettings = useCockpitSettings();

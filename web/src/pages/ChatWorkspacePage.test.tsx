@@ -8,7 +8,9 @@ import {
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { MockWebSocket } from "../hooks/useWorkspaceWs.test-utils";
 import {
   emptyWorkspaceContentCache,
   workspaceContentCacheValues,
@@ -113,6 +115,7 @@ afterEach(() => {
 describe("ChatWorkspacePage shell and content loading", () => {
   installChatWorkspacePageTestHooks();
   beforeEach(() => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
     vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(makeNodeDetail());
   });
 
@@ -623,8 +626,10 @@ describe("ChatWorkspacePage dual track switch", () => {
     });
   }
 
-  function renderWorkspace() {
-    mockWorkspaceWs();
+  function renderWorkspace(mockWs = true) {
+    if (mockWs) {
+      mockWorkspaceWs();
+    }
     return render(
       <ChatWorkspacePage
         sessionId="session_switch"
@@ -634,47 +639,19 @@ describe("ChatWorkspacePage dual track switch", () => {
     );
   }
 
-  it("renders a plan session without timeline nodes in legacy form by default", () => {
-    setWorkspaceType("work_item_plan");
+  it.each(["work_item_plan", "story", "design"] as const)(
+    "defaults %s sessions to the cockpit",
+    (workspaceType) => {
+      setWorkspaceType(workspaceType);
 
-    renderWorkspace();
+      renderWorkspace();
 
-    expect(screen.getByRole("button", { name: "开始生成" })).toBeInTheDocument();
-    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
-    expect(screen.queryByTestId("cockpit-page")).toBeNull();
-  });
+      expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
+      expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+    },
+  );
 
-  it("renders a plan session with timeline nodes in the cockpit by default", () => {
-    setWorkspaceType("work_item_plan");
-    useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode()]);
-
-    renderWorkspace();
-
-    expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
-    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
-  });
-  it("renders a story session in the legacy form by default", () => {
-    setWorkspaceType("story");
-
-    renderWorkspace();
-
-    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
-    expect(screen.queryByTestId("cockpit-page")).toBeNull();
-  });
-
-  it("renders a target story session in legacy while the store holds another session's plan type", () => {
-    setWorkspaceType("work_item_plan");
-
-    mockWorkspaceWs();
-    render(
-      <ChatWorkspacePage sessionId="session_story" onBack={vi.fn()} onOpenSession={vi.fn()} />,
-    );
-
-    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
-    expect(screen.queryByTestId("cockpit-page")).toBeNull();
-  });
-
-  it("keeps a plan session in the legacy form when legacy is explicitly set", () => {
+  it("keeps a known session in the legacy form when legacy is explicitly set", () => {
     window.localStorage.setItem("aria.chat.cockpit", "legacy");
     setWorkspaceType("work_item_plan");
 
@@ -684,7 +661,7 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
   });
 
-  it("renders a story session in the cockpit when cockpit is explicitly set", () => {
+  it("renders a known session in the cockpit when cockpit is explicitly set", () => {
     window.localStorage.setItem("aria.chat.cockpit", "cockpit");
     setWorkspaceType("story");
 
@@ -694,31 +671,44 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
   });
 
-  it("keeps the safe legacy form until a plan timeline node arrives, then switches once", () => {
+  it("keeps the connection shell for a stale session type", () => {
+    setWorkspaceType("work_item_plan");
+
+    render(
+      <ChatWorkspacePage sessionId="session_story" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("keeps the connection shell when workspace type is missing", () => {
     renderWorkspace();
 
-    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
-
-    act(() => {
-      setWorkspaceType("work_item_plan");
-    });
-
-    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
-    expect(screen.queryByTestId("cockpit-page")).toBeNull();
-
-    act(() => {
-      useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode()]);
-    });
-
-    const cockpit = screen.getByTestId("cockpit-page");
     expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("uses one websocket while unknown becomes a known story", async () => {
+    const { useWorkspaceWs: realUseWorkspaceWs } =
+      await vi.importActual<typeof WorkspaceWsModule>("../hooks/useWorkspaceWs");
+    MockWebSocket.instances = [];
+    vi.mocked(useWorkspaceWs).mockImplementation(realUseWorkspaceWs);
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    renderWorkspace(false);
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeVisible();
+    expect(MockWebSocket.instances).toHaveLength(1);
 
     act(() => {
-      useWorkspaceStore.getState().setTimelineNodesForTest([timelineNode()]);
+      setWorkspaceType("story");
     });
 
-    expect(screen.getByTestId("cockpit-page")).toBe(cockpit);
-    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+    expect(screen.getByTestId("cockpit-page")).toBeVisible();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0]?.closeCodes).not.toContain(1000);
   });
 });

@@ -23,7 +23,11 @@ import { readCockpitSettings } from "../state/cockpit-settings";
 import { ChatCockpitPage } from "./ChatCockpitPage";
 import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
 import { useOperationAuditStore } from "../state/operation-audit-store";
-import { installChatWorkspacePageTestHooks, mockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
+import {
+  currentMockWorkspaceWs,
+  installChatWorkspacePageTestHooks,
+  mockWorkspaceWs,
+} from "./ChatWorkspacePage.test-utils";
 vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
@@ -105,6 +109,7 @@ describe("ChatCockpitPage", () => {
         sessionId={sessionId}
         onBack={vi.fn()}
         onOpenSession={onOpenSession}
+        workspaceWs={currentMockWorkspaceWs()}
       />,
     );
   };
@@ -617,7 +622,7 @@ describe("ChatCockpitPage", () => {
 
   it("dispatches typed gate feedback through the typed websocket helper", async () => {
     const feedback = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
+    const workspaceWs = mockWorkspaceWs({ sendHumanGateFeedback: feedback });
     const user = userEvent.setup();
     const store = useWorkspaceStore.getState();
     store.setSessionIdForTest("session_001");
@@ -630,6 +635,7 @@ describe("ChatCockpitPage", () => {
         sessionId="session_001"
         onBack={vi.fn()}
         onOpenSession={vi.fn()}
+        workspaceWs={workspaceWs}
       />,
     );
     const gateEntry = screen.getByTestId("gate-prompt-entry");

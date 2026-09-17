@@ -1,10 +1,11 @@
 import { beforeEach, vi } from "vitest";
 import type { NodeDetail } from "../api/types";
+import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
 import { useWorkspaceStore, type TimelineNode } from "../state/workspace-ws-store";
 
-type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
+let currentWorkspaceWs: WorkspaceWsApi | undefined;
 
 export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
   const api: WorkspaceWsApi = {
@@ -47,8 +48,16 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sessionSnapshotGeneration: 0,
     ...overrides,
   };
+  currentWorkspaceWs = api;
   vi.mocked(useWorkspaceWs).mockReturnValue(api);
   return api;
+}
+
+export function currentMockWorkspaceWs(): WorkspaceWsApi {
+  if (!currentWorkspaceWs) {
+    throw new Error("workspace websocket mock has not been created");
+  }
+  return currentWorkspaceWs;
 }
 
 
@@ -61,6 +70,7 @@ export function installChatWorkspacePageTestHooks() {
     });
     useWorkspaceStore.getState().reset();
     vi.clearAllMocks();
+    currentWorkspaceWs = undefined;
   });
 }
 

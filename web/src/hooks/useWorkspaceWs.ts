@@ -34,7 +34,6 @@ import {
 type WorkspaceWsSendMessage =
   | WsInMessage
   | { type: "provider_select"; role: string; provider: string };
-
 const PING_INTERVAL_MS = 25_000;
 const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;
@@ -48,6 +47,9 @@ const DISCONNECTED_PRESENTATION_SAVE_ERROR = "连接已断开，请重连后重�
 export function newCommandId(): string {
   return crypto.randomUUID();
 }
+
+
+export type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);

@@ -17,6 +17,7 @@ import {
   selectWorkspaceHeaderState,
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
+import { CHAT_COCKPIT_STORAGE_KEY } from "../state/chat-cockpit-mode";
 import { ChatWorkspacePage } from "./ChatWorkspacePage";
 import {
   chatEntry,
@@ -73,7 +74,7 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 describe("ChatWorkspacePage work item plan flow", () => {
   installChatWorkspacePageTestHooks();
   beforeEach(() => {
-    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    window.localStorage.setItem(CHAT_COCKPIT_STORAGE_KEY, "legacy");
   });
 
   it("shows empty state when work_item_plan candidate is missing", async () => {

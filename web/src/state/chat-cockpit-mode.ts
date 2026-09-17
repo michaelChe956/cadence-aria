@@ -2,21 +2,24 @@ export const CHAT_COCKPIT_STORAGE_KEY = "aria.chat.cockpit";
 
 export type ChatCockpitMode = "legacy" | "cockpit";
 
-// 显式设置始终优先；未设置时由会话类型和生成阶段选择默认形态。
-export function readChatCockpitMode(
-  workspaceType: string | null,
-  hasTimelineNodes = false,
-): ChatCockpitMode {
+// 显式设置始终优先；未设置时由已知会话类型选择默认形态。
+export function readChatCockpitMode(workspaceType: string | null): ChatCockpitMode {
   try {
     const stored = window.localStorage.getItem(CHAT_COCKPIT_STORAGE_KEY);
     if (stored === "cockpit" || stored === "legacy") {
       return stored;
     }
-    return workspaceType === "work_item_plan" && hasTimelineNodes
+    return workspaceType === "story" ||
+      workspaceType === "design" ||
+      workspaceType === "work_item_plan"
       ? "cockpit"
       : "legacy";
   } catch {
-    return "legacy";
+    return workspaceType === "story" ||
+      workspaceType === "design" ||
+      workspaceType === "work_item_plan"
+      ? "cockpit"
+      : "legacy";
   }
 }
 

@@ -36,7 +36,7 @@ import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
-import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   gateActionBlockReason as gateActionBlockReasonForState,
@@ -75,11 +75,12 @@ const UNLOAD_GUARD_MESSAGE =
 export function LegacyChatWorkspacePage({
   sessionId,
   onBack,
+  workspaceWs,
 }: {
   sessionId: string;
   onBack: () => void;
+  workspaceWs: WorkspaceWsApi;
 }) {
-  const workspaceWs = useWorkspaceWs(sessionId);
   const {
     sendContextNote,
     sendStartGeneration,
