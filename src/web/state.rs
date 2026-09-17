@@ -30,7 +30,6 @@ use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
 use tokio_util::sync::CancellationToken;
 
-
 mod coding_run_registry;
 pub(crate) use coding_run_registry::CodingAttemptMutationLease;
 pub use coding_run_registry::{CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation};
@@ -66,7 +65,6 @@ impl Drop for WorkspaceProviderDriveGuard {
         self.runs.end_provider_drive(&self.session_id);
     }
 }
-
 
 impl WorkspaceRunRegistry {
     /// 标记该 session 进入 provider drive 期；返回的守卫 drop 时结束标记。
@@ -114,7 +112,6 @@ impl WorkspaceRunRegistry {
             .map(|depth| depth.get(session_id).copied().unwrap_or(0))
             .unwrap_or(0)
     }
-
 }
 
 #[derive(Clone)]

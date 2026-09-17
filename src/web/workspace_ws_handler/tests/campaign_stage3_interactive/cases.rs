@@ -782,7 +782,6 @@ async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candid
             event_tx,
             child_session,
         )));
-        let current_run = Arc::new(Mutex::new(None));
         let workspace_runs = WorkspaceRunRegistry::default();
         let mut registry = ProviderRegistry::new();
         registry.register(
@@ -796,19 +795,15 @@ async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candid
                 crate::web::runtime::WebRuntime::new_fake(harness.root.path().to_path_buf()),
             ),
             engine: engine.clone(),
-            run_context: ProviderRunContext {
-                provider_registry: Arc::new(registry),
-                engine,
-                current_run: current_run.clone(),
-                workspace_runs: workspace_runs.clone(),
-                session_id: child.id.clone(),
-                next_run_id: Arc::new(Mutex::new(0)),
-                app_paths: harness.app_paths.clone(),
-                session_record: child.clone(),
-            },
+            run_context: ProviderRunContext::test_fixture(
+                Arc::new(registry),
+                engine.clone(),
+                workspace_runs.clone(),
+                child.id.clone(),
+                harness.app_paths.clone(),
+                child.clone(),
+            ),
             outbound_tx,
-            current_run,
-            workspace_runs,
             session_id: child.id.clone(),
         };
         handle_workspace_inbound_message(

@@ -505,18 +505,14 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
             starts: Arc::new(AtomicUsize::new(0)),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
         engine,
-        current_run: current_run.clone(),
-        workspace_runs,
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: fixture.paths.clone(),
+        WorkspaceRunRegistry::default(),
+        session_record.id.clone(),
+        fixture.paths.clone(),
         session_record,
-    };
+    );
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(8);
 
     spawn_provider_run_from_handler(

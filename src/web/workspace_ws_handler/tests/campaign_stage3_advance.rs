@@ -684,7 +684,6 @@ pub(super) async fn send_via_restarted_worker(
         event_tx,
         session,
     )));
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
     let (outbound_tx, outbound_rx) = mpsc::channel(256);
     let context = WorkspaceInboundContext {
@@ -693,19 +692,15 @@ pub(super) async fn send_via_restarted_worker(
             crate::web::runtime::WebRuntime::new_fake(harness.root.path().to_path_buf()),
         ),
         engine: engine.clone(),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine,
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: harness.session_id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
-            app_paths: harness.app_paths.clone(),
-            session_record: record,
-        },
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            harness.session_id.clone(),
+            harness.app_paths.clone(),
+            record,
+        ),
         outbound_tx: outbound_tx.clone(),
-        current_run,
-        workspace_runs,
         session_id: harness.session_id.clone(),
     };
     handle_workspace_inbound_message(context, message).await;

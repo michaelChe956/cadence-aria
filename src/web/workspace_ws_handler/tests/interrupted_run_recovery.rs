@@ -179,18 +179,14 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
         ProviderName::Codex,
         Arc::new(PromptRecordingProvider { input_tx }),
     );
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        WorkspaceRunRegistry::default(),
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
 
     handle_workspace_inbound_message(
@@ -202,8 +198,6 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
             engine,
             run_context,
             outbound_tx,
-            current_run,
-            workspace_runs,
             session_id: session_record.id,
         },
         WsInMessage::RetryInterruptedRun {

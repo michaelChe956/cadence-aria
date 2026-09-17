@@ -3,6 +3,7 @@ use crate::product::models::{
     WorkspaceRolePermissionModes, WorkspaceSessionRecord, WorkspaceSessionStatus,
 };
 use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
+use crate::web::workspace_session::ActiveRun;
 use crate::web::workspace_ws_types::{WorkItemBatchDecisionDto, WorkItemDraftDecisionDto};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -138,18 +139,21 @@ async fn single_candidate_scope_rejection_does_not_wait_for_provider_engine_lock
     let envelope =
         parse_workspace_inbound_text(r#"{"type":"abort"}"#).expect("raw envelope should parse");
     let (command_tx, mut command_rx) = mpsc::channel(1);
+    let cancel = CancellationToken::new();
+    let command_tx_for_run = command_tx.clone();
     context
-        .current_run
-        .lock()
-        .await
-        .replace(WorkspaceActiveRun {
+        .run_context
+        .manager
+        .test_set_active_run(ActiveRun {
             id: 1,
             token: 1,
             node_id: None,
-            cancel: CancellationToken::new(),
-            command_tx,
+            cancel,
+            command_tx: command_tx_for_run,
             pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        });
+            lease_epoch: 0,
+        })
+        .await;
     let engine_guard = engine.lock().await;
 
     timeout(
@@ -279,8 +283,6 @@ pub(super) fn scope_test_context(
         event_tx,
         session,
     )));
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
     let (outbound_tx, outbound_rx) = mpsc::channel(8);
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -288,19 +290,15 @@ pub(super) fn scope_test_context(
             crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
         ),
         engine: engine.clone(),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine: engine.clone(),
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: session_record.id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            WorkspaceRunRegistry::default(),
+            session_record.id.clone(),
             app_paths,
             session_record,
-        },
+        ),
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: "workspace_scope_test".to_string(),
     };
     (context, engine, outbound_rx, event_rx)

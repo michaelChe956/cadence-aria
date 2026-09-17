@@ -641,18 +641,15 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
         ProviderName::ClaudeCode,
         Arc::new(RebuildRecordingProvider { input_tx }),
     );
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: app_paths.clone(),
-        session_record: session_record.clone(),
-    };
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
+        app_paths.clone(),
+        session_record.clone(),
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(8);
 
     spawn_provider_run_from_handler(

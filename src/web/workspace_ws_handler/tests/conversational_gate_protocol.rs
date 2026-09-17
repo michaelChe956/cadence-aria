@@ -125,7 +125,6 @@ async fn conversational_gate_feedback_reaches_service_through_socket_dispatch() 
         session,
     )));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -133,19 +132,15 @@ async fn conversational_gate_feedback_reaches_service_through_socket_dispatch() 
             crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
         ),
         engine: engine.clone(),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine: engine.clone(),
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: record.id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            record.id.clone(),
             app_paths,
-            session_record: record,
-        },
+            record,
+        ),
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: "socket_gate_session".to_string(),
     };
 
@@ -238,27 +233,22 @@ async fn conversational_gate_budget_exhausted_reaches_handler_as_protocol_error(
         session,
     )));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
             root.path().to_path_buf(),
             crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
         ),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine: engine.clone(),
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: record.id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            record.id.clone(),
             app_paths,
-            session_record: record.clone(),
-        },
+            record.clone(),
+        ),
         engine: engine.clone(),
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: record.id.clone(),
     };
 
@@ -457,27 +447,22 @@ async fn conversational_gate_post_approve_feedback_is_structured_protocol_error(
         session,
     )));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
             root.path().to_path_buf(),
             crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
         ),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine: engine.clone(),
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: record.id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
-            app_paths: app_paths.clone(),
-            session_record: record.clone(),
-        },
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            record.id.clone(),
+            app_paths.clone(),
+            record.clone(),
+        ),
         engine: engine.clone(),
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: record.id.clone(),
     };
 
@@ -668,7 +653,6 @@ async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
         session,
     )));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -676,19 +660,15 @@ async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
             crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
         ),
         engine: engine.clone(),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine: engine.clone(),
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: record.id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            record.id.clone(),
             app_paths,
-            session_record: record,
-        },
+            record,
+        ),
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: "confirm_gate_findings".to_string(),
     };
 
@@ -809,7 +789,6 @@ async fn late_confirm_after_gate_closed_is_silent_idempotent_noop_at_ws_boundary
         session,
     )));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -817,19 +796,15 @@ async fn late_confirm_after_gate_closed_is_silent_idempotent_noop_at_ws_boundary
             crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
         ),
         engine: engine.clone(),
-        run_context: ProviderRunContext {
-            provider_registry: Arc::new(ProviderRegistry::new()),
-            engine: engine.clone(),
-            current_run: current_run.clone(),
-            workspace_runs: workspace_runs.clone(),
-            session_id: record.id.clone(),
-            next_run_id: Arc::new(Mutex::new(0)),
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            record.id.clone(),
             app_paths,
-            session_record: record.clone(),
-        },
+            record.clone(),
+        ),
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: "late_confirm_session".to_string(),
     };
 

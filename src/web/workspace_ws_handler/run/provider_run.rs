@@ -73,6 +73,10 @@ pub(crate) async fn spawn_provider_run_from_handler(
         session_id, run_kind
     );
 
+    // 旧实现先取消再等待 engine 锁；流任务在整个 provider 生命周期持锁。
+    // 保持此顺序，才能让下一条用户消息或 ChoiceRequest 接替立即解除旧任务，
+    // 而不是被旧任务的 stream/choice wait 阻塞到自然完成。
+    manager.abort_active_run().await;
 
     let provider_name = {
         let engine = engine.lock().await;
@@ -108,9 +112,8 @@ pub(crate) async fn spawn_provider_run_from_handler(
         let engine = engine.lock().await;
         engine.active_timeline_node_id()
     };
-    let (run_id, run_token, run_cancel, command_rx, _node_id) = manager
-        .start_run(run_kind.clone(), target_node_id)
-        .await?;
+    let (run_id, run_token, run_cancel, command_rx, _node_id) =
+        manager.start_run(run_kind.clone(), target_node_id).await?;
     let run_label = format!("run-{run_id}");
     // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session
     // 的 idle 守卫都不主动关连接；run 所有权已由 manager 跨 socket 保存。

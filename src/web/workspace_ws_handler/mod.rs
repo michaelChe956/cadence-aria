@@ -1,7 +1,4 @@
-pub(crate) use std::sync::{
-    Arc,
-    atomic::AtomicU64,
-};
+pub(crate) use std::sync::{Arc, atomic::AtomicU64};
 
 pub(crate) use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 pub(crate) use axum::extract::{Path, State, WebSocketUpgrade};

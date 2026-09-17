@@ -365,8 +365,6 @@ pub(crate) fn map_engine_event(event: EngineEvent) -> Option<WsOutMessage> {
 pub(crate) fn spawn_engine_event_forward_task(
     mut engine_rx: mpsc::Receiver<EngineEvent>,
     outbound_tx: mpsc::Sender<OutboundControl>,
-    session_id: String,
-    workspace_runs: WorkspaceRunRegistry,
     run_context: Option<ProviderRunContext>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -416,10 +414,11 @@ pub(crate) fn spawn_engine_event_forward_task(
                     questions,
                     source,
                 } => {
-                    if source != ChoiceRequestSource::TextFallback {
-                        let _ = workspace_runs
-                            .register_choice(&session_id, id.clone())
-                            .await;
+                    if source != ChoiceRequestSource::TextFallback
+                        && let Some(run_context) = run_context.as_ref()
+                        && let Some(run) = run_context.manager.active_run().await
+                    {
+                        run.pending_choice_ids.lock().await.insert(id.clone());
                     }
                     let message = WsOutMessage::ChoiceRequest {
                         id,

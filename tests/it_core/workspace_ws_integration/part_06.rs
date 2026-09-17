@@ -69,7 +69,12 @@ async fn workspace_ws_second_connection_attaches_while_run_holds_engine_lock() {
     let _chunk = recv_until_stream_chunk(&mut driver).await;
 
     let durable_before = durable_tree_snapshot(root.path());
-    let run_before = state.workspace_runs.run("workspace_session_0001").await.map(|run| run.token);
+    let manager = state
+        .workspace_sessions
+        .get("workspace_session_0001")
+        .await
+        .expect("driver attach creates session manager");
+    let run_before = manager.active_run().await.map(|run| run.token);
     assert!(run_before.is_some(), "driver run must be registered before observer attaches");
 
     let attach_started = tokio::time::Instant::now();
@@ -87,7 +92,7 @@ async fn workspace_ws_second_connection_attaches_while_run_holds_engine_lock() {
         "投影器必须是零 durable 写入的纯渲染器"
     );
     assert_eq!(
-        state.workspace_runs.run("workspace_session_0001").await.map(|run| run.token),
+        manager.active_run().await.map(|run| run.token),
         run_before,
         "投影器不得触发 start_run/supersede（不入 run 面）"
     );

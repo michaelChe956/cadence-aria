@@ -335,7 +335,6 @@ impl CampaignStage3Harness {
     /// outbound channel 与引擎。
     pub(super) async fn send(&self, message: WsInMessage) {
         let record = self.session_record().await;
-        let current_run = Arc::new(Mutex::new(None));
         let workspace_runs = WorkspaceRunRegistry::default();
         let mut registry = ProviderRegistry::new();
         registry.register(
@@ -348,19 +347,8 @@ impl CampaignStage3Harness {
                 crate::web::runtime::WebRuntime::new_fake(self.root.path().to_path_buf()),
             ),
             engine: self.engine.clone(),
-            run_context: ProviderRunContext {
-                provider_registry: Arc::new(registry),
-                engine: self.engine.clone(),
-                current_run: current_run.clone(),
-                workspace_runs: workspace_runs.clone(),
-                session_id: self.session_id.clone(),
-                next_run_id: Arc::new(Mutex::new(0)),
-                app_paths: self.app_paths.clone(),
-                session_record: record,
-            },
+            run_context: ProviderRunContext::test_fixture(Arc::new(registry), self.engine.clone(), workspace_runs.clone(), self.session_id.clone(), self.app_paths.clone(), record),
             outbound_tx: self.outbound_tx.clone(),
-            current_run,
-            workspace_runs,
             session_id: self.session_id.clone(),
         };
         handle_workspace_inbound_message(context, message).await;
@@ -386,7 +374,6 @@ impl CampaignStage3Harness {
             event_tx,
             session,
         )));
-        let current_run = Arc::new(Mutex::new(None));
         let workspace_runs = WorkspaceRunRegistry::default();
         let mut registry = ProviderRegistry::new();
         registry.register(
@@ -399,19 +386,15 @@ impl CampaignStage3Harness {
                 crate::web::runtime::WebRuntime::new_fake(self.root.path().to_path_buf()),
             ),
             engine: engine.clone(),
-            run_context: ProviderRunContext {
-                provider_registry: Arc::new(registry),
-                engine,
-                current_run: current_run.clone(),
-                workspace_runs: workspace_runs.clone(),
-                session_id: self.session_id.clone(),
-                next_run_id: Arc::new(Mutex::new(0)),
-                app_paths: self.app_paths.clone(),
-                session_record: record,
-            },
+            run_context: ProviderRunContext::test_fixture(
+                Arc::new(registry),
+                engine.clone(),
+                workspace_runs.clone(),
+                self.session_id.clone(),
+                self.app_paths.clone(),
+                record,
+            ),
             outbound_tx: self.outbound_tx.clone(),
-            current_run,
-            workspace_runs,
             session_id: self.session_id.clone(),
         };
         handle_workspace_inbound_message(context, message).await;

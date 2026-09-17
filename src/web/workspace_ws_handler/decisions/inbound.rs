@@ -7,7 +7,6 @@ pub(crate) struct WorkspaceInboundContext {
     pub(crate) engine: Arc<Mutex<WorkspaceEngine>>,
     pub(crate) run_context: ProviderRunContext,
     pub(crate) outbound_tx: mpsc::Sender<OutboundControl>,
-    pub(crate) manager: Arc<crate::web::workspace_session::WorkspaceSessionManager>,
     pub(crate) session_id: String,
 }
 
@@ -50,7 +49,6 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
         engine,
         run_context,
         outbound_tx,
-        manager,
         session_id,
     } = context;
 
@@ -153,7 +151,7 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 "[aria-cancellation] workspace ws_rollback_message trigger=ws_rollback_message session_id={} checkpoint_id={checkpoint_id}",
                 session_id
             );
-            manager.abort_active_run().await;
+            run_context.manager.abort_active_run().await;
             let mut engine = engine.lock().await;
             if let Err(e) = engine.handle_rollback(&checkpoint_id).await {
                 let err = WsOutMessage::Error { message: e };
@@ -210,7 +208,7 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
             reason,
         } => {
             tracing::info!(permission_id = %id, approved, "ws inbound permission response");
-            let command_tx = manager.active_run_command_tx().await;
+            let command_tx = run_context.manager.active_run_command_tx().await;
             if let Some(command_tx) = command_tx {
                 let _ = command_tx
                     .send(ProviderCommand::PermissionResponse {
@@ -243,7 +241,7 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                     .as_ref()
                     .is_some_and(|text| !text.trim().is_empty())
             );
-            let active_run = manager.active_run().await;
+            let active_run = run_context.manager.active_run().await;
             if let Some(run) = active_run {
                 let mut pending_choice_ids = run.pending_choice_ids.lock().await;
                 if !pending_choice_ids.remove(&id) {
@@ -576,7 +574,7 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 "[aria-cancellation] workspace ws_abort_message trigger=ws_abort_message session_id={}",
                 session_id
             );
-            if manager.abort_active_run().await {
+            if run_context.manager.abort_active_run().await {
                 let _ = send_json_outbound(
                     &outbound_tx,
                     &WsOutMessage::ProviderStatus {

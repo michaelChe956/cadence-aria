@@ -90,6 +90,36 @@ pub(crate) struct ProviderRunContext {
     pub(crate) session_record: WorkspaceSessionRecord,
 }
 
+#[cfg(test)]
+impl ProviderRunContext {
+    pub(crate) fn test_fixture(
+        provider_registry: Arc<ProviderRegistry>,
+        engine: Arc<Mutex<WorkspaceEngine>>,
+        workspace_runs: WorkspaceRunRegistry,
+        session_id: String,
+        app_paths: ProductAppPaths,
+        session_record: WorkspaceSessionRecord,
+    ) -> Self {
+        let manager =
+            crate::web::workspace_session::WorkspaceSessionManager::test_fixture_with_parts(
+                &session_id,
+                engine.clone(),
+                provider_registry.clone(),
+                app_paths.clone(),
+                session_record.clone(),
+            );
+        Self {
+            provider_registry,
+            manager,
+            engine,
+            workspace_runs,
+            session_id,
+            app_paths,
+            session_record,
+        }
+    }
+}
+
 /// 新 BLOCKER 修复：rebuilt snapshot 仅在 **provider 成功启动后** 才 commit（延迟落盘）。
 ///
 /// provider `start` 失败（`Err`）时**不落盘** —— 确保 provider 不可用/启动前置失败时

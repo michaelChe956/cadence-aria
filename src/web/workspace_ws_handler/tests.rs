@@ -520,18 +520,15 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         Arc::new(PromptRecordingProvider { input_tx }),
     );
 
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: app_paths.clone(),
-        session_record: session_record.clone(),
-    };
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
+        app_paths.clone(),
+        session_record.clone(),
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -541,8 +538,6 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
 
@@ -647,18 +642,15 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         engine_tx,
         session,
     )));
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(ProviderRegistry::new()),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(ProviderRegistry::new()),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -668,8 +660,6 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
 
@@ -792,18 +782,15 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         ProviderName::Pi,
         Arc::new(PromptRecordingProvider { input_tx }),
     );
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -813,8 +800,6 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
 
@@ -1038,18 +1023,15 @@ async fn assert_pi_failure_does_not_start_alternate(mode: PiFailureMode) {
             starts: alternate_starts.clone(),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        record.id.clone(),
         app_paths,
-        session_record: record,
-    };
+        record,
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(8);
 
     spawn_provider_run_from_handler(

@@ -11,6 +11,7 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+use crate::web::workspace_session::WorkspaceSessionManager;
 
 struct RecordingOutputProvider {
     output: String,
@@ -64,7 +65,7 @@ pub(super) struct ProviderRunFixture {
     pub(super) record: WorkspaceSessionRecord,
     pub(super) engine: Arc<Mutex<WorkspaceEngine>>,
     pub(super) engine_tx: mpsc::Sender<EngineEvent>,
-    pub(super) current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    pub(super) manager: Arc<WorkspaceSessionManager>,
     pub(super) workspace_runs: WorkspaceRunRegistry,
     pub(super) story_id: String,
     pub(super) design_id: String,
@@ -240,12 +241,18 @@ impl ProviderRunFixture {
         Self {
             root,
             repository_root,
-            app_paths,
+            app_paths: app_paths.clone(),
             lifecycle,
-            record,
-            engine,
+            record: record.clone(),
+            engine: engine.clone(),
             engine_tx,
-            current_run: Arc::new(Mutex::new(None)),
+            manager: WorkspaceSessionManager::test_fixture_with_parts(
+                &record.id,
+                engine.clone(),
+                Arc::new(ProviderRegistry::new()),
+                app_paths.clone(),
+                record.clone(),
+            ),
             workspace_runs: WorkspaceRunRegistry::default(),
             story_id: story.id,
             design_id: design.id,
@@ -301,16 +308,15 @@ pub(super) fn single_candidate_context(
 ) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, provider);
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: fixture.engine.clone(),
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
-        session_id: fixture.record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: fixture.app_paths.clone(),
-        session_record: fixture.record.clone(),
-    };
+    let mut run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
+        fixture.workspace_runs.clone(),
+        fixture.record.id.clone(),
+        fixture.app_paths.clone(),
+        fixture.record.clone(),
+    );
+    run_context.manager = fixture.manager.clone();
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     (
         WorkspaceInboundContext {
@@ -321,8 +327,6 @@ pub(super) fn single_candidate_context(
             engine: fixture.engine.clone(),
             run_context,
             outbound_tx,
-            current_run: fixture.current_run.clone(),
-            workspace_runs: fixture.workspace_runs.clone(),
             session_id: fixture.record.id.clone(),
         },
         outbound_rx,
@@ -376,16 +380,15 @@ async fn legacy_provider_run_uses_outline_builder_and_legacy_parser_only() {
     });
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, provider);
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: fixture.engine.clone(),
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
-        session_id: fixture.record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: fixture.app_paths.clone(),
-        session_record: fixture.record.clone(),
-    };
+    let mut run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
+        fixture.workspace_runs.clone(),
+        fixture.record.id.clone(),
+        fixture.app_paths.clone(),
+        fixture.record.clone(),
+    );
+    run_context.manager = fixture.manager.clone();
     let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -395,8 +398,6 @@ async fn legacy_provider_run_uses_outline_builder_and_legacy_parser_only() {
         engine: fixture.engine.clone(),
         run_context,
         outbound_tx,
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
         session_id: fixture.record.id.clone(),
     };
 

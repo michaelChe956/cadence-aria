@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::sync::{Mutex, mpsc};
-use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
 use crate::product::app_paths::ProductAppPaths;
@@ -20,6 +18,8 @@ use crate::web::workspace_ws_handler::{
     spawn_provider_run_from_event,
 };
 use crate::web::workspace_ws_types::WsOutMessage;
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 struct ManagerState {
     attachments: HashMap<String, mpsc::Sender<OutboundControl>>,
@@ -59,7 +59,7 @@ pub struct WorkspaceSessionManager {
 #[cfg(test)]
 impl WorkspaceSessionManager {
     /// 仅供 registry 并发单测制造可做指针比较的具体 manager；不启动 router 或 provider。
-    pub(super) fn test_fixture(session_id: &str) -> Arc<Self> {
+    pub(crate) fn test_fixture(session_id: &str) -> Arc<Self> {
         let (engine_tx, _engine_rx) = mpsc::channel(1);
         let engine = WorkspaceEngine::new(
             Arc::new(CheckpointStore::new(std::env::temp_dir().join(session_id))),
@@ -80,6 +80,37 @@ impl WorkspaceSessionManager {
             app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
             provider_registry: Arc::new(ProviderRegistry::new()),
         })
+    }
+
+    pub(crate) fn test_fixture_with_parts(
+        session_id: &str,
+        engine: Arc<Mutex<WorkspaceEngine>>,
+        provider_registry: Arc<ProviderRegistry>,
+        app_paths: ProductAppPaths,
+        session_record: WorkspaceSessionRecord,
+    ) -> Arc<Self> {
+        let (engine_tx, _engine_rx) = mpsc::channel(1);
+        Arc::new(Self {
+            engine,
+            engine_tx,
+            state: StdMutex::new(ManagerState {
+                attachments: HashMap::new(),
+                next_run_id: 0,
+                active_run: None,
+                lease: LeaseState::default(),
+            }),
+            session_id: session_id.to_string(),
+            session_record,
+            app_paths,
+            provider_registry,
+        })
+    }
+
+    pub(crate) async fn test_set_active_run(&self, run: ActiveRun) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run = Some(run);
     }
 }
 
@@ -343,7 +374,9 @@ impl WorkspaceSessionManager {
             let _ = engine
                 .append_aborted_by_disconnect(format!("run-{}", run.id), connection_id.clone())
                 .await;
-            engine.transition_to_prepare_context_after_disconnect().await;
+            engine
+                .transition_to_prepare_context_after_disconnect()
+                .await;
             let state_msg = engine.build_session_state();
             let _ = crate::web::workspace_ws_handler::send_json_outbound(&outbound_tx, &state_msg)
                 .await;
@@ -485,10 +518,10 @@ impl WorkspaceSessionManager {
                         questions,
                         source,
                     } => {
-                        if source != ChoiceRequestSource::TextFallback {
-                            if let Some(run) = manager.active_run().await {
-                                run.pending_choice_ids.lock().await.insert(id.clone());
-                            }
+                        if source != ChoiceRequestSource::TextFallback
+                            && let Some(run) = manager.active_run().await
+                        {
+                            run.pending_choice_ids.lock().await.insert(id.clone());
                         }
                         manager.broadcast(WsOutMessage::ChoiceRequest {
                             id,

@@ -372,17 +372,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_idle_activity_guard_covers_current_run_and_provider_drive() {
+    async fn workspace_idle_activity_guard_covers_active_run_and_provider_drive() {
         let registry = WorkspaceRunRegistry::default();
-        let current_run: Arc<Mutex<Option<WorkspaceActiveRun>>> = Arc::new(Mutex::new(None));
+        let manager = WorkspaceSessionManager::test_fixture("session_a");
         let guard = workspace_idle_activity_guard(
-            current_run.clone(),
+            manager.clone(),
             registry.clone(),
             "session_a".to_string(),
         );
         assert!(
             !guard(),
-            "无 current_run 且无 provider drive：允许 idle 回收"
+            "无 active run 且无 provider drive：允许 idle 回收"
         );
 
         let drive = registry.begin_provider_drive("session_a");
@@ -393,15 +393,11 @@ mod tests {
         drop(drive);
         assert!(!guard(), "drive 结束后恢复 idle 回收");
 
-        *current_run.lock().await = Some(WorkspaceActiveRun {
-            id: 1,
-            token: 1,
-            node_id: None,
-            cancel: CancellationToken::new(),
-            command_tx: mpsc::channel(1).0,
-            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        });
-        assert!(guard(), "本 socket current_run 进行中：不得主动关连接");
+        let _run = manager
+            .start_run(ProviderRunKind::ReviewOnly, None)
+            .await
+            .expect("active run");
+        assert!(guard(), "manager active run 进行中：不得主动关连接");
     }
 }
 
@@ -481,7 +477,6 @@ pub(crate) async fn handle_workspace_socket(
         engine: engine.clone(),
         run_context: run_context.clone(),
         outbound_tx: outbound_tx.clone(),
-        manager: manager.clone(),
         session_id: session_id.clone(),
     };
     let idle_timeout_task = spawn_idle_timeout_task(

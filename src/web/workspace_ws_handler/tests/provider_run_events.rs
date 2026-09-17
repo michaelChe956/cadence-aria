@@ -6,6 +6,7 @@ use crate::product::models::WorkspaceType;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::single_candidate_provider_run::{ProviderRunFixture, single_candidate_markdown};
+use crate::web::workspace_session::ActiveRun;
 
 #[tokio::test]
 async fn provider_run_request_event_starts_and_registers_provider_run_once() {
@@ -43,26 +44,18 @@ async fn provider_run_request_event_starts_and_registers_provider_run_once() {
             held_event_senders: held_event_senders.clone(),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths,
-        session_record: session_record.clone(),
-    };
-    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx,
-        session_record.id.clone(),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
         workspace_runs.clone(),
-        Some(run_context),
+        session_record.id.clone(),
+        app_paths,
+        session_record.clone(),
     );
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    let manager = run_context.manager.clone();
+    let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, Some(run_context));
 
     engine_tx
         .send(EngineEvent::ProviderRunRequested {
@@ -76,9 +69,7 @@ async fn provider_run_request_event_starts_and_registers_provider_run_once() {
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if starts.load(Ordering::SeqCst) == 1
-                && workspace_runs.run(&session_record.id).await.is_some()
-            {
+            if starts.load(Ordering::SeqCst) == 1 && manager.active_run().await.is_some() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -87,8 +78,8 @@ async fn provider_run_request_event_starts_and_registers_provider_run_once() {
     .await
     .expect("provider request must start and register one run");
     assert_eq!(starts.load(Ordering::SeqCst), 1);
-    let active_node_id = workspace_runs
-        .run(&session_record.id)
+    let active_node_id = manager
+        .active_run()
         .await
         .expect("registered provider run")
         .node_id;
@@ -132,7 +123,7 @@ async fn provider_run_request_event_starts_and_registers_provider_run_once() {
         "same active timeline node must not be started twice"
     );
 
-    let _ = abort_active_run(&current_run, &workspace_runs, &session_record.id).await;
+    let _ = manager.abort_active_run().await;
     held_event_senders.lock().await.clear();
     drop(engine_tx);
     forward.abort();
@@ -175,39 +166,31 @@ async fn provider_run_request_event_replaces_an_active_run_for_a_new_timeline_no
             held_event_senders: held_event_senders.clone(),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
     let (old_command_tx, _old_command_rx) = mpsc::channel(1);
-    let old_run = WorkspaceActiveRun {
-        id: 0,
-        token: 0,
-        node_id: Some("old-timeline-node".to_string()),
-        cancel: CancellationToken::new(),
-        command_tx: old_command_tx,
-        pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-    };
-    let old_cancel = old_run.cancel.clone();
-    workspace_runs
-        .insert(session_record.id.clone(), old_run)
-        .await;
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths,
-        session_record: session_record.clone(),
-    };
-    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx,
-        session_record.id.clone(),
+    let old_cancel = CancellationToken::new();
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
         workspace_runs.clone(),
-        Some(run_context),
+        session_record.id.clone(),
+        app_paths,
+        session_record.clone(),
     );
+    let manager = run_context.manager.clone();
+    manager
+        .test_set_active_run(ActiveRun {
+            id: 0,
+            token: 0,
+            node_id: Some("old-timeline-node".to_string()),
+            cancel: old_cancel.clone(),
+            command_tx: old_command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            lease_epoch: 0,
+        })
+        .await;
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, Some(run_context));
     let new_node_id = engine.lock().await.active_timeline_node_id();
 
     engine_tx
@@ -223,8 +206,8 @@ async fn provider_run_request_event_replaces_an_active_run_for_a_new_timeline_no
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             if starts.load(Ordering::SeqCst) == 1
-                && workspace_runs
-                    .run(&session_record.id)
+                && manager
+                    .active_run()
                     .await
                     .is_some_and(|run| run.node_id == new_node_id)
             {
@@ -240,7 +223,7 @@ async fn provider_run_request_event_replaces_an_active_run_for_a_new_timeline_no
         "new node must cancel the old active run"
     );
 
-    let _ = abort_active_run(&current_run, &workspace_runs, &session_record.id).await;
+    let _ = manager.abort_active_run().await;
     held_event_senders.lock().await.clear();
     drop(engine_tx);
     forward.abort();
@@ -293,41 +276,33 @@ async fn review_only_relay_event_yields_to_in_flight_run_review_handoff() {
             held_event_senders: held_event_senders.clone(),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
     // 在途 run：模拟 SC author run 在「author 完成 → reviewer 启动」交接窗口
     // （followups 即将/正在驱动 review 握手），注册节点是 author 节点。
     let (in_flight_command_tx, _in_flight_command_rx) = mpsc::channel(1);
-    let in_flight_run = WorkspaceActiveRun {
-        id: 1,
-        token: 1,
-        node_id: Some("single-candidate-author-node".to_string()),
-        cancel: CancellationToken::new(),
-        command_tx: in_flight_command_tx,
-        pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-    };
-    let in_flight_cancel = in_flight_run.cancel.clone();
-    workspace_runs
-        .insert(session_record.id.clone(), in_flight_run)
-        .await;
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths,
-        session_record: session_record.clone(),
-    };
-    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx,
-        session_record.id.clone(),
+    let in_flight_cancel = CancellationToken::new();
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
         workspace_runs.clone(),
-        Some(run_context),
+        session_record.id.clone(),
+        app_paths,
+        session_record.clone(),
     );
+    let manager = run_context.manager.clone();
+    manager
+        .test_set_active_run(ActiveRun {
+            id: 1,
+            token: 1,
+            node_id: Some("single-candidate-author-node".to_string()),
+            cancel: in_flight_cancel.clone(),
+            command_tx: in_flight_command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            lease_epoch: 0,
+        })
+        .await;
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, Some(run_context));
 
     engine_tx
         .send(EngineEvent::ProviderRunRequested {
@@ -378,21 +353,21 @@ async fn review_only_relay_event_yields_to_in_flight_run_review_handoff() {
         0,
         "ReviewOnly 引擎接力不得在在途 run 存活时再起第二个 reviewer provider"
     );
-    let active = workspace_runs
-        .run(&session_record.id)
+    let active = manager
+        .active_run()
         .await
         .expect("in-flight run must stay registered");
     assert_eq!(
         active.token, 1,
-        "registry 必须保留在途 run（不得被接力 run 替换）"
+        "manager 必须保留在途 run（不得被接力 run 替换）"
     );
     assert_eq!(
         active.node_id.as_deref(),
         Some("single-candidate-author-node"),
-        "registry 保留的必须是在途 run 的 author 节点"
+        "manager 保留的必须是在途 run 的 author 节点"
     );
 
-    let _ = abort_active_run(&current_run, &workspace_runs, &session_record.id).await;
+    let _ = manager.abort_active_run().await;
     held_event_senders.lock().await.clear();
     drop(engine_tx);
     forward.abort();
@@ -438,31 +413,29 @@ async fn handler_originated_spawn_still_supersedes_in_flight_run() {
             held_event_senders: held_event_senders.clone(),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
     let (old_command_tx, _old_command_rx) = mpsc::channel(1);
-    let old_run = WorkspaceActiveRun {
-        id: 0,
-        token: 0,
-        node_id: Some("old-timeline-node".to_string()),
-        cancel: CancellationToken::new(),
-        command_tx: old_command_tx,
-        pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-    };
-    let old_cancel = old_run.cancel.clone();
-    workspace_runs
-        .insert(session_record.id.clone(), old_run)
-        .await;
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let old_cancel = CancellationToken::new();
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs,
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
+    let manager = run_context.manager.clone();
+    manager
+        .test_set_active_run(ActiveRun {
+            id: 0,
+            token: 0,
+            node_id: Some("old-timeline-node".to_string()),
+            cancel: old_cancel.clone(),
+            command_tx: old_command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            lease_epoch: 0,
+        })
+        .await;
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
 
     spawn_provider_run_from_handler(
@@ -487,7 +460,7 @@ async fn handler_originated_spawn_still_supersedes_in_flight_run() {
     .expect("handler-originated spawn must supersede the in-flight run");
     assert!(old_cancel.is_cancelled());
 
-    let _ = abort_active_run(&current_run, &workspace_runs, &session_record.id).await;
+    let _ = manager.abort_active_run().await;
     held_event_senders.lock().await.clear();
 }
 
@@ -539,16 +512,15 @@ fn sc_context_with_registry(
     fixture: &ProviderRunFixture,
     registry: ProviderRegistry,
 ) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: fixture.engine.clone(),
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
-        session_id: fixture.record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: fixture.app_paths.clone(),
-        session_record: fixture.record.clone(),
-    };
+    let mut run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
+        fixture.workspace_runs.clone(),
+        fixture.record.id.clone(),
+        fixture.app_paths.clone(),
+        fixture.record.clone(),
+    );
+    run_context.manager = fixture.manager.clone();
     let root = fixture.root_path();
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     (
@@ -560,8 +532,6 @@ fn sc_context_with_registry(
             engine: fixture.engine.clone(),
             run_context,
             outbound_tx,
-            current_run: fixture.current_run.clone(),
-            workspace_runs: fixture.workspace_runs.clone(),
             session_id: fixture.record.id.clone(),
         },
         outbound_rx,
@@ -838,20 +808,11 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
         "委托仍必须发射全名 kind 的 SC author 接力事件（唯一接续路径）"
     );
     assert!(
-        fixture
-            .workspace_runs
-            .run(&fixture.record.id)
-            .await
-            .is_none(),
-        "run 任务必须在让位接力后退场（registry 不得残留 run-1）"
+        fixture.manager.active_run().await.is_none(),
+        "run 任务必须在让位接力后退场（manager 不得残留 run-1）"
     );
 
-    let _ = abort_active_run(
-        &fixture.current_run,
-        &fixture.workspace_runs,
-        &fixture.record.id,
-    )
-    .await;
+    let _ = fixture.manager.abort_active_run().await;
     drain_engine.abort();
     drain_outbound.abort();
 }
@@ -875,39 +836,30 @@ async fn single_candidate_author_relay_still_supersedes_in_flight_run() {
         }),
     );
     let (old_command_tx, _old_command_rx) = mpsc::channel(1);
-    // token/id 用哨兵值，避免与进程级 NEXT_ACTIVE_RUN_TOKEN / 每 context run_id
-    // 计数（并行测试首分配可能恰为 1）碰撞，使「注册替换」判定确定。
-    let old_run = WorkspaceActiveRun {
-        id: 4242,
-        token: 424_242,
-        node_id: Some("single-candidate-author-node".to_string()),
-        cancel: CancellationToken::new(),
-        command_tx: old_command_tx,
-        pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-    };
-    let old_cancel = old_run.cancel.clone();
+    let old_cancel = CancellationToken::new();
     fixture
-        .workspace_runs
-        .insert(fixture.record.id.clone(), old_run)
+        .manager
+        .test_set_active_run(ActiveRun {
+            id: 4242,
+            token: 424_242,
+            node_id: Some("single-candidate-author-node".to_string()),
+            cancel: old_cancel.clone(),
+            command_tx: old_command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            lease_epoch: 0,
+        })
         .await;
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: fixture.engine.clone(),
-        current_run: fixture.current_run.clone(),
-        workspace_runs: fixture.workspace_runs.clone(),
-        session_id: fixture.record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: fixture.app_paths.clone(),
-        session_record: fixture.record.clone(),
-    };
-    let (outbound_tx, outbound_rx) = mpsc::channel(8);
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx,
-        fixture.record.id.clone(),
+    let mut run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
         fixture.workspace_runs.clone(),
-        Some(run_context),
+        fixture.record.id.clone(),
+        fixture.app_paths.clone(),
+        fixture.record.clone(),
     );
+    run_context.manager = fixture.manager.clone();
+    let (outbound_tx, outbound_rx) = mpsc::channel(8);
+    let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, Some(run_context));
 
     fixture
         .engine_tx
@@ -934,21 +886,16 @@ async fn single_candidate_author_relay_still_supersedes_in_flight_run() {
     );
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     let active = fixture
-        .workspace_runs
-        .run(&fixture.record.id)
+        .manager
+        .active_run()
         .await
-        .expect("relay run must replace the in-flight run in the registry");
+        .expect("relay run must replace the in-flight run in the manager");
     assert_ne!(
         active.id, 4242,
-        "registry 必须由 run-2 替换在途 run-1（哨兵 id 不得残留）"
+        "manager 必须由 run-2 替换在途 run-1（哨兵 id 不得残留）"
     );
 
-    let _ = abort_active_run(
-        &fixture.current_run,
-        &fixture.workspace_runs,
-        &fixture.record.id,
-    )
-    .await;
+    let _ = fixture.manager.abort_active_run().await;
     held_event_senders.lock().await.clear();
     drop(outbound_rx);
     forward.abort();

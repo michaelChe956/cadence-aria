@@ -138,20 +138,17 @@ async fn human_presentation_save_handler_acknowledges_success_and_returns_recove
         engine_tx,
         WorkspaceSession::from_record(session_record.clone()),
     )));
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(ProviderRegistry::new()),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(ProviderRegistry::new()),
+        engine.clone(),
+        workspace_runs,
+        session_record.id.clone(),
         app_paths,
-        session_record: WorkspaceSessionRecord {
+        WorkspaceSessionRecord {
             ..session_record.clone()
         },
-    };
+    );
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(8);
     let context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -161,8 +158,6 @@ async fn human_presentation_save_handler_acknowledges_success_and_returns_recove
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
     let command = || WsInMessage::SaveHumanPresentationRevision {

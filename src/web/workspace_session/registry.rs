@@ -51,6 +51,11 @@ impl WorkspaceSessionRegistry {
             .clone())
     }
 
+    /// 返回已创建的 session manager，供集成测试观察运行期单例状态。
+    pub async fn get(&self, session_id: &str) -> Option<Arc<WorkspaceSessionManager>> {
+        self.sessions.lock().await.get(session_id).cloned()
+    }
+
     /// 仅供测试及后续 Task 3 回收点观察；生产代码不遍历。
     pub async fn session_ids(&self) -> Vec<String> {
         let mut ids = self

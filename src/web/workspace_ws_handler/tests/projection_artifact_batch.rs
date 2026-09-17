@@ -93,13 +93,7 @@ async fn work_item_plan_projection_artifact_batch_sorts_and_expands_in_version_o
     updates.rotate_right(2);
     let (engine_tx, engine_rx) = mpsc::channel(1);
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx,
-        "session_projection_batch".to_string(),
-        WorkspaceRunRegistry::default(),
-        None,
-    );
+    let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, None);
 
     engine_tx
         .send(EngineEvent::ArtifactBatchUpdate { updates })
