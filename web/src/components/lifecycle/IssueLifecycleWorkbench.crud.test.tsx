@@ -511,6 +511,55 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     expect(within(dialog).getByText("请选择代码库")).toBeInTheDocument();
   });
 
+  it("keeps a durably created issue searchable while the list index is stale", async () => {
+    const baseFetch = lifecycleFetch();
+    const createdIssue = {
+      issue_id: "issue_0277",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "P1 补丁批",
+      description: "索引延迟期间仍应可见",
+      change_id: "p1-patch",
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-09-17T10:00:00Z",
+      updated_at: "2026-09-17T10:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
+        return jsonResponseValue(createdIssue);
+      }
+      if (url === "/api/issues/issue_0277/lifecycle?project_id=project_0001") {
+        return jsonResponseValue({
+          issue: createdIssue,
+          story_specs: [], design_specs: [], work_item_plans: [], work_items: [],
+          work_item_repository_groups: [], workspace_sessions: [], coding_attempts: [],
+        });
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
+    await user.type(within(dialog).getByLabelText("Issue 标题"), "P1 补丁批");
+    await user.selectOptions(within(dialog).getByLabelText("代码库"), "repo:repository_0001");
+    await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
+
+    expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+    const filter = screen.getByRole("textbox", { name: "过滤 Issues" });
+    await user.type(filter, "0277");
+    expect(screen.getByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+  });
+
   it("shows an alert for invalid lifecycle responses", async () => {
     vi.stubGlobal("fetch", lifecycleFetch({ invalidLifecycle: true }));
 

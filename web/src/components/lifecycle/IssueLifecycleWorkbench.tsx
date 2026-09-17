@@ -44,6 +44,7 @@ import type {
   CodingAttemptAddress,
   IssueLifecycleResponse,
   PointerPublicationDto,
+  ProductIssue,
   Project,
   Repository,
   CreateRepositoryRequest,
@@ -218,7 +219,10 @@ export function IssueLifecycleWorkbench({
     onDrawerFocusChange(isDrawerOpen ? drawerFocusedEntityKey : null);
   }, [drawerFocusedEntityKey, isDrawerOpen, onDrawerFocusChange]);
 
-  async function refresh(projectIdOverride?: string | null) {
+  async function refresh(
+    projectIdOverride?: string | null,
+    optimisticIssues: readonly ProductIssue[] = [],
+  ) {
     const requestId = refreshRequestId.current + 1;
     refreshRequestId.current = requestId;
 
@@ -267,8 +271,17 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
+      const materializedIssues = [...(issueResponse.issues ?? []), ...optimisticIssues]
+        .reduce<ProductIssue[]>((issues, issue) =>
+          issues.some((candidate) => candidate.issue_id === issue.issue_id)
+            ? issues
+            : [...issues, issue],
+        [])
+        .sort((left, right) =>
+          (right.updated_at ?? right.created_at).localeCompare(left.updated_at ?? left.created_at),
+        );
       const lifecycleResponses = await Promise.all(
-        (issueResponse.issues ?? []).map(async (issue) =>
+        materializedIssues.map(async (issue) =>
           normalizeLifecycleResponse(
             await getIssueLifecycle(issue.issue_id, projectId),
             issue,
@@ -739,7 +752,7 @@ export function IssueLifecycleWorkbench({
       return;
     }
 
-    await createProductIssue(selectedProjectId, {
+    const createdIssue = await createProductIssue(selectedProjectId, {
       title: payload.title,
       description: payload.description,
       change_id: null,
@@ -747,7 +760,7 @@ export function IssueLifecycleWorkbench({
       logical_codebase_id: payload.logical_codebase_id,
     });
     setDialogOpen(false);
-    await refresh();
+    await refresh(selectedProjectId, [createdIssue]);
   }
 
   function handleChooseSingleCodebase() {
