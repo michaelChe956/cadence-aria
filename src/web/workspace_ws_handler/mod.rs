@@ -74,10 +74,9 @@ pub(crate) use run::*;
 pub(crate) use run::{ProviderRunContext, spawn_provider_run_from_event};
 #[cfg(test)]
 pub(crate) use socket::parse_workspace_inbound_text;
-pub(crate) use socket::{OutboundControl, send_json_outbound};
-
 #[cfg(test)]
+pub(crate) use socket::{ActivityTimestamp, pump_outbound_controls, spawn_idle_timeout_task};
 pub(crate) use socket::{
-    ActivityTimestamp, planning_resume_decision_with_fresh_index, planning_resume_run_kind,
-    pump_outbound_controls, spawn_idle_timeout_task,
+    OutboundControl, planning_resume_decision_with_fresh_index, planning_resume_run_kind,
+    send_json_outbound,
 };

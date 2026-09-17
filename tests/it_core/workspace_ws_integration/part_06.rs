@@ -201,3 +201,73 @@ fn durable_tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec
 
 #[allow(dead_code)]
 fn _registry_type_is_public(_: WorkspaceSessionRegistry) {}
+
+/// T3：run 在最后一个 attachment 断开后完成时，manager 必须从 registry 回收；再次
+/// attach 必须从 durable 重建，且不得新增断连终态审计节点。
+#[tokio::test]
+async fn workspace_session_manager_recycled_after_terminal_without_subscribers() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    let app = build_web_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("recycle_probe"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut ws).await;
+    drop(ws);
+    assert_eq!(state.workspace_sessions.session_ids().await.len(), 1);
+
+    complete.notify_one();
+    let recycled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if state.workspace_sessions.session_ids().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    assert!(
+        recycled.await.is_ok(),
+        "终态且无订阅者后 manager 应被回收"
+    );
+
+    let (mut again, _) = connect_async(url).await.expect("reconnect ws");
+    match recv_json(&mut again).await {
+        WsOutMessage::SessionState { timeline_nodes, .. } => {
+            assert_eq!(
+                timeline_nodes
+                    .iter()
+                    .filter(|node| node.node_type == TimelineNodeType::AbortedByDisconnect)
+                    .count(),
+                0,
+                "重建不得新增断连审计节点"
+            );
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+    drop(again);
+    server.abort();
+}

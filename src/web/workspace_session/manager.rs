@@ -12,10 +12,11 @@ use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSe
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
 use crate::web::workspace_context::ensure_workspace_context_message;
-use crate::web::workspace_session::lease::LeaseState;
+use crate::web::workspace_session::{LeaseState, WorkspaceSessionRegistry};
 use crate::web::workspace_ws_handler::{
     OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind, map_engine_event,
-    spawn_provider_run_from_event,
+    planning_resume_decision_with_fresh_index, planning_resume_run_kind,
+    spawn_provider_run_from_event, spawn_provider_run_from_handler,
 };
 use crate::web::workspace_ws_types::WsOutMessage;
 use tokio::sync::{Mutex, mpsc};
@@ -55,6 +56,8 @@ pub struct WorkspaceSessionManager {
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
     provider_registry: Arc<ProviderRegistry>,
+    workspace_runs: crate::web::state::WorkspaceRunRegistry,
+    registry: WorkspaceSessionRegistry,
 }
 #[cfg(test)]
 impl WorkspaceSessionManager {
@@ -79,6 +82,8 @@ impl WorkspaceSessionManager {
             session_record: test_session_record(session_id),
             app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
             provider_registry: Arc::new(ProviderRegistry::new()),
+            workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
+            registry: WorkspaceSessionRegistry::default(),
         })
     }
 
@@ -103,6 +108,8 @@ impl WorkspaceSessionManager {
             session_record,
             app_paths,
             provider_registry,
+            workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
+            registry: WorkspaceSessionRegistry::default(),
         })
     }
 
@@ -222,8 +229,11 @@ impl WorkspaceSessionManager {
             session_record,
             app_paths,
             provider_registry: state.provider_registry.clone(),
+            workspace_runs: state.workspace_runs.clone(),
+            registry: state.workspace_sessions.clone(),
         });
         manager.spawn_event_router(engine_rx, state.workspace_runs.clone());
+        manager.recover_on_creation().await?;
         Ok(manager)
     }
 
@@ -285,16 +295,26 @@ impl WorkspaceSessionManager {
     }
 
     pub async fn finish_run(&self, token: u64) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state
-            .active_run
-            .as_ref()
-            .is_some_and(|run| run.token == token)
+        let recycle = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state
+                .active_run
+                .as_ref()
+                .is_some_and(|run| run.token == token)
+            {
+                state.active_run = None;
+            }
+            state.active_run.is_none() && state.attachments.is_empty()
+        };
+        if recycle
+            && !self
+                .workspace_runs
+                .provider_drive_in_progress(&self.session_id)
         {
-            state.active_run = None;
+            self.registry.remove(&self.session_id).await;
         }
     }
 
@@ -418,11 +438,21 @@ impl WorkspaceSessionManager {
     }
 
     pub async fn detach(&self, connection_id: &str) {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .attachments
-            .remove(connection_id);
+        let recycle = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.attachments.remove(connection_id);
+            state.active_run.is_none() && state.attachments.is_empty()
+        };
+        if recycle
+            && !self
+                .workspace_runs
+                .provider_drive_in_progress(&self.session_id)
+        {
+            self.registry.remove(&self.session_id).await;
+        }
     }
 
     /// 一次性只读 durable 投影器。禁止将它扩展为第二 engine 状态源：没有 spawn、没有
@@ -449,6 +479,91 @@ impl WorkspaceSessionManager {
             engine.build_session_state(),
             engine.pending_author_choice_request_message(),
         )
+    }
+
+    async fn recover_on_creation(self: &Arc<Self>) -> Result<(), String> {
+        let run_context = self.provider_run_context(self.workspace_runs.clone());
+        let human_gate_recovery = {
+            let mut engine = self.engine.lock().await;
+            engine.recover_human_gate_turns(false)
+        }
+        .map_err(|error| format!("human gate recovery failed: {error}"))?;
+        for (turn_id, action) in human_gate_recovery {
+            if !matches!(
+                action,
+                crate::product::workspace_engine::HumanGateRecoveryAction::ResumeSameTurn { .. }
+            ) {
+                continue;
+            }
+            let run_kind = crate::product::workspace_engine::provider_run_kind_for_human_gate(
+                self.session_record.flow_kind,
+                &turn_id,
+            )?;
+            let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+            spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx).await?;
+        }
+
+        let outline_resume_kind = {
+            let engine = self.engine.lock().await;
+            let durable_flow_kind = self.session_record.flow_kind;
+            if let Some(error) = engine.outline_revision_recovery_error() {
+                Err(format!("outline revision recovery failed: {error}"))
+            } else {
+                let should_resume = engine.session().workspace_type
+                    == crate::product::models::WorkspaceType::WorkItemPlan
+                    && engine.session().stage == crate::product::workspace_engine::WorkspaceStage::Running
+                    && engine.active_node_type()
+                        == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
+                    && engine.active_run_id().is_none();
+                if !should_resume {
+                    Ok(None)
+                } else if let Some(node_id) = engine.active_timeline_node_id() {
+                    match LifecycleStore::new(self.app_paths.clone())
+                        .load_node_detail(&self.session_id, &node_id)
+                    {
+                        Ok(detail) => Ok(Some(if durable_flow_kind
+                            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+                        {
+                            ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
+                        } else if detail.is_revision {
+                            ProviderRunKind::WorkItemPlanOutlineRevision {
+                                feedback: detail.revision_feedback,
+                            }
+                        } else {
+                            ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
+                        })),
+                        Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
+                            Ok(Some(ProviderRunKind::work_item_plan_author_for_durable_flow(
+                                durable_flow_kind,
+                            )))
+                        }
+                        Err(error) => Err(format!(
+                            "resume outline run detail failed for {node_id}: {error}"
+                        )),
+                    }
+                } else {
+                    Err("resume outline run detail failed: active node id unavailable".to_string())
+                }
+            }
+        };
+        if let Some(run_kind) = outline_resume_kind?
+            && self.active_run().await.is_none()
+        {
+            let decision = planning_resume_decision_with_fresh_index(
+                &self.app_paths,
+                &self.session_record.project_id,
+                &self.session_record.issue_id,
+            )
+            .await?;
+            let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+            spawn_provider_run_from_handler(
+                run_context,
+                planning_resume_run_kind(&decision, run_kind),
+                outbound_tx,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// session-owned event router：engine event 映射后 fan-out 到所有 attachment。
