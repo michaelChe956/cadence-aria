@@ -6,7 +6,7 @@
 
 ## 交付内容
 
-- 新增 `EventJournal`：活动 run 期间不按尾窗裁剪；run 正常完成或显式中止后裁至 `JOURNAL_TAIL = 1_024`；始终受 `JOURNAL_HARD_CAP = 65_536` 限制。hard cap 丢弃最早事件并永久标记 `truncated`，任意 cursor 重放返回 `None`，为后续 snapshot 基线路径提供诚实降级判定。
+- 新增 `EventJournal`：活动 run 期间不按尾窗裁剪；run 正常完成或显式中止后裁至 `JOURNAL_TAIL = 1_024`；始终受 `JOURNAL_HARD_CAP = 65_536` 限制。窗口内 cursor（含 `oldest_seq - 1` 的 attach 基线）严格回放其后的事件；hard cap 丢弃最早事件并永久标记 `truncated`，任意 cursor 重放返回 `None`，为后续 snapshot 基线路径提供诚实降级判定。
 - manager 维护 session 生命周期内的 `AtomicU64` 序号。router 的路径固定为：map → serialize → stamp → journal.push → 对全部 attachment `try_send`。每个 attachment 收到同一原始 JSON 文本和同一个 `event_seq`。
 - `finish_run` 与 manager 的显式 abort 路径标记 journal run terminal，确保 run 完成后执行尾窗裁剪。
 - attach 的 `session_state` 在序列化边界写入当前 `event_seq` 基线（首 attach 为 `0`），仍保留原有 `connection_id` 装饰。已写入 T10 接口注释：携带 `after_event_seq` 的 Hello 必须延迟/抑制该初始基线帧，避免回放被前端去重吞掉；本 Task 不提前改变该既有 attach 时序。

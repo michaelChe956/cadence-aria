@@ -245,7 +245,14 @@ fn journal_replays_window_and_degrades_when_truncated() {
             .expect("cursor at latest sequence")
             .is_empty()
     );
-    assert!(journal.replay_after(0).is_none(), "cursor before left edge");
+    let from_attach_baseline = journal
+        .replay_after(0)
+        .expect("attach baseline precedes first event");
+    assert_eq!(
+        from_attach_baseline.len(),
+        10,
+        "baseline replays the full first window"
+    );
 
     journal.mark_run_terminal();
     assert_eq!(journal.entries.len(), 10);

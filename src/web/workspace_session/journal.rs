@@ -47,7 +47,7 @@ impl EventJournal {
         }
         let oldest = self.oldest_seq()?;
         let latest = self.entries.back()?.0;
-        if cursor < oldest || cursor > latest {
+        if cursor < oldest.saturating_sub(1) || cursor > latest {
             return None;
         }
         Some(
