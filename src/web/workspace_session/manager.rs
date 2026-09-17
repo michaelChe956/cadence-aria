@@ -812,13 +812,14 @@ impl WorkspaceSessionManager {
     }
 
     pub async fn detach(self: &Arc<Self>, connection_id: &str) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.attachments.remove(connection_id);
-        state.pending_attachments.remove(connection_id);
-        drop(state);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.attachments.remove(connection_id);
+            state.pending_attachments.remove(connection_id);
+        }
         self.maybe_recycle().await;
     }
 

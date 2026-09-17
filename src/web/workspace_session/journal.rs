@@ -15,7 +15,9 @@ pub(crate) struct EventJournal {
     pub(crate) entries: VecDeque<(u64, String)>,
     pub(crate) truncated: bool,
     pub(crate) run_active: bool,
-    /// 当前 run 启动时的下一事件序号，用于将活跃 run 补发与历史尾窗隔离。
+    #[cfg(test)]
+    pub(crate) run_start_seq: Option<u64>,
+    #[cfg(not(test))]
     run_start_seq: Option<u64>,
 }
 
