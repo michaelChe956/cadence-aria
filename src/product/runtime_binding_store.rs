@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{IssueRuntimeBindingRecord, RuntimeBindingStatus};
 
@@ -69,9 +69,10 @@ impl RuntimeBindingStore {
         validate_relative_id(&input.repo_id)?;
         let project_id = input.project_id;
         let issue_id = input.issue_id;
-        let bindings = self.list(&project_id, &issue_id)?;
-        let existing_len = bindings.len();
-        let id = next_sequential_id("binding", existing_len);
+        let bindings_root = self.bindings_root(&project_id, &issue_id);
+        let id = next_sequential_id_in_directory("binding", &bindings_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", bindings_root.display()))
+        })?;
         let now = Utc::now().to_rfc3339();
         let task_root = input
             .task_id
@@ -120,5 +121,42 @@ impl RuntimeBindingStore {
     fn binding_path(&self, project_id: &str, issue_id: &str, binding_id: &str) -> PathBuf {
         self.bindings_root(project_id, issue_id)
             .join(format!("{binding_id}.json"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateRuntimeBindingInput, RuntimeBindingStore};
+    use crate::product::app_paths::ProductAppPaths;
+
+    fn input(project_id: &str, issue_id: &str, repo_id: &str) -> CreateRuntimeBindingInput {
+        CreateRuntimeBindingInput {
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            repo_id: repo_id.to_string(),
+            change_id: format!("change-{repo_id}"),
+            task_id: None,
+            session_id: None,
+            runtime_root: std::path::PathBuf::from("/tmp/runtime"),
+        }
+    }
+
+    #[test]
+    fn create_after_deleting_middle_binding_uses_id_above_existing_maximum() {
+        let root = tempfile::tempdir().unwrap();
+        let store = RuntimeBindingStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let _first = store.create(input("project_0001", "issue_0001", "repository_0001")).unwrap();
+        let middle = store.create(input("project_0001", "issue_0001", "repository_0002")).unwrap();
+        let _last = store.create(input("project_0001", "issue_0001", "repository_0003")).unwrap();
+        std::fs::remove_file(
+            root.path()
+                .join(".aria/projects/project_0001/issues/issue_0001/bindings")
+                .join(format!("{}.json", middle.id)),
+        )
+        .unwrap();
+
+        let replacement = store.create(input("project_0001", "issue_0001", "repository_0004")).unwrap();
+
+        assert_eq!(replacement.id, "binding_0004");
     }
 }
