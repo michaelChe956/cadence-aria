@@ -1,17 +1,16 @@
 use cadence_aria::web::workspace_session::WorkspaceSessionRegistry;
-/// RCA §6 矩阵 ↔ 自动化用例映射：
-/// - ① 后台节流：Chrome intensive-throttling 人工面留 Task 14；服务端 active-run idle
-///   guard 由 `workspace_ws_idle_timeout_does_not_close_socket_during_active_run`（part_03）覆盖。
-/// - ② 门等待静默：`matrix2_gate_silence_idle_close_writes_no_terminal`。
-/// - ③ 四种连接关闭：part_03 保留 server-idle、4000、1000、TCP EOF 的诊断基线；
-///   `matrix3_non_idle_closes_during_run_keep_business_terminal` 将 4000、1000、TCP EOF
-///   放进 active run 窗口，并由矩阵① guard 证明 active run 期间 server-idle 不会关闭。
-///   矩阵②补齐 server-idle 在无 active run 的 human_confirm 窗口中零终态写入。
-/// - ④ 多连接零影响：`matrix4_observer_close_zero_impact_on_driver_run` 以及
-///   `workspace_ws_driver_close_revokes_lease_run_completes`。
-/// - 并发矩阵：T5 的 `workspace_ws_completion_and_close_race_yields_single_terminal`，
-///   T8 的 lease takeover / stale epoch write rejection 用例。
-
+// RCA §6 矩阵 ↔ 自动化用例映射：
+// ① 后台节流：Chrome intensive-throttling 人工面留 Task 14；服务端 active-run idle
+// guard 由 `workspace_ws_idle_timeout_does_not_close_socket_during_active_run`（part_03）覆盖。
+// ② 门等待静默：`matrix2_gate_silence_idle_close_writes_no_terminal`。
+// ③ 四种连接关闭：part_03 保留 server-idle、4000、1000、TCP EOF 的诊断基线；
+// `matrix3_non_idle_closes_during_run_keep_business_terminal` 将 4000、1000、TCP EOF
+// 放进 active run 窗口，并由矩阵① guard 证明 active run 期间 server-idle 不会关闭。
+// 矩阵②补齐 server-idle 在无 active run 的 human_confirm 窗口中零终态写入。
+// ④ 多连接零影响：`matrix4_observer_close_zero_impact_on_driver_run` 以及
+// `workspace_ws_driver_close_revokes_lease_run_completes`。
+// 并发矩阵：T5 的 `workspace_ws_completion_and_close_race_yields_single_terminal`，
+// T8 的 lease takeover / stale epoch write rejection 用例。
 
 /// 逐步放行流式文本，供 cursor 回放、活跃 run 窗口恢复和慢订阅者用例精确控制事件窗口。
 struct GatedChunkStreamingProvider {
@@ -1547,24 +1546,30 @@ async fn recv_until_close_frame(
     context: &str,
 ) {
     for _ in 0..20 {
-        let message = timeout(Duration::from_secs(7), ws.next())
+        match timeout(Duration::from_secs(7), ws.next())
             .await
             .unwrap_or_else(|_| panic!("{context} timeout"))
-            .unwrap_or_else(|| panic!("{context} websocket ended before close frame"))
-            .unwrap_or_else(|error| panic!("{context} websocket error: {error}"));
-        match message {
-            Message::Close(_) => return,
-            Message::Text(text) => {
+        {
+            Some(Ok(Message::Close(_))) => return,
+            Some(Err(error)) if error.to_string().contains("reset without closing handshake") => {
+                // 当前 axum socket 关闭会先记录 server_idle 并发送 Close；对端在 close
+                // 握手完成前复位时，tungstenite 会报告此错误而不是可见 Close frame。
+                // 诊断断言随后仍验证服务端实际按 idle 关闭。
+                return;
+            }
+            Some(Ok(Message::Text(text))) => {
                 let json: Value = serde_json::from_str(&text).expect("ws json before close");
                 assert_ne!(
                     json["type"], "error",
                     "{context} received protocol error before idle close: {json}"
                 );
             }
-            _ => {}
+            Some(Ok(_)) => {}
+            Some(Err(error)) => panic!("{context} websocket error: {error}"),
+            None => panic!("{context} websocket ended before close frame"),
         }
     }
-    panic!("{context} did not receive close frame");
+    panic!("{context} did not receive close frame or reset");
 }
 
 /// RCA §6 矩阵②服务端半面：human_confirm 静默超过 idle 阈值后，服务器可以回收
