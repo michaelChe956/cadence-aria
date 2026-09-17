@@ -1,3 +1,4 @@
+use super::journal::{EventJournal, JOURNAL_HARD_CAP, JOURNAL_TAIL};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -220,4 +221,98 @@ async fn finish_run_and_connection_close_interleaving_clears_run_and_attachment(
             "交错后不得遗留 active_run 或 attachment，manager 必须可回收"
         );
     }
+}
+
+/// 防止 journal 因窗口边界、终态裁剪或 hard cap 而对 cursor 做不诚实回放。
+#[test]
+fn journal_replays_window_and_degrades_when_truncated() {
+    let mut journal = EventJournal {
+        run_active: true,
+        ..EventJournal::default()
+    };
+    for seq in 1..=10 {
+        journal.push(seq, format!("{{\"event_seq\":{seq}}}"));
+    }
+
+    let replay = journal
+        .replay_after(3)
+        .expect("cursor within journal window");
+    assert_eq!(replay.len(), 7);
+    assert!(replay[0].contains("\"event_seq\":4"));
+    assert!(
+        journal
+            .replay_after(10)
+            .expect("cursor at latest sequence")
+            .is_empty()
+    );
+    assert!(journal.replay_after(0).is_none(), "cursor before left edge");
+
+    journal.mark_run_terminal();
+    assert_eq!(journal.entries.len(), 10);
+    for seq in 11..=JOURNAL_TAIL + 20 {
+        journal.push(seq, String::new());
+    }
+    assert_eq!(journal.entries.len(), JOURNAL_TAIL as usize);
+    assert!(journal.oldest_seq().expect("tail has entries") > 11);
+    assert!(
+        journal.replay_after(11).is_none(),
+        "tail window moved left edge"
+    );
+
+    journal.run_active = true;
+    for seq in 2_000..=JOURNAL_HARD_CAP + 2_000 {
+        journal.push(seq, String::new());
+    }
+    assert!(journal.truncated, "hard cap must record irreversible loss");
+    assert!(
+        journal.replay_after(JOURNAL_HARD_CAP + 2_000).is_none(),
+        "truncated journal must require a snapshot even at latest cursor"
+    );
+}
+
+/// 防止 router 退化为单 attachment 发送，或在每个连接上分配不同的 event_seq。
+#[tokio::test]
+async fn manager_broadcast_stamps_monotonic_seq_per_session() {
+    let manager = WorkspaceSessionManager::test_fixture("session_event_seq");
+    let (tx_a, mut rx_a) = mpsc::channel(16);
+    let (tx_b, mut rx_b) = mpsc::channel(16);
+    manager.attach("conn-a", tx_a).await;
+    manager.attach("conn-b", tx_b).await;
+    for status in [
+        crate::web::workspace_ws_types::WsProviderStatus::Starting,
+        crate::web::workspace_ws_types::WsProviderStatus::Running,
+        crate::web::workspace_ws_types::WsProviderStatus::Completed,
+    ] {
+        manager.broadcast_test_event(status).await;
+    }
+
+    let received_a = (0..3)
+        .map(
+            |_| match rx_a.try_recv().expect("attachment A receives broadcast") {
+                OutboundControl::Text(json) => serde_json::from_str::<serde_json::Value>(&json)
+                    .expect("stamped broadcast json")["event_seq"]
+                    .as_u64()
+                    .expect("event_seq")
+                    .to_owned(),
+                control => panic!("unexpected broadcast control: {control:?}"),
+            },
+        )
+        .collect::<Vec<_>>();
+    let received_b = (0..3)
+        .map(
+            |_| match rx_b.try_recv().expect("attachment B receives broadcast") {
+                OutboundControl::Text(json) => serde_json::from_str::<serde_json::Value>(&json)
+                    .expect("stamped broadcast json")["event_seq"]
+                    .as_u64()
+                    .expect("event_seq")
+                    .to_owned(),
+                control => panic!("unexpected broadcast control: {control:?}"),
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(received_a, vec![1, 2, 3]);
+    assert_eq!(
+        received_b, received_a,
+        "fan-out must preserve stamped event identity"
+    );
 }

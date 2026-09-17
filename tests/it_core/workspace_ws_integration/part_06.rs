@@ -766,13 +766,16 @@ async fn workspace_ws_driver_close_revokes_lease_run_completes() {
                 nodes
                     .iter()
                     .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect),
-                "driver close must not write an aborted_by_disconnect marker"
+                "driver close must not write disconnect-aborted terminal"
             );
             completed = true;
             break;
         }
     }
-    assert!(completed, "revoking a lease must leave the run to its business completion");
+    assert!(
+        completed,
+        "revoking a lease must leave the run to its business completion"
+    );
     server.abort();
 }
 
@@ -837,4 +840,113 @@ async fn workspace_ws_observer_connection_does_not_take_over_lease() {
     drop(driver);
     complete.notify_one();
     server.abort();
+}
+
+/// REQ-WCR-04/T9：manager 只分配一次序号；attach 基线和所有在线 attachment 的直播
+/// 事件必须携带同一递增 `event_seq`，而非 socket-local 序号。
+#[tokio::test]
+async fn workspace_ws_fanout_events_have_shared_monotonic_event_seq() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url.clone()).await.expect("driver");
+    let initial = recv_json_value(&mut driver).await;
+    assert_eq!(initial["type"], "session_state");
+    assert_eq!(
+        initial["event_seq"], 0,
+        "first attach establishes seq baseline"
+    );
+
+    let (mut observer, _) = connect_async(url).await.expect("observer");
+    let observer_initial = recv_json_value(&mut observer).await;
+    assert_eq!(observer_initial["type"], "session_state");
+    assert_eq!(
+        observer_initial["event_seq"], 0,
+        "all attachments share baseline"
+    );
+    send_json(
+        &mut observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("event_seq_fanout"),
+        },
+    )
+    .await;
+    let driver_chunk = recv_until_stream_chunk_value(&mut driver).await;
+    let observer_chunk = recv_until_stream_chunk_value(&mut observer).await;
+    let driver_seq = driver_chunk["event_seq"]
+        .as_u64()
+        .expect("driver event seq");
+    let observer_seq = observer_chunk["event_seq"]
+        .as_u64()
+        .expect("observer event seq");
+    assert_eq!(
+        driver_seq, observer_seq,
+        "fan-out shares the stamped event identity"
+    );
+    assert!(driver_seq > 0, "live event advances attach baseline");
+
+    complete.notify_one();
+    drop(observer);
+    drop(driver);
+    server.abort();
+}
+
+async fn recv_json_value(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
+    let message = timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("ws message timeout")
+        .expect("ws message")
+        .expect("valid ws message");
+    match message {
+        Message::Text(text) => serde_json::from_str(&text).expect("ws json"),
+        other => panic!("expected text ws message, got {other:?}"),
+    }
+}
+
+async fn recv_until_stream_chunk_value(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
+    for _ in 0..40 {
+        let message = recv_json_value(ws).await;
+        match message["type"].as_str() {
+            Some("stream_chunk") => return message,
+            Some("error") => panic!("ws error: {}", message["message"]),
+            _ => {}
+        }
+    }
+    panic!("stream_chunk not received");
 }

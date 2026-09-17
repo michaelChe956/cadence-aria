@@ -437,7 +437,9 @@ pub(crate) async fn handle_workspace_socket(
         connection_id.clone(),
     ));
     let (session_state, restored_choice_request) = manager.attached_session_state().await;
-    if let Ok(json) = serde_json::to_string(&session_state.with_connection_id(&connection_id)) {
+    if let Some(json) =
+        manager.serialize_attach_session_state(session_state.with_connection_id(&connection_id))
+    {
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
     if let Some(choice_request) = restored_choice_request

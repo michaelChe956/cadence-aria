@@ -42,6 +42,8 @@ pub struct RecoverableInterruptedRun {
 
 // SessionState 必须按既有 WebSocket wire schema 内联完整 durable snapshot；为节省
 // Rust 内存布局而装箱会改变公共枚举字段，故保留现有表示。
+/// 广播由 session manager 在序列化边界额外注入可选顶层 `event_seq`，不在此枚举
+/// 各变体重复字段；旧 wire 客户端可忽略该增量字段。
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

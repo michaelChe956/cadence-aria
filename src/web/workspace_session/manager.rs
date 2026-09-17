@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use super::journal::EventJournal;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
 use crate::product::app_paths::ProductAppPaths;
@@ -37,6 +39,7 @@ struct ManagerState {
     attachments: HashMap<String, Attachment>,
     next_run_id: u64,
     active_run: Option<ActiveRun>,
+    journal: EventJournal,
     lease: LeaseState,
     recovery_error: Option<String>,
 }
@@ -64,6 +67,9 @@ pub struct WorkspaceSessionManager {
     engine: Arc<Mutex<WorkspaceEngine>>,
     engine_tx: mpsc::Sender<EngineEvent>,
     state: StdMutex<ManagerState>,
+    /// 序号在 manager 生命周期内严格单调；manager 被回收后 durable 重建会改走
+    /// snapshot 基线，故不需要将它持久化。
+    next_event_seq: AtomicU64,
     pub session_id: String,
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
@@ -89,6 +95,7 @@ impl WorkspaceSessionManager {
                 next_run_id: 0,
                 active_run: None,
                 lease: LeaseState::default(),
+                journal: EventJournal::default(),
                 recovery_error: None,
             }),
             session_id: session_id.to_string(),
@@ -96,6 +103,7 @@ impl WorkspaceSessionManager {
             app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
             provider_registry: Arc::new(ProviderRegistry::new()),
             workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
+            next_event_seq: AtomicU64::new(1),
             registry: WorkspaceSessionRegistry::default(),
         })
     }
@@ -115,9 +123,11 @@ impl WorkspaceSessionManager {
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
+                journal: EventJournal::default(),
                 lease: LeaseState::default(),
                 recovery_error: None,
             }),
+            next_event_seq: AtomicU64::new(1),
             session_id: session_id.to_string(),
             session_record,
             app_paths,
@@ -239,6 +249,7 @@ impl WorkspaceSessionManager {
                 active_run: None,
                 lease: LeaseState::default(),
                 recovery_error: None,
+                journal: EventJournal::default(),
             }),
             session_id: session_id.to_string(),
             session_record,
@@ -246,6 +257,7 @@ impl WorkspaceSessionManager {
             provider_registry: state.provider_registry.clone(),
             workspace_runs: state.workspace_runs.clone(),
             registry: state.workspace_sessions.clone(),
+            next_event_seq: AtomicU64::new(1),
         });
         manager.spawn_event_router(engine_rx, state.workspace_runs.clone());
         manager.recover_on_creation().await;
@@ -343,7 +355,11 @@ impl WorkspaceSessionManager {
             {
                 return Err("STALE_DRIVER_LEASE".to_string());
             }
-            state.active_run.take()
+            let run = state.active_run.take();
+            if run.is_some() {
+                state.journal.mark_run_terminal();
+            }
+            run
         };
         if let Some(run) = run {
             Self::cancel_run(&run);
@@ -398,6 +414,7 @@ impl WorkspaceSessionManager {
                 pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
                 lease_epoch,
             });
+            state.journal.mark_run_started();
             (replaced_run, (run_id, token, cancel, command_rx, node_id))
         };
         if let Some(run) = replaced_run {
@@ -426,18 +443,24 @@ impl WorkspaceSessionManager {
                 .is_some_and(|run| run.token == token)
             {
                 state.active_run = None;
+                state.journal.mark_run_terminal();
             }
         }
         self.maybe_recycle().await;
     }
 
     pub async fn abort_active_run(&self) -> bool {
-        let run = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .active_run
-            .take();
+        let run = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run = state.active_run.take();
+            if run.is_some() {
+                state.journal.mark_run_terminal();
+            }
+            run
+        };
         if let Some(run) = run {
             Self::cancel_run(&run);
             true
@@ -613,6 +636,17 @@ impl WorkspaceSessionManager {
             }
         }
         self.durable_projection()
+    }
+
+    /// 在序列化边界为 attach snapshot 注入当前 event_seq 基线。T10 将在首个 Hello 的
+    /// cursor 分支抑制该初帧，确保回放事件不会被前端基线去重吞掉；本阶段仍维持既有
+    /// 立即 attach。返回 JSON 而非重新反序列化枚举，以保留增量字段。
+    pub(crate) fn serialize_attach_session_state(&self, message: WsOutMessage) -> Option<String> {
+        let seq = self
+            .next_event_seq
+            .load(Ordering::Relaxed)
+            .saturating_sub(1);
+        inject_event_seq(serde_json::to_string(&message).ok()?, seq)
     }
 
     pub async fn detach(self: &Arc<Self>, connection_id: &str) {
@@ -880,24 +914,38 @@ impl WorkspaceSessionManager {
         });
     }
 
+    /// 从序列化边界注入增量 wire 字段，避免侵入所有 `WsOutMessage` 变体。旧客户端
+    /// 忽略未知字段；同一 stamped JSON 同时写 journal 并 fan-out 到所有 attachment。
     fn broadcast(&self, message: WsOutMessage) {
-        let Ok(json) = serde_json::to_string(&message) else {
+        let Ok(serialized) = serde_json::to_string(&message) else {
             eprintln!(
                 "[aria-broadcast] serialize failed session={}",
                 self.session_id
             );
             return;
         };
-        let attachments = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .attachments
-            .iter()
-            .map(|(connection_id, attachment)| {
-                (connection_id.clone(), attachment.outbound_tx.clone())
-            })
-            .collect::<Vec<_>>();
+        let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
+        let Some(json) = inject_event_seq(serialized, seq) else {
+            eprintln!(
+                "[aria-broadcast] event sequence injection failed session={}",
+                self.session_id
+            );
+            return;
+        };
+        let attachments = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.journal.push(seq, json.clone());
+            state
+                .attachments
+                .iter()
+                .map(|(connection_id, attachment)| {
+                    (connection_id.clone(), attachment.outbound_tx.clone())
+                })
+                .collect::<Vec<_>>()
+        };
         for (connection_id, sender) in attachments {
             if sender
                 .try_send(OutboundControl::Text(json.clone()))
@@ -910,4 +958,29 @@ impl WorkspaceSessionManager {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn attach(
+        &self,
+        connection_id: &str,
+        outbound_tx: mpsc::Sender<OutboundControl>,
+    ) {
+        self.register_attachment(connection_id, outbound_tx);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn broadcast_test_event(
+        &self,
+        status: crate::web::workspace_ws_types::WsProviderStatus,
+    ) {
+        self.broadcast(WsOutMessage::ProviderStatus { status });
+    }
+}
+
+/// 保持 `WsOutMessage` schema 不变，在 JSON 顶层增加可选 `event_seq`。
+fn inject_event_seq(message: String, seq: u64) -> Option<String> {
+    let mut value = serde_json::from_str::<serde_json::Value>(&message).ok()?;
+    let object = value.as_object_mut()?;
+    object.insert("event_seq".to_string(), serde_json::Value::from(seq));
+    serde_json::to_string(&value).ok()
 }
