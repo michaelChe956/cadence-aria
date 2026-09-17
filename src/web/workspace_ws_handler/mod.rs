@@ -72,6 +72,7 @@ pub(crate) use run::*;
 #[cfg(test)]
 pub(crate) use socket::parse_workspace_inbound_text;
 pub(crate) use socket::{OutboundControl, send_json_outbound};
+pub(crate) use run::{ProviderRunContext, spawn_provider_run_from_event};
 
 #[cfg(test)]
 pub(crate) use socket::{

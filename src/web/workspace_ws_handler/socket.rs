@@ -1,8 +1,8 @@
 use super::*;
 use crate::product::logical_codebase::{
     PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode, ResumeDecision,
-    resolve_issue_logical_codebase_id,
 };
+use crate::web::workspace_session::WorkspaceSessionManager;
 
 pub async fn workspace_ws(
     ws: WebSocketUpgrade,
@@ -424,135 +424,23 @@ pub(crate) async fn handle_workspace_socket(
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let connection_id = uuid::Uuid::new_v4().to_string();
 
-    let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let session_record = match lifecycle.get_workspace_session(&session_id) {
-        Ok(session) => session,
-        Err(error) => {
-            let err = WsOutMessage::Error {
-                message: format!("workspace session not found: {error}"),
-            };
-            if let Ok(json) = serde_json::to_string(&err) {
-                let _ = ws_sender.send(Message::Text(json.into())).await;
-            }
-            return;
-        }
-    };
-    let session_record =
-        match ensure_workspace_context_message(&app_paths, &lifecycle, session_record).await {
-            Ok(session) => session,
-            Err(error) => {
-                let err = WsOutMessage::Error {
-                    message: format!("workspace context unavailable: {error}"),
-                };
-                if let Ok(json) = serde_json::to_string(&err) {
-                    let _ = ws_sender.send(Message::Text(json.into())).await;
-                }
-                return;
-            }
-        };
-
-    let repository = match workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
+    let manager = match state
+        .workspace_sessions
+        .get_or_create(&session_id, || WorkspaceSessionManager::create(&state, &session_id))
+        .await
     {
-        Ok(repository) => repository,
-        Err(error) => {
-            let err = WsOutMessage::Error {
-                message: format!("workspace repository unavailable: {error}"),
-            };
+        Ok(manager) => manager,
+        Err(message) => {
+            let err = WsOutMessage::Error { message };
             if let Ok(json) = serde_json::to_string(&err) {
                 let _ = ws_sender.send(Message::Text(json.into())).await;
             }
             return;
         }
     };
-
-    let checkpoint_store = Arc::new(CheckpointStore::new(
-        app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
-    ));
-
-    let (engine_tx, engine_rx) = mpsc::channel::<EngineEvent>(64);
-
-    let is_logical_session = repository.logical_repository_id.is_some();
-
-    let mut session = WorkspaceSession::from_record(session_record.clone());
-    session.repository_path = Some(repository.path);
-    if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
-        session.restore_checkpoint_ids(&checkpoints);
-    }
-    let mut engine_workspace =
-        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, engine_tx, session);
-    if is_logical_session {
-        let lc_id = match resolve_issue_logical_codebase_id(
-            &app_paths,
-            &session_record.project_id,
-            &session_record.issue_id,
-        ) {
-            Ok(lc_id) => lc_id,
-            Err(error) => {
-                let err = WsOutMessage::Error {
-                    message: format!("logical codebase resolution failed: {error}"),
-                };
-                if let Ok(json) = serde_json::to_string(&err) {
-                    let _ = ws_sender.send(Message::Text(json.into())).await;
-                }
-                return;
-            }
-        };
-        let gateway = match state.gateway_factory() {
-            Some(factory) => {
-                match factory.build_for_lc(&session_record.project_id, lc_id.as_deref()) {
-                    Ok(gateway) => gateway,
-                    Err(error) => {
-                        let err = WsOutMessage::Error {
-                            message: format!("logical gateway build failed: {error}"),
-                        };
-                        if let Ok(json) = serde_json::to_string(&err) {
-                            let _ = ws_sender.send(Message::Text(json.into())).await;
-                        }
-                        return;
-                    }
-                }
-            }
-            None => {
-                let err = WsOutMessage::Error {
-                    message: "logical gateway factory unavailable".to_string(),
-                };
-                if let Ok(json) = serde_json::to_string(&err) {
-                    let _ = ws_sender.send(Message::Text(json.into())).await;
-                }
-                return;
-            }
-        };
-        engine_workspace = engine_workspace.with_logical_provider_gateway(Arc::new(gateway));
-    }
-    let engine = Arc::new(Mutex::new(engine_workspace));
-
-    let (session_state, restored_choice_request) = {
-        let mut engine = engine.lock().await;
-        if let Err(error) = engine.ensure_plan_repair_artifacts().await {
-            let err = WsOutMessage::Error {
-                message: format!("plan repair artifact bootstrap failed: {error:?}"),
-            };
-            if let Ok(json) = serde_json::to_string(&err) {
-                let _ = ws_sender.send(Message::Text(json.into())).await;
-            }
-            return;
-        }
-        (
-            engine
-                .build_session_state()
-                .with_connection_id(&connection_id),
-            engine.pending_author_choice_request_message(),
-        )
-    };
-    if let Ok(json) = serde_json::to_string(&session_state) {
-        let _ = ws_sender.send(Message::Text(json.into())).await;
-    }
-    if let Some(choice_request) = restored_choice_request
-        && let Ok(json) = serde_json::to_string(&choice_request)
-    {
-        let _ = ws_sender.send(Message::Text(json.into())).await;
-    }
+    let app_paths = manager.app_paths.clone();
+    let session_record = manager.session_record.clone();
+    let engine = manager.engine();
 
     let (outbound_tx, connection_outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let (socket_outbound_tx, outbound_rx) = mpsc::channel::<OutboundControl>(64);
@@ -561,6 +449,18 @@ pub(crate) async fn handle_workspace_socket(
         socket_outbound_tx,
         connection_id.clone(),
     ));
+    let (session_state, restored_choice_request) = manager
+        .attach(&connection_id, outbound_tx.clone())
+        .await;
+    if let Ok(json) = serde_json::to_string(&session_state.with_connection_id(&connection_id)) {
+        let _ = ws_sender.send(Message::Text(json.into())).await;
+    }
+    if let Some(choice_request) = restored_choice_request
+        && let Ok(json) = serde_json::to_string(&choice_request)
+    {
+        let _ = ws_sender.send(Message::Text(json.into())).await;
+    }
+
     let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
     state
         .test_controls
@@ -585,18 +485,8 @@ pub(crate) async fn handle_workspace_socket(
         }
     });
 
-    let current_run: Arc<Mutex<Option<WorkspaceActiveRun>>> = Arc::new(Mutex::new(None));
-    let next_run_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-    let run_context = ProviderRunContext {
-        provider_registry: state.provider_registry.clone(),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: state.workspace_runs.clone(),
-        session_id: session_id.clone(),
-        next_run_id: next_run_id.clone(),
-        app_paths: app_paths.clone(),
-        session_record: session_record.clone(),
-    };
+    let current_run = manager.current_run();
+    let run_context = manager.provider_run_context(state.workspace_runs.clone());
     let inbound_context = WorkspaceInboundContext {
         app_state: state.clone(),
         engine: engine.clone(),
@@ -606,13 +496,6 @@ pub(crate) async fn handle_workspace_socket(
         workspace_runs: state.workspace_runs.clone(),
         session_id: session_id.clone(),
     };
-    let event_forward_task = spawn_engine_event_forward_task(
-        engine_rx,
-        outbound_tx.clone(),
-        session_id.clone(),
-        state.workspace_runs.clone(),
-        Some(run_context.clone()),
-    );
     let human_gate_recovery = {
         let active_node_id = engine.lock().await.active_timeline_node_id();
         let provider_is_running = state
@@ -919,14 +802,13 @@ pub(crate) async fn handle_workspace_socket(
             let _ = send_json_outbound(&outbound_tx, &state_msg).await;
         }
     }
+    manager.detach(&connection_id).await;
     drop(outbound_tx);
     connection_outbound_task.abort();
     idle_timeout_task.abort();
     socket_control_task.abort();
-    event_forward_task.abort();
     send_task.abort();
     let _ = connection_outbound_task.await;
     let _ = socket_control_task.await;
-    let _ = event_forward_task.await;
     let _ = send_task.await;
 }
