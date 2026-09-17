@@ -1,13 +1,10 @@
 use chrono::Utc;
 
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::VerificationPlan;
 
-use super::{
-    CreateVerificationPlanInput, LifecycleStore, count_json_files, delete_required_file,
-    list_json_records,
-};
+use super::{CreateVerificationPlanInput, LifecycleStore, delete_required_file, list_json_records};
 
 impl LifecycleStore {
     pub fn create_verification_plan(
@@ -24,7 +21,9 @@ impl LifecycleStore {
                 validate_relative_id(id)?;
                 id.clone()
             }
-            None => next_sequential_id("verification_plan", count_json_files(&root)?),
+            None => next_sequential_id_in_directory("verification_plan", &root).map_err(
+                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+            )?,
         };
         let now = Utc::now().to_rfc3339();
         let plan = VerificationPlan {

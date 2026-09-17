@@ -1186,6 +1186,31 @@ fn validate_confirm_aggregate_spec_ignores_non_story_design_workspace() {
         .expect("non story/design workspace must skip the aggregate confirm gate");
 }
 
+
+#[test]
+fn lifecycle_creation_uses_ids_above_deleted_middle_records() {
+    let (_tmp, store) = setup();
+    let create_story = |title: &str| {
+        store
+            .create_story_spec(CreateStorySpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                title: title.to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap()
+    };
+    let _first = create_story("First");
+    let middle = create_story("Middle");
+    let _last = create_story("Last");
+    store
+        .delete_story_spec(PROJECT_ID, ISSUE_ID, &middle.id)
+        .unwrap();
+
+    assert_eq!(create_story("Replacement").id, "story_spec_0004");
+}
+
 // Task 9 三元键 shared worktree 回归测试拆分到独立文件，经 include! 引入（large_file_guard 1200 行红线）。
 include!("tests/task9_repo_worktree.rs");
 include!("tests/human_gate_recovery.rs");

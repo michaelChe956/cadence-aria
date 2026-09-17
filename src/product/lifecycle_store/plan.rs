@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     IssueWorkItemPlan, IssueWorkItemPlanStatus, ProviderName, RepositoryProfile,
@@ -11,8 +11,7 @@ use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
 use super::{
     CreateIssueWorkItemPlanInput, CreateRepositoryProfileInput, CreateVerificationPlanInput,
     CreateWorkItemInput, IssueWorkItemPlanUpdate, LifecycleStore, WorkItemPlanCandidateSnapshot,
-    child_directories, count_json_files, delete_required_file, list_json_records,
-    remove_file_if_exists, validate_relative_ids,
+    delete_required_file, list_json_records, remove_file_if_exists, validate_relative_ids,
 };
 
 impl LifecycleStore {
@@ -31,7 +30,9 @@ impl LifecycleStore {
                 validate_relative_id(id)?;
                 id.clone()
             }
-            None => next_sequential_id("issue_work_item_plan", count_json_files(&root)?),
+            None => next_sequential_id_in_directory("issue_work_item_plan", &root).map_err(
+                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+            )?,
         };
         let now = Utc::now().to_rfc3339();
         let plan = IssueWorkItemPlan {
@@ -520,7 +521,9 @@ impl LifecycleStore {
                 validate_relative_id(id)?;
                 id.clone()
             }
-            None => next_sequential_id("repository_profile", count_json_files(&root)?),
+            None => next_sequential_id_in_directory("repository_profile", &root).map_err(
+                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+            )?,
         };
         let now = Utc::now().to_rfc3339();
         let profile = RepositoryProfile {
@@ -602,8 +605,8 @@ impl LifecycleStore {
         validate_relative_id(issue_id)?;
 
         let root = self.provider_runs_root(project_id, issue_id);
-        let existing = child_directories(&root)?.len();
-        let id = next_sequential_id("provider_run_split", existing);
+        let id = next_sequential_id_in_directory("provider_run_split", &root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
         let dir = root.join(&id);
         let now = Utc::now().to_rfc3339();
         write_json(

@@ -1,17 +1,14 @@
 use chrono::Utc;
 use std::path::PathBuf;
 
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     LifecycleWorkItemRecord, WorkItemExecutionPlanStatus, WorkItemPlanStatus, WorkItemStatus,
     WorkspaceType,
 };
 
-use super::{
-    CreateWorkItemInput, LifecycleStore, count_json_files, delete_required_file, list_json_records,
-    validate_relative_ids,
-};
+use super::{CreateWorkItemInput, LifecycleStore, count_json_files, delete_required_file, list_json_records, validate_relative_ids};
 
 impl LifecycleStore {
     pub fn create_work_item(
@@ -30,7 +27,9 @@ impl LifecycleStore {
                 validate_relative_id(id)?;
                 id.clone()
             }
-            None => next_sequential_id("work_item", count_json_files(&root)?),
+            None => next_sequential_id_in_directory("work_item", &root).map_err(|error| {
+                ProductStoreError::Io(format!("read {}: {error}", root.display()))
+            })?,
         };
         let now = Utc::now().to_rfc3339();
         let work_item = LifecycleWorkItemRecord {

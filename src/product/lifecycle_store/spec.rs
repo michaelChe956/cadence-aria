@@ -1,7 +1,7 @@
 use chrono::Utc;
 use std::path::PathBuf;
 
-use crate::product::id::next_sequential_id;
+use crate::product::id::{next_sequential_id, next_sequential_id_in_directory};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     DesignSpecRecord, LifecycleConfirmationStatus, ProjectProviderDefaultsRecord,
@@ -11,8 +11,8 @@ use crate::product::models::{
 use super::{
     AggregateDesignSpecScope, AggregateStorySpecScope, AppendSpecVersionInput,
     CreateDesignSpecInput, CreateProjectProviderDefaultsInput, CreateStorySpecInput,
-    LifecycleStore, count_json_files, delete_required_file, ensure_target_absent,
-    list_json_records, path_is_regular_file, remove_dir_all_if_exists, validate_relative_ids,
+    LifecycleStore, delete_required_file, ensure_target_absent, list_json_records,
+    path_is_regular_file, remove_dir_all_if_exists, validate_relative_ids,
 };
 
 pub(crate) enum ExistingSpecRecord {
@@ -124,7 +124,8 @@ impl LifecycleStore {
         }
 
         let root = self.story_specs_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("story_spec", count_json_files(&root)?);
+        let id = next_sequential_id_in_directory("story_spec", &root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
         let now = Utc::now().to_rfc3339();
 
         // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
@@ -207,7 +208,8 @@ impl LifecycleStore {
         validate_relative_ids(&input.story_spec_ids)?;
 
         let root = self.design_specs_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("design_spec", count_json_files(&root)?);
+        let id = next_sequential_id_in_directory("design_spec", &root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
         let now = Utc::now().to_rfc3339();
 
         // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
