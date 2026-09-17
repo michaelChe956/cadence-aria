@@ -86,6 +86,8 @@ pub(crate) struct ProviderRunContext {
     pub(crate) engine: Arc<Mutex<WorkspaceEngine>>,
     pub(crate) workspace_runs: WorkspaceRunRegistry,
     pub(crate) session_id: String,
+    pub(crate) connection_id: Option<String>,
+    pub(crate) lease_epoch: Option<u64>,
     pub(crate) app_paths: ProductAppPaths,
     pub(crate) session_record: WorkspaceSessionRecord,
 }
@@ -114,6 +116,8 @@ impl ProviderRunContext {
             engine,
             workspace_runs,
             session_id,
+            connection_id: None,
+            lease_epoch: None,
             app_paths,
             session_record,
         }

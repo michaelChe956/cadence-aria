@@ -29,6 +29,8 @@ struct Attachment {
     // Hello 前的一个 RTT 内，连接维持 legacy driver 等价，待 Hello 归一后覆盖。
     role: ConnectionRole,
     after_event_seq: Option<u64>,
+    lease_epoch: u64,
+    provisional_lease: Option<LeaseState>,
 }
 
 struct ManagerState {
@@ -261,12 +263,48 @@ impl WorkspaceSessionManager {
             engine: self.engine(),
             workspace_runs,
             session_id: self.session_id.clone(),
+            connection_id: None,
+            lease_epoch: None,
             app_paths: self.app_paths.clone(),
             session_record: self.session_record.clone(),
         }
     }
+    /// registry 在 sessions 互斥中调用，保证 attachment 登记与 idle 摘除不可交错。
+    pub(crate) fn register_attachment(
+        &self,
+        connection_id: &str,
+        outbound_tx: mpsc::Sender<OutboundControl>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(message) = state.recovery_error.clone() {
+            let _ = outbound_tx.try_send(OutboundControl::Text(
+                serde_json::to_string(&WsOutMessage::Error { message }).unwrap_or_else(|_| {
+                    "{\"type\":\"error\",\"message\":\"serialization failed\"}".to_string()
+                }),
+            ));
+        }
+        // role 字段直到 Hello 才可见。先以 legacy Driver 绑定保住旧客户端和第二
+        // 连接 abort 语义；若随后显式声明 Observer，bind_role 原样回滚此次临时接管。
+        let provisional_lease = state.lease.clone();
+        state.lease.acquire(connection_id);
+        let lease_epoch = state.lease.epoch;
+        state.attachments.insert(
+            connection_id.to_string(),
+            Attachment {
+                outbound_tx,
+                role: ConnectionRole::Driver,
+                after_event_seq: None,
+                lease_epoch,
+                provisional_lease: Some(provisional_lease),
+            },
+        );
+    }
 
-    /// run 的启动与 supersede 仅在该锁内裁决，防止附件间出现双活 run。
+    /// 内部 engine relay 的 run 启动与 supersede 仅在该锁内裁决，防止附件间出现
+    /// 双活 run。socket 路径须先经 `abort_active_run_from_attachment` 授权并中止。
     pub async fn start_run(
         &self,
         _kind: ProviderRunKind,
@@ -295,6 +333,7 @@ impl WorkspaceSessionManager {
         let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let node_id = requested_node_id;
+        let lease_epoch = state.lease.epoch;
         state.active_run = Some(ActiveRun {
             id: run_id,
             token,
@@ -302,11 +341,97 @@ impl WorkspaceSessionManager {
             cancel: cancel.clone(),
             command_tx,
             pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
-            lease_epoch: state.lease.epoch,
+            lease_epoch,
         });
         Ok((run_id, token, cancel, command_rx, node_id))
     }
 
+    /// 在取得 engine 锁前，以 attachment epoch 核验 lease 并立即 supersede 当前
+    /// run。故已被接管的迟到写永远不会取消 run，同时保留同一 holder 覆盖流式 run 的
+    /// 既有低延迟时序。
+    pub async fn abort_active_run_from_attachment(
+        &self,
+        connection_id: Option<&str>,
+        attachment_epoch: Option<u64>,
+    ) -> Result<(), String> {
+        let run = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(connection_id) = connection_id
+                && (state.lease.holder.as_deref() != Some(connection_id)
+                    || attachment_epoch != Some(state.lease.epoch))
+            {
+                return Err("STALE_DRIVER_LEASE".to_string());
+            }
+            state.active_run.take()
+        };
+        if let Some(run) = run {
+            Self::cancel_run(&run);
+        }
+        Ok(())
+    }
+
+    /// 在 provider 启动前再次检查 socket attachment 的 lease epoch，避免连接在
+    /// supersede 已触发后被新 driver 接管时，旧连接仍登记新的 run。
+    pub async fn start_run_from_attachment(
+        &self,
+        connection_id: Option<&str>,
+        attachment_epoch: Option<u64>,
+        _kind: ProviderRunKind,
+        requested_node_id: Option<String>,
+    ) -> Result<
+        (
+            u64,
+            u64,
+            CancellationToken,
+            mpsc::Receiver<ProviderCommand>,
+            Option<String>,
+        ),
+        String,
+    > {
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(connection_id) = connection_id
+            && (state.lease.holder.as_deref() != Some(connection_id)
+                || attachment_epoch != Some(state.lease.epoch))
+        {
+            return Err("STALE_DRIVER_LEASE".to_string());
+        }
+        if let Some(run) = state.active_run.take() {
+            Self::cancel_run(&run);
+        }
+        state.next_run_id += 1;
+        let run_id = state.next_run_id;
+        let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let node_id = requested_node_id;
+        let lease_epoch = state.lease.epoch;
+        state.active_run = Some(ActiveRun {
+            id: run_id,
+            token,
+            node_id: node_id.clone(),
+            cancel: cancel.clone(),
+            command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
+            lease_epoch,
+        });
+        Ok((run_id, token, cancel, command_rx, node_id))
+    }
+
+    pub(crate) fn lease_epoch_for_connection(&self, connection_id: &str) -> Option<u64> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .attachments
+            .get(connection_id)
+            .map(|attachment| attachment.lease_epoch)
+    }
     pub async fn finish_run(self: &Arc<Self>, token: u64) {
         {
             let mut state = self
@@ -383,11 +508,18 @@ impl WorkspaceSessionManager {
         run.cancel.cancel();
     }
 
-    /// REQ-WCR-03：连接关闭只摘除 attachment；不得因为连接读循环结束写入 durable
-    /// 终态、覆盖活动节点或整流 session stage。诊断由 socket 在调用前记录；lease
-    /// 关闭记录由 Task 8 在此处接入。
+    /// REQ-WCR-03：连接关闭只摘除 attachment；若它持有 lease，仅撤销该授权。
+    /// 连接关闭绝不取消 run、不写入 durable 终态也不改写 engine 状态。
     pub(crate) async fn handle_connection_closed(self: &Arc<Self>, connection_id: &str) {
-        self.detach(connection_id).await;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.lease.revoke_if_holder(connection_id);
+            state.attachments.remove(connection_id);
+        }
+        self.maybe_recycle().await;
     }
 
     pub fn engine(&self) -> Arc<Mutex<WorkspaceEngine>> {
@@ -398,50 +530,50 @@ impl WorkspaceSessionManager {
         self.engine_tx.clone()
     }
 
-    /// registry 在 sessions 互斥中调用，保证 attachment 登记与 idle 摘除不可交错。
-    pub(crate) fn register_attachment(
-        &self,
-        connection_id: &str,
-        outbound_tx: mpsc::Sender<OutboundControl>,
-    ) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(message) = state.recovery_error.clone() {
-            let _ = outbound_tx.try_send(OutboundControl::Text(
-                serde_json::to_string(&WsOutMessage::Error { message }).unwrap_or_else(|_| {
-                    "{\"type\":\"error\",\"message\":\"serialization failed\"}".to_string()
-                }),
-            ));
-        }
-        state.attachments.insert(
-            connection_id.to_string(),
-            Attachment {
-                outbound_tx,
-                role: ConnectionRole::Driver,
-                after_event_seq: None,
-            },
-        );
-    }
-
-    /// Hello 入口完成 wire role 的一次归一；每个 attachment 的出站通道唯一对应连接。
+    /// Hello 入口完成 wire role 的一次归一。显式或 legacy Driver 在绑定时获取 lease；
+    /// observer 只记录读面角色，绝不获取或接管 lease。
     pub(crate) fn bind_role(
         &self,
         outbound_tx: &mpsc::Sender<OutboundControl>,
         role: ConnectionRole,
         after_event_seq: Option<u64>,
     ) {
-        if let Some(attachment) = self
+        let mut state = self
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let connection_id = state
             .attachments
-            .values_mut()
-            .find(|attachment| attachment.outbound_tx.same_channel(outbound_tx))
-        {
-            attachment.role = role;
-            attachment.after_event_seq = after_event_seq;
+            .iter_mut()
+            .find_map(|(connection_id, attachment)| {
+                if attachment.outbound_tx.same_channel(outbound_tx) {
+                    attachment.role = role;
+                    attachment.after_event_seq = after_event_seq;
+                    Some(connection_id.clone())
+                } else {
+                    None
+                }
+            });
+        let Some(connection_id) = connection_id else {
+            return;
+        };
+        if role == ConnectionRole::Observer {
+            let rollback = state
+                .attachments
+                .get_mut(&connection_id)
+                .and_then(|attachment| attachment.provisional_lease.take());
+            if let Some(rollback) = rollback
+                && state.lease.holder.as_deref() == Some(connection_id.as_str())
+            {
+                state.lease = rollback;
+            }
+            return;
+        }
+        state.lease.acquire(&connection_id);
+        let lease_epoch = state.lease.epoch;
+        if let Some(attachment) = state.attachments.get_mut(&connection_id) {
+            attachment.lease_epoch = lease_epoch;
+            attachment.provisional_lease = None;
         }
     }
 
@@ -455,8 +587,8 @@ impl WorkspaceSessionManager {
             .unwrap_or(ConnectionRole::Driver)
     }
 
-    /// 读循环在取得 engine 锁之前调用。只拒绝显式 observer 的写面，缺席 role 已在
-    /// Hello 入口归一为 Driver，保留 legacy 客户端既有互操作语义。
+    /// 读循环在取得 engine 锁之前调用。无 role 已在 Hello 入口归一为 Driver；任何
+    /// 非 holder 的 Driver 写面都必须由 lease 以 STALE_DRIVER_LEASE 拒绝。
     pub(crate) fn arbitrate(
         &self,
         connection_id: &str,
@@ -466,17 +598,24 @@ impl WorkspaceSessionManager {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let role = state
+        let (role, lease_epoch) = state
             .attachments
             .get(connection_id)
-            .map(|attachment| attachment.role)
+            .map(|attachment| (attachment.role, attachment.lease_epoch))
             // attachment 只会在 socket 收尾时摘除；若发生内部竞态，写面保守拒绝。
-            .unwrap_or(ConnectionRole::Observer);
-        if role == ConnectionRole::Observer && is_write_message(message) {
-            Err(role)
-        } else {
-            Ok(())
+            .unwrap_or((ConnectionRole::Observer, 0));
+        if !is_write_message(message) {
+            return Ok(());
         }
+        if role == ConnectionRole::Observer {
+            return Err(ConnectionRole::Observer);
+        }
+        if state.lease.holder.as_deref() != Some(connection_id)
+            || !state.lease.matches_epoch(lease_epoch)
+        {
+            return Err(ConnectionRole::Driver);
+        }
+        Ok(())
     }
     /// 返回已登记 attachment 的 initial snapshot 与已恢复 choice。
     pub(crate) async fn attached_session_state(&self) -> (WsOutMessage, Option<WsOutMessage>) {

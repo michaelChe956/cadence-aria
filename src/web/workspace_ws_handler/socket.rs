@@ -470,7 +470,9 @@ pub(crate) async fn handle_workspace_socket(
         }
     });
 
-    let run_context = manager.provider_run_context(state.workspace_runs.clone());
+    let mut run_context = manager.provider_run_context(state.workspace_runs.clone());
+    run_context.connection_id = Some(connection_id.clone());
+    run_context.lease_epoch = manager.lease_epoch_for_connection(&connection_id);
     let inbound_context = WorkspaceInboundContext {
         app_state: state.clone(),
         engine: engine.clone(),
@@ -529,12 +531,24 @@ pub(crate) async fn handle_workspace_socket(
                 };
                 let in_msg = &envelope.message;
                 if let Err(role) = manager.arbitrate(&connection_id, in_msg) {
+                    let stale_driver = role == crate::web::workspace_session::ConnectionRole::Driver;
                     let err = WsOutMessage::ProtocolError {
-                        code: "OBSERVER_WRITE_REJECTED".to_string(),
-                        message: format!(
-                            "observer connection cannot send write message {}",
-                            message_type(in_msg)
-                        ),
+                        code: if stale_driver {
+                            "STALE_DRIVER_LEASE".to_string()
+                        } else {
+                            "OBSERVER_WRITE_REJECTED".to_string()
+                        },
+                        message: if stale_driver {
+                            format!(
+                                "driver connection no longer holds the lease for write message {}",
+                                message_type(in_msg)
+                            )
+                        } else {
+                            format!(
+                                "observer connection cannot send write message {}",
+                                message_type(in_msg)
+                            )
+                        },
                         context: Some(serde_json::json!({
                             "role": role.as_str(),
                             "received": message_type(in_msg),

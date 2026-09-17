@@ -584,6 +584,17 @@ async fn workspace_ws_second_connection_does_not_mark_active_run_stale() {
     let (mut secondary, _) = connect_async(url.clone())
         .await
         .expect("connect secondary ws");
+    send_json(
+        &mut secondary,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+
     match recv_json(&mut secondary).await {
         WsOutMessage::SessionState {
             stage,
@@ -608,8 +619,10 @@ async fn workspace_ws_second_connection_does_not_mark_active_run_stale() {
     server.abort();
 }
 
+/// 缺席 role 的 legacy 次连接接管 lease 后仍可中止活动 run；被接管的主连接
+/// 此后任何迟到写均须被拒绝，保持旧脚本的次连接 abort 行为同时收紧单活写面。
 #[tokio::test]
-async fn workspace_ws_secondary_connection_can_abort_active_run_started_by_primary() {
+async fn workspace_ws_secondary_connection_takes_lease_and_can_abort_active_run_started_by_primary() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture(&root).await;
     let mut registry = ProviderRegistry::new();
@@ -644,6 +657,12 @@ async fn workspace_ws_secondary_connection_can_abort_active_run_started_by_prima
         .await
         .expect("connect secondary ws");
     let _secondary_state = recv_json(&mut secondary).await;
+
+    send_json(&mut primary, &WsInMessage::Abort).await;
+    match recv_json(&mut primary).await {
+        WsOutMessage::ProtocolError { code, .. } => assert_eq!(code, "STALE_DRIVER_LEASE"),
+        other => panic!("primary stale write must be rejected after secondary takeover, got {other:?}"),
+    }
 
     send_json(&mut secondary, &WsInMessage::Abort).await;
     tokio::time::timeout(

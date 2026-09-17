@@ -651,3 +651,190 @@ async fn workspace_session_manager_recycled_after_terminal_without_subscribers()
     drop(again);
     server.abort();
 }
+
+/// REQ-WCR-02：第二个 legacy driver 接管会话 lease；被接管的旧连接迟到写必须
+/// 以可诊断的协议错误拒绝，而当前 holder 仍可中止同一活动 run。
+#[tokio::test]
+async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut first_driver, _) = connect_async(url.clone()).await.expect("first driver");
+    let _initial = recv_json(&mut first_driver).await;
+    send_json(
+        &mut first_driver,
+        &WsInMessage::UserMessage {
+            content: long_message("lease_takeover"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut first_driver).await;
+
+    let (mut second_driver, _) = connect_async(url).await.expect("second driver");
+    let _second_initial = recv_json(&mut second_driver).await;
+
+    send_json(&mut first_driver, &WsInMessage::Abort).await;
+    match recv_json(&mut first_driver).await {
+        WsOutMessage::ProtocolError { code, .. } => assert_eq!(code, "STALE_DRIVER_LEASE"),
+        other => panic!("stale driver write must be rejected, got {other:?}"),
+    }
+
+    drop(first_driver);
+    send_json(&mut second_driver, &WsInMessage::Abort).await;
+    match recv_json(&mut second_driver).await {
+        WsOutMessage::ProviderStatus { status } => assert_eq!(status, WsProviderStatus::Aborted),
+        other => panic!("lease holder abort should cancel the active run, got {other:?}"),
+    }
+
+    drop(second_driver);
+    complete.notify_one();
+    server.abort();
+}
+
+/// REQ-WCR-02：driver close 只撤销连接持有型 lease，不取消正在运行的 provider，
+/// 后续真实完成仍写入业务终态且不产生断连中止 marker。
+#[tokio::test]
+async fn workspace_ws_driver_close_revokes_lease_run_completes() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url).await.expect("driver");
+    let _initial = recv_json(&mut driver).await;
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("driver_close_revokes_lease"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut driver).await;
+    drop(driver);
+
+    let diagnostic = wait_for_connection_diagnostic(&controls, "eof").await;
+    assert_eq!(diagnostic["role"], "driver");
+    assert!(diagnostic["current_run_token"].as_u64().is_some());
+
+    complete.notify_one();
+    let mut completed = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let nodes = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+            .load_timeline_nodes("workspace_session_0001")
+            .expect("timeline nodes");
+        if persisted_workspace_messages(root.path())
+            .iter()
+            .any(|message| message.role == "assistant" && message.content.contains("# Story Spec"))
+        {
+            assert!(
+                nodes
+                    .iter()
+                    .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect),
+                "driver close must not write an aborted_by_disconnect marker"
+            );
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "revoking a lease must leave the run to its business completion");
+    server.abort();
+}
+
+/// REQ-WCR-02/F1：显式 observer 的 Hello 不得接管 driver lease；读面的 initial
+/// snapshot 仍可用，而现任 driver 必须继续能够中止 run。
+#[tokio::test]
+async fn workspace_ws_observer_connection_does_not_take_over_lease() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url.clone()).await.expect("driver");
+    let _initial = recv_json(&mut driver).await;
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("observer_does_not_take_lease"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut driver).await;
+
+    let (mut observer, _) = connect_async(url).await.expect("observer");
+    send_json(
+        &mut observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_json(&mut observer).await,
+        WsOutMessage::SessionState { .. }
+    ));
+
+    send_json(&mut driver, &WsInMessage::Abort).await;
+    match recv_json(&mut driver).await {
+        WsOutMessage::ProviderStatus { status } => assert_eq!(status, WsProviderStatus::Aborted),
+        other => panic!("observer must not stale the driver lease, got {other:?}"),
+    }
+
+    drop(observer);
+    drop(driver);
+    complete.notify_one();
+    server.abort();
+}

@@ -37,13 +37,33 @@ pub const fn is_write_message(message: &WsInMessage) -> bool {
     !matches!(message, WsInMessage::Hello { .. } | WsInMessage::Ping)
 }
 
+/// 会话级单活性 driver lease。它绑定于 WebSocket attachment，不设超时定时器：
+/// lease 的唯一过期条件是当前 holder 的连接关闭。
 #[derive(Debug, Clone, Default)]
 pub struct LeaseState {
     pub holder: Option<String>,
     pub epoch: u64,
+    pub last_holder: Option<String>,
 }
 
 impl LeaseState {
+    /// Driver 在 Hello 绑定时显式获取 lease；已有另一 holder 时立即接管并推进 epoch。
+    pub fn acquire(&mut self, connection_id: &str) {
+        if self.holder.as_deref() != Some(connection_id) {
+            self.epoch += 1;
+            self.holder = Some(connection_id.to_string());
+        }
+    }
+
+    /// 仅 holder 的连接关闭才撤销 lease；运行的生命周期完全不受影响。
+    pub fn revoke_if_holder(&mut self, connection_id: &str) -> bool {
+        if self.holder.as_deref() != Some(connection_id) {
+            return false;
+        }
+        self.last_holder = self.holder.take();
+        true
+    }
+
     pub const fn matches_epoch(&self, epoch: u64) -> bool {
         self.epoch == epoch
     }
