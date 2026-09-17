@@ -528,6 +528,21 @@ pub(crate) async fn handle_workspace_socket(
                     }
                 };
                 let in_msg = &envelope.message;
+                if let Err(role) = manager.arbitrate(&connection_id, in_msg) {
+                    let err = WsOutMessage::ProtocolError {
+                        code: "OBSERVER_WRITE_REJECTED".to_string(),
+                        message: format!(
+                            "observer connection cannot send write message {}",
+                            message_type(in_msg)
+                        ),
+                        context: Some(serde_json::json!({
+                            "role": role.as_str(),
+                            "received": message_type(in_msg),
+                        })),
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                    continue;
+                }
 
                 let stage_type_and_cancel_replay = if requires_stage_validation(in_msg)
                     && !single_candidate_generation_decision_bypasses_stage_validation(

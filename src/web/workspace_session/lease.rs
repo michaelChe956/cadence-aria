@@ -1,5 +1,7 @@
 use crate::web::workspace_ws_types::HelloRole;
 
+use crate::web::workspace_ws_types::WsInMessage;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionRole {
     Driver,
@@ -27,6 +29,12 @@ impl ConnectionRole {
             Self::Observer => "observer",
         }
     }
+}
+
+/// 协议读白名单：显式 observer 只允许完成握手或保持连接；其余消息全部视为写，
+/// 以便新增消息类型默认落入拒绝面。
+pub const fn is_write_message(message: &WsInMessage) -> bool {
+    !matches!(message, WsInMessage::Hello { .. } | WsInMessage::Ping)
 }
 
 #[derive(Debug, Clone, Default)]

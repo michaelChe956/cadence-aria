@@ -19,8 +19,9 @@ use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::test_controls::TestControls;
 use cadence_aria::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType,
-    TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,
+    ArtifactPayload, ArtifactVersion, AuthorDecision, HelloRole, ProviderConfigSnapshot,
+    ReviewVerdictType, TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage,
+    WsProviderStatus,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};

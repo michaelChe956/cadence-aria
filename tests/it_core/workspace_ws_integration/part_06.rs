@@ -187,6 +187,120 @@ async fn workspace_ws_passive_connection_receives_live_stream_events() {
     server.abort();
 }
 
+/// REQ-WCR-02：显式 observer 的写命令必须在进入 engine 前被拒绝；缺席 role 的
+/// legacy driver 兼容语义由 part_03 的 secondary abort 用例持续覆盖。
+#[tokio::test]
+async fn workspace_ws_observer_write_commands_are_rejected_and_run_untouched() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url.clone()).await.expect("driver");
+    send_json(
+        &mut driver,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    let _state = recv_json(&mut driver).await;
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("observer_reject_probe"),
+        },
+    )
+    .await;
+    let _chunk = recv_until_stream_chunk(&mut driver).await;
+
+    let (mut observer, _) = connect_async(url.clone()).await.expect("observer");
+    send_json(
+        &mut observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    let _snapshot = recv_json(&mut observer).await;
+
+    for message in [
+        WsInMessage::Abort,
+        WsInMessage::UserMessage {
+            content: "observer write".into(),
+        },
+        WsInMessage::Advance {
+            command_id: "cmd-obs-1".into(),
+        },
+        WsInMessage::ContextNote {
+            content: "future write family defaults to rejected".into(),
+        },
+    ] {
+        send_json(&mut observer, &message).await;
+        match recv_json(&mut observer).await {
+            WsOutMessage::ProtocolError {
+                code,
+                context: Some(context),
+                ..
+            } => {
+                assert_eq!(code, "OBSERVER_WRITE_REJECTED");
+                assert_eq!(context["role"], "observer");
+                assert_eq!(context["received"], message_type_for_test(&message));
+            }
+            other => panic!("observer write must be rejected diagnostically, got {other:?}"),
+        }
+    }
+
+    complete.notify_one();
+    let mut completed = false;
+    for _ in 0..200 {
+        match recv_json(&mut driver).await {
+            WsOutMessage::MessageComplete { .. } | WsOutMessage::StageChange { .. } => {
+                completed = true;
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("driver ws error: {message}"),
+            _ => continue,
+        }
+    }
+    assert!(completed, "observer 被拒写不得影响 driver run 至完成");
+
+    drop(observer);
+    drop(driver);
+    server.abort();
+}
+
+fn message_type_for_test(message: &WsInMessage) -> &'static str {
+    match message {
+        WsInMessage::Abort => "abort",
+        WsInMessage::UserMessage { .. } => "user_message",
+        WsInMessage::Advance { .. } => "advance",
+        WsInMessage::ContextNote { .. } => "context_note",
+        _ => unreachable!("test only constructs observer write commands"),
+    }
+}
+
 fn durable_tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     fn visit(
         base: &std::path::Path,

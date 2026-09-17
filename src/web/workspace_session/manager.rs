@@ -14,13 +14,15 @@ use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSe
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
 use crate::web::workspace_context::ensure_workspace_context_message;
-use crate::web::workspace_session::{ConnectionRole, LeaseState, WorkspaceSessionRegistry};
+use crate::web::workspace_session::{
+    ConnectionRole, LeaseState, WorkspaceSessionRegistry, is_write_message,
+};
 use crate::web::workspace_ws_handler::{
     OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind, map_engine_event,
     planning_resume_decision_with_fresh_index, planning_resume_run_kind,
     spawn_provider_run_from_event, spawn_provider_run_from_handler,
 };
-use crate::web::workspace_ws_types::WsOutMessage;
+use crate::web::workspace_ws_types::{WsInMessage, WsOutMessage};
 
 struct Attachment {
     outbound_tx: mpsc::Sender<OutboundControl>,
@@ -453,6 +455,29 @@ impl WorkspaceSessionManager {
             .unwrap_or(ConnectionRole::Driver)
     }
 
+    /// 读循环在取得 engine 锁之前调用。只拒绝显式 observer 的写面，缺席 role 已在
+    /// Hello 入口归一为 Driver，保留 legacy 客户端既有互操作语义。
+    pub(crate) fn arbitrate(
+        &self,
+        connection_id: &str,
+        message: &WsInMessage,
+    ) -> Result<(), ConnectionRole> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let role = state
+            .attachments
+            .get(connection_id)
+            .map(|attachment| attachment.role)
+            // attachment 只会在 socket 收尾时摘除；若发生内部竞态，写面保守拒绝。
+            .unwrap_or(ConnectionRole::Observer);
+        if role == ConnectionRole::Observer && is_write_message(message) {
+            Err(role)
+        } else {
+            Ok(())
+        }
+    }
     /// 返回已登记 attachment 的 initial snapshot 与已恢复 choice。
     pub(crate) async fn attached_session_state(&self) -> (WsOutMessage, Option<WsOutMessage>) {
         for attempt in 0..2 {
