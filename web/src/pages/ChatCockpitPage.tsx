@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, History } from "lucide-react";
+import { ArrowLeft, Check, ClipboardCopy, GitBranch, History } from "lucide-react";
+import type { AuthorDecisionChoice } from "../api/types";
 import { takeoverWorkspaceSession } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
-import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
+import { ArtifactReviewPanel } from "../components/chat-workspace/ArtifactReviewPanel";
+import {
+  ChatInputBar,
+  type ChatInputBarHandle,
+} from "../components/chat-workspace/ChatInputBar";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import {
   DisconnectBanner,
@@ -37,6 +42,7 @@ import {
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { selectLatestReviewReport } from "../state/workspace-ws-selectors";
 import {
   COCKPIT_HOTKEYS,
   type ConfirmTwiceButtonHandle,
@@ -53,9 +59,11 @@ import {
   clampReviewRounds,
   latestUnacknowledgedAbortedNode,
   numericContentCacheValues,
+  optionalWorkItemPlanReviewDecisionOptions,
   providerConfigFor,
   ProviderConfigDialogButton,
   requestIdFromEntry,
+  ReviewDecisionActionBar,
   scrollTargetEntryIdForNode,
   UNLOAD_GUARDED_STAGES,
   UNLOAD_GUARD_MESSAGE,
@@ -148,9 +156,9 @@ export function ChatCockpitPage({
   const { loadContent, cacheContent: cacheCurrentContent } = useWorkspaceContentLoaders(selectedSessionId);
   const cacheContent = takeoverSessionId === null ? cacheCurrentContent : undefined;
   const [drilldownNodeId, setDrilldownNodeId] = useState<string | null>(null);
-  const [drilldownView, setDrilldownView] = useState<"conversation" | "plan">(
-    "conversation",
-  );
+  const [drilldownView, setDrilldownView] = useState<
+    "conversation" | "plan" | "artifact"
+  >("conversation");
   const [jumpEntryId, setJumpEntryId] = useState<string | null>(null);
   const isCurrentSession = takeoverSessionId === null;
   const canConfigureProviders =
@@ -218,6 +226,27 @@ export function ChatCockpitPage({
     [workspaceWs.sendChoiceResponse],
   );
   const isPlanApprovalSession = selectedState?.workspaceType === "work_item_plan";
+  const isArtifactReviewSession =
+    selectedState?.workspaceType === "story" || selectedState?.workspaceType === "design";
+  const chatInputRef = useRef<ChatInputBarHandle | null>(null);
+  const activeNode = useMemo(
+    () => state.timelineNodes.find((node) => node.node_id === state.activeNodeId) ?? null,
+    [state.activeNodeId, state.timelineNodes],
+  );
+  const latestReviewReport = useWorkspaceStore(selectLatestReviewReport);
+  const changelogSummary = useMemo(() => {
+    const lastCompletedRevision = (selectedState?.timelineNodes ?? [])
+      .filter((node) => node.node_type === "revision" && node.status === "completed")
+      .at(-1);
+    const summary = lastCompletedRevision?.summary?.trim();
+    return summary ? summary : undefined;
+  }, [selectedState?.timelineNodes]);
+  const reviewDecisionOptions = useMemo(
+    () =>
+      state.pendingDecision?.options ??
+      optionalWorkItemPlanReviewDecisionOptions(state.workspaceType, state.chatEntries),
+    [state.chatEntries, state.pendingDecision?.options, state.workspaceType],
+  );
   const artifactContentCacheValues = useMemo(
     () =>
       // 轮次缓存键是裸版本号，跨会话会碰撞（P1，审查 fix round 1）：
@@ -243,6 +272,16 @@ export function ChatCockpitPage({
       storeState.setArtifactContentCacheEntry(version, markdown);
     },
     [selectedSessionId],
+  );
+  const handleAuthorDecision = useCallback(
+    (decision: AuthorDecisionChoice, feedback?: string) => {
+      if (decision === "revise") {
+        workspaceWs.sendAuthorDecision("revise", feedback);
+        return;
+      }
+      workspaceWs.sendAuthorDecision(decision);
+    },
+    [workspaceWs.sendAuthorDecision],
   );
   const handleJumpToEntry = useCallback((entryId: string) => {
     setDrilldownView("conversation");
@@ -433,6 +472,14 @@ export function ChatCockpitPage({
     chatListRef.current?.scrollToEntry(jumpEntryId);
     setJumpEntryId(null);
   }, [jumpEntryId]);
+  useEffect(() => {
+    if (
+      selectedState?.stage === "author_confirm" &&
+      (selectedState.workspaceType === "story" || selectedState.workspaceType === "design")
+    ) {
+      setDrilldownView("artifact");
+    }
+  }, [selectedState?.stage, selectedState?.workspaceType]);
 
   return (
     <div
@@ -584,7 +631,7 @@ export function ChatCockpitPage({
           <section
             data-testid="cockpit-conversation-flow"
             aria-label="下钻对话流"
-            className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+            className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
           >
             <div className="flex min-w-0 items-center gap-2 px-3 py-2">
               <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
@@ -615,7 +662,7 @@ export function ChatCockpitPage({
                   {providerSummary}
                 </span>
               )}
-              {isPlanApprovalSession ? (
+              {isArtifactReviewSession || isPlanApprovalSession ? (
                 <div
                   role="tablist"
                   aria-label="下钻视图"
@@ -631,20 +678,80 @@ export function ChatCockpitPage({
                   >
                     对话流
                   </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={drilldownView === "plan"}
-                    data-testid="cockpit-plan-approval-tab"
-                    onClick={() => setDrilldownView("plan")}
-                    className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                  >
-                    计划审批
-                  </button>
+                  {isArtifactReviewSession ? (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={drilldownView === "artifact"}
+                      data-testid="cockpit-artifact-review-tab"
+                      onClick={() => setDrilldownView("artifact")}
+                      className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                    >
+                      产物审核
+                    </button>
+                  ) : null}
+                  {isPlanApprovalSession ? (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={drilldownView === "plan"}
+                      data-testid="cockpit-plan-approval-tab"
+                      onClick={() => setDrilldownView("plan")}
+                      className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                    >
+                      计划审批
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
-            {drilldownView === "plan" && isPlanApprovalSession ? (
+            {drilldownView === "artifact" && isArtifactReviewSession ? (
+              <ArtifactReviewPanel
+                artifactVersions={selectedState?.artifactVersions ?? []}
+                artifact={selectedState?.artifact ?? null}
+                sessionId={isCurrentSession ? sessionId : null}
+                artifactContentCache={artifactContentCacheValues}
+                loadArtifactVersion={loadVersionMarkdown}
+                onCacheArtifactContent={cacheVersionMarkdown}
+                changelogSummary={changelogSummary}
+                onClose={() => setDrilldownView("conversation")}
+                actions={
+                  isCurrentSession && state.stage === "author_confirm" ? (
+                    <>
+                      {latestReviewReport ? (
+                        <button
+                          type="button"
+                          className="btn-secondary h-9"
+                          onClick={() => {
+                            chatInputRef.current?.prefill(
+                              `按以下 review 意见修订：\n\n${latestReviewReport}`,
+                            );
+                            setDrilldownView("conversation");
+                          }}
+                        >
+                          <ClipboardCopy className="h-4 w-4" /> 采纳 Review 意见
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className={state.reviewerEnabled ? "btn-primary h-9" : "btn-secondary h-9"}
+                        onClick={() => handleAuthorDecision("accept_with_review")}
+                      >
+                        <GitBranch className="h-4 w-4" /> 确认并送审
+                      </button>
+                      <button
+                        type="button"
+                        className={state.reviewerEnabled ? "btn-secondary h-9" : "btn-primary h-9"}
+                        onClick={() => handleAuthorDecision("accept_finalize")}
+                      >
+                        <Check className="h-4 w-4" /> 确认定稿
+                      </button>
+                    </>
+                  ) : undefined
+                }
+                className="min-h-0"
+              />
+            ) : drilldownView === "plan" && isPlanApprovalSession ? (
               <PlanApprovalPanel
                 key={selectedSessionId}
                 sessionId={selectedSessionId}
@@ -670,16 +777,34 @@ export function ChatCockpitPage({
                 testId="cockpit-conversation-flow-list"
               />
             )}
-            {isCurrentSession && state.stage === "prepare_context" ? (
+            {isCurrentSession &&
+            (state.stage === "prepare_context" || state.stage === "author_confirm") ? (
               <ChatInputBar
+                ref={chatInputRef}
                 stage={state.stage}
+                activeNodeType={activeNode?.node_type ?? null}
+                workItemPlanArtifact={state.workItemPlanArtifact}
                 disabled={workspaceWs.connectionStatus !== "connected"}
                 humanConfirmDisabled={gateActionBlockReason !== null}
                 hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
                 onSendContextNote={workspaceWs.sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 onSendHumanDecision={actions.requestChange}
+                onAuthorDecision={handleAuthorDecision}
+                onSelectWorkItemGenerationMode={workspaceWs.sendSelectWorkItemGenerationMode}
+                onRequestOutlineRevision={() => workspaceWs.sendRequestOutlineRevision()}
+                onWorkItemDraftDecision={workspaceWs.sendWorkItemDraftDecision}
+                onWorkItemBatchDecision={workspaceWs.sendWorkItemBatchDecision}
                 onAbort={workspaceWs.abort}
+              />
+            ) : null}
+            {isCurrentSession && state.stage === "review_decision" ? (
+              <ReviewDecisionActionBar
+                options={reviewDecisionOptions}
+                onSelectDecision={workspaceWs.sendReviewDecision}
+                onSelectRevisionPath={(path, extraContext) =>
+                  workspaceWs.sendSelectRevisionPath(path, extraContext)
+                }
               />
             ) : null}
           </section>
