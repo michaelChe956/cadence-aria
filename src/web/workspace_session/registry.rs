@@ -53,7 +53,13 @@ impl WorkspaceSessionRegistry {
 
     /// 仅供测试及后续 Task 3 回收点观察；生产代码不遍历。
     pub async fn session_ids(&self) -> Vec<String> {
-        let mut ids = self.sessions.lock().await.keys().cloned().collect::<Vec<_>>();
+        let mut ids = self
+            .sessions
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         ids.sort();
         ids
     }

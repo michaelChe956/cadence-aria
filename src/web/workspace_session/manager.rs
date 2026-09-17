@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
@@ -39,6 +40,74 @@ pub struct WorkspaceSessionManager {
     current_run: Arc<Mutex<Option<crate::web::state::WorkspaceActiveRun>>>,
     next_run_id: Arc<Mutex<u64>>,
 }
+#[cfg(test)]
+impl WorkspaceSessionManager {
+    /// 仅供 registry 并发单测制造可做指针比较的具体 manager；不启动 router 或 provider。
+    pub(super) fn test_fixture(session_id: &str) -> Arc<Self> {
+        let (engine_tx, _engine_rx) = mpsc::channel(1);
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(std::env::temp_dir().join(session_id))),
+            engine_tx.clone(),
+            WorkspaceSession::from_record(test_session_record(session_id)),
+        );
+        Arc::new(Self {
+            engine: Arc::new(Mutex::new(engine)),
+            engine_tx,
+            state: StdMutex::new(ManagerState {
+                attachments: HashMap::new(),
+            }),
+            session_id: session_id.to_string(),
+            session_record: test_session_record(session_id),
+            app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            current_run: Arc::new(Mutex::new(None)),
+            next_run_id: Arc::new(Mutex::new(0)),
+        })
+    }
+}
+
+#[cfg(test)]
+fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
+    WorkspaceSessionRecord {
+        id: session_id.to_string(),
+        project_id: "project_test".to_string(),
+        issue_id: "issue_test".to_string(),
+        entity_id: "entity_test".to_string(),
+        workspace_type: crate::product::models::WorkspaceType::Story,
+        status: crate::product::models::WorkspaceSessionStatus::Open,
+        author_provider: crate::product::models::ProviderName::Fake,
+        reviewer_provider: crate::product::models::ProviderName::Fake,
+        review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        provisional_reviewer_provider: None,
+        reviewer_enabled_at_start: None,
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        human_gate_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
+        work_item_runtime_binding: None,
+        provider_conversations: Vec::new(),
+        messages: Vec::new(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
 impl WorkspaceSessionManager {
     /// 将原 socket-local engine 构建链迁入每 session 一次的工厂。
     pub async fn create(state: &WebAppState, session_id: &str) -> Result<Arc<Self>, String> {
@@ -47,9 +116,10 @@ impl WorkspaceSessionManager {
         let session_record = lifecycle
             .get_workspace_session(session_id)
             .map_err(|error| format!("workspace session not found: {error}"))?;
-        let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
-            .await
-            .map_err(|error| format!("workspace context unavailable: {error}"))?;
+        let session_record =
+            ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+                .await
+                .map_err(|error| format!("workspace context unavailable: {error}"))?;
         let repository = workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
             .map_err(|error| format!("workspace repository unavailable: {error}"))?;
         let checkpoint_store = Arc::new(CheckpointStore::new(
@@ -61,8 +131,12 @@ impl WorkspaceSessionManager {
         if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
             session.restore_checkpoint_ids(&checkpoints);
         }
-        let mut engine_workspace =
-            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, engine_tx.clone(), session);
+        let mut engine_workspace = WorkspaceEngine::new_persistent(
+            checkpoint_store,
+            lifecycle,
+            engine_tx.clone(),
+            session,
+        );
         if repository.logical_repository_id.is_some() {
             let lc_id = resolve_issue_logical_codebase_id(
                 &app_paths,
@@ -122,9 +196,7 @@ impl WorkspaceSessionManager {
         }
     }
 
-    pub(crate) fn current_run(
-        &self,
-    ) -> Arc<Mutex<Option<crate::web::state::WorkspaceActiveRun>>> {
+    pub(crate) fn current_run(&self) -> Arc<Mutex<Option<crate::web::state::WorkspaceActiveRun>>> {
         self.current_run.clone()
     }
 
@@ -137,7 +209,7 @@ impl WorkspaceSessionManager {
     }
 
     /// 注册连接的出站通道并返回 initial snapshot 与已恢复 choice。
-    pub async fn attach(
+    pub(crate) async fn attach(
         &self,
         connection_id: &str,
         outbound_tx: mpsc::Sender<OutboundControl>,
@@ -174,10 +246,10 @@ impl WorkspaceSessionManager {
     /// provider/run 注册、没有 event receiver，并且使用有接收端但永不消费的 channel。
     fn durable_projection(&self) -> (WsOutMessage, Option<WsOutMessage>) {
         let lifecycle = LifecycleStore::new(self.app_paths.clone());
-        let checkpoint_store = Arc::new(CheckpointStore::new(
-            self.app_paths
-                .issue_lifecycle_root(&self.session_record.project_id, &self.session_record.issue_id),
-        ));
+        let checkpoint_store = Arc::new(CheckpointStore::new(self.app_paths.issue_lifecycle_root(
+            &self.session_record.project_id,
+            &self.session_record.issue_id,
+        )));
         let (projection_tx, _projection_rx) = mpsc::channel::<EngineEvent>(1);
         let mut session = WorkspaceSession::from_record(self.session_record.clone());
         if let Ok(repository) =
@@ -188,7 +260,8 @@ impl WorkspaceSessionManager {
         if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
             session.restore_checkpoint_ids(&checkpoints);
         }
-        let engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, projection_tx, session);
+        let engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, projection_tx, session);
         (
             engine.build_session_state(),
             engine.pending_author_choice_request_message(),
@@ -216,18 +289,28 @@ impl WorkspaceSessionManager {
                             .next()
                             .cloned();
                         let Some(outbound) = outbound else {
-                            eprintln!("[aria-broadcast] provider run requested without attachment session={}", manager.session_id);
+                            eprintln!(
+                                "[aria-broadcast] provider run requested without attachment session={}",
+                                manager.session_id
+                            );
                             continue;
                         };
                         let run_context = manager.provider_run_context(workspace_runs.clone());
                         tokio::spawn(async move {
-                            if let Err(message) =
-                                spawn_provider_run_from_event(run_context, kind, node_id, outbound.clone())
-                                    .await
+                            if let Err(message) = spawn_provider_run_from_event(
+                                run_context,
+                                kind,
+                                node_id,
+                                outbound.clone(),
+                            )
+                            .await
                             {
                                 let _ = outbound.try_send(OutboundControl::Text(
                                     serde_json::to_string(&WsOutMessage::Error { message })
-                                        .unwrap_or_else(|_| "{\"type\":\"error\",\"message\":\"serialization failed\"}".to_string()),
+                                        .unwrap_or_else(|_| {
+                                            "{\"type\":\"error\",\"message\":\"serialization failed\"}"
+                                                .to_string()
+                                        }),
                                 ));
                             }
                         });
@@ -235,11 +318,43 @@ impl WorkspaceSessionManager {
                     EngineEvent::ArtifactBatchUpdate { mut updates } => {
                         updates.sort_by_key(|update| update.version);
                         for update in updates {
-                            manager.broadcast(crate::web::workspace_ws_handler::ws_artifact_update(
-                                update.version,
-                                update.payload,
-                            ));
+                            manager.broadcast(
+                                crate::web::workspace_ws_handler::ws_artifact_update(
+                                    update.version,
+                                    update.payload,
+                                ),
+                            );
                         }
+                    }
+                    EngineEvent::ChoiceRequest {
+                        id,
+                        prompt,
+                        options,
+                        allow_multiple,
+                        allow_free_text,
+                        questions,
+                        source,
+                    } => {
+                        if source != ChoiceRequestSource::TextFallback {
+                            let _ = workspace_runs
+                                .register_choice(&manager.session_id, id.clone())
+                                .await;
+                        }
+                        manager.broadcast(WsOutMessage::ChoiceRequest {
+                            id,
+                            prompt,
+                            options: options
+                                .into_iter()
+                                .map(crate::web::workspace_ws_handler::ws_choice_option)
+                                .collect(),
+                            allow_multiple,
+                            allow_free_text,
+                            questions: questions
+                                .into_iter()
+                                .map(crate::web::workspace_ws_handler::ws_choice_question)
+                                .collect(),
+                            source: source.as_str().to_string(),
+                        });
                     }
                     event => {
                         if let Some(message) = map_engine_event(event) {
@@ -253,7 +368,10 @@ impl WorkspaceSessionManager {
 
     fn broadcast(&self, message: WsOutMessage) {
         let Ok(json) = serde_json::to_string(&message) else {
-            eprintln!("[aria-broadcast] serialize failed session={}", self.session_id);
+            eprintln!(
+                "[aria-broadcast] serialize failed session={}",
+                self.session_id
+            );
             return;
         };
         let attachments = self
@@ -265,7 +383,10 @@ impl WorkspaceSessionManager {
             .map(|(connection_id, sender)| (connection_id.clone(), sender.clone()))
             .collect::<Vec<_>>();
         for (connection_id, sender) in attachments {
-            if sender.try_send(OutboundControl::Text(json.clone())).is_err() {
+            if sender
+                .try_send(OutboundControl::Text(json.clone()))
+                .is_err()
+            {
                 eprintln!(
                     "[aria-broadcast] attachment unreachable session={} connection={connection_id}",
                     self.session_id

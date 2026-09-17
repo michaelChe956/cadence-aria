@@ -74,6 +74,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
 
     let state = WsOutMessage::SessionState {
         session_id: "workspace_session_001".to_string(),
+        connection_id: None,
         workspace_type: WorkspaceType::WorkItemPlan,
         stage: "author_confirm".to_string(),
         superpowers_enabled: true,

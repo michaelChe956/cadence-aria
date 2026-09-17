@@ -13,12 +13,15 @@ pub(crate) use tokio_util::sync::CancellationToken;
 
 pub(crate) use crate::cross_cutting::provider_adapter::parse_last_structured_output;
 pub(crate) use crate::cross_cutting::provider_registry::ProviderRegistry;
+#[cfg(test)]
+pub(crate) use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
 pub(crate) use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceQuestionData, ChoiceRequestSource, ProviderCommand,
-    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderStatus, RiskLevel, StreamingProviderAdapter,
+    ChoiceOptionData, ChoiceQuestionData, ProviderCommand, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
+    StreamingProviderAdapter,
 };
 pub(crate) use crate::product::app_paths::ProductAppPaths;
+#[cfg(test)]
 pub(crate) use crate::product::checkpoint_store::CheckpointStore;
 pub(crate) use crate::product::issue_store::IssueStore;
 pub(crate) use crate::product::lifecycle_store::LifecycleStore;
@@ -31,12 +34,14 @@ pub(crate) use crate::product::work_item_split_engine::{
     WorkItemSplitEngine, design_context_capabilities_for_request, design_context_gaps,
     parse_work_item_draft_output, parse_work_item_plan_outline_output,
 };
+#[cfg(test)]
+pub(crate) use crate::product::workspace_engine::WorkspaceSession;
 pub(crate) use crate::product::workspace_engine::{
     AuthorDecisionOutcome, EngineEvent, HumanGateCommandOutcome, HumanGateFeedbackInput,
     HumanPresentationScope, InterruptedRunRecoveryOutcome, PendingAuthorChoiceError,
     ProviderRunKind, ReviewDecisionOutcome, SaveHumanPresentationRevision,
     WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome,
-    WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine, WorkspaceStage,
     build_work_item_plan_revision_input,
 };
 pub(crate) use crate::product::workspace_repository::workspace_repository_for_session;
@@ -69,10 +74,10 @@ pub(crate) use mapping::*;
 pub(crate) use plan_repair_activation::*;
 pub(crate) use protocol::*;
 pub(crate) use run::*;
+pub(crate) use run::{ProviderRunContext, spawn_provider_run_from_event};
 #[cfg(test)]
 pub(crate) use socket::parse_workspace_inbound_text;
 pub(crate) use socket::{OutboundControl, send_json_outbound};
-pub(crate) use run::{ProviderRunContext, spawn_provider_run_from_event};
 
 #[cfg(test)]
 pub(crate) use socket::{

@@ -426,7 +426,9 @@ pub(crate) async fn handle_workspace_socket(
 
     let manager = match state
         .workspace_sessions
-        .get_or_create(&session_id, || WorkspaceSessionManager::create(&state, &session_id))
+        .get_or_create(&session_id, || {
+            WorkspaceSessionManager::create(&state, &session_id)
+        })
         .await
     {
         Ok(manager) => manager,
@@ -449,9 +451,8 @@ pub(crate) async fn handle_workspace_socket(
         socket_outbound_tx,
         connection_id.clone(),
     ));
-    let (session_state, restored_choice_request) = manager
-        .attach(&connection_id, outbound_tx.clone())
-        .await;
+    let (session_state, restored_choice_request) =
+        manager.attach(&connection_id, outbound_tx.clone()).await;
     if let Ok(json) = serde_json::to_string(&session_state.with_connection_id(&connection_id)) {
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
@@ -496,52 +497,6 @@ pub(crate) async fn handle_workspace_socket(
         workspace_runs: state.workspace_runs.clone(),
         session_id: session_id.clone(),
     };
-    let human_gate_recovery = {
-        let active_node_id = engine.lock().await.active_timeline_node_id();
-        let provider_is_running = state
-            .workspace_runs
-            .run(&session_id)
-            .await
-            .is_some_and(|run| run.node_id == active_node_id);
-        let mut engine = engine.lock().await;
-        engine.recover_human_gate_turns(provider_is_running)
-    };
-    let human_gate_recovery = match human_gate_recovery {
-        Ok(actions) => actions,
-        Err(error) => {
-            let err = WsOutMessage::Error {
-                message: format!("human gate recovery failed: {error}"),
-            };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-            return;
-        }
-    };
-    for (turn_id, action) in human_gate_recovery {
-        if matches!(
-            action,
-            crate::product::workspace_engine::HumanGateRecoveryAction::ResumeSameTurn { .. }
-        ) {
-            let run_kind = match crate::product::workspace_engine::provider_run_kind_for_human_gate(
-                session_record.flow_kind,
-                &turn_id,
-            ) {
-                Ok(run_kind) => run_kind,
-                Err(error) => {
-                    let err = WsOutMessage::Error { message: error };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
-                    continue;
-                }
-            };
-            if let Err(error) =
-                spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx.clone())
-                    .await
-            {
-                let err = WsOutMessage::Error { message: error };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-    }
-
     let idle_timeout_task = spawn_idle_timeout_task(
         last_client_activity_at.clone(),
         last_server_activity_at.clone(),
@@ -555,85 +510,140 @@ pub(crate) async fn handle_workspace_socket(
         state.test_controls.server_idle_timeout(),
         std::time::Duration::from_secs(5),
     );
-
-    let outline_resume_kind: Result<Option<ProviderRunKind>, String> = {
-        let engine = engine.lock().await;
-        let durable_flow_kind = session_record.flow_kind;
-        if let Some(error) = engine.outline_revision_recovery_error() {
-            Err(format!("outline revision recovery failed: {error}"))
-        } else {
-            let should_resume = engine.session().workspace_type == WorkspaceType::WorkItemPlan
-                && engine.session().stage == WorkspaceStage::Running
-                && engine.active_node_type()
-                    == Some(
-                        crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
-                    )
-                && engine.active_run_id().is_none();
-            if !should_resume {
-                Ok(None)
-            } else if let Some(node_id) = engine.active_timeline_node_id() {
-                match LifecycleStore::new(app_paths.clone()).load_node_detail(&session_id, &node_id)
-                {
-                    Ok(detail) => Ok(Some(if durable_flow_kind
-                        == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
-                    {
-                        ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
-                    } else if detail.is_revision {
-                        ProviderRunKind::WorkItemPlanOutlineRevision {
-                            feedback: detail.revision_feedback,
-                        }
-                    } else {
-                        ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
-                    })),
-                    Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
-                        Ok(Some(ProviderRunKind::work_item_plan_author_for_durable_flow(
-                            durable_flow_kind,
-                        )))
-                    }
-                    Err(error) => Err(format!(
-                        "resume outline run detail failed for {node_id}: {error}"
-                    )),
-                }
-            } else {
-                Err("resume outline run detail failed: active node id unavailable".to_string())
+    // 已有 provider run 时，engine 锁由 run 驱动长期持有。附着连接的恢复/续跑只适用于
+    // 没有活跃 provider 的 durable 会话；此时等待该锁会使第二连接虽拿到投影快照却不能
+    // 开始读入 Abort/ChoiceResponse。运行期由现有 run 自行完成，跳过这两段恢复路径。
+    let startup_recovery_allowed = state.workspace_runs.run(&session_id).await.is_none();
+    if startup_recovery_allowed {
+        let human_gate_recovery = {
+            let active_node_id = engine.lock().await.active_timeline_node_id();
+            let provider_is_running = state
+                .workspace_runs
+                .run(&session_id)
+                .await
+                .is_some_and(|run| run.node_id == active_node_id);
+            let mut engine = engine.lock().await;
+            engine.recover_human_gate_turns(provider_is_running)
+        };
+        let human_gate_recovery = match human_gate_recovery {
+            Ok(actions) => actions,
+            Err(error) => {
+                let err = WsOutMessage::Error {
+                    message: format!("human gate recovery failed: {error}"),
+                };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
             }
-        }
-    };
-    match outline_resume_kind {
-        Ok(Some(run_kind)) if state.workspace_runs.run(&session_id).await.is_none() => {
-            match planning_resume_decision_with_fresh_index(
-                &app_paths,
-                &session_record.project_id,
-                &session_record.issue_id,
-            )
-            .await
-            {
-                Ok(decision) => {
-                    let run_kind = planning_resume_run_kind(&decision, run_kind);
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        run_kind,
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Err(message) => {
-                    let err = WsOutMessage::Error {
-                        message: format!("planning resume check failed: {message}"),
+        };
+        for (turn_id, action) in human_gate_recovery {
+            if matches!(
+                action,
+                crate::product::workspace_engine::HumanGateRecoveryAction::ResumeSameTurn { .. }
+            ) {
+                let run_kind =
+                    match crate::product::workspace_engine::provider_run_kind_for_human_gate(
+                        session_record.flow_kind,
+                        &turn_id,
+                    ) {
+                        Ok(run_kind) => run_kind,
+                        Err(error) => {
+                            let err = WsOutMessage::Error { message: error };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                            continue;
+                        }
                     };
+                if let Err(error) = spawn_provider_run_from_handler(
+                    run_context.clone(),
+                    run_kind,
+                    outbound_tx.clone(),
+                )
+                .await
+                {
+                    let err = WsOutMessage::Error { message: error };
                     let _ = send_json_outbound(&outbound_tx, &err).await;
                 }
             }
         }
-        Err(message) => {
-            let err = WsOutMessage::Error { message };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
+
+        let outline_resume_kind: Result<Option<ProviderRunKind>, String> = {
+            let engine = engine.lock().await;
+            let durable_flow_kind = session_record.flow_kind;
+            if let Some(error) = engine.outline_revision_recovery_error() {
+                Err(format!("outline revision recovery failed: {error}"))
+            } else {
+                let should_resume = engine.session().workspace_type == WorkspaceType::WorkItemPlan
+                    && engine.session().stage == WorkspaceStage::Running
+                    && engine.active_node_type()
+                        == Some(
+                            crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
+                        )
+                    && engine.active_run_id().is_none();
+                if !should_resume {
+                    Ok(None)
+                } else if let Some(node_id) = engine.active_timeline_node_id() {
+                    match LifecycleStore::new(app_paths.clone()).load_node_detail(&session_id, &node_id)
+                    {
+                        Ok(detail) => Ok(Some(if durable_flow_kind
+                            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+                        {
+                            ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
+                        } else if detail.is_revision {
+                            ProviderRunKind::WorkItemPlanOutlineRevision {
+                                feedback: detail.revision_feedback,
+                            }
+                        } else {
+                            ProviderRunKind::work_item_plan_author_for_durable_flow(durable_flow_kind)
+                        })),
+                        Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
+                            Ok(Some(ProviderRunKind::work_item_plan_author_for_durable_flow(
+                                durable_flow_kind,
+                            )))
+                        }
+                        Err(error) => Err(format!(
+                            "resume outline run detail failed for {node_id}: {error}"
+                        )),
+                    }
+                } else {
+                    Err("resume outline run detail failed: active node id unavailable".to_string())
+                }
+            }
+        };
+        match outline_resume_kind {
+            Ok(Some(run_kind)) if state.workspace_runs.run(&session_id).await.is_none() => {
+                match planning_resume_decision_with_fresh_index(
+                    &app_paths,
+                    &session_record.project_id,
+                    &session_record.issue_id,
+                )
+                .await
+                {
+                    Ok(decision) => {
+                        let run_kind = planning_resume_run_kind(&decision, run_kind);
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            run_kind,
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Err(message) => {
+                        let err = WsOutMessage::Error {
+                            message: format!("planning resume check failed: {message}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                }
+            }
+            Err(message) => {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+            Ok(Some(_)) | Ok(None) => {}
         }
-        Ok(Some(_)) | Ok(None) => {}
     }
 
     let idle_receiver_exit = idle_timeout_triggered.clone();

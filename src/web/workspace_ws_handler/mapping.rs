@@ -361,3 +361,87 @@ pub(crate) fn map_engine_event(event: EngineEvent) -> Option<WsOutMessage> {
         },
     })
 }
+#[cfg(test)]
+pub(crate) fn spawn_engine_event_forward_task(
+    mut engine_rx: mpsc::Receiver<EngineEvent>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    session_id: String,
+    workspace_runs: WorkspaceRunRegistry,
+    run_context: Option<ProviderRunContext>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = engine_rx.recv().await {
+            match event {
+                EngineEvent::ProviderRunRequested { kind, node_id } => {
+                    if let Some(run_context) = run_context.as_ref() {
+                        let run_context = run_context.clone();
+                        let outbound_tx = outbound_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(message) = spawn_provider_run_from_event(
+                                run_context,
+                                kind,
+                                node_id,
+                                outbound_tx.clone(),
+                            )
+                            .await
+                            {
+                                let _ = send_json_outbound(
+                                    &outbound_tx,
+                                    &WsOutMessage::Error { message },
+                                )
+                                .await;
+                            }
+                        });
+                    }
+                }
+                EngineEvent::ArtifactBatchUpdate { mut updates } => {
+                    updates.sort_by_key(|update| update.version);
+                    for update in updates {
+                        if !send_json_outbound(
+                            &outbound_tx,
+                            &ws_artifact_update(update.version, update.payload),
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                    }
+                }
+                EngineEvent::ChoiceRequest {
+                    id,
+                    prompt,
+                    options,
+                    allow_multiple,
+                    allow_free_text,
+                    questions,
+                    source,
+                } => {
+                    if source != ChoiceRequestSource::TextFallback {
+                        let _ = workspace_runs
+                            .register_choice(&session_id, id.clone())
+                            .await;
+                    }
+                    let message = WsOutMessage::ChoiceRequest {
+                        id,
+                        prompt,
+                        options: options.into_iter().map(ws_choice_option).collect(),
+                        allow_multiple,
+                        allow_free_text,
+                        questions: questions.into_iter().map(ws_choice_question).collect(),
+                        source: source.as_str().to_string(),
+                    };
+                    if !send_json_outbound(&outbound_tx, &message).await {
+                        return;
+                    }
+                }
+                event => {
+                    if let Some(message) = map_engine_event(event)
+                        && !send_json_outbound(&outbound_tx, &message).await
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+}
