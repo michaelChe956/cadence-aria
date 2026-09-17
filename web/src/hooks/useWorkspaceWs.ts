@@ -66,6 +66,7 @@ export function useWorkspaceWs(sessionId: string | null) {
   const lastServerMessageAtRef = useRef<string | null>(null);
   const lastPongOrServerMessageAtRef = useRef<string | null>(null);
   const lastPingAtRef = useRef<string | null>(null);
+  const lastEventSeqRef = useRef<number | null>(null);
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const [sessionSnapshot, setSessionSnapshot] = useState({
     sessionId: null as string | null,
@@ -118,7 +119,6 @@ export function useWorkspaceWs(sessionId: string | null) {
       useWorkspaceStore.getState().flushBufferedStream(nodeId);
     }, STREAM_FLUSH_INTERVAL_MS);
   }, []);
-
   const connect = useCallback(() => {
     if (!sessionId) return;
 
@@ -174,6 +174,10 @@ export function useWorkspaceWs(sessionId: string | null) {
           type: "hello",
           session_id: sessionId,
           last_seen_node_id: store.activeNodeId ?? store.timelineNodes.at(-1)?.node_id ?? null,
+          role: "driver",
+          ...(lastEventSeqRef.current !== null
+            ? { after_event_seq: lastEventSeqRef.current }
+            : {}),
         }),
       );
     };
@@ -220,6 +224,22 @@ export function useWorkspaceWs(sessionId: string | null) {
       lastPongOrServerMessageAtRef.current = now;
       try {
         const msg = JSON.parse(event.data) as WsServerMessage;
+        if (msg.type === "resync_required") {
+          ws.close(STALE_SOCKET_CLOSE_CODE);
+          return;
+        }
+        if (typeof msg.event_seq === "number") {
+          if (msg.type === "session_state") {
+            lastEventSeqRef.current = msg.event_seq;
+          } else if (
+            lastEventSeqRef.current !== null &&
+            msg.event_seq <= lastEventSeqRef.current
+          ) {
+            return;
+          } else {
+            lastEventSeqRef.current = msg.event_seq;
+          }
+        }
         if (msg.type === "pong") {
           lastPongOrServerMessageAtRef.current = now;
         }
@@ -262,7 +282,9 @@ export function useWorkspaceWs(sessionId: string | null) {
   useEffect(() => {
     planRepairSourceRef.current = { hasSnapshot: false, source: null };
     useLinkedWorkspaceAmendmentStore.getState().reset(sessionId);
-    if (useWorkspaceStore.getState().sessionId !== sessionId) {
+    const sessionChanged = useWorkspaceStore.getState().sessionId !== sessionId;
+    if (sessionChanged) {
+      lastEventSeqRef.current = null;
       useWorkspaceStore.setState({ connectionCloseDiagnostics: [] });
     }
     if (!sessionId) {
@@ -361,6 +383,10 @@ export function useWorkspaceWs(sessionId: string | null) {
         type: "hello",
         session_id: targetSessionId,
         last_seen_node_id: lastSeenNodeId ?? null,
+        role: "driver",
+        ...(lastEventSeqRef.current !== null
+          ? { after_event_seq: lastEventSeqRef.current }
+          : {}),
       });
     },
     [sendJson],

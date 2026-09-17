@@ -277,7 +277,13 @@ export type WsInMessage =
       target: LinkedWorkspaceAmendmentTarget;
     }
   | { type: "abort" }
-  | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
+  | {
+      type: "hello";
+      session_id: string;
+      last_seen_node_id?: string | null;
+      role?: "driver" | "observer";
+      after_event_seq?: number;
+    }
   | { type: "ping" };
 
 export type TimelineNodeType =
@@ -551,7 +557,9 @@ export type WorkspaceArtifactVersionResponse = {
   source_node_id?: string;
 };
 
-export type WsOutMessage =
+export type WithEventSeq<T> = T & { event_seq?: number };
+
+export type WsOutMessage = WithEventSeq<
   | { type: "stream_chunk"; role: string; content: string; node_id?: string | null }
   | {
       type: "message_complete";
@@ -682,4 +690,6 @@ export type WsOutMessage =
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }
   | { type: "provider_locked"; snapshot: ProviderConfigSnapshot; locked_at: string }
-  | { type: "pong" };
+  | { type: "resync_required"; event_seq: number }
+  | { type: "pong" }
+>;

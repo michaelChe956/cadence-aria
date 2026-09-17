@@ -91,10 +91,17 @@ describe("workspace websocket protocol types", () => {
       decision: "request-change",
       payload: { description: "补充验收标准" },
     };
+    const hello: WsInMessage = {
+      type: "hello",
+      session_id: "session_001",
+      role: "driver",
+      after_event_seq: 42,
+    };
 
     expect(note.type).toBe("context_note");
     expect(start.type).toBe("start_generation");
     expect(human.decision).toBe("request-change");
+    expect(hello.after_event_seq).toBe(42);
   });
 
   it("accepts protocol v2 outbound messages", () => {
@@ -109,9 +116,11 @@ describe("workspace websocket protocol types", () => {
       snapshot: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
       locked_at: "2026-05-20T00:00:00Z",
     };
+    const resync: WsOutMessage = { type: "resync_required", event_seq: 99 };
 
     expect(error.code).toBe("INVALID_MESSAGE_FOR_STAGE");
     expect(locked.snapshot.author).toBe("claude_code");
+    expect(resync.event_seq).toBe(99);
   });
 
   it("describes node details used by session snapshots", () => {

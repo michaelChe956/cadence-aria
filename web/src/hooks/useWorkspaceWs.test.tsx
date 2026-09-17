@@ -526,4 +526,166 @@ describe("useWorkspaceWs websocket messages", () => {
       ]),
     );
   });
+  it("deduplicates event sequences and resets the baseline on session state", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(workspaceSessionState(10));
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "stale",
+        node_id: null,
+        event_seq: 9,
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "duplicate",
+        node_id: null,
+        event_seq: 10,
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "live",
+        node_id: null,
+        event_seq: 11,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().streamingContent).toBe("live");
+
+    act(() => {
+      harness.ws.receive(workspaceSessionState(20));
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "stale-after-reset",
+        node_id: null,
+        event_seq: 15,
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "after-reset",
+        node_id: null,
+        event_seq: 21,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().streamingContent).toBe("after-reset");
+  });
+
+  it("reconnects with the last delivered cursor when resync is required", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(workspaceSessionState(10));
+      harness.ws.receive({ type: "resync_required", event_seq: 99 });
+    });
+
+    expect(harness.ws.closeCodes).toContain(4000);
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+      harness.latestWs.open();
+    });
+
+    expect(JSON.parse(harness.latestWs.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "hello",
+      role: "driver",
+      after_event_seq: 10,
+    });
+  });
+
+  it("does not carry a cursor across workspace sessions", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(workspaceSessionState(10));
+    });
+    act(() => {
+      harness.switchSession("session_002");
+    });
+    const replacement = harness.latestWs;
+    act(() => {
+      replacement.open();
+    });
+
+    const hello = JSON.parse(replacement.sent.at(-1) ?? "{}");
+    expect(hello).toMatchObject({ type: "hello", session_id: "session_002", role: "driver" });
+    expect(hello).not.toHaveProperty("after_event_seq");
+  });
+
+  it("accepts replay frames before live frames after cursor reconnect", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(workspaceSessionState(10));
+      harness.ws.receive({ type: "resync_required", event_seq: 99 });
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+      harness.latestWs.open();
+    });
+
+    expect(JSON.parse(harness.latestWs.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "hello",
+      after_event_seq: 10,
+    });
+
+    act(() => {
+      harness.latestWs.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "replay-a",
+        node_id: null,
+        event_seq: 11,
+      });
+      harness.latestWs.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "replay-b",
+        node_id: null,
+        event_seq: 12,
+      });
+      harness.latestWs.receive({
+        type: "stream_chunk",
+        role: "assistant",
+        content: "live-c",
+        node_id: null,
+        event_seq: 13,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().streamingContent).toBe("replay-areplay-blive-c");
+  });
+  function workspaceSessionState(eventSeq: number) {
+    return {
+      type: "session_state",
+      session_id: "session_001",
+      workspace_type: "work_item",
+      stage: "running",
+      superpowers_enabled: false,
+      openspec_enabled: false,
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+      human_presentation_revisions: [],
+      event_seq: eventSeq,
+    } as const;
+  }
 });

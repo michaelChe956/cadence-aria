@@ -171,6 +171,7 @@ describe("useWorkspaceWs outgoing actions", () => {
         type: "hello",
         session_id: "session_001",
         last_seen_node_id: "timeline_node_001",
+        role: "driver",
       }),
       JSON.stringify({ type: "ping" }),
     ]);
@@ -331,6 +332,7 @@ describe("useWorkspaceWs outgoing actions", () => {
         type: "hello",
         session_id: "session_001",
         last_seen_node_id: "timeline_node_001",
+        role: "driver",
       }),
     ]);
   });
