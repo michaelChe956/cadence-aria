@@ -205,6 +205,19 @@ describe("workspace cockpit gate projection", () => {
     expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("terminal_stage");
     expect(gateActionBlockCopy("terminal_stage")).toContain("已离开人工确认门");
   });
+  it.each(["compile_plan", "completed"])(
+    "blocks the %s stage without a gate snapshot or turn",
+    (stage) => {
+      useWorkspaceStore.setState({
+        stage,
+        humanGateSnapshot: null,
+        humanGateTurn: null,
+        humanGateClosure: null,
+      });
+
+      expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("terminal_stage");
+    },
+  );
 
   it("blocks a single-candidate gate while phase is outside the engine-authorized set", () => {
     useWorkspaceStore.setState({

@@ -3,9 +3,11 @@ import { useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import {
   gateActionBlockCopy,
+  selectGateProjection,
   type GateActionBlockReason,
   GATE_TRIGGER_LABELS,
 } from "../../../state/workspace-cockpit-projection";
+import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
 import type {
@@ -54,7 +56,20 @@ export function GatePromptEntry({
   const typedGateAwaitingCommand =
     actionFacade === "typed" &&
     typeof (entry.metadata as Record<string, unknown> | undefined)?.command_id !== "string";
-  const actionBlockReason = actionBlockReasonFromEntry(entry);
+  const persistedActionBlockReason = actionBlockReasonFromEntry(entry);
+  const actionBlockReason = useWorkspaceStore((state) => {
+    const gateIdentity = (entry.metadata as Record<string, unknown> | undefined)?.gate_identity;
+    if (typeof gateIdentity !== "string") {
+      return persistedActionBlockReason;
+    }
+    const projection = selectGateProjection(state);
+    if (projection?.key === gateIdentity) {
+      return projection.action_block_reason ?? null;
+    }
+    return gateIdentity === "legacy:human_confirm" && state.stage !== "human_confirm"
+      ? "terminal_stage"
+      : persistedActionBlockReason;
+  });
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
     : allowsCurrentVersion

@@ -167,6 +167,29 @@ describe("cockpit gate action facade", () => {
     expect(sendAdvance).toHaveBeenCalledTimes(1);
     expect(sendAdvance.mock.calls[0]?.[0]).toMatch(/^[0-9a-f-]{36}$/);
   });
+  it("allows manual advance after the engine has confirmed a completed single-candidate gate", () => {
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "completed",
+      sessionStatus: "confirmed",
+      humanGateClosure: null,
+    });
+    const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
+
+    expect(
+      createCockpitActionFacade({
+        flowKind: "single_candidate",
+        commandId: null,
+        getState: useWorkspaceStore.getState,
+        sendHumanConfirm: vi.fn(() => true),
+        sendHumanGateFeedback: vi.fn(() => true),
+        sendAdvance,
+      }).advance(),
+    ).toBe(true);
+
+    expect(sendAdvance).toHaveBeenCalledOnce();
+  });
 
   it("re-reads actionability before every action so a stale snapshot cannot send", () => {
     const sendHumanConfirm = vi.fn(() => true);

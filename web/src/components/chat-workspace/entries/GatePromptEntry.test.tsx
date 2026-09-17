@@ -1,11 +1,16 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../../../state/chat-entries";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
+import { useWorkspaceStore } from "../../../state/workspace-ws-store";
+import { installWorkspaceStoreTestHooks } from "../../../state/workspace-ws-store.test-utils";
 import { GatePromptEntry } from "./GatePromptEntry";
 
-function gateEntry(actionBlockReason: "terminal_stage" | "phase_mismatch" | null): ChatEntry {
+function gateEntry(
+  actionBlockReason: "terminal_stage" | "phase_mismatch" | null,
+  gateIdentity?: string,
+): ChatEntry {
   return {
     id: "gate:entry",
     type: "gate_prompt",
@@ -16,6 +21,7 @@ function gateEntry(actionBlockReason: "terminal_stage" | "phase_mismatch" | null
       action_facade: "typed",
       command_id: "cmd_1",
       action_block_reason: actionBlockReason,
+      ...(gateIdentity ? { gate_identity: gateIdentity } : {}),
     },
   };
 }
@@ -30,7 +36,9 @@ function actions(): CockpitActionFacade {
   };
 }
 
+
 describe("GatePromptEntry actionability", () => {
+  installWorkspaceStoreTestHooks();
   it("replaces every gate action with its block reason when the projection is stale", () => {
     const gateActions = actions();
 
@@ -43,6 +51,24 @@ describe("GatePromptEntry actionability", () => {
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
     expect(gateActions.terminate).not.toHaveBeenCalled();
+  });
+  it("locks a rebuilt legacy gate card when the live stage leaves human confirmation", () => {
+    const gateActions = actions();
+    useWorkspaceStore.getState().setStage("human_confirm");
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, "legacy:human_confirm")}
+        actions={gateActions}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "确认产物" })).toBeVisible();
+
+    act(() => useWorkspaceStore.getState().setStage("compile_plan"));
+
+    expect(screen.getByText("已离开人工确认门")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
   });
 
   it("keeps typed gate controls wired to the supplied facade when no block reason exists", async () => {

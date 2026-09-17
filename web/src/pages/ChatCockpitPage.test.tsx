@@ -291,12 +291,19 @@ describe("ChatCockpitPage", () => {
     const sendHumanConfirm = vi.fn(() => true);
     mockWorkspaceWs({ sendHumanConfirm });
     renderCockpit("session_001", false);
-    useWorkspaceStore.getState().setStage("running");
+    const store = useWorkspaceStore.getState();
 
-    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+    for (const stage of ["running", "compile_plan", "completed"]) {
+      useWorkspaceStore.setState({
+        stage,
+        humanGateClosure: null,
+        humanGateSnapshot: null,
+        humanGateTurn: null,
+      });
+      fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+    }
     expect(sendHumanConfirm).not.toHaveBeenCalled();
 
-    const store = useWorkspaceStore.getState();
     store.setStage("human_confirm");
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
 

@@ -44,6 +44,9 @@ export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockR
     return "closed";
   }
   if (state.stage === "human_confirm") {
+    if (state.sessionStatus === "confirmed") {
+      return null;
+    }
     return state.flowKind !== "single_candidate" ||
       state.singleCandidatePhase === "approval" ||
       state.singleCandidatePhase === "evaluate"
@@ -53,7 +56,10 @@ export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockR
   if (state.stage === "completed" && state.humanGateSnapshot) {
     return null;
   }
-  return TERMINAL_GATE_STAGES[state.stage] ? "terminal_stage" : null;
+  if (TERMINAL_GATE_STAGES[state.stage]) {
+    return "terminal_stage";
+  }
+  return state.humanGateSnapshot || state.humanGateTurn ? null : "terminal_stage";
 }
 
 export function gateActionBlockCopy(reason: Exclude<GateActionBlockReason, null>): string {

@@ -43,3 +43,25 @@ cd web && pnpm test
 
 已提交为 `fix: 阻断终态门投影操作`；未 push。
 
+## Round 1 审查 findings 修复
+
+- P1：`gateActionBlockReason` 保留 `completed + humanGateSnapshot` 放行和六个既有终态锁定，并将其余无 `humanGateSnapshot`、无 `humanGateTurn` 的阶段统一锁为 `terminal_stage`。Cockpit 确认热键回归覆盖 `running`、`compile_plan` 与无快照 `completed`，三者均不发送；因此恢复 BASE 的无门静默语义。
+- P2：选择渲染时从 live store 派生理由，避免在事件路径重建并丢失聊天历史。`GatePromptEntry` 以 `gate_identity` 重新匹配当前 `selectGateProjection`；legacy 门在 live stage 已迁离 `human_confirm` 时直接显示“已离开人工确认门”并移除全部操作控件。新增回归覆盖“重建期门卡 → stage_change 迁出 → 不可操作”。
+- ⚠3 核实：Rust `close_human_gate(Confirm)` 先以 `Running` 关闭门并触发 compile，随后强制读取 durable 状态，要求 `WorkspaceSessionStatus::Confirmed + SingleCandidatePhase::Completed` 才发 `HumanGateClosed`（`src/product/workspace_engine/conversational_gate.rs:831-871`）。因此已确认门的 advance 必须兼容 completed phase；守卫在 `sessionStatus === "confirmed"` 时将 `human_confirm` 视作可推进，保留 BASE 的已确认推进能力。
+
+### Round 1 定向验证
+
+```text
+cd web && pnpm test src/state/workspace-cockpit-projection.test.ts src/state/cockpit-action-routing.test.ts src/components/chat-workspace/cockpit/CockpitInbox.test.tsx src/components/chat-workspace/entries/GatePromptEntry.test.tsx src/pages/ChatCockpitPage.test.tsx src/pages/ChatWorkspacePage.actions.test.tsx
+```
+
+结果：6 个测试文件、118 个测试通过。
+
+### Round 1 全量验证
+
+```text
+cd web && pnpm tsc -b && pnpm test
+```
+
+结果：TypeScript 构建通过；167 个测试文件、1421 个测试通过。全量测试仍输出既有 jsdom `navigation (except hash changes)` stderr，对应 lifecycle 测试通过，本次未修改该路径。
+
