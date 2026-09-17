@@ -115,12 +115,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
         engine.active_timeline_node_id()
     };
     let (run_id, run_token, run_cancel, command_rx, _node_id) = manager
-        .start_run_from_attachment(
-            connection_id.as_deref(),
-            lease_epoch,
-            run_kind.clone(),
-            target_node_id,
-        )
+        .start_run_from_attachment(connection_id.as_deref(), lease_epoch, target_node_id)
         .await?;
     let run_label = format!("run-{run_id}");
     // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session

@@ -303,8 +303,9 @@ impl WorkspaceSessionManager {
         );
     }
 
-    /// 内部 engine relay 的 run 启动与 supersede 仅在该锁内裁决，防止附件间出现
-    /// 双活 run。socket 路径须先经 `abort_active_run_from_attachment` 授权并中止。
+    /// 内部 engine relay 的启动路径保留既有 supersede 语义。socket 路径先通过
+    /// `abort_active_run_from_attachment` 在同一临界区完成 lease epoch 校验和中止，
+    /// 再在 provider 启动前由 `start_run_from_attachment` 复检 epoch 后登记新 run。
     pub async fn start_run(
         &self,
         _kind: ProviderRunKind,
@@ -319,31 +320,8 @@ impl WorkspaceSessionManager {
         ),
         String,
     > {
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let cancel = CancellationToken::new();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(run) = state.active_run.take() {
-            Self::cancel_run(&run);
-        }
-        state.next_run_id += 1;
-        let run_id = state.next_run_id;
-        let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let node_id = requested_node_id;
-        let lease_epoch = state.lease.epoch;
-        state.active_run = Some(ActiveRun {
-            id: run_id,
-            token,
-            node_id: node_id.clone(),
-            cancel: cancel.clone(),
-            command_tx,
-            pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
-            lease_epoch,
-        });
-        Ok((run_id, token, cancel, command_rx, node_id))
+        self.start_run_from_attachment(None, None, requested_node_id)
+            .await
     }
 
     /// 在取得 engine 锁前，以 attachment epoch 核验 lease 并立即 supersede 当前
@@ -379,7 +357,6 @@ impl WorkspaceSessionManager {
         &self,
         connection_id: Option<&str>,
         attachment_epoch: Option<u64>,
-        _kind: ProviderRunKind,
         requested_node_id: Option<String>,
     ) -> Result<
         (
@@ -402,9 +379,6 @@ impl WorkspaceSessionManager {
                 || attachment_epoch != Some(state.lease.epoch))
         {
             return Err("STALE_DRIVER_LEASE".to_string());
-        }
-        if let Some(run) = state.active_run.take() {
-            Self::cancel_run(&run);
         }
         state.next_run_id += 1;
         let run_id = state.next_run_id;
