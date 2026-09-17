@@ -34,12 +34,12 @@ import {
 type WorkspaceWsSendMessage =
   | WsInMessage
   | { type: "provider_select"; role: string; provider: string };
+const CONNECT_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 25_000;
 const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
-const CONNECT_TIMEOUT_MS = 5_000;
-const STREAM_FLUSH_INTERVAL_MS = 80;
+const STREAM_FLUSH_INTERVAL_MS = 50;
 const DISCONNECTED_PRESENTATION_SAVE_ERROR = "连接已断开，请重连后重试";
 
 // M2：门禁/推进命令 id 唯一生成点。动作发起时生成一次并随动作保存；

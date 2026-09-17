@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, ClipboardCopy, GitBranch, History } from "lucide-react";
+import { ArrowLeft, Check, ClipboardCopy, GitBranch, History, Radio } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
 import { takeoverWorkspaceSession } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
@@ -138,6 +138,37 @@ function generationStatusText(
     default:
       return stageLabel;
   }
+}
+
+function StreamingConversationBlock({
+  content,
+  role,
+}: {
+  content: string;
+  role: ChatEntry["role"];
+}) {
+  if (!content) {
+    return null;
+  }
+
+  const roleLabel = role === "reviewer" ? "审核者" : "作者";
+  return (
+    <article
+      data-testid="cockpit-streaming-content"
+      data-frame-window-ms="50"
+      aria-live="polite"
+      aria-label={`${roleLabel}正在生成`}
+      className="mx-3 mb-3 rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-panel-muted)] p-3"
+    >
+      <div className="flex items-center gap-2 text-xs font-semibold text-[var(--aria-ink-muted)]">
+        <Radio className="h-3.5 w-3.5 text-[var(--aria-primary)]" aria-hidden="true" />
+        {roleLabel}正在生成
+      </div>
+      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-[var(--aria-ink)]">
+        {content}
+      </pre>
+    </article>
+  );
 }
 
 export function ChatCockpitPage({
@@ -903,6 +934,15 @@ export function ChatCockpitPage({
                 testId="cockpit-conversation-flow-list"
               />
             )}
+            {takeoverSessionId === null && state.streamBuffers[state.activeNodeId ?? ""] ? (
+              <StreamingConversationBlock
+                content={[
+                  state.streamBuffers[state.activeNodeId ?? ""]?.visibleText ?? "",
+                  ...(state.streamBuffers[state.activeNodeId ?? ""]?.chunks ?? []),
+                ].join("")}
+                role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
+              />
+            ) : null}
             {isCurrentSession &&
             (state.stage === "prepare_context" || state.stage === "author_confirm") ? (
               <ChatInputBar

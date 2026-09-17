@@ -140,6 +140,56 @@ describe("ChatCockpitPage", () => {
     );
   };
 
+
+  it("renders a streaming block immediately, coalesces its visual updates, and replaces it on completion", () => {
+    const streamingEntry = {
+      id: "node-stream:stream-active",
+      type: "provider_stream" as const,
+      role: "author" as const,
+      content: "正在起草第一段",
+      timestamp: "2026-09-17T10:00:00Z",
+      node_id: "node-stream",
+    };
+    useWorkspaceStore.setState({
+      stage: "running",
+      activeNodeId: "node-stream",
+      chatEntries: [],
+      streamBuffers: {
+        "node-stream": {
+          chunks: [" 尚未刷到正式条目"],
+          visibleText: streamingEntry.content,
+          role: "author",
+        },
+      },
+    });
+
+    const { rerender } = renderCockpit();
+    expect(screen.getByTestId("cockpit-streaming-content")).toHaveTextContent(
+      "正在起草第一段 尚未刷到正式条目",
+    );
+    expect(screen.getByTestId("cockpit-streaming-content")).toHaveAttribute(
+      "data-frame-window-ms",
+      "50",
+    );
+
+    useWorkspaceStore.setState({
+      streamBuffers: {},
+      chatEntries: [{ ...streamingEntry, id: "message-complete" }],
+    });
+    rerender(
+      <ChatCockpitPage
+        sessionId="session_001"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+        workspaceWs={currentMockWorkspaceWs()}
+      />,
+    );
+
+    expect(screen.queryByTestId("cockpit-streaming-content")).toBeNull();
+    expect(screen.getByTestId("cockpit-conversation-flow-list")).toHaveTextContent(
+      "正在起草第一段",
+    );
+  });
   it("starts generation from cockpit with the legacy provider payload and one optimistic entry", async () => {
     const user = userEvent.setup();
     const sendStartGeneration = vi.fn();
