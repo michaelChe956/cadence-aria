@@ -295,6 +295,70 @@ async fn workspace_ws_stale_cursor_without_active_run_falls_back_to_snapshot_bas
     drop(ws2);
     server.abort();
 }
+/// REQ-WCR-04：cursor 已确认原 choice 事件时，重连仍须补发 pending 门卡，
+/// 否则前端丢失门卡后 run 将永远等待选择。
+#[tokio::test]
+async fn workspace_ws_cursor_reconnect_replays_pending_choice_after_replay_window() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let provider_state = Arc::new(ChoiceThenArtifactProviderState::default());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ChoiceThenArtifactProvider {
+            state: provider_state,
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
+    assert_eq!(recv_json_value(&mut ws).await["type"], "session_state");
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "开始生成".to_string(),
+        },
+    )
+    .await;
+    let choice = loop {
+        let message = recv_json_value(&mut ws).await;
+        if message["type"] == "choice_request" {
+            break message;
+        }
+    };
+    let cursor = choice["event_seq"].as_u64().expect("choice event seq");
+    let choice_id = choice["id"].as_str().expect("choice id").to_string();
+
+    let (mut ws2, _) = connect_async(url).await.expect("reconnect");
+    send_json(
+        &mut ws2,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Driver),
+            after_event_seq: Some(cursor),
+        },
+    )
+    .await;
+    let replayed_choice = recv_json_value(&mut ws2).await;
+    assert_eq!(replayed_choice["type"], "choice_request");
+    assert_eq!(replayed_choice["id"], choice_id);
+    assert!(
+        replayed_choice.get("event_seq").is_none(),
+        "重发门卡不属于 journal 回放事件，不能干扰 cursor 去重"
+    );
+
+    drop(ws2);
+    server.abort();
+}
 
 /// T1 单实例：多个 attachment 必须复用同一个 session-owned manager/engine。
 #[tokio::test]

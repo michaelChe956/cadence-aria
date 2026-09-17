@@ -702,6 +702,7 @@ impl WorkspaceSessionManager {
     pub(crate) async fn resubscribe(
         &self,
         outbound_tx: &mpsc::Sender<OutboundControl>,
+        connection_id: &str,
         after_event_seq: u64,
     ) {
         enum Resubscription {
@@ -758,11 +759,17 @@ impl WorkspaceSessionManager {
                         return;
                     }
                 }
+                let (_, choice) = self.attached_session_state().await;
+                let _ = send_optional_message(outbound_tx, choice).await;
             }
             Resubscription::ActiveRunWindow { baseline, events } => {
                 let (snapshot, choice) = self.attached_session_state().await;
                 if !self
-                    .send_snapshot_with_baseline(outbound_tx, snapshot, baseline)
+                    .send_snapshot_with_baseline(
+                        outbound_tx,
+                        snapshot.with_connection_id(connection_id),
+                        baseline,
+                    )
                     .await
                 {
                     return;
@@ -783,7 +790,11 @@ impl WorkspaceSessionManager {
             Resubscription::Snapshot { baseline } => {
                 let (snapshot, choice) = self.attached_session_state().await;
                 if !self
-                    .send_snapshot_with_baseline(outbound_tx, snapshot, baseline)
+                    .send_snapshot_with_baseline(
+                        outbound_tx,
+                        snapshot.with_connection_id(connection_id),
+                        baseline,
+                    )
                     .await
                 {
                     return;

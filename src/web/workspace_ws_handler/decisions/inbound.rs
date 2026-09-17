@@ -598,9 +598,12 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 after_event_seq,
             );
             if let Some(after_event_seq) = after_event_seq {
+                let Some(connection_id) = run_context.connection_id.as_deref() else {
+                    return;
+                };
                 run_context
                     .manager
-                    .resubscribe(&outbound_tx, after_event_seq)
+                    .resubscribe(&outbound_tx, connection_id, after_event_seq)
                     .await;
             } else {
                 let engine_for_hello = engine.clone();

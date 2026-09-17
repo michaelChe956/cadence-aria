@@ -30,4 +30,16 @@
 ## Concerns
 
 - `after_event_seq` 迟于 `ATTACH_INITIAL_PUSH_GRACE` 到达时，初始 snapshot 已可能排队；服务端仅记录诊断，客户端必须按 cursor 重试吸收该 r2 已披露的窄窗口。
+
+## 审查修复（round 1/5）
+
+- 修复 Replay 分支漏发 pending restored choice：回放 journal 后重新读取当前 attachment state，并补发待处理的 `choice_request`；新增「cursor 重连 + pending choice」集成回归，确认门卡帧可达且不携带 `event_seq`。
+- `resubscribe` 现在接收真实 `connection_id`，两个 snapshot fallback 分支发送前均注入该标识；manager 单测直接断言 socket 装饰前的重订阅 snapshot 具备诊断连接标识。
+- 初始帧宽限发送提取为带 RAII 激活守卫的 `flush_initial_attachment`：任务在异步写入期间被 abort 时 guard 仍把 attachment 转入直播表；入站分支共享该路径，取消窗口不再可使连接永久滞留 pending。
+
+### 修复验证
+
+`cargo check --locked` 完成。
+
+`cargo test --locked --test it_core workspace_ws_`：58 passed，0 failed。
 - 本 Task 未触碰 coding WS、durable schema 或 3.7 交互面。

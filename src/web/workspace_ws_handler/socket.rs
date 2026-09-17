@@ -84,7 +84,7 @@ struct ConnectionDiagnostic {
 }
 
 impl WsOutMessage {
-    pub(super) fn with_connection_id(mut self, connection_id: &str) -> Self {
+    pub(crate) fn with_connection_id(mut self, connection_id: &str) -> Self {
         if let Self::SessionState {
             connection_id: slot,
             ..
@@ -400,6 +400,74 @@ mod tests {
             .expect("active run");
         assert!(guard(), "manager active run 进行中：不得主动关连接");
     }
+
+    #[tokio::test]
+    async fn cancelled_initial_flush_still_activates_attachment() {
+        let manager = WorkspaceSessionManager::test_fixture("session_initial_flush");
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+        manager.register_attachment("connection", outbound_tx.clone());
+        outbound_tx
+            .send(OutboundControl::Text("occupied".to_string()))
+            .await
+            .expect("occupy outbound channel");
+
+        let manager_for_flush = manager.clone();
+        let outbound_for_flush = outbound_tx.clone();
+        let initial_flush = tokio::spawn(async move {
+            flush_initial_attachment(
+                manager_for_flush.as_ref(),
+                "connection",
+                &outbound_for_flush,
+                Some(("baseline".to_string(), None)),
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+        initial_flush.abort();
+        let _ = initial_flush.await;
+
+        assert!(
+            matches!(outbound_rx.recv().await, Some(OutboundControl::Text(text)) if text == "occupied")
+        );
+        manager
+            .broadcast_test_event(WsProviderStatus::Running)
+            .await;
+        assert!(
+            matches!(outbound_rx.recv().await, Some(OutboundControl::Text(text)) if text.contains("provider_status")),
+            "取消初始帧写入后连接仍必须接收直播帧"
+        );
+    }
+}
+
+async fn flush_initial_attachment(
+    manager: &WorkspaceSessionManager,
+    connection_id: &str,
+    outbound_tx: &mpsc::Sender<OutboundControl>,
+    initial: Option<(String, Option<WsOutMessage>)>,
+) {
+    struct ActivationGuard<'a> {
+        manager: &'a WorkspaceSessionManager,
+        connection_id: &'a str,
+    }
+
+    impl Drop for ActivationGuard<'_> {
+        fn drop(&mut self) {
+            self.manager.activate_attachment(self.connection_id);
+        }
+    }
+
+    let _activation_guard = ActivationGuard {
+        manager,
+        connection_id,
+    };
+    if let Some((session_state, choice)) = initial {
+        let _ = outbound_tx.send(OutboundControl::Text(session_state)).await;
+        if let Some(choice) = choice
+            && let Ok(json) = serde_json::to_string(&choice)
+        {
+            let _ = outbound_tx.send(OutboundControl::Text(json)).await;
+        }
+    }
 }
 
 pub(crate) async fn handle_workspace_socket(
@@ -507,20 +575,18 @@ pub(crate) async fn handle_workspace_socket(
         )
         .await;
         let initial = initial_for_grace.lock().await.take();
-        if let Some((session_state, choice)) = initial {
+        if initial.is_some() {
             eprintln!(
                 "[aria-cursor-resubscribe] initial attach grace elapsed; sending baseline before live registration"
             );
-            let _ = outbound_for_grace
-                .send(OutboundControl::Text(session_state))
-                .await;
-            if let Some(choice) = choice
-                && let Ok(json) = serde_json::to_string(&choice)
-            {
-                let _ = outbound_for_grace.send(OutboundControl::Text(json)).await;
-            }
         }
-        manager_for_grace.activate_attachment(&connection_for_grace);
+        flush_initial_attachment(
+            manager_for_grace.as_ref(),
+            &connection_for_grace,
+            &outbound_for_grace,
+            initial,
+        )
+        .await;
     });
 
     let receiver_exit = tokio::select! {
@@ -571,14 +637,15 @@ pub(crate) async fn handle_workspace_socket(
                     if initial.is_none() {
                         eprintln!("[aria-cursor-resubscribe] cursor Hello arrived after initial attach grace; client cursor retry absorbs disclosed narrow window");
                     }
-                } else if let Some((session_state, choice)) = initial {
-                    let _ = outbound_tx.send(OutboundControl::Text(session_state)).await;
-                    if let Some(choice) = choice
-                        && let Ok(json) = serde_json::to_string(&choice)
-                    {
-                        let _ = outbound_tx.send(OutboundControl::Text(json)).await;
-                    }
                     manager.activate_attachment(&connection_id);
+                } else {
+                    flush_initial_attachment(
+                        manager.as_ref(),
+                        &connection_id,
+                        &outbound_tx,
+                        initial,
+                    )
+                    .await;
                 }
                 initial_push_grace_task.abort();
                 if let Err(role) = manager.arbitrate(&connection_id, in_msg) {

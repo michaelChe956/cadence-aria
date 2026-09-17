@@ -8,6 +8,22 @@ use crate::web::workspace_ws_handler::OutboundControl;
 use tokio::sync::mpsc;
 
 #[tokio::test]
+async fn resubscribe_snapshot_includes_connection_id_before_socket_decoration() {
+    let manager = WorkspaceSessionManager::test_fixture("session_resubscribe_connection_id");
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(1);
+    manager.register_attachment("connection", outbound_tx.clone());
+
+    manager.resubscribe(&outbound_tx, "connection", 1).await;
+
+    let Some(OutboundControl::Text(snapshot)) = outbound_rx.recv().await else {
+        panic!("resubscribe should send a snapshot");
+    };
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot).expect("snapshot JSON");
+    assert_eq!(snapshot["type"], "session_state");
+    assert_eq!(snapshot["connection_id"], "connection");
+}
+
+#[tokio::test]
 async fn start_run_supersedes_active_run_with_token_equality_guard() {
     let manager = WorkspaceSessionManager::test_fixture("session_arb");
     let (_id_a, token_a, cancel_a, _rx_a, _) = manager
