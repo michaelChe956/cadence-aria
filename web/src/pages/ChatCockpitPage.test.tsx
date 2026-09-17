@@ -856,6 +856,100 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByTestId("cockpit-conversation-flow")).toHaveTextContent("暂无聊天记录");
   });
 
+describe("cockpit generation status identity and boundaries", () => {
+  it("shows provider identity and elapsed time while a generation runs", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-17T12:00:00Z"));
+      const workspaceWs = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        providerStatus: "running",
+        stage: "running",
+        providers: { author: "pi", reviewer: "codex" } as const,
+        activeNodeId: "author-1",
+        timelineNodes: [
+          timelineNode({
+            node_id: "author-1",
+            status: "active",
+            started_at: new Date("2026-09-17T11:58:55Z").toISOString(),
+          }),
+        ],
+      });
+
+      renderCockpitWith(workspaceWs);
+
+      const status = screen.getByTestId("cockpit-generation-status");
+      expect(status).toHaveTextContent("正在生成");
+      expect(status).toHaveTextContent("pi");
+      expect(status).toHaveTextContent("1:05");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("labels the reviewer during cross review", () => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      providerStatus: "running",
+      stage: "cross_review",
+      providers: { author: "pi", reviewer: "codex" } as const,
+      activeNodeId: "reviewer-1",
+      timelineNodes: [timelineNode({ node_id: "reviewer-1", stage: "cross_review" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(screen.getByTestId("cockpit-generation-status")).toHaveTextContent("codex");
+  });
+
+  it("omits provider and elapsed segments when their driving facts are absent", () => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      providerStatus: "running",
+      stage: "running",
+      providers: null,
+      activeNodeId: "author-1",
+      timelineNodes: [timelineNode({ node_id: "author-1", started_at: "" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    const status = screen.getByTestId("cockpit-generation-status");
+    expect(status).toHaveTextContent("正在生成 · 运行中");
+    expect(status).not.toHaveTextContent("undefined");
+    expect(status).not.toHaveTextContent("NaN");
+  });
+
+  it("guides an empty unstarted session instead of reporting a fault", () => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      providerStatus: "starting",
+      stage: "prepare_context",
+      timelineNodes: [],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(screen.getByTestId("cockpit-generation-status")).toHaveTextContent(
+      "等待发起 · 选择 Provider 后点击「开始生成」",
+    );
+  });
+
+  it.each([
+    ["failed", "running", "生成失败"],
+    ["completed", "completed", "生成完成"],
+  ] as const)("marks %s provider state visibly", (providerStatus, stage, label) => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({ providerStatus, stage, chatEntries: [] });
+
+    renderCockpitWith(workspaceWs);
+
+    const status = screen.getByTestId("cockpit-generation-status");
+    expect(status).toHaveTextContent(label);
+    expect(status).not.toHaveTextContent("正在生成");
+  });
+});
+
   it("shows a successful takeover through the shared audit view", async () => {
     useWorkspaceStore.setState({ stage: "running" });
     const user = userEvent.setup();

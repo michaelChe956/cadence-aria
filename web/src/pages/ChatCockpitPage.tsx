@@ -79,13 +79,49 @@ function useNowTicker(intervalMs = 1000): number {
   return now;
 }
 
-function generationStatusText(providerStatus: string, stage: string) {
+function runningProviderName(
+  stage: string,
+  providers: { author: string; reviewer?: string | null } | null,
+): string | null {
+  if (!providers) return null;
+  if (stage === "cross_review") return providers.reviewer ?? null;
+  if (stage === "running" || stage === "revision") return providers.author;
+  return null;
+}
+
+function formatElapsedMs(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+function generationStatusText(
+  providerStatus: string,
+  stage: string,
+  running: { provider: string | null; elapsedMs: number | null } | null,
+) {
+  if (providerStatus === "not_started") {
+    return "等待发起 · 选择 Provider 后点击「开始生成」";
+  }
+
   const stageLabel = workspaceStageLabel(stage);
   switch (providerStatus) {
     case "running":
-      return `正在生成 · ${stageLabel}`;
-    case "starting":
-      return `正在启动生成 · ${stageLabel}`;
+    case "starting": {
+      const statusLabel = providerStatus === "running" ? "正在生成" : "正在启动生成";
+      const segments = [
+        statusLabel,
+        running?.provider,
+        stageLabel,
+        running?.elapsedMs === null || running?.elapsedMs === undefined
+          ? null
+          : `已用 ${formatElapsedMs(running.elapsedMs)}`,
+      ];
+      return segments.filter((segment): segment is string => segment !== null).join(" · ");
+    }
     case "waiting_approval":
       return `等待生成确认 · ${stageLabel}`;
     case "completed":
@@ -145,6 +181,25 @@ export function ChatCockpitPage({
       ? state
       : observedRecords.find((record) => record.sessionId === takeoverSessionId)?.state ?? null;
   const selectedSessionId = takeoverSessionId ?? sessionId;
+  const statusState = selectedState ?? state;
+  const activeTimelineNode =
+    statusState.timelineNodes.find((node) => node.node_id === statusState.activeNodeId) ??
+    statusState.timelineNodes.at(-1) ??
+    null;
+  const activeStartedAtMs = activeTimelineNode
+    ? Date.parse(activeTimelineNode.started_at)
+    : NaN;
+  const runningContext =
+    statusState.providerStatus === "running" || statusState.providerStatus === "starting"
+      ? {
+          provider: runningProviderName(statusState.stage, statusState.providers ?? null),
+          elapsedMs: Number.isNaN(activeStartedAtMs)
+            ? null
+            : Math.max(0, now - activeStartedAtMs),
+        }
+      : null;
+  const isEmptyUnstarted =
+    statusState.stage === "prepare_context" && statusState.timelineNodes.length === 0;
   const flowRows = useMemo(
     () => (selectedState ? selectCockpitFlow(selectedState, now) : []),
     [now, selectedState],
@@ -602,8 +657,9 @@ export function ChatCockpitPage({
                 className="text-xs text-[var(--aria-ink-muted)]"
               >
                 {generationStatusText(
-                  selectedState?.providerStatus ?? state.providerStatus,
-                  selectedState?.stage ?? state.stage,
+                  isEmptyUnstarted ? "not_started" : statusState.providerStatus,
+                  statusState.stage,
+                  runningContext,
                 )}
               </p>
               <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
