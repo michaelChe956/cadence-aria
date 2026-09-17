@@ -1,9 +1,10 @@
 use cadence_aria::web::workspace_session::WorkspaceSessionRegistry;
 
-/// 逐步放行流式文本，供 cursor 回放与活跃 run 窗口恢复用例精确控制事件窗口。
+/// 逐步放行流式文本，供 cursor 回放、活跃 run 窗口恢复和慢订阅者用例精确控制事件窗口。
 struct GatedChunkStreamingProvider {
     step: Arc<Notify>,
     complete: Arc<Notify>,
+    chunk_bytes: usize,
 }
 
 #[async_trait::async_trait]
@@ -16,12 +17,13 @@ impl StreamingProviderAdapter for GatedChunkStreamingProvider {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
         let step = self.step.clone();
+        let chunk_bytes = self.chunk_bytes;
         let complete = self.complete.clone();
         tokio::spawn(async move {
             let mut index = 0_u64;
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
-                    content: format!("gated chunk {index}"),
+                    content: gated_chunk(0, chunk_bytes),
                 })
                 .await;
             loop {
@@ -30,7 +32,7 @@ impl StreamingProviderAdapter for GatedChunkStreamingProvider {
                     _ = step.notified() => {
                         index += 1;
                         if event_tx.send(ProviderEvent::TextDelta {
-                            content: format!("gated chunk {index}"),
+                            content: gated_chunk(index, chunk_bytes),
                         }).await.is_err() {
                             return;
                         }
@@ -68,6 +70,14 @@ impl StreamingProviderAdapter for GatedChunkStreamingProvider {
     }
 }
 
+fn gated_chunk(index: u64, chunk_bytes: usize) -> String {
+    let mut content = format!("gated chunk {index}");
+    if chunk_bytes > content.len() {
+        content.push_str(&"x".repeat(chunk_bytes - content.len()));
+    }
+    content
+}
+
 /// REQ-WCR-04：携带可回放 cursor 的重连仅收到严格晚于 cursor 的事件，且 attach
 /// snapshot 基线不得先于回放帧到达。
 #[tokio::test]
@@ -82,6 +92,7 @@ async fn workspace_ws_reconnect_with_cursor_replays_without_snapshot_baseline() 
         Arc::new(GatedChunkStreamingProvider {
             step: step.clone(),
             complete: complete.clone(),
+            chunk_bytes: 0,
         }),
     );
     let app = build_web_router(WebAppState::with_provider_registry(
@@ -170,6 +181,7 @@ async fn workspace_ws_stale_cursor_during_active_run_replays_current_run_window(
         Arc::new(GatedChunkStreamingProvider {
             step: step.clone(),
             complete: complete.clone(),
+            chunk_bytes: 0,
         }),
     );
     let app = build_web_router(WebAppState::with_provider_registry(
@@ -1279,6 +1291,210 @@ async fn workspace_ws_fanout_events_have_shared_monotonic_event_seq() {
     server.abort();
 }
 
+/// REQ-WCR-04：一个不消费的 observer 不得反压 provider，快 observer 保持精确直播流。
+#[tokio::test]
+async fn workspace_ws_slow_subscriber_degrades_without_backpressure() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let step = Arc::new(Notify::new());
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(GatedChunkStreamingProvider {
+            step: step.clone(),
+            complete: complete.clone(),
+            chunk_bytes: 0,
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url.clone()).await.expect("driver");
+    assert_eq!(recv_json_value(&mut driver).await["type"], "session_state");
+
+    let (mut slow_observer, _) = connect_async(url.clone()).await.expect("slow observer");
+    send_json(
+        &mut slow_observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+
+    let (mut fast_observer, _) = connect_async(url.clone()).await.expect("fast observer");
+    send_json(
+        &mut fast_observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    assert_eq!(recv_json_value(&mut fast_observer).await["type"], "session_state");
+
+    assert_eq!(
+        timeout(Duration::from_secs(3), recv_json_value(&mut slow_observer))
+            .await
+            .expect("slow observer initial snapshot")["type"],
+        "session_state"
+    );
+
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("slow_subscriber"),
+        },
+    )
+    .await;
+    let initial_driver = recv_until_stream_chunk_value(&mut driver).await;
+    assert!(
+        initial_driver["content"]
+            .as_str()
+            .is_some_and(|content| content.starts_with("gated chunk 0"))
+    );
+    let initial_fast = recv_until_stream_chunk_value(&mut fast_observer).await;
+    assert!(
+        initial_fast["content"]
+            .as_str()
+            .is_some_and(|content| content.starts_with("gated chunk 0"))
+    );
+
+    for index in 1..=200 {
+        step.notify_one();
+        let chunk = timeout(Duration::from_secs(2), recv_until_stream_chunk_value(&mut driver))
+            .await
+            .expect("slow observer must not backpressure driver");
+        assert!(
+            chunk["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with(&format!("gated chunk {index}"))),
+            "driver must receive stepped chunk {index}"
+        );
+    }
+
+    // 满队列降级和单发 `resync_required` 由 manager 单测精确覆盖；此处保持端到端的
+    // router 不反压和快订阅者全量接收验证，避免本机 TCP 缓冲大小污染协议测试。
+    for index in 1..=200 {
+        let chunk = timeout(
+            Duration::from_secs(2),
+            recv_until_stream_chunk_value(&mut fast_observer),
+        )
+        .await
+        .expect("fast observer must receive every stepped live chunk");
+        assert!(
+            chunk["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with(&format!("gated chunk {index}"))),
+            "fast observer must receive stepped chunk {index}"
+        );
+    }
+    complete.notify_one();
+    drop(slow_observer);
+    drop(driver);
+    server.abort();
+}
+
+/// REQ-WCR-04：关闭单一 attachment 只摘除该连接，其他连接的事件流和 run 不受影响。
+#[tokio::test]
+async fn workspace_ws_closing_one_connection_does_not_affect_others() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let step = Arc::new(Notify::new());
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(GatedChunkStreamingProvider {
+            step: step.clone(),
+            complete: complete.clone(),
+            chunk_bytes: 0,
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut driver, _) = connect_async(url.clone()).await.expect("driver");
+    assert_eq!(recv_json_value(&mut driver).await["type"], "session_state");
+    let (mut closing_observer, _) = connect_async(url.clone()).await.expect("closing observer");
+    assert_eq!(recv_json_value(&mut closing_observer).await["type"], "session_state");
+    send_json(
+        &mut closing_observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+    let (mut observing_observer, _) = connect_async(url.clone()).await.expect("observing observer");
+    assert_eq!(recv_json_value(&mut observing_observer).await["type"], "session_state");
+    send_json(
+        &mut observing_observer,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".into(),
+            last_seen_node_id: None,
+            role: Some(HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+
+    send_json(
+        &mut driver,
+        &WsInMessage::UserMessage {
+            content: long_message("close_one_connection"),
+        },
+    )
+    .await;
+    assert_eq!(recv_until_stream_chunk_value(&mut driver).await["content"], "gated chunk 0");
+    assert_eq!(recv_until_stream_chunk_value(&mut closing_observer).await["content"], "gated chunk 0");
+    assert_eq!(recv_until_stream_chunk_value(&mut observing_observer).await["content"], "gated chunk 0");
+
+    closing_observer.close(None).await.expect("close observer");
+    drop(closing_observer);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for index in 1..=2 {
+        step.notify_one();
+        assert_eq!(
+            recv_until_stream_chunk_value(&mut driver).await["content"],
+            format!("gated chunk {index}"),
+            "driver stream must continue after a peer closes"
+        );
+        assert_eq!(
+            recv_until_stream_chunk_value(&mut observing_observer).await["content"],
+            format!("gated chunk {index}"),
+            "remaining observer stream must continue after a peer closes"
+        );
+    }
+    complete.notify_one();
+    let _ = recv_until_message_complete(&mut driver).await;
+
+    drop(observing_observer);
+    drop(driver);
+    server.abort();
+}
 async fn recv_json_value(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,

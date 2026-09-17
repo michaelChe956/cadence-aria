@@ -28,6 +28,8 @@ use crate::web::workspace_ws_types::{WsInMessage, WsOutMessage};
 
 struct Attachment {
     outbound_tx: mpsc::Sender<OutboundControl>,
+    /// 一旦直播通道溢出，该连接只能通过重连回到一致状态；此后 router 不再向其投递。
+    degraded: bool,
     // Hello 前的一个 RTT 内，连接维持 legacy driver 等价，待 Hello 归一后覆盖。
     role: ConnectionRole,
     after_event_seq: Option<u64>,
@@ -314,6 +316,7 @@ impl WorkspaceSessionManager {
             connection_id.to_string(),
             Attachment {
                 outbound_tx,
+                degraded: false,
                 role: ConnectionRole::Driver,
                 after_event_seq: None,
                 lease_epoch,
@@ -1109,32 +1112,84 @@ impl WorkspaceSessionManager {
             );
             return;
         };
-        let attachments = {
+        {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.journal.push(seq, json.clone());
-            state
-                .attachments
-                .iter()
-                .map(|(connection_id, attachment)| {
-                    (connection_id.clone(), attachment.outbound_tx.clone())
-                })
-                .collect::<Vec<_>>()
+        }
+        let resync = serde_json::to_string(&WsOutMessage::ResyncRequired { event_seq: seq })
+            .expect("resync required message serializes");
+        let attachment_ids = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.attachments.keys().cloned().collect::<Vec<_>>()
         };
-        for (connection_id, sender) in attachments {
-            if sender
-                .try_send(OutboundControl::Text(json.clone()))
-                .is_err()
-            {
-                eprintln!(
-                    "[aria-broadcast] attachment unreachable session={} connection={connection_id}",
-                    self.session_id
-                );
+        for connection_id in attachment_ids {
+            self.try_send_live_event(&connection_id, &json, &resync);
+        }
+    }
+
+    /// 直播发送只允许 `try_send`：任何 attachment 都不能使 provider/router 等待。
+    ///
+    /// 满队列将连接永久标为本次 attachment 生命周期内的 degraded，并仅尝试一次
+    /// `ResyncRequired` 控制帧。若并发出站泵恰好腾出一个槽位，客户端立即得知须重连；
+    /// 否则丢弃控制帧，客户端仍可依自身关闭/重订阅恢复。已关闭的 sender 只清理自身。
+    fn try_send_live_event(&self, connection_id: &str, json: &str, resync: &str) {
+        let sender = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.attachments.get(connection_id).and_then(|attachment| {
+                (!attachment.degraded).then(|| attachment.outbound_tx.clone())
+            })
+        };
+        let Some(sender) = sender else {
+            return;
+        };
+
+        match sender.try_send(OutboundControl::Text(json.to_string())) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let sender = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let Some(attachment) = state.attachments.get_mut(connection_id) else {
+                        return;
+                    };
+                    if attachment.degraded {
+                        return;
+                    }
+                    attachment.degraded = true;
+                    attachment.outbound_tx.clone()
+                };
+                let _ = sender.try_send(OutboundControl::Text(resync.to_string()));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .attachments
+                    .remove(connection_id);
             }
         }
     }
+    #[cfg(test)]
+    pub(crate) fn attachment_is_degraded(&self, connection_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .attachments
+            .get(connection_id)
+            .is_some_and(|attachment| attachment.degraded)
+    }
+
 
     #[cfg(test)]
     pub(crate) async fn attach(
@@ -1143,6 +1198,7 @@ impl WorkspaceSessionManager {
         outbound_tx: mpsc::Sender<OutboundControl>,
     ) {
         self.register_attachment(connection_id, outbound_tx);
+        self.activate_attachment(connection_id);
     }
 
     #[cfg(test)]

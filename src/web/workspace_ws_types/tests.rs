@@ -53,6 +53,15 @@ fn permission_messages_use_snake_case_type_tags() {
 }
 
 #[test]
+fn resync_required_message_serializes_current_event_sequence() {
+    let value = serde_json::to_value(WsOutMessage::ResyncRequired { event_seq: 42 })
+        .expect("resync required serializes");
+
+    assert_eq!(value["type"], "resync_required");
+    assert_eq!(value["event_seq"], 42);
+}
+
+#[test]
 fn permission_message_values_are_constrained() {
     let invalid_risk: Result<WsOutMessage, _> = serde_json::from_value(serde_json::json!({
         "type": "permission_request",

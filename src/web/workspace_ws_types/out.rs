@@ -222,6 +222,10 @@ pub enum WsOutMessage {
         snapshot: ProviderConfigSnapshot,
         locked_at: String,
     },
+    /// attachment 直播队列溢出；客户端必须关闭该连接并带 cursor 重连以恢复一致状态。
+    ResyncRequired {
+        event_seq: u64,
+    },
     Pong,
 }
 

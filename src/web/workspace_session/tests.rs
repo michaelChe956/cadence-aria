@@ -339,3 +339,46 @@ async fn manager_broadcast_stamps_monotonic_seq_per_session() {
         "fan-out must preserve stamped event identity"
     );
 }
+
+/// REQ-WCR-04：某个 attachment 的有界队列满时，仅该连接被降级；其他 attachment
+/// 继续逐事件接收，router 从不等待慢连接。
+#[tokio::test]
+async fn manager_degrades_only_full_attachment_without_backpressure() {
+    let manager = WorkspaceSessionManager::test_fixture("session_slow_attachment");
+    let (slow_tx, mut slow_rx) = mpsc::channel(1);
+    let (fast_tx, mut fast_rx) = mpsc::channel(8);
+    manager.attach("slow", slow_tx).await;
+    manager.attach("fast", fast_tx).await;
+
+    manager
+        .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Starting)
+        .await;
+    manager
+        .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Running)
+        .await;
+    assert!(
+        manager.attachment_is_degraded("slow"),
+        "满队列 attachment 必须被标为 degraded，之后不再接收直播帧"
+    );
+
+    let first_slow = slow_rx.recv().await.expect("slow attachment first event");
+    assert!(matches!(first_slow, OutboundControl::Text(json) if json.contains("provider_status")));
+    manager
+        .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Completed)
+        .await;
+    assert!(
+        matches!(slow_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "满队列时重同步控制帧允许被一次性丢弃，降级 attachment 不得继续直播"
+    );
+
+    let fast_sequences = (0..3)
+        .map(|_| match fast_rx.try_recv().expect("fast attachment receives every event") {
+            OutboundControl::Text(json) => serde_json::from_str::<serde_json::Value>(&json)
+                .expect("broadcast JSON")["event_seq"]
+                .as_u64()
+                .expect("event sequence"),
+            other => panic!("unexpected fast attachment control: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fast_sequences, vec![1, 2, 3]);
+}
