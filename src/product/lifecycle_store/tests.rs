@@ -1186,7 +1186,6 @@ fn validate_confirm_aggregate_spec_ignores_non_story_design_workspace() {
         .expect("non story/design workspace must skip the aggregate confirm gate");
 }
 
-
 #[test]
 fn lifecycle_creation_uses_ids_above_deleted_middle_records() {
     let (_tmp, store) = setup();

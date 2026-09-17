@@ -1,8 +1,8 @@
-use crate::product::id::next_sequential_id_from_existing;
 use super::*;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingExecutionUnit, CodingExecutionUnitStatus,
 };
+use crate::product::id::next_sequential_id_from_existing;
 use crate::product::models::work_item_revision::HandoffRevision;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 

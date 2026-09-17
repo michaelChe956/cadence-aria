@@ -1100,13 +1100,18 @@ fn blocked_gate_creation_is_idempotent_for_same_node_and_reason() {
     );
 }
 
-
 #[test]
 fn create_context_note_after_deleting_middle_uses_id_above_existing_maximum() {
     let (_tmp, store, attempt) = setup();
-    let _first = store.create_context_note(&attempt, "first".to_string()).unwrap();
-    let middle = store.create_context_note(&attempt, "middle".to_string()).unwrap();
-    let _last = store.create_context_note(&attempt, "last".to_string()).unwrap();
+    let _first = store
+        .create_context_note(&attempt, "first".to_string())
+        .unwrap();
+    let middle = store
+        .create_context_note(&attempt, "middle".to_string())
+        .unwrap();
+    let _last = store
+        .create_context_note(&attempt, "last".to_string())
+        .unwrap();
     std::fs::remove_file(
         store
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)

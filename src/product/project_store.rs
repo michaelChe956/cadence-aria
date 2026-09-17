@@ -128,7 +128,6 @@ impl ProjectStore {
     }
 }
 
-
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     path.try_exists()
         .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))

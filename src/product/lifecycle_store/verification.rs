@@ -16,15 +16,16 @@ impl LifecycleStore {
         validate_relative_id(&input.work_item_id)?;
 
         let root = self.verification_plans_root(&input.project_id, &input.issue_id);
-        let id = match input.id {
-            Some(ref id) => {
-                validate_relative_id(id)?;
-                id.clone()
-            }
-            None => next_sequential_id_in_directory("verification_plan", &root).map_err(
-                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
-            )?,
-        };
+        let id =
+            match input.id {
+                Some(ref id) => {
+                    validate_relative_id(id)?;
+                    id.clone()
+                }
+                None => next_sequential_id_in_directory("verification_plan", &root).map_err(
+                    |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+                )?,
+            };
         let now = Utc::now().to_rfc3339();
         let plan = VerificationPlan {
             id: id.clone(),

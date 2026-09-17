@@ -25,15 +25,16 @@ impl LifecycleStore {
         validate_relative_ids(&input.verification_plan_ids)?;
 
         let root = self.issue_work_item_plans_root(&input.project_id, &input.issue_id);
-        let id = match input.id {
-            Some(ref id) => {
-                validate_relative_id(id)?;
-                id.clone()
-            }
-            None => next_sequential_id_in_directory("issue_work_item_plan", &root).map_err(
-                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
-            )?,
-        };
+        let id =
+            match input.id {
+                Some(ref id) => {
+                    validate_relative_id(id)?;
+                    id.clone()
+                }
+                None => next_sequential_id_in_directory("issue_work_item_plan", &root).map_err(
+                    |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+                )?,
+            };
         let now = Utc::now().to_rfc3339();
         let plan = IssueWorkItemPlan {
             id: id.clone(),
@@ -516,15 +517,16 @@ impl LifecycleStore {
         validate_relative_id(&input.repository_id)?;
 
         let root = self.repository_profiles_root(&input.project_id, &input.issue_id);
-        let id = match input.id {
-            Some(ref id) => {
-                validate_relative_id(id)?;
-                id.clone()
-            }
-            None => next_sequential_id_in_directory("repository_profile", &root).map_err(
-                |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
-            )?,
-        };
+        let id =
+            match input.id {
+                Some(ref id) => {
+                    validate_relative_id(id)?;
+                    id.clone()
+                }
+                None => next_sequential_id_in_directory("repository_profile", &root).map_err(
+                    |error| ProductStoreError::Io(format!("read {}: {error}", root.display())),
+                )?,
+            };
         let now = Utc::now().to_rfc3339();
         let profile = RepositoryProfile {
             id: id.clone(),

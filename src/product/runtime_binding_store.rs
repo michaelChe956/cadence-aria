@@ -145,9 +145,15 @@ mod tests {
     fn create_after_deleting_middle_binding_uses_id_above_existing_maximum() {
         let root = tempfile::tempdir().unwrap();
         let store = RuntimeBindingStore::new(ProductAppPaths::new(root.path().join(".aria")));
-        let _first = store.create(input("project_0001", "issue_0001", "repository_0001")).unwrap();
-        let middle = store.create(input("project_0001", "issue_0001", "repository_0002")).unwrap();
-        let _last = store.create(input("project_0001", "issue_0001", "repository_0003")).unwrap();
+        let _first = store
+            .create(input("project_0001", "issue_0001", "repository_0001"))
+            .unwrap();
+        let middle = store
+            .create(input("project_0001", "issue_0001", "repository_0002"))
+            .unwrap();
+        let _last = store
+            .create(input("project_0001", "issue_0001", "repository_0003"))
+            .unwrap();
         std::fs::remove_file(
             root.path()
                 .join(".aria/projects/project_0001/issues/issue_0001/bindings")
@@ -155,7 +161,9 @@ mod tests {
         )
         .unwrap();
 
-        let replacement = store.create(input("project_0001", "issue_0001", "repository_0004")).unwrap();
+        let replacement = store
+            .create(input("project_0001", "issue_0001", "repository_0004"))
+            .unwrap();
 
         assert_eq!(replacement.id, "binding_0004");
     }

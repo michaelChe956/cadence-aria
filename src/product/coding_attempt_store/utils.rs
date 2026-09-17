@@ -176,7 +176,6 @@ pub(crate) fn push_unique_artifact_ref(artifact_refs: &mut Vec<String>, artifact
     }
 }
 
-
 pub(crate) fn next_text_file_sequence(
     path: &Path,
     purpose: &str,

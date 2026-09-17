@@ -158,15 +158,12 @@ impl CodingWorkspaceEngine {
         let existing_requests =
             self.store
                 .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let review_request_id = attempt
-            .review_request_id
-            .clone()
-            .unwrap_or_else(|| {
-                crate::product::id::next_sequential_id_from_existing(
-                    "review_request",
-                    existing_requests.iter().map(|request| request.id.as_str()),
-                )
-            });
+        let review_request_id = attempt.review_request_id.clone().unwrap_or_else(|| {
+            crate::product::id::next_sequential_id_from_existing(
+                "review_request",
+                existing_requests.iter().map(|request| request.id.as_str()),
+            )
+        });
         self.store
             .complete_review_coding_git_operation(
                 attempt,

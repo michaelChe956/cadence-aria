@@ -8,7 +8,10 @@ use crate::product::models::{
     WorkspaceType,
 };
 
-use super::{CreateWorkItemInput, LifecycleStore, count_json_files, delete_required_file, list_json_records, validate_relative_ids};
+use super::{
+    CreateWorkItemInput, LifecycleStore, count_json_files, delete_required_file, list_json_records,
+    validate_relative_ids,
+};
 
 impl LifecycleStore {
     pub fn create_work_item(

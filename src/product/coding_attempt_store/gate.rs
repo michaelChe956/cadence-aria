@@ -533,9 +533,10 @@ impl super::CodingAttemptStore {
         let gates_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("stage-gates");
-        let gate_id = next_sequential_id_in_directory("coding_stage_gate", &gates_root).map_err(
-            |error| ProductStoreError::Io(format!("read {}: {error}", gates_root.display())),
-        )?;
+        let gate_id =
+            next_sequential_id_in_directory("coding_stage_gate", &gates_root).map_err(|error| {
+                ProductStoreError::Io(format!("read {}: {error}", gates_root.display()))
+            })?;
         let now = Utc::now().to_rfc3339();
         let gate = CodingStageGateState {
             gate_id: gate_id.clone(),
@@ -787,7 +788,6 @@ fn create_blocked_gate_unlocked(
     write_json(&gates_root.join(format!("{gate_id}.json")), &record)?;
     Ok(gate)
 }
-
 
 fn next_sequential_id_in_gate_directories(
     prefix: &str,

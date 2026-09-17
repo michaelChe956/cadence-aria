@@ -1,6 +1,6 @@
-use crate::product::id::next_sequential_id_from_existing;
 use super::coding::CoderExecutionOutcome;
 use super::*;
+use crate::product::id::next_sequential_id_from_existing;
 
 impl CodingWorkspaceEngine {
     pub async fn execute_coder_fix_from_review(
