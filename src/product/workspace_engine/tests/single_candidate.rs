@@ -1177,6 +1177,16 @@ mod contract_prerevision {
             .get_workspace_session(&engine.session().session_id)
             .expect("load persisted session");
         assert_eq!(
+            persisted.single_candidate_phase,
+            Some(SingleCandidatePhase::Approval),
+            "repeated-fingerprint 人工门必须在开启时回到 Approval，避免前端可确认而引擎相位仍停在 Evaluate"
+        );
+        assert_eq!(
+            engine.session().single_candidate_phase,
+            Some(SingleCandidatePhase::Approval),
+            "门开 CAS 后内存相位必须同步 durable Approval"
+        );
+        assert_eq!(
             persisted.run_history.repairs_used, 1,
             "the repeated round must not consume another repair budget"
         );

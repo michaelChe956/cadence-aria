@@ -919,6 +919,52 @@ async fn conversational_gate_revision_completed_turn_stale_evaluate_reconnect_ne
     assert_eq!(after.provider_start_ledger.len(), ledger_len);
 }
 
+#[tokio::test]
+async fn conversational_gate_revision_reopens_evaluate_gate_at_approval_after_interruption() {
+    let (root, lifecycle, mut engine) =
+        evaluate_gate_revision_fixture("revision_reopen_after_interruption", 2, 0);
+    let turn_id =
+        open_running_revision_turn(&mut engine, "revision_reopen_after_interruption_command").await;
+
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("修订候选必须重新打开人工门");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    let reopened = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("重开的门会话");
+    assert_eq!(
+        reopened.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert_eq!(
+        reopened.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+        "修订完成必须把被中断的 Evaluate 门回置到 Approval 节点"
+    );
+
+    // 断连重连由 durable 记录重建引擎；门的相位和派生 stage 必须重新一致。
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let recovered = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            root.path().join("reopen-after-interruption-checkpoints"),
+        )),
+        lifecycle,
+        event_tx,
+        crate::product::workspace_engine::WorkspaceSession::from_record(reopened),
+    );
+    assert_eq!(
+        recovered.session().stage,
+        crate::product::workspace_engine::WorkspaceStage::HumanConfirm,
+        "断连重连后，Approval 门必须恢复到 human_confirm"
+    );
+}
+
 // —— 确定性结构标题归一化(2026-09-03 现场 pi 两次标题翻译事故)——
 //
 // 现场:pi 随机把结构标题翻成中文(### 身份/### 目标/…)导致 compiler

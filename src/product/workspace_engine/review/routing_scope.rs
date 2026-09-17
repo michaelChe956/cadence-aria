@@ -704,13 +704,17 @@ impl WorkspaceEngine {
         if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
             return None;
         }
+        // Interactive EnterHumanGate 是可确认门的唯一落盘投影：无论触发来自
+        // repeated_fingerprint、native human requirement 还是修订后的 Evaluate，
+        // 都必须原子回到 Approval，令 durable phase 与 HumanConfirm stage 一致。
+        // StopNeedsHuman 不是可确认门，保留原相位。
         match action {
-            RoutingAction::ContinueToCompleted => Some(SingleCandidatePhase::Approval),
+            RoutingAction::ContinueToCompleted | RoutingAction::EnterHumanGate { .. } => {
+                Some(SingleCandidatePhase::Approval)
+            }
             RoutingAction::AbortFatal { .. } => Some(SingleCandidatePhase::Failed),
             RoutingAction::TriggerAggregateRepair { .. } => Some(SingleCandidatePhase::Generate),
-            RoutingAction::EnterHumanGate { .. } | RoutingAction::StopNeedsHuman { .. } => {
-                self.session.single_candidate_phase.clone()
-            }
+            RoutingAction::StopNeedsHuman { .. } => self.session.single_candidate_phase.clone(),
         }
     }
 
