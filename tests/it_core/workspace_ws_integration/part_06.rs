@@ -1,4 +1,17 @@
 use cadence_aria::web::workspace_session::WorkspaceSessionRegistry;
+/// RCA §6 矩阵 ↔ 自动化用例映射：
+/// - ① 后台节流：Chrome intensive-throttling 人工面留 Task 14；服务端 active-run idle
+///   guard 由 `workspace_ws_idle_timeout_does_not_close_socket_during_active_run`（part_03）覆盖。
+/// - ② 门等待静默：`matrix2_gate_silence_idle_close_writes_no_terminal`。
+/// - ③ 四种连接关闭：part_03 保留 server-idle、4000、1000、TCP EOF 的诊断基线；
+///   `matrix3_non_idle_closes_during_run_keep_business_terminal` 将 4000、1000、TCP EOF
+///   放进 active run 窗口，并由矩阵① guard 证明 active run 期间 server-idle 不会关闭。
+///   矩阵②补齐 server-idle 在无 active run 的 human_confirm 窗口中零终态写入。
+/// - ④ 多连接零影响：`matrix4_observer_close_zero_impact_on_driver_run` 以及
+///   `workspace_ws_driver_close_revokes_lease_run_completes`。
+/// - 并发矩阵：T5 的 `workspace_ws_completion_and_close_race_yields_single_terminal`，
+///   T8 的 lease takeover / stale epoch write rejection 用例。
+
 
 /// 逐步放行流式文本，供 cursor 回放、活跃 run 窗口恢复和慢订阅者用例精确控制事件窗口。
 struct GatedChunkStreamingProvider {
@@ -1409,7 +1422,7 @@ async fn workspace_ws_slow_subscriber_degrades_without_backpressure() {
 
 /// REQ-WCR-04：关闭单一 attachment 只摘除该连接，其他连接的事件流和 run 不受影响。
 #[tokio::test]
-async fn workspace_ws_closing_one_connection_does_not_affect_others() {
+async fn matrix4_observer_close_zero_impact_on_driver_run() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture(&root).await;
     let step = Arc::new(Notify::new());
@@ -1525,4 +1538,291 @@ async fn recv_until_stream_chunk_value(
         }
     }
     panic!("stream_chunk not received");
+}
+
+async fn recv_until_close_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    context: &str,
+) {
+    for _ in 0..20 {
+        let message = timeout(Duration::from_secs(7), ws.next())
+            .await
+            .unwrap_or_else(|_| panic!("{context} timeout"))
+            .unwrap_or_else(|| panic!("{context} websocket ended before close frame"))
+            .unwrap_or_else(|error| panic!("{context} websocket error: {error}"));
+        match message {
+            Message::Close(_) => return,
+            Message::Text(text) => {
+                let json: Value = serde_json::from_str(&text).expect("ws json before close");
+                assert_ne!(
+                    json["type"], "error",
+                    "{context} received protocol error before idle close: {json}"
+                );
+            }
+            _ => {}
+        }
+    }
+    panic!("{context} did not receive close frame");
+}
+
+/// RCA §6 矩阵②服务端半面：human_confirm 静默超过 idle 阈值后，服务器可以回收
+/// 连接，但不能写入任何终态；重连仍必须投影原来的门等待。
+#[tokio::test]
+async fn matrix2_gate_silence_idle_close_writes_no_terminal() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    controls
+        .set_server_idle_timeout(Duration::from_millis(30))
+        .await;
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("matrix2_gate_silence"),
+        },
+    )
+    .await;
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    accept_author_output(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "human_confirm").await,
+        "human_confirm"
+    );
+
+    let durable_before_idle_close = durable_tree_snapshot(root.path());
+    recv_until_close_frame(&mut ws, "human gate idle close").await;
+    let diagnostic = wait_for_connection_diagnostic(&controls, "server_idle").await;
+    assert_eq!(diagnostic["idle_timeout_triggered"], true);
+    assert!(
+        diagnostic["current_run_token"].is_null(),
+        "human_confirm 窗口不能保留 active run"
+    );
+
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let session = lifecycle
+        .get_workspace_session("workspace_session_0001")
+        .expect("workspace session");
+    assert_eq!(
+        session.status,
+        cadence_aria::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    let nodes = lifecycle
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("timeline nodes");
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect),
+        "idle 回收 human_confirm 连接不得写入断连伪终态"
+    );
+    assert_ne!(
+        nodes.last().expect("human gate timeline node").status,
+        TimelineNodeStatus::Failed,
+        "idle 回收不得将等待门覆盖为 Failed"
+    );
+    assert_eq!(
+        durable_tree_snapshot(root.path()),
+        durable_before_idle_close,
+        "idle close 不得产生任何 durable 终态写入"
+    );
+
+    let (mut probe, _) = connect_async(url).await.expect("reconnect probe");
+    match recv_json(&mut probe).await {
+        WsOutMessage::SessionState {
+            stage,
+            session_status,
+            timeline_nodes,
+            ..
+        } => {
+            assert_eq!(
+                session_status,
+                cadence_aria::product::models::WorkspaceSessionStatus::WaitingForHuman
+            );
+            assert!(
+                matches!(stage.as_str(), "author_confirm" | "human_confirm"),
+                "重连必须恢复一个待人工处理的 gate，而非由 idle close 改写为终态：{stage}"
+            );
+            assert!(
+                timeline_nodes
+                    .iter()
+                    .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect)
+            );
+        }
+        other => panic!("expected session_state after idle reconnect, got {other:?}"),
+    }
+
+    drop(probe);
+    drop(ws);
+    server.abort();
+}
+
+/// RCA §6 矩阵③：所有可在 active run 期间由客户端触发的关闭形态都必须留下唯一的
+/// 中性诊断，并让 provider 自然写入业务终态；server-idle 在 active run 中由矩阵①
+/// 的 guard 禁止触发，空闲 gate 的 server-idle 回收由矩阵②覆盖。
+#[tokio::test]
+async fn matrix3_non_idle_closes_during_run_keep_business_terminal() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
+    for close_kind in [
+        Matrix3ClientCloseKind::StaleSocket4000,
+        Matrix3ClientCloseKind::PageUnload1000,
+        Matrix3ClientCloseKind::TcpDrop,
+    ] {
+        let root = tempdir().expect("root");
+        let _repo = create_workspace_session_fixture(&root).await;
+        let complete = Arc::new(Notify::new());
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            ProviderName::Fake,
+            Arc::new(SignalledCompletionStreamingProvider {
+                complete: complete.clone(),
+            }),
+        );
+        let state = WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        );
+        let controls = state.test_controls.clone();
+        let app = build_web_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+
+        let (ws, _) = connect_async(url).await.expect("ws");
+        let mut ws = Some(ws);
+        let _initial = recv_json(ws.as_mut().expect("active ws")).await;
+        send_json(
+            ws.as_mut().expect("active ws"),
+            &WsInMessage::UserMessage {
+                content: long_message(close_kind.message_token()),
+            },
+        )
+        .await;
+        let _chunk = recv_until_stream_chunk(ws.as_mut().expect("active ws")).await;
+
+        let receiver_exit = close_kind.close(ws.as_mut().expect("active ws")).await;
+        if close_kind.is_tcp_drop() {
+            drop(ws.take());
+        }
+        let diagnostic = wait_for_connection_diagnostic(&controls, receiver_exit).await;
+        assert!(
+            diagnostic["current_run_token"].as_u64().is_some(),
+            "{close_kind:?} 的诊断必须保留 close 时 run 在途的 token：{diagnostic}"
+        );
+        assert_eq!(diagnostic["idle_timeout_triggered"], false);
+        close_kind.assert_diagnostic(&diagnostic);
+
+        complete.notify_one();
+        wait_for_business_terminal(root.path(), close_kind.message_token()).await;
+        let nodes = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+            .load_timeline_nodes("workspace_session_0001")
+            .expect("timeline nodes");
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect),
+            "{close_kind:?} 不得写入 aborted_by_disconnect"
+        );
+
+        drop(ws.take());
+        server.abort();
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Matrix3ClientCloseKind {
+    StaleSocket4000,
+    PageUnload1000,
+    TcpDrop,
+}
+
+impl Matrix3ClientCloseKind {
+    fn message_token(self) -> &'static str {
+        match self {
+            Self::StaleSocket4000 => "matrix3_close_4000",
+            Self::PageUnload1000 => "matrix3_close_1000",
+            Self::TcpDrop => "matrix3_tcp_drop",
+        }
+    }
+
+    async fn close(
+        self,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> &'static str {
+        match self {
+            Self::StaleSocket4000 => {
+                ws.send(Message::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Library(4000),
+                    reason: "matrix stale socket".into(),
+                })))
+                .await
+                .expect("send 4000 close");
+                "close_frame"
+            }
+            Self::PageUnload1000 => {
+                ws.close(None).await.expect("send 1000 close");
+                "close_frame"
+            }
+            Self::TcpDrop => {
+                // 将底层连接留给函数末尾 drop；此处停止发送即可模拟无 close frame 的 EOF。
+                "eof"
+            }
+        }
+    }
+
+    fn is_tcp_drop(self) -> bool {
+        matches!(self, Self::TcpDrop)
+    }
+
+    fn assert_diagnostic(self, diagnostic: &Value) {
+        match self {
+            Self::StaleSocket4000 => {
+                assert_eq!(diagnostic["close_code"], 4000);
+                assert_eq!(diagnostic["close_reason"], "matrix stale socket");
+            }
+            Self::PageUnload1000 => {
+                assert!(
+                    diagnostic["close_code"].is_null() || diagnostic["close_code"] == 1000,
+                    "page unload must preserve its 1000-or-empty close diagnostic: {diagnostic}"
+                );
+            }
+            Self::TcpDrop => {
+                assert!(
+                    diagnostic["close_code"].is_null(),
+                    "TCP EOF must not be encoded as a close frame: {diagnostic}"
+                );
+            }
+        }
+    }
+}
+
+async fn wait_for_business_terminal(root: &std::path::Path, close_kind: &str) {
+    for _ in 0..100 {
+        if persisted_workspace_messages(root)
+            .iter()
+            .any(|message| message.role == "assistant" && message.content.contains("# Story Spec"))
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{close_kind} 后 provider 业务终态未落盘");
 }
