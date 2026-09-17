@@ -3,7 +3,7 @@ use chrono::Utc;
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, PlanAmendmentContext, PlanAmendmentContextStatus,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::AmendmentResumeTarget;
@@ -82,8 +82,15 @@ impl super::CodingAttemptStore {
                     id: unit_id.to_string(),
                 })?;
             let previous_plan_revision_id = self.get_plan_binding(&current)?.bound_plan_revision_id;
-            let contexts = self.list_plan_amendment_contexts(&current)?;
-            let id = next_sequential_id("coding_plan_amendment_context", contexts.len());
+            let root = self.plan_amendment_contexts_root(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+            );
+            let id = next_sequential_id_in_directory("coding_plan_amendment_context", &root)
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("read {}: {error}", root.display()))
+                })?;
             let now = Utc::now().to_rfc3339();
             let context = PlanAmendmentContext {
                 id,
@@ -98,11 +105,6 @@ impl super::CodingAttemptStore {
                 created_at: now.clone(),
                 updated_at: now,
             };
-            let root = self.plan_amendment_contexts_root(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-            );
             write_json(&root.join(format!("{}.json", context.id)), &context)?;
             Ok(context)
         })

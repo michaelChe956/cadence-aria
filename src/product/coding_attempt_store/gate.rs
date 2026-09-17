@@ -13,7 +13,7 @@ use crate::product::coding_models::{
     CodingStageGateState, CodingStageGateStatus, CodingUnitRun, CodingUnitRunStatus,
     QualityGateBypassAudit,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 use super::locking::with_exclusive_lock;
@@ -406,9 +406,9 @@ impl super::CodingAttemptStore {
             return Ok(gate);
         }
 
-        let gate_count = super::count_json_files(&gates_root)?
-            + super::count_json_files(&gates_root.join("resolved"))?;
-        let gate_id = next_sequential_id("coding_choice_gate", gate_count);
+        let gate_id = next_sequential_id_in_directory("coding_choice_gate", &gates_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", gates_root.display())),
+        )?;
         let now = Utc::now().to_rfc3339();
         let gate = CodingChoiceGate {
             gate_id: gate_id.clone(),
@@ -494,7 +494,8 @@ impl super::CodingAttemptStore {
         )?;
         let root =
             self.quality_bypass_audits_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
-        let id = next_sequential_id("quality_bypass_audit", super::count_json_files(&root)?);
+        let id = next_sequential_id_in_directory("quality_bypass_audit", &root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
         let audit = QualityGateBypassAudit {
             id: id.clone(),
             attempt_id: attempt.id.clone(),
@@ -534,8 +535,9 @@ impl super::CodingAttemptStore {
         let gates_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("stage-gates");
-        let gate_id =
-            next_sequential_id("coding_stage_gate", super::count_json_files(&gates_root)?);
+        let gate_id = next_sequential_id_in_directory("coding_stage_gate", &gates_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", gates_root.display())),
+        )?;
         let now = Utc::now().to_rfc3339();
         let gate = CodingStageGateState {
             gate_id: gate_id.clone(),
@@ -759,9 +761,9 @@ fn create_blocked_gate_unlocked(
         write_json(&existing_path, &record)?;
         return Ok(record.gate);
     }
-    let gate_count = super::count_json_files(gates_root)?
-        + super::count_json_files(&gates_root.join("resolved"))?;
-    let gate_id = next_sequential_id("coding_blocked_gate", gate_count);
+    let gate_id = next_sequential_id_in_directory("coding_blocked_gate", gates_root).map_err(
+        |error| ProductStoreError::Io(format!("read {}: {error}", gates_root.display())),
+    )?;
     let now = Utc::now().to_rfc3339();
     let gate = CodingGateRequired {
         gate_id: gate_id.clone(),

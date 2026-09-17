@@ -4,7 +4,7 @@ use crate::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingRoleRun,
     CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
 };
@@ -24,8 +24,12 @@ impl super::CodingAttemptStore {
         if let Some(node_id) = &node_id {
             validate_relative_id(node_id)?;
         }
+        let role_runs_root =
+            self.role_runs_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let id = next_sequential_id("coding_role_run", existing.len());
+        let id = next_sequential_id_in_directory("coding_role_run", &role_runs_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", role_runs_root.display())),
+        )?;
         let run_no = existing
             .iter()
             .filter(|run| run.stage == stage && run.role == role)
@@ -98,6 +102,8 @@ impl super::CodingAttemptStore {
             return Err(invalid_retry_metadata(prior.id));
         }
 
+        let role_runs_root =
+            self.role_runs_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         if existing.iter().any(|run| {
             run.retry_metadata.as_ref().is_some_and(|existing_retry| {
@@ -110,7 +116,9 @@ impl super::CodingAttemptStore {
                 retry.cycle_id, retry.attempt_no
             )));
         }
-        let id = next_sequential_id("coding_role_run", existing.len());
+        let id = next_sequential_id_in_directory("coding_role_run", &role_runs_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", role_runs_root.display())),
+        )?;
         let run_no = existing
             .iter()
             .filter(|run| run.stage == stage && run.role == role)
@@ -152,6 +160,8 @@ impl super::CodingAttemptStore {
         validate_relative_id(&attempt.issue_id)?;
         validate_relative_id(&attempt.id)?;
         validate_relative_id(&prior.id)?;
+        let role_runs_root =
+            self.role_runs_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let latest = existing
             .iter()
@@ -165,7 +175,9 @@ impl super::CodingAttemptStore {
             return Err(invalid_retry_metadata(prior.id.clone()));
         }
 
-        let id = next_sequential_id("coding_role_run", existing.len());
+        let id = next_sequential_id_in_directory("coding_role_run", &role_runs_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", role_runs_root.display())),
+        )?;
         let run_no = existing
             .iter()
             .filter(|run| run.stage == stage && run.role == role)

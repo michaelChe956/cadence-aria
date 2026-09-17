@@ -5,7 +5,7 @@ use crate::product::coding_models::{
     CodingExecutionStage, CodingExecutionUnit, CodingExecutionUnitStatus,
     CodingRoleProviderConfigSnapshot, CodingUnitRunStatus,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{AmendmentResumeMode, PlanAmendmentManifest};
 use std::collections::HashSet;
@@ -280,7 +280,8 @@ impl super::CodingAttemptStore {
         }
 
         let root = self.coding_units_root(&input.project_id, &input.issue_id, &input.attempt_id);
-        let id = next_sequential_id("coding_unit", super::count_json_files(&root)?);
+        let id = next_sequential_id_in_directory("coding_unit", &root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?;
         let now = Utc::now().to_rfc3339();
         let started_at = if matches!(input.status, CodingExecutionUnitStatus::Running) {
             Some(now.clone())
