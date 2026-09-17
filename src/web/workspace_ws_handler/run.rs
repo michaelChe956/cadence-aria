@@ -82,11 +82,10 @@ pub(crate) fn single_candidate_generation_steps_for_session(session_id: &str) ->
 #[derive(Clone)]
 pub(crate) struct ProviderRunContext {
     pub(crate) provider_registry: Arc<ProviderRegistry>,
+    pub(crate) manager: Arc<crate::web::workspace_session::WorkspaceSessionManager>,
     pub(crate) engine: Arc<Mutex<WorkspaceEngine>>,
-    pub(crate) current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
     pub(crate) workspace_runs: WorkspaceRunRegistry,
     pub(crate) session_id: String,
-    pub(crate) next_run_id: Arc<Mutex<u64>>,
     pub(crate) app_paths: ProductAppPaths,
     pub(crate) session_record: WorkspaceSessionRecord,
 }
@@ -150,75 +149,4 @@ pub(crate) async fn complete_work_item_plan_outline_author_from_output(
         }
     };
     engine.complete_work_item_plan_outline_author(output).await
-}
-
-pub(crate) async fn active_run_command_tx(
-    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
-    workspace_runs: &WorkspaceRunRegistry,
-    session_id: &str,
-) -> Option<mpsc::Sender<ProviderCommand>> {
-    active_run(current_run, workspace_runs, session_id)
-        .await
-        .map(|run| run.command_tx.clone())
-}
-
-pub(crate) async fn active_run(
-    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
-    workspace_runs: &WorkspaceRunRegistry,
-    session_id: &str,
-) -> Option<WorkspaceActiveRun> {
-    let local = { current_run.lock().await.clone() };
-    if local.is_some() {
-        return local;
-    }
-    workspace_runs.run(session_id).await
-}
-
-pub(crate) async fn abort_workspace_run(run: &WorkspaceActiveRun) {
-    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：workspace runner token 的
-    // 唯一 cancel 漏斗——所有触发源（断连清理/Abort 消息/Rollback/新 run 接替）
-    // 在各自调用点带 trigger 打点，此行确认取消真正执行（含向 provider 会话
-    // 转发 Abort 命令）。
-    eprintln!(
-        "[aria-cancellation] workspace abort_workspace_run cancelling runner token trigger=abort_workspace_run run_id=run-{} run_token={} node_id={:?}",
-        run.id, run.token, run.node_id
-    );
-    let _ = run.command_tx.send(ProviderCommand::Abort).await;
-    run.cancel.cancel();
-}
-
-pub(crate) async fn abort_active_run(
-    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
-    workspace_runs: &WorkspaceRunRegistry,
-    session_id: &str,
-) -> bool {
-    let active = { current_run.lock().await.take() };
-    if let Some(run) = active {
-        let _ = workspace_runs.remove_if_token(session_id, run.token).await;
-        abort_workspace_run(&run).await;
-        return true;
-    }
-
-    if let Some(run) = workspace_runs.take(session_id).await {
-        abort_workspace_run(&run).await;
-        return true;
-    }
-
-    false
-}
-
-pub(crate) async fn clear_active_run_if_token(
-    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
-    workspace_runs: &WorkspaceRunRegistry,
-    session_id: &str,
-    run_token: u64,
-) {
-    let _ = workspace_runs.remove_if_token(session_id, run_token).await;
-    let mut current = current_run.lock().await;
-    if current
-        .as_ref()
-        .is_some_and(|active| active.token == run_token)
-    {
-        *current = None;
-    }
 }

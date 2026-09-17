@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -18,7 +18,6 @@ use crate::cross_cutting::provider_health::{
     ProviderHealthService, ProviderHealthSnapshot, SystemProviderHealthClock,
 };
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
@@ -29,19 +28,8 @@ use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use crate::web::handlers::RepositoryRegistrationDependencies;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
-pub struct WorkspaceActiveRun {
-    pub id: u64,
-    pub token: u64,
-    /// 已登记的活动 run 所属 timeline 节点；用于拒绝同一节点的重复启动请求。
-    pub node_id: Option<String>,
-    pub cancel: CancellationToken,
-    pub command_tx: mpsc::Sender<ProviderCommand>,
-    pub pending_choice_ids: Arc<AsyncMutex<HashSet<String>>>,
-}
 
 mod coding_run_registry;
 pub(crate) use coding_run_registry::CodingAttemptMutationLease;
@@ -60,11 +48,9 @@ pub use aggregate_index_rebuild_registry::{
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
-    runs: Arc<AsyncMutex<HashMap<String, WorkspaceActiveRun>>>,
     /// provider drive 期标记（idle 关闭守卫扩展用）：session → 正在驱动 provider
-    /// 会话的 run 计数。断连清理不再取消 run 后，run 会跨 socket 存活（原 socket
-    /// 读循环已退出、registry 摘除），该计数让服务器侧 idle 守卫在「workspace
-    /// run 进行中」也不主动关连接。
+    /// 会话的 run 计数。run 所有权由 `WorkspaceSessionManager` 持有；此结构仅追踪
+    /// 与连接无关的跨 socket provider drive 生命周期。
     provider_drive_depth: Arc<StdMutex<HashMap<String, u32>>>,
 }
 
@@ -81,11 +67,8 @@ impl Drop for WorkspaceProviderDriveGuard {
     }
 }
 
-impl WorkspaceRunRegistry {
-    pub async fn insert(&self, session_id: String, run: WorkspaceActiveRun) {
-        self.runs.lock().await.insert(session_id, run);
-    }
 
+impl WorkspaceRunRegistry {
     /// 标记该 session 进入 provider drive 期；返回的守卫 drop 时结束标记。
     /// 嵌套 begin 会叠加计数，全部 drop 后才视为结束。
     pub fn begin_provider_drive(&self, session_id: &str) -> WorkspaceProviderDriveGuard {
@@ -132,51 +115,6 @@ impl WorkspaceRunRegistry {
             .unwrap_or(0)
     }
 
-    pub async fn take(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
-        self.runs.lock().await.remove(session_id)
-    }
-
-    pub async fn command_tx(&self, session_id: &str) -> Option<mpsc::Sender<ProviderCommand>> {
-        self.runs
-            .lock()
-            .await
-            .get(session_id)
-            .map(|run| run.command_tx.clone())
-    }
-
-    pub async fn run(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
-        self.runs.lock().await.get(session_id).cloned()
-    }
-
-    pub async fn register_choice(&self, session_id: &str, choice_id: String) -> bool {
-        let Some(run) = self.runs.lock().await.get(session_id).cloned() else {
-            return false;
-        };
-        run.pending_choice_ids.lock().await.insert(choice_id);
-        true
-    }
-
-    pub async fn remove_if_token(&self, session_id: &str, token: u64) -> bool {
-        let mut runs = self.runs.lock().await;
-        if runs.get(session_id).is_some_and(|run| run.token == token) {
-            runs.remove(session_id);
-            return true;
-        }
-        false
-    }
-
-    pub async fn replace_command_tx_if_token(
-        &self,
-        session_id: &str,
-        token: u64,
-        command_tx: mpsc::Sender<ProviderCommand>,
-    ) {
-        if let Some(run) = self.runs.lock().await.get_mut(session_id)
-            && run.token == token
-        {
-            run.command_tx = command_tx;
-        }
-    }
 }
 
 #[derive(Clone)]

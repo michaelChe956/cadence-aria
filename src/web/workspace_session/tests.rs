@@ -2,6 +2,52 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{WorkspaceSessionManager, WorkspaceSessionRegistry};
+use crate::product::workspace_engine::ProviderRunKind;
+
+#[tokio::test]
+async fn start_run_supersedes_active_run_with_token_equality_guard() {
+    let manager = WorkspaceSessionManager::test_fixture("session_arb");
+    let (_id_a, token_a, cancel_a, _rx_a, _) = manager
+        .start_run(ProviderRunKind::ReviewOnly, None)
+        .await
+        .expect("run a");
+    assert!(manager.active_run().await.is_some());
+
+    let (_id_b, token_b, _cancel_b, _rx_b, _) = manager
+        .start_run(ProviderRunKind::ReviewOnly, None)
+        .await
+        .expect("run b");
+    tokio::time::timeout(std::time::Duration::from_millis(500), cancel_a.cancelled())
+        .await
+        .expect("run a token cancelled by supersede");
+    assert_ne!(token_a, token_b);
+    assert_eq!(manager.active_run().await.unwrap().token, token_b);
+
+    manager.finish_run(token_a).await;
+    assert_eq!(manager.active_run().await.unwrap().token, token_b);
+
+    manager.finish_run(token_b).await;
+    assert!(manager.active_run().await.is_none());
+}
+
+#[tokio::test]
+async fn abort_active_run_cancels_token_and_clears_state() {
+    let manager = WorkspaceSessionManager::test_fixture("session_abort");
+    let (_, _token, cancel, _rx, _) = manager
+        .start_run(ProviderRunKind::ReviewOnly, None)
+        .await
+        .expect("run");
+
+    assert!(manager.abort_active_run().await);
+    tokio::time::timeout(std::time::Duration::from_millis(500), cancel.cancelled())
+        .await
+        .expect("abort cancels token");
+    assert!(manager.active_run().await.is_none());
+    assert!(
+        !manager.abort_active_run().await,
+        "无 run 时 abort 返回 false"
+    );
+}
 
 #[tokio::test]
 async fn registry_get_or_create_runs_factory_once_under_concurrency() {

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex, mpsc};
-
+use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
 use crate::product::app_paths::ProductAppPaths;
@@ -14,13 +14,31 @@ use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSe
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
 use crate::web::workspace_context::ensure_workspace_context_message;
+use crate::web::workspace_session::lease::LeaseState;
 use crate::web::workspace_ws_handler::{
-    OutboundControl, ProviderRunContext, map_engine_event, spawn_provider_run_from_event,
+    OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind, map_engine_event,
+    spawn_provider_run_from_event,
 };
 use crate::web::workspace_ws_types::WsOutMessage;
 
 struct ManagerState {
     attachments: HashMap<String, mpsc::Sender<OutboundControl>>,
+    next_run_id: u64,
+    active_run: Option<ActiveRun>,
+    lease: LeaseState,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveRun {
+    pub id: u64,
+    pub token: u64,
+    /// 已登记的活动 run 所属 timeline 节点；用于拒绝同一节点的重复启动请求。
+    pub node_id: Option<String>,
+    pub cancel: CancellationToken,
+    pub command_tx: mpsc::Sender<ProviderCommand>,
+    pub pending_choice_ids: Arc<Mutex<HashSet<String>>>,
+    /// 启动该 run 时的授权 epoch；角色仲裁在 Task 8 落地。
+    pub lease_epoch: u64,
 }
 
 /// 一个 durable workspace session 的唯一运行期所有者。
@@ -37,8 +55,6 @@ pub struct WorkspaceSessionManager {
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
     provider_registry: Arc<ProviderRegistry>,
-    current_run: Arc<Mutex<Option<crate::web::state::WorkspaceActiveRun>>>,
-    next_run_id: Arc<Mutex<u64>>,
 }
 #[cfg(test)]
 impl WorkspaceSessionManager {
@@ -55,13 +71,14 @@ impl WorkspaceSessionManager {
             engine_tx,
             state: StdMutex::new(ManagerState {
                 attachments: HashMap::new(),
+                next_run_id: 0,
+                active_run: None,
+                lease: LeaseState::default(),
             }),
             session_id: session_id.to_string(),
             session_record: test_session_record(session_id),
             app_paths: ProductAppPaths::new(std::env::temp_dir().join(session_id)),
             provider_registry: Arc::new(ProviderRegistry::new()),
-            current_run: Arc::new(Mutex::new(None)),
-            next_run_id: Arc::new(Mutex::new(0)),
         })
     }
 }
@@ -166,38 +183,171 @@ impl WorkspaceSessionManager {
             engine_tx,
             state: StdMutex::new(ManagerState {
                 attachments: HashMap::new(),
+                next_run_id: 0,
+                active_run: None,
+                lease: LeaseState::default(),
             }),
             session_id: session_id.to_string(),
             session_record,
             app_paths,
             provider_registry: state.provider_registry.clone(),
-            current_run: Arc::new(Mutex::new(None)),
-            next_run_id: Arc::new(Mutex::new(0)),
         });
         manager.spawn_event_router(engine_rx, state.workspace_runs.clone());
         Ok(manager)
     }
 
-    /// Task 2 前保留既有 ProviderRunContext 形状，但所有 attachment 共用同一组
-    /// current_run/next_run_id，避免 engine 所有权迁移后再次复制 run 所有权。
+    /// 构造所有 run 调用方共享的上下文；run 所有权仅存在于本 manager。
     pub(crate) fn provider_run_context(
-        &self,
+        self: &Arc<Self>,
         workspace_runs: crate::web::state::WorkspaceRunRegistry,
     ) -> ProviderRunContext {
         ProviderRunContext {
             provider_registry: self.provider_registry.clone(),
+            manager: self.clone(),
             engine: self.engine(),
-            current_run: self.current_run.clone(),
             workspace_runs,
             session_id: self.session_id.clone(),
-            next_run_id: self.next_run_id.clone(),
             app_paths: self.app_paths.clone(),
             session_record: self.session_record.clone(),
         }
     }
 
-    pub(crate) fn current_run(&self) -> Arc<Mutex<Option<crate::web::state::WorkspaceActiveRun>>> {
-        self.current_run.clone()
+    /// run 的启动与 supersede 仅在该锁内裁决，防止附件间出现双活 run。
+    pub async fn start_run(
+        &self,
+        _kind: ProviderRunKind,
+        requested_node_id: Option<String>,
+    ) -> Result<
+        (
+            u64,
+            u64,
+            CancellationToken,
+            mpsc::Receiver<ProviderCommand>,
+            Option<String>,
+        ),
+        String,
+    > {
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(run) = state.active_run.take() {
+            Self::cancel_run(&run);
+        }
+        state.next_run_id += 1;
+        let run_id = state.next_run_id;
+        let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let node_id = requested_node_id;
+        state.active_run = Some(ActiveRun {
+            id: run_id,
+            token,
+            node_id: node_id.clone(),
+            cancel: cancel.clone(),
+            command_tx,
+            pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
+            lease_epoch: state.lease.epoch,
+        });
+        Ok((run_id, token, cancel, command_rx, node_id))
+    }
+
+    pub async fn finish_run(&self, token: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state
+            .active_run
+            .as_ref()
+            .is_some_and(|run| run.token == token)
+        {
+            state.active_run = None;
+        }
+    }
+
+    pub async fn abort_active_run(&self) -> bool {
+        let run = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run
+            .take();
+        if let Some(run) = run {
+            Self::cancel_run(&run);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn active_run(&self) -> Option<ActiveRun> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run
+            .clone()
+    }
+
+    pub async fn active_run_command_tx(&self) -> Option<mpsc::Sender<ProviderCommand>> {
+        self.active_run().await.map(|run| run.command_tx)
+    }
+
+    pub async fn replace_command_tx_if_token(
+        &self,
+        token: u64,
+        command_tx: mpsc::Sender<ProviderCommand>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(run) = state.active_run.as_mut()
+            && run.token == token
+        {
+            run.command_tx = command_tx;
+        }
+    }
+
+    pub fn is_active_run(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.active_run.is_some())
+            .unwrap_or(true)
+    }
+
+    fn cancel_run(run: &ActiveRun) {
+        eprintln!(
+            "[aria-cancellation] workspace abort_workspace_run cancelling runner token trigger=abort_workspace_run run_id=run-{} run_token={} node_id={:?}",
+            run.id, run.token, run.node_id
+        );
+        let _ = run.command_tx.try_send(ProviderCommand::Abort);
+        run.cancel.cancel();
+    }
+
+    /// Task 4 前的过渡期关闭路径：保留旧的终态写入语义。
+    pub(crate) async fn handle_connection_closed_transitional(
+        &self,
+        connection_id: String,
+        outbound_tx: mpsc::Sender<OutboundControl>,
+    ) {
+        let active = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run
+            .take();
+        if let Some(run) = active {
+            let mut engine = self.engine.lock().await;
+            let _ = engine
+                .append_aborted_by_disconnect(format!("run-{}", run.id), connection_id.clone())
+                .await;
+            engine.transition_to_prepare_context_after_disconnect().await;
+            let state_msg = engine.build_session_state();
+            let _ = crate::web::workspace_ws_handler::send_json_outbound(&outbound_tx, &state_msg)
+                .await;
+        }
     }
 
     pub fn engine(&self) -> Arc<Mutex<WorkspaceEngine>> {
@@ -336,9 +486,9 @@ impl WorkspaceSessionManager {
                         source,
                     } => {
                         if source != ChoiceRequestSource::TextFallback {
-                            let _ = workspace_runs
-                                .register_choice(&manager.session_id, id.clone())
-                                .await;
+                            if let Some(run) = manager.active_run().await {
+                                run.pending_choice_ids.lock().await.insert(id.clone());
+                            }
                         }
                         manager.broadcast(WsOutMessage::ChoiceRequest {
                             id,

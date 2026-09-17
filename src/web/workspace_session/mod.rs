@@ -1,7 +1,9 @@
+mod lease;
 mod manager;
 mod registry;
 
-pub use manager::WorkspaceSessionManager;
+pub use lease::{ConnectionRole, LeaseState};
+pub use manager::{ActiveRun, WorkspaceSessionManager};
 pub use registry::WorkspaceSessionRegistry;
 
 #[cfg(test)]

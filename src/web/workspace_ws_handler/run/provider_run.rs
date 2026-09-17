@@ -6,11 +6,7 @@ pub(crate) async fn spawn_provider_run_from_event(
     requested_node_id: Option<String>,
     outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<(), String> {
-    if let Some(active_run) = run_context
-        .workspace_runs
-        .run(&run_context.session_id)
-        .await
-    {
+    if let Some(active_run) = run_context.manager.active_run().await {
         if active_run.node_id == requested_node_id {
             tracing::debug!(
                 session_id = %run_context.session_id,
@@ -52,11 +48,10 @@ pub(crate) async fn spawn_provider_run_from_handler(
     let run_context_clone = run_context.clone();
     let ProviderRunContext {
         provider_registry,
+        manager,
         engine,
-        current_run,
         workspace_runs,
         session_id,
-        next_run_id,
         app_paths: _,
         session_record: _,
     } = run_context;
@@ -72,18 +67,12 @@ pub(crate) async fn spawn_provider_run_from_handler(
     // keep the supersede hand-off below.
     //
     // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：新 run 接替取消旧 run
-    // （workitem 重试/新阶段启动时若旧 runner 仍在注册表，其 token 在此被取消——
-    // workspace 版 H1 候选：接替误杀在途握手）。
+    // 的唯一裁决点迁入 manager，令所有连接共享同一临界区。
     eprintln!(
         "[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id={} kind={:?}",
         session_id, run_kind
     );
-    abort_active_run(&current_run, &workspace_runs, &session_id).await;
 
-    let target_node_id = {
-        let engine = engine.lock().await;
-        engine.active_timeline_node_id()
-    };
 
     let provider_name = {
         let engine = engine.lock().await;
@@ -115,29 +104,16 @@ pub(crate) async fn spawn_provider_run_from_handler(
         provider
     };
 
-    let run_id = {
-        let mut next = next_run_id.lock().await;
-        *next += 1;
-        *next
+    let target_node_id = {
+        let engine = engine.lock().await;
+        engine.active_timeline_node_id()
     };
+    let (run_id, run_token, run_cancel, command_rx, _node_id) = manager
+        .start_run(run_kind.clone(), target_node_id)
+        .await?;
     let run_label = format!("run-{run_id}");
-    let run_token = NEXT_ACTIVE_RUN_TOKEN.fetch_add(1, Ordering::Relaxed);
-    let run_cancel = CancellationToken::new();
-    let (command_tx, command_rx) = mpsc::channel(8);
-    let active_run = WorkspaceActiveRun {
-        id: run_id,
-        token: run_token,
-        node_id: target_node_id,
-        cancel: run_cancel.clone(),
-        command_tx: command_tx.clone(),
-        pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-    };
-    *current_run.lock().await = Some(active_run.clone());
-    workspace_runs.insert(session_id.clone(), active_run).await;
     // provider drive 期标记（idle 关闭守卫扩展）：从 run 任务启动到结束，该 session
-    // 的 idle 守卫都不主动关连接；断连清理不再取消 run 后，该标记覆盖「run 跨
-    // socket 存活」窗口（此时 registry 已摘除、新 socket 无 current_run）。
-    // 守卫 drop（含 panic/abort 展开）即结束标记，不会泄漏压制 idle 回收。
+    // 的 idle 守卫都不主动关连接；run 所有权已由 manager 跨 socket 保存。
     let provider_drive_guard = workspace_runs.begin_provider_drive(&session_id);
 
     {
@@ -146,9 +122,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
     }
 
     let engine_for_run = engine.clone();
-    let current_run_for_task = current_run.clone();
-    let workspace_runs_for_task = workspace_runs.clone();
-    let session_id_for_task = session_id.clone();
+    let manager_for_task = manager.clone();
     let provider_registry_for_run = provider_registry.clone();
     let outbound_tx_for_task = outbound_tx.clone();
     let outline_revision_feedback = match &run_kind {
@@ -472,25 +446,13 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
-                            clear_active_run_if_token(
-                                &current_run_for_task,
-                                &workspace_runs_for_task,
-                                &session_id_for_task,
-                                run_token,
-                            )
-                            .await;
+                            manager_for_task.finish_run(run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             engine.mark_active_run_finished(&run_label);
                             drop(engine);
-                            clear_active_run_if_token(
-                                &current_run_for_task,
-                                &workspace_runs_for_task,
-                                &session_id_for_task,
-                                run_token,
-                            )
-                            .await;
+                            manager_for_task.finish_run(run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::AutoRevision { findings } => {
@@ -643,13 +605,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     Ok(single_candidate::SingleCandidateProviderRunOutcome::AlreadyReserved) => {
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
-                        clear_active_run_if_token(
-                            &current_run_for_task,
-                            &workspace_runs_for_task,
-                            &session_id_for_task,
-                            run_token,
-                        )
-                        .await;
+                        manager_for_task.finish_run(run_token).await;
                         return;
                     }
                     Err(single_candidate::SingleCandidateProviderRunError::AlreadyFinished) => {
@@ -931,9 +887,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     command_rx,
                     run_label,
                     outbound_tx_for_task,
-                    current_run_for_task,
-                    workspace_runs_for_task,
-                    session_id_for_task,
+                    manager_for_task,
                     run_token,
                     feedback
                 );
@@ -1142,9 +1096,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
         workspace_ws_provider_run_followups!(
             engine,
             provider_registry_for_run,
-            current_run_for_task,
-            workspace_runs_for_task,
-            session_id_for_task,
+            manager_for_task,
             run_token,
             run_label,
             outbound_tx_for_task,
@@ -1154,13 +1106,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
         engine.mark_active_run_finished(&run_label);
         drop(engine);
 
-        clear_active_run_if_token(
-            &current_run_for_task,
-            &workspace_runs_for_task,
-            &session_id_for_task,
-            run_token,
-        )
-        .await;
+        manager_for_task.finish_run(run_token).await;
     });
 
     Ok(())

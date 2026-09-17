@@ -1,6 +1,6 @@
 pub(crate) use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::AtomicU64,
 };
 
 pub(crate) use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
@@ -45,7 +45,7 @@ pub(crate) use crate::product::workspace_engine::{
     build_work_item_plan_revision_input,
 };
 pub(crate) use crate::product::workspace_repository::workspace_repository_for_session;
-pub(crate) use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
+pub(crate) use crate::web::state::{WebAppState, WorkspaceRunRegistry};
 pub(crate) use crate::web::test_controls::WorkspaceSocketControl;
 pub(crate) use crate::web::types::GenerateWorkItemsRequest;
 pub(crate) use crate::web::workspace_context::ensure_workspace_context_message;

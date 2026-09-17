@@ -58,9 +58,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
         $command_rx:ident,
         $run_label:ident,
         $outbound_tx_for_task:ident,
-        $current_run_for_task:ident,
-        $workspace_runs_for_task:ident,
-        $session_id_for_task:ident,
+        $manager_for_task:ident,
         $run_token:ident,
         $feedback:ident
     ) => {{
@@ -258,25 +256,13 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             $engine.mark_active_run_finished(&$run_label);
                             drop($engine);
-                            clear_active_run_if_token(
-                                &$current_run_for_task,
-                                &$workspace_runs_for_task,
-                                &$session_id_for_task,
-                                $run_token,
-                            )
-                            .await;
+                            $manager_for_task.finish_run($run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             $engine.mark_active_run_finished(&$run_label);
                             drop($engine);
-                            clear_active_run_if_token(
-                                &$current_run_for_task,
-                                &$workspace_runs_for_task,
-                                &$session_id_for_task,
-                                $run_token,
-                            )
-                            .await;
+                            $manager_for_task.finish_run($run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
@@ -455,9 +441,7 @@ macro_rules! workspace_ws_provider_run_followups {
     (
         $engine:ident,
         $provider_registry_for_run:ident,
-        $current_run_for_task:ident,
-        $workspace_runs_for_task:ident,
-        $session_id_for_task:ident,
+        $manager_for_task:ident,
         $run_token:ident,
         $run_label:ident,
         $outbound_tx_for_task:ident,
@@ -493,16 +477,8 @@ macro_rules! workspace_ws_provider_run_followups {
                 break;
             };
             let (review_command_tx, review_command_rx) = mpsc::channel(8);
-            {
-                let mut current = $current_run_for_task.lock().await;
-                if let Some(active) = current.as_mut()
-                    && active.token == $run_token
-                {
-                    active.command_tx = review_command_tx.clone();
-                }
-            }
-            $workspace_runs_for_task
-                .replace_command_tx_if_token(&$session_id_for_task, $run_token, review_command_tx)
+            $manager_for_task
+                .replace_command_tx_if_token($run_token, review_command_tx)
                 .await;
             if $engine.logical_provider_gateway().is_some() {
                 $engine
@@ -530,26 +506,12 @@ macro_rules! workspace_ws_provider_run_followups {
                     message: format!("provider unavailable: {author_name:?}"),
                 };
                 let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
+                $manager_for_task.finish_run($run_token).await;
                 return;
             };
             let (outline_command_tx, mut outline_command_rx) = mpsc::channel(8);
-            {
-                let mut current = $current_run_for_task.lock().await;
-                if let Some(active) = current.as_mut()
-                    && active.token == $run_token
-                {
-                    active.command_tx = outline_command_tx.clone();
-                }
-            }
-            $workspace_runs_for_task
-                .replace_command_tx_if_token(&$session_id_for_task, $run_token, outline_command_tx)
+            $manager_for_task
+                .replace_command_tx_if_token($run_token, outline_command_tx)
                 .await;
             match drive_current_work_item_plan_outline_run(
                 &mut $engine,
@@ -570,13 +532,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: "work item plan outline auto revision after review is not supported in follow-up run".to_string(),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
                 Err(message) => {
@@ -584,13 +540,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     drop($engine);
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             }
@@ -611,91 +561,59 @@ macro_rules! workspace_ws_provider_run_followups {
                     message: format!("provider unavailable: {author_name:?}"),
                 };
                 let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
+                $manager_for_task.finish_run($run_token).await;
                 return;
             };
             let (draft_command_tx, mut draft_command_rx) = mpsc::channel(8);
-            {
-                let mut current = $current_run_for_task.lock().await;
-                if let Some(active) = current.as_mut()
-                    && active.token == $run_token
-                {
-                    active.command_tx = draft_command_tx.clone();
-                }
-            }
-            $workspace_runs_for_task
-                .replace_command_tx_if_token(&$session_id_for_task, $run_token, draft_command_tx)
+            $manager_for_task
+                .replace_command_tx_if_token($run_token, draft_command_tx)
                 .await;
             let mut feedback = $engine.pending_revision_context.clone();
             while $engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
             {
-            let Some(node_id) = $engine.active_timeline_node_id() else {
-                $engine.mark_active_run_finished(&$run_label);
-                drop($engine);
-                let err = WsOutMessage::Error {
-                    message: "work item draft run node unavailable".to_string(),
-                };
-                let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
-                return;
-            };
-            let plan_launch = match resolve_plan_author_launch(&*$engine, None, None) {
-                Ok(launch) => launch,
-                Err(error) => {
+                let Some(node_id) = $engine.active_timeline_node_id() else {
                     $engine.mark_active_run_finished(&$run_label);
                     drop($engine);
                     let err = WsOutMessage::Error {
-                        message: format!("logical plan launch failed: {error}"),
+                        message: "work item draft run node unavailable".to_string(),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    $manager_for_task.finish_run($run_token).await;
                     return;
-                }
-            };
-            let routing_context = plan_launch.routing_context();
-            let provider_input = match $engine
-                .build_current_work_item_draft_streaming_input(
-                    feedback.as_deref(),
-                    &routing_context,
-                )
-            {
-                Ok(input) => input,
-                Err(message) => {
-                    $engine
-                        .finish_active_run_with_failed_node(message.clone())
-                        .await;
-                    drop($engine);
-                    let err = WsOutMessage::Error { message };
-                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
+                };
+                let plan_launch = match resolve_plan_author_launch(&*$engine, None, None) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("logical plan launch failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        $manager_for_task.finish_run($run_token).await;
+                        return;
+                    }
+                };
+                let routing_context = plan_launch.routing_context();
+                let provider_input = match $engine
+                    .build_current_work_item_draft_streaming_input(
+                        feedback.as_deref(),
+                        &routing_context,
                     )
-                    .await;
-                    return;
-                }
-            };
+                {
+                    Ok(input) => input,
+                    Err(message) => {
+                        $engine
+                            .finish_active_run_with_failed_node(message.clone())
+                            .await;
+                        drop($engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        $manager_for_task.finish_run($run_token).await;
+                        return;
+                    }
+                };
             $engine
                 .emit_provider_prompt_event(
                     &node_id,
@@ -740,13 +658,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: format!("work item draft generate failed: {message}"),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             };
@@ -759,13 +671,7 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: format!("work item draft parse failed: {}", error.message),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             };
@@ -783,13 +689,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     drop($engine);
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             }

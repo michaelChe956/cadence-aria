@@ -201,25 +201,14 @@ pub(crate) fn spawn_idle_timeout_task(
     })
 }
 
-/// idle 关闭守卫（断连终局修复）：除本 socket 的 current_run 外，该 session 的
-/// workspace run 处于 provider drive 期也不主动关连接——断连清理不再取消 run
-/// 后，run 会跨 socket 存活（原 socket 读循环已退出、registry 摘除），重连的
-/// 新 socket 无 current_run，若在 drive 期被 idle 关闭会引发无谓的断连/重连循环。
-/// try_lock 失败按「活跃」处理（保守不关）。
+/// idle 关闭守卫：manager 的 active run 与独立 provider drive 均阻止主动关闭。
 pub(crate) fn workspace_idle_activity_guard(
-    current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    manager: Arc<WorkspaceSessionManager>,
     workspace_runs: WorkspaceRunRegistry,
     session_id: String,
 ) -> Arc<dyn Fn() -> bool + Send + Sync> {
     Arc::new(move || {
-        if current_run
-            .try_lock()
-            .map(|run| run.is_some())
-            .unwrap_or(true)
-        {
-            return true;
-        }
-        workspace_runs.provider_drive_in_progress(&session_id)
+        manager.is_active_run() || workspace_runs.provider_drive_in_progress(&session_id)
     })
 }
 
@@ -486,15 +475,13 @@ pub(crate) async fn handle_workspace_socket(
         }
     });
 
-    let current_run = manager.current_run();
     let run_context = manager.provider_run_context(state.workspace_runs.clone());
     let inbound_context = WorkspaceInboundContext {
         app_state: state.clone(),
         engine: engine.clone(),
         run_context: run_context.clone(),
         outbound_tx: outbound_tx.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: state.workspace_runs.clone(),
+        manager: manager.clone(),
         session_id: session_id.clone(),
     };
     let idle_timeout_task = spawn_idle_timeout_task(
@@ -503,7 +490,7 @@ pub(crate) async fn handle_workspace_socket(
         idle_timeout_triggered.clone(),
         outbound_tx.clone(),
         workspace_idle_activity_guard(
-            current_run.clone(),
+            manager.clone(),
             state.workspace_runs.clone(),
             session_id.clone(),
         ),
@@ -513,13 +500,12 @@ pub(crate) async fn handle_workspace_socket(
     // 已有 provider run 时，engine 锁由 run 驱动长期持有。附着连接的恢复/续跑只适用于
     // 没有活跃 provider 的 durable 会话；此时等待该锁会使第二连接虽拿到投影快照却不能
     // 开始读入 Abort/ChoiceResponse。运行期由现有 run 自行完成，跳过这两段恢复路径。
-    let startup_recovery_allowed = state.workspace_runs.run(&session_id).await.is_none();
+    let startup_recovery_allowed = manager.active_run().await.is_none();
     if startup_recovery_allowed {
         let human_gate_recovery = {
             let active_node_id = engine.lock().await.active_timeline_node_id();
-            let provider_is_running = state
-                .workspace_runs
-                .run(&session_id)
+            let provider_is_running = manager
+                .active_run()
                 .await
                 .is_some_and(|run| run.node_id == active_node_id);
             let mut engine = engine.lock().await;
@@ -609,7 +595,7 @@ pub(crate) async fn handle_workspace_socket(
             }
         };
         match outline_resume_kind {
-            Ok(Some(run_kind)) if state.workspace_runs.run(&session_id).await.is_none() => {
+            Ok(Some(run_kind)) if manager.active_run().await.is_none() => {
                 match planning_resume_decision_with_fresh_index(
                     &app_paths,
                     &session_record.project_id,
@@ -764,7 +750,7 @@ pub(crate) async fn handle_workspace_socket(
     };
 
     let idle_timeout_triggered = idle_timeout_triggered.load(std::sync::atomic::Ordering::SeqCst);
-    let active_for_diagnostic = current_run.lock().await.clone();
+    let active_for_diagnostic = manager.active_run().await;
     let close_frame = receiver_exit.close_frame();
     let last_client_activity_at = last_client_activity_at.lock().await.recorded_at;
     let last_server_activity_at = last_server_activity_at.lock().await.recorded_at;
@@ -790,28 +776,9 @@ pub(crate) async fn handle_workspace_socket(
         .record_connection_diagnostic(&session_id, diagnostic_json)
         .await;
 
-    let active = { current_run.lock().await.take() };
-    if let Some(run) = active {
-        let last_active_run_id = format!("run-{}", run.id);
-        let owned_registry_run = state
-            .workspace_runs
-            .remove_if_token(&session_id, run.token)
-            .await;
-        // 断连清理保留既有 run/registry 语义；归因只补 detail 中的 connection id。
-        if owned_registry_run {
-            let mut engine = engine.lock().await;
-            let _ = engine
-                .append_aborted_by_disconnect(last_active_run_id, connection_id.clone())
-                .await;
-            engine
-                .transition_to_prepare_context_after_disconnect()
-                .await;
-            let state_msg = engine
-                .build_session_state()
-                .with_connection_id(&connection_id);
-            let _ = send_json_outbound(&outbound_tx, &state_msg).await;
-        }
-    }
+    manager
+        .handle_connection_closed_transitional(connection_id.clone(), outbound_tx.clone())
+        .await;
     manager.detach(&connection_id).await;
     drop(outbound_tx);
     connection_outbound_task.abort();
