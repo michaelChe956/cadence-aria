@@ -7,6 +7,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use super::WorkspaceSessionManager;
 
+type CreationLocks = HashMap<String, Arc<AsyncMutex<()>>>;
+
 /// 每个 durable workspace session 仅保留一个运行期 manager。
 ///
 /// 附着注册与 idle 摘除在同一 `sessions` 互斥下完成：已通过身份核对的 manager
@@ -14,6 +16,7 @@ use super::WorkspaceSessionManager;
 #[derive(Clone, Default)]
 pub struct WorkspaceSessionRegistry {
     sessions: Arc<AsyncMutex<HashMap<String, Arc<WorkspaceSessionManager>>>>,
+    creating: Arc<AsyncMutex<CreationLocks>>,
 }
 
 impl WorkspaceSessionRegistry {
@@ -26,12 +29,16 @@ impl WorkspaceSessionRegistry {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<WorkspaceSessionManager>, String>>,
     {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(manager) = sessions.get(session_id).cloned() {
+        if let Some(manager) = self.sessions.lock().await.get(session_id).cloned() {
             return Ok(manager);
         }
-
+        let creation_lock = self.creation_lock(session_id).await;
+        let _creation_guard = creation_lock.lock().await;
+        if let Some(manager) = self.sessions.lock().await.get(session_id).cloned() {
+            return Ok(manager);
+        }
         let manager = factory().await?;
+        let mut sessions = self.sessions.lock().await;
         Ok(sessions
             .entry(session_id.to_string())
             .or_insert_with(|| manager.clone())
@@ -51,11 +58,13 @@ impl WorkspaceSessionRegistry {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<WorkspaceSessionManager>, String>>,
     {
-        let mut sessions = self.sessions.lock().await;
-        let manager = if let Some(manager) = sessions.get(session_id).cloned() {
+        let creation_lock = self.creation_lock(session_id).await;
+        let _creation_guard = creation_lock.lock().await;
+        let manager = if let Some(manager) = self.sessions.lock().await.get(session_id).cloned() {
             manager
         } else {
             let manager = factory().await?;
+            let mut sessions = self.sessions.lock().await;
             sessions
                 .entry(session_id.to_string())
                 .or_insert_with(|| manager.clone())
@@ -63,6 +72,15 @@ impl WorkspaceSessionRegistry {
         };
         manager.register_attachment(connection_id, outbound_tx);
         Ok(manager)
+    }
+
+    async fn creation_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        self.creating
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
     }
 
     /// 返回已创建的 session manager，供集成测试观察运行期单例状态。
@@ -89,6 +107,8 @@ impl WorkspaceSessionRegistry {
         session_id: &str,
         expected: &Arc<WorkspaceSessionManager>,
     ) -> bool {
+        let creation_lock = self.creation_lock(session_id).await;
+        let _creation_guard = creation_lock.lock().await;
         let mut sessions = self.sessions.lock().await;
         let Some(current) = sessions.get(session_id) else {
             return false;
@@ -97,11 +117,13 @@ impl WorkspaceSessionRegistry {
             return false;
         }
         sessions.remove(session_id);
+        self.creating.lock().await.remove(session_id);
         true
     }
 
     /// 仅供单元测试验证幂等移除。
     pub async fn remove(&self, session_id: &str) {
         self.sessions.lock().await.remove(session_id);
+        self.creating.lock().await.remove(session_id);
     }
 }

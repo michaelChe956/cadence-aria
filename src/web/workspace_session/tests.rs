@@ -82,6 +82,44 @@ async fn registry_get_or_create_runs_factory_once_under_concurrency() {
 }
 
 #[tokio::test]
+async fn registry_creates_different_sessions_without_waiting_for_slow_factory() {
+    let registry = WorkspaceSessionRegistry::default();
+    let factory_entered = Arc::new(tokio::sync::Notify::new());
+    let factory_release = Arc::new(tokio::sync::Notify::new());
+    let slow_registry = registry.clone();
+    let slow_entered = factory_entered.clone();
+    let slow_release = factory_release.clone();
+    let slow = tokio::spawn(async move {
+        slow_registry
+            .get_or_create("session_slow", move || async move {
+                slow_entered.notify_one();
+                slow_release.notified().await;
+                Ok(WorkspaceSessionManager::test_fixture("session_slow"))
+            })
+            .await
+    });
+    factory_entered.notified().await;
+
+    let fast = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        registry.get_or_create("session_fast", || async {
+            Ok(WorkspaceSessionManager::test_fixture("session_fast"))
+        }),
+    )
+    .await
+    .expect("慢 factory 不得阻塞其他 session")
+    .expect("fast manager");
+    assert_eq!(fast.session_id, "session_fast");
+
+    factory_release.notify_one();
+    slow.await.expect("slow task").expect("slow manager");
+    assert_eq!(
+        registry.session_ids().await,
+        vec!["session_fast".to_string(), "session_slow".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn registry_session_ids_are_sorted_and_remove_is_idempotent() {
     let registry = WorkspaceSessionRegistry::default();
 
