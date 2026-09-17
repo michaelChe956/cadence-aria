@@ -33,6 +33,7 @@ export function CockpitInbox({
   actionableSessionId,
   takeoverButtonRef,
   onBulkConfirm,
+  emptyHint,
 }: {
   items: readonly CockpitInboxItem[];
   actions?: CockpitActionFacade;
@@ -41,6 +42,8 @@ export function CockpitInbox({
   actionableSessionId?: string;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
   onBulkConfirm?: (items: readonly CockpitInboxItem[]) => void;
+  /** 空收件箱时的引导文案；缺省渲染既有「暂无待处理项」。 */
+  emptyHint?: string | null;
 }) {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
@@ -105,7 +108,7 @@ export function CockpitInbox({
         </button>
       ) : null}
       {items.length === 0 ? (
-        <p className="text-xs text-[var(--aria-ink-muted)]">暂无待处理项</p>
+        <p className="text-xs text-[var(--aria-ink-muted)]">{emptyHint ?? "暂无待处理项"}</p>
       ) : (
         items.map((item) => (
           <CockpitInboxRow

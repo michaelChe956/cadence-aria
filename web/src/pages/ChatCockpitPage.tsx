@@ -26,6 +26,7 @@ import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
+import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   gateActionBlockReason as gateActionBlockReasonForState,
@@ -54,11 +55,11 @@ import {
   numericContentCacheValues,
   providerConfigFor,
   ProviderConfigDialogButton,
+  requestIdFromEntry,
   scrollTargetEntryIdForNode,
   UNLOAD_GUARDED_STAGES,
   UNLOAD_GUARD_MESSAGE,
 } from "./ChatWorkspacePageParts";
-
 function useNowTicker(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
 
@@ -156,6 +157,10 @@ export function ChatCockpitPage({
     isCurrentSession &&
     state.stage === "prepare_context" &&
     workspaceWs.connectionStatus === "connected";
+  const inboxEmptyHint =
+    isCurrentSession && state.stage === "prepare_context" && (state.timelineNodes?.length ?? 0) === 0
+      ? "会话尚未开始——在右侧选择 Provider 并点击「开始生成」"
+      : null;
   const providerSummary = [
     `Author：${selectedState?.providers?.author ?? "claude_code"}`,
     selectedState?.reviewerEnabled
@@ -187,6 +192,31 @@ export function ChatCockpitPage({
       reviewerEnabled,
     );
   }, [workspaceWs.sendStartGeneration]);
+  const handlePermissionResponse = useCallback(
+    (entry: ChatEntry, approved: boolean) => {
+      const requestId = requestIdFromEntry(entry);
+      if (!requestId) {
+        return;
+      }
+      workspaceWs.respondPermission(requestId, approved, undefined);
+    },
+    [workspaceWs.respondPermission],
+  );
+  const handleChoiceResponse = useCallback(
+    (entry: ChatEntry, response: ChoiceResponsePayload) => {
+      const requestId = requestIdFromEntry(entry);
+      if (!requestId) {
+        return;
+      }
+      workspaceWs.sendChoiceResponse(
+        requestId,
+        response.selected_option_ids,
+        response.free_text,
+        response.answers,
+      );
+    },
+    [workspaceWs.sendChoiceResponse],
+  );
   const isPlanApprovalSession = selectedState?.workspaceType === "work_item_plan";
   const artifactContentCacheValues = useMemo(
     () =>
@@ -509,6 +539,7 @@ export function ChatCockpitPage({
           actionableSessionId={sessionId}
           takeoverButtonRef={takeoverButtonRef}
           onBulkConfirm={handleBulkConfirm}
+          emptyHint={inboxEmptyHint}
         />
 
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
@@ -628,6 +659,10 @@ export function ChatCockpitPage({
                 ref={chatListRef}
                 entries={selectedState?.chatEntries ?? []}
                 actions={takeoverSessionId === null ? actions : undefined}
+                onPermissionResponse={
+                  takeoverSessionId === null ? handlePermissionResponse : undefined
+                }
+                onChoiceResponse={takeoverSessionId === null ? handleChoiceResponse : undefined}
                 contentCache={contentCacheValues}
                 loadContent={loadContent}
                 onCacheContent={cacheContent}

@@ -161,6 +161,143 @@ describe("ChatCockpitPage", () => {
     ).toHaveLength(1);
   });
 
+  it("answers a permission request entry through the injected ws api", async () => {
+    const user = userEvent.setup();
+    const respondPermission = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ respondPermission });
+    useWorkspaceStore.setState({
+      stage: "running",
+      chatEntries: [
+        {
+          id: "perm-1",
+          type: "permission_request",
+          role: "author",
+          content: "请求执行命令",
+          timestamp: new Date().toISOString(),
+          metadata: { request_id: "perm-1" },
+        },
+      ],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "允许" }));
+
+    expect(respondPermission).toHaveBeenCalledWith("perm-1", true, undefined);
+  });
+
+  it("answers a structured choice request through the injected ws api", async () => {
+    const user = userEvent.setup();
+    const sendChoiceResponse = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendChoiceResponse });
+    useWorkspaceStore.setState({
+      stage: "running",
+      chatEntries: [
+        {
+          id: "choice-1",
+          type: "choice_request",
+          role: "system",
+          content: "请选择下一步",
+          timestamp: "2026-09-17T10:00:00Z",
+          resolved: false,
+          metadata: {
+            request_id: "choice-1",
+            prompt: "请选择下一步",
+            allow_multiple: false,
+            allow_free_text: false,
+            options: [
+              { id: "continue", label: "继续" },
+              { id: "stop", label: "停止" },
+            ],
+          },
+        },
+      ],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByLabelText("继续"));
+    await user.click(screen.getByRole("button", { name: "提交选择" }));
+
+    expect(sendChoiceResponse).toHaveBeenCalledWith(
+      "choice-1",
+      ["continue"],
+      null,
+      undefined,
+    );
+  });
+
+  it("guides an unstarted session from the empty inbox instead of an error state", () => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({ stage: "prepare_context", timelineNodes: [] });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(
+      screen.getByText("会话尚未开始——在右侧选择 Provider 并点击「开始生成」"),
+    ).toBeVisible();
+  });
+
+  it("keeps interactive entries read-only for a takeover observed session", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_perm_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+    cockpitObservedRecords.push({
+      sessionId: "child_perm_001",
+      state: {
+        ...observerStateFromSessionState({
+          type: "session_state",
+          session_id: "child_perm_001",
+          workspace_type: "work_item",
+          stage: "running",
+          superpowers_enabled: false,
+          openspec_enabled: false,
+          messages: [],
+          checkpoints: [],
+          artifact: null,
+          providers: { author: "claude_code", reviewer: null },
+          timeline_nodes: [],
+          active_node_id: null,
+          artifact_versions: [],
+          timeline_node_details: {},
+          active_run_id: null,
+          human_presentation_revisions: [],
+          session_status: "running",
+          flow_kind: "legacy",
+          run_policy: "interactive",
+          run_history: {
+            seen_fingerprints: [],
+            repairs_used: 0,
+            manual_repairs_used: 0,
+            transitions_used: 0,
+            initial_review_count: 0,
+            verification_review_count: 0,
+          },
+        }),
+        chatEntries: [
+          {
+            id: "perm-obs-1",
+            type: "permission_request",
+            role: "author",
+            content: "请求执行命令",
+            timestamp: "2026-09-17T10:00:00Z",
+            metadata: { request_id: "perm-obs-1" },
+          },
+        ],
+      } as WorkspaceWsState,
+    });
+
+    renderCockpit();
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(await screen.findByText("请求执行命令")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "允许" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "拒绝" })).toBeNull();
+  });
+
   it("opens the shared provider configuration dialog during prepare context", async () => {
     const user = userEvent.setup();
     const workspaceWs = mockWorkspaceWs({ connectionStatus: "connected" });

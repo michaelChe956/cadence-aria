@@ -156,4 +156,16 @@ describe("CockpitInbox", () => {
     expect(onBulkConfirm).toHaveBeenCalledWith([current]);
     expect(screen.queryByRole("button", { name: "批量确认 1 项" })).toBeNull();
   });
+
+  it("renders a custom empty hint when provided", () => {
+    render(<CockpitInbox items={[]} actions={actions} emptyHint="会话尚未开始" />);
+
+    expect(screen.getByText("会话尚未开始")).toBeVisible();
+  });
+
+  it("keeps the default empty text without a hint", () => {
+    render(<CockpitInbox items={[]} actions={actions} />);
+
+    expect(screen.getByText("暂无待处理项")).toBeVisible();
+  });
 });
