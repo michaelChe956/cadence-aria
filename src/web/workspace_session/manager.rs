@@ -374,30 +374,11 @@ impl WorkspaceSessionManager {
         run.cancel.cancel();
     }
 
-    /// Task 4 前的过渡期关闭路径：保留旧的终态写入语义。
-    pub(crate) async fn handle_connection_closed_transitional(
-        &self,
-        connection_id: String,
-        outbound_tx: mpsc::Sender<OutboundControl>,
-    ) {
-        let active = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .active_run
-            .take();
-        if let Some(run) = active {
-            let mut engine = self.engine.lock().await;
-            let _ = engine
-                .append_aborted_by_disconnect(format!("run-{}", run.id), connection_id.clone())
-                .await;
-            engine
-                .transition_to_prepare_context_after_disconnect()
-                .await;
-            let state_msg = engine.build_session_state();
-            let _ = crate::web::workspace_ws_handler::send_json_outbound(&outbound_tx, &state_msg)
-                .await;
-        }
+    /// REQ-WCR-03：连接关闭只摘除 attachment；不得因为连接读循环结束写入 durable
+    /// 终态、覆盖活动节点或整流 session stage。诊断由 socket 在调用前记录；lease
+    /// 关闭记录由 Task 8 在此处接入。
+    pub(crate) async fn handle_connection_closed(self: &Arc<Self>, connection_id: &str) {
+        self.detach(connection_id).await;
     }
 
     pub fn engine(&self) -> Arc<Mutex<WorkspaceEngine>> {

@@ -318,85 +318,77 @@ async fn workspace_ws_tcp_drop_records_eof_connection_diagnostic() {
     server.abort();
 }
 
+/// REQ-WCR-03（0429 形态根治）：run 驱动至自然终态后连接关闭/读循环结束，
+/// 不得追加 aborted_by_disconnect、不得把 session 拉回 prepare_context。
+/// 原过渡期用例（connection_id 写入 marker detail）随 close 写入路径移除而改写；
+/// 归因由中性 ConnectionDiagnostic 承担（D9）。
 #[tokio::test]
-async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect() {
+async fn workspace_ws_disconnect_during_active_run_writes_no_disconnect_terminal() {
+    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture(&root).await;
-    let app = build_web_router(WebAppState::new(
+    let complete = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SignalledCompletionStreamingProvider {
+            complete: complete.clone(),
+        }),
+    );
+    let state = WebAppState::with_provider_registry(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
+        registry,
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
     });
-
     let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
-    let _initial = recv_json(&mut ws).await;
 
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
     send_json(
         &mut ws,
         &WsInMessage::UserMessage {
-            content: long_message("disconnect_instruction"),
+            content: long_message("close_no_terminal"),
         },
     )
     .await;
-    let _first_chunk = recv_until_stream_chunk(&mut ws).await;
-    drop(ws);
+    let _chunk = recv_until_stream_chunk(&mut ws).await;
+    drop(ws); // 连接关闭：run 仍在跑
+    let _diagnostic = wait_for_connection_diagnostic(&controls, "eof").await;
+    complete.notify_one(); // close 清理已开始；run 驱动至自然完成（业务终态）
 
-    // 断连清理不再取消 run：fake provider 驱动至自然完成后，断连清理才拿到
-    // engine 锁追加 aborted_by_disconnect 审计节点——轮询重连直至审计节点落盘
-    // （旧行为是取消后立即落盘，两条路径部应收敛到同一审计终态）。
-    let mut verified = false;
+    let mut business_terminal = false;
     for _ in 0..100 {
-        let (mut probe, _) = connect_async(url.clone()).await.expect("probe ws");
-        match recv_json(&mut probe).await {
-            WsOutMessage::SessionState {
-                stage,
-                timeline_nodes,
-                active_run_id,
-                ..
-            } => {
-                let last = timeline_nodes.last().expect("timeline node");
-                if last.node_type == TimelineNodeType::AbortedByDisconnect {
-                    assert_eq!(stage, "prepare_context");
-                    assert_eq!(active_run_id, None);
-                    assert_eq!(last.status, TimelineNodeStatus::Failed);
-                    assert!(
-                        last.summary
-                            .as_deref()
-                            .is_some_and(|summary| summary.contains("run-1"))
-                    );
-                    assert!(
-                        last.summary
-                            .as_deref()
-                            .is_some_and(|summary| summary.contains("connection_id:"))
-                    );
-                    assert_eq!(
-                        timeline_nodes
-                            .iter()
-                            .filter(|node| node.node_type == TimelineNodeType::AbortedByDisconnect)
-                            .count(),
-                        1
-                    );
-                    verified = true;
-                }
-            }
-            other => panic!("expected session_state, got {other:?}"),
-        }
-        drop(probe);
-        if verified {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let nodes = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+            .load_timeline_nodes("workspace_session_0001")
+            .expect("timeline nodes");
+        let no_marker = nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect);
+        let assistant_done = persisted_workspace_messages(root.path())
+            .iter()
+            .any(|message| message.role == "assistant" && message.content.contains("# Story Spec"));
+        if assistant_done {
+            assert!(
+                no_marker,
+                "断连后业务终态落盘，但断连审计节点仍被写入：nodes={:?}",
+                nodes
+                    .iter()
+                    .map(|node| (&node.node_type, &node.status))
+                    .collect::<Vec<_>>()
+            );
+            business_terminal = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(
-        verified,
-        "断连后 aborted_by_disconnect 审计节点应在 run 结束后落盘且语义保留"
-    );
-
+    assert!(business_terminal, "run 应驱动至完成并落盘 assistant 消息");
     server.abort();
 }
 

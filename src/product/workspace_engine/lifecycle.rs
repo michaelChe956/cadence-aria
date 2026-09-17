@@ -842,6 +842,10 @@ impl WorkspaceEngine {
         Ok((node, locked))
     }
 
+    /// 仅供进程重启后的 stale run 恢复链记录真实 provider 死亡终态。
+    /// REQ-WCR-03：workspace WebSocket 连接关闭路径禁止调用；不得传入连接级事实。
+    /// `connection_id` 仅在恢复链中标记 synthetic stale connection；连接关闭不再把它
+    /// 写入 timeline marker detail。
     pub async fn append_aborted_by_disconnect(
         &mut self,
         last_active_run_id: String,
@@ -870,6 +874,8 @@ impl WorkspaceEngine {
             .await)
     }
 
+    /// 仅供进程重启后的 stale run 恢复链整流 session stage。
+    /// REQ-WCR-03：workspace WebSocket 连接关闭路径禁止调用。
     pub async fn transition_to_prepare_context_after_disconnect(&mut self) {
         self.active_run_id = None;
         if let Some(store) = &self.lifecycle_store {

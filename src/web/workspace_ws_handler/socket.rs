@@ -634,10 +634,7 @@ pub(crate) async fn handle_workspace_socket(
         .record_connection_diagnostic(&session_id, diagnostic_json)
         .await;
 
-    manager
-        .handle_connection_closed_transitional(connection_id.clone(), outbound_tx.clone())
-        .await;
-    manager.detach(&connection_id).await;
+    manager.handle_connection_closed(&connection_id).await;
     drop(outbound_tx);
     connection_outbound_task.abort();
     idle_timeout_task.abort();
