@@ -20,9 +20,12 @@
 
 结果：57 passed，0 failed。
 
+`cargo check --locked` 完成；`cargo clippy --locked --tests -- -D warnings` 完成。
+
 ## Commit
 
-待提交（本报告写入后由 Task 执行者显式暂存五个源码/测试文件与本报告；不暂存工作树中既有的无关改动）。
+- `84bd5f1e feat(workspace): Hello after_event_seq 重订阅——journal 回放与 snapshot 基线双路径`
+- `b4866fc1 fix(workspace): keep cursor recovery clippy clean`
 
 ## Concerns
 
