@@ -1503,7 +1503,7 @@ describe("ChatCockpitPage", () => {
       return {
         version: 1,
         markdown: "# 设计稿",
-        generated_by: "claude_code",
+        generated_by: "claude_code" as const,
         reviewed_by: null,
         review_verdict: null,
         confirmed_by: null,
