@@ -1221,7 +1221,8 @@ impl WorkspaceSessionManager {
 async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
     use crate::cross_cutting::provider_adapter::ProviderAdapterError;
     use crate::cross_cutting::streaming_provider::{
-        ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+        ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
+        StreamingProviderInput,
     };
     use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
     use crate::product::models::ProviderName;
