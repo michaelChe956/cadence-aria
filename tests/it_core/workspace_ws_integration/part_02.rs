@@ -357,7 +357,22 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
     )
     .await;
 
-    let rolled_back = recv_until_session_state(&mut ws).await;
+    // F-09 起门开启会向已连接页面广播一帧全量 session_state（回滚前快照，含 "second"），
+    // 它可能排在回滚响应之前；等待「second 已被截断」的快照再断言回滚语义。
+    let mut rolled_back_state: Option<WsOutMessage> = None;
+    for _ in 0..40 {
+        let message = recv_json(&mut ws).await;
+        if let WsOutMessage::Error { message } = message {
+            panic!("ws error: {message}");
+        }
+        if let WsOutMessage::SessionState { messages, .. } = &message
+            && !messages.iter().any(|message| message.content == "second")
+        {
+            rolled_back_state = Some(message);
+            break;
+        }
+    }
+    let rolled_back = rolled_back_state.expect("rolled-back session_state not received");
     match rolled_back {
         WsOutMessage::SessionState {
             messages, stage, ..
