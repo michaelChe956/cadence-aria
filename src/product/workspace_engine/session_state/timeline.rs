@@ -361,8 +361,14 @@ impl WorkspaceEngine {
         let Some(node_id) = self.active_node_id.clone() else {
             return;
         };
-        self.update_timeline_node(&node_id, TimelineNodeStatus::Completed, summary)
-            .await;
+        if self
+            .timeline_nodes
+            .iter()
+            .any(|node| node.node_id == node_id && node.status == TimelineNodeStatus::Active)
+        {
+            self.update_timeline_node(&node_id, TimelineNodeStatus::Completed, summary)
+                .await;
+        }
     }
 
     pub(crate) async fn update_timeline_node(

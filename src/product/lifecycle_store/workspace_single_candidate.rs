@@ -163,8 +163,11 @@ impl LifecycleStore {
             }
             if matches!(
                 stored.single_candidate_phase,
-                Some(SingleCandidatePhase::Completed | SingleCandidatePhase::Failed)
+                Some(SingleCandidatePhase::Completed)
             ) {
+                return Ok((stored, false));
+            }
+            if stored.single_candidate_phase == Some(SingleCandidatePhase::Failed) {
                 return Ok((stored, false));
             }
             if !matches!(
@@ -194,6 +197,44 @@ impl LifecycleStore {
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(&session_path, &stored)?;
             Ok((stored, true))
+        })
+    }
+
+    /// 用户显式重新生成时，原子重臂失败的 SingleCandidate 会话；已完成会话保持拒绝。
+    pub fn rearm_failed_single_candidate_for_start_generation(
+        &self,
+        expected: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "single_candidate_rearm",
+                reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            if stored.single_candidate_phase == Some(SingleCandidatePhase::Completed) {
+                return Err(ProductStoreError::Conflict {
+                    kind: "single_candidate_rearm",
+                    id: stored.id.clone(),
+                });
+            }
+            if stored.single_candidate_phase == Some(SingleCandidatePhase::Failed) {
+                stored.single_candidate_phase = Some(SingleCandidatePhase::Prepare);
+                stored.status = crate::product::models::WorkspaceSessionStatus::Open;
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &stored)?;
+            }
+            Ok(stored)
         })
     }
 
@@ -680,6 +721,60 @@ mod tests {
             .expect("replay provider start");
         assert!(!did_replay);
         assert_eq!(replayed, started);
+    }
+
+    #[test]
+    fn explicit_start_generation_rearms_failed_single_candidate_but_rejects_completed() {
+        let temp = tempdir().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+        let session = store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    run_policy: RunPolicy::Interactive,
+                    rollout_snapshot: true,
+                }),
+            })
+            .expect("create candidate session");
+        let failed = store
+            .compare_and_save_single_candidate_phase(
+                &session,
+                SingleCandidatePhase::Failed,
+                crate::product::models::WorkspaceSessionStatus::Failed,
+            )
+            .expect("persist failed session");
+        let rearmed = store
+            .rearm_failed_single_candidate_for_start_generation(&failed)
+            .expect("explicit start generation must rearm failed session");
+        assert_eq!(
+            rearmed.single_candidate_phase,
+            Some(SingleCandidatePhase::Prepare)
+        );
+        assert_eq!(
+            rearmed.status,
+            crate::product::models::WorkspaceSessionStatus::Open
+        );
+
+        let completed = store
+            .compare_and_save_single_candidate_phase(
+                &rearmed,
+                SingleCandidatePhase::Completed,
+                crate::product::models::WorkspaceSessionStatus::Confirmed,
+            )
+            .expect("persist completed session");
+        assert!(matches!(
+            store.rearm_failed_single_candidate_for_start_generation(&completed),
+            Err(ProductStoreError::Conflict { .. })
+        ));
     }
 
     #[test]

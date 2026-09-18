@@ -609,15 +609,11 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 .await
                 {
                     Ok(single_candidate::SingleCandidateProviderRunOutcome::Completed) => {}
-                    Ok(single_candidate::SingleCandidateProviderRunOutcome::AlreadyReserved) => {
+                    Err(single_candidate::SingleCandidateProviderRunError::AlreadyFinished) => {
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
                         drop(provider_drive_guard.take());
                         manager_for_task.finish_run(run_token).await;
-                        return;
-                    }
-                    Err(single_candidate::SingleCandidateProviderRunError::AlreadyFinished) => {
-                        engine.mark_active_run_finished(&run_label);
                         return;
                     }
                     Err(single_candidate::SingleCandidateProviderRunError::Message(message)) => {

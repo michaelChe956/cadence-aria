@@ -434,7 +434,8 @@ fn single_candidate_recovery_generate_reserved_without_ledger_replans_once() {
         .expect("serialize provider ledger");
     let key = format!(
         "single_candidate_author:{}:{}",
-        before_restart.id, before_restart.run_history.repairs_used
+        before_restart.id,
+        before_restart.provider_start_ledger.len() - 1
     );
     single_candidate_recovery_assert_provider_start_dedup(&before_restart, &key, 1);
     let events_before = single_candidate_recovery_events(&lifecycle, engine.session());
@@ -498,7 +499,8 @@ async fn single_candidate_recovery_repair_started_ledger_is_deduplicated() {
         .expect("serialize provider ledger");
     let key = format!(
         "single_candidate_author:{}:{}",
-        before_restart.id, before_restart.run_history.repairs_used
+        before_restart.id,
+        before_restart.provider_start_ledger.len() - 1
     );
     single_candidate_recovery_assert_provider_start_dedup(&before_restart, &key, 1);
     let events_before = single_candidate_recovery_events(&lifecycle, engine.session());

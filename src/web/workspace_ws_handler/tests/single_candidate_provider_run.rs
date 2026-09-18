@@ -1061,3 +1061,183 @@ async fn single_candidate_compile_unknown_key_failure_stays_terminal_without_rer
     )
     .await;
 }
+
+#[tokio::test]
+async fn single_candidate_failed_reopen_claims_next_ledger_key_and_starts_provider() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let language_rules_path = fixture
+        .repository_root
+        .path()
+        .join(".claude/rules/language.md");
+    let language_rules = std::fs::read_to_string(&language_rules_path)
+        .expect("fixture language rules must exist before the failed attempt");
+    std::fs::remove_file(&language_rules_path).expect("remove language rules for first attempt");
+
+    let (first_input_tx, first_input_rx) = mpsc::unbounded_channel();
+    let first_provider = Arc::new(RecordingOutputProvider {
+        output: single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        inputs: first_input_tx,
+    });
+    let (first_context, mut first_outbound_rx) = single_candidate_context(&fixture, first_provider);
+    handle_workspace_inbound_message(
+        first_context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+    let _ = next_error_message(&mut first_outbound_rx).await;
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+    drop(first_input_rx);
+
+    std::fs::write(&language_rules_path, language_rules)
+        .expect("restore language rules before explicit user reopen");
+    let (second_input_tx, mut second_input_rx) = mpsc::unbounded_channel();
+    let second_provider = Arc::new(RecordingOutputProvider {
+        output: single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        inputs: second_input_tx,
+    });
+    let (second_context, _second_outbound_rx) = single_candidate_context(&fixture, second_provider);
+    handle_workspace_inbound_message(
+        second_context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    let _ = next_provider_input(&mut second_input_rx).await;
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload reopened session");
+    assert_eq!(
+        durable
+            .provider_start_ledger
+            .iter()
+            .map(|entry| entry.provider_start_idempotency_key.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            format!("single_candidate_author:{}:0", fixture.record.id),
+            format!("single_candidate_author:{}:1", fixture.record.id),
+        ],
+        "a failed explicit reopen must claim a new durable provider-start key"
+    );
+}
+
+#[tokio::test]
+async fn single_candidate_completed_reopen_is_rejected_without_starting_or_running() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Completed,
+        );
+    }
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(RecordingOutputProvider {
+        output: single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("reopen SingleCandidate session rejected"),
+        "completed reopen must return a visible rejection: {message}"
+    );
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "completed reopen must not invoke a provider"
+    );
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload completed session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Completed)
+    );
+    assert_eq!(
+        durable.status,
+        crate::product::models::WorkspaceSessionStatus::Confirmed,
+        "completed reopen must not pre-burn the durable status to running"
+    );
+    assert_eq!(
+        fixture.engine.lock().await.current_stage(),
+        WorkspaceStage::PrepareContext
+    );
+    assert!(fixture.manager.active_run().await.is_none());
+}
+
+#[tokio::test]
+async fn single_candidate_reopen_preserves_failed_author_node_terminal_fields() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let node_id = "failed-author-run".to_string();
+    let original_completed_at = "2026-09-18T08:09:10Z".to_string();
+    let original_summary = "原始 author 失败摘要".to_string();
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine
+            .timeline_nodes
+            .push(crate::web::workspace_ws_types::TimelineNode {
+                node_id: node_id.clone(),
+                node_type: crate::web::workspace_ws_types::TimelineNodeType::AuthorRun,
+                agent: Some(ProviderName::ClaudeCode),
+                stage: crate::web::workspace_ws_types::WorkspaceStage::Running,
+                round: None,
+                status: crate::web::workspace_ws_types::TimelineNodeStatus::Failed,
+                title: "SingleCandidate author".to_string(),
+                summary: Some(original_summary.clone()),
+                started_at: "2026-09-18T08:00:00Z".to_string(),
+                completed_at: Some(original_completed_at.clone()),
+                duration_ms: Some(10),
+                artifact_ref: None,
+                provider_config_snapshot: provider_config(),
+                retry: None,
+            });
+        engine.active_node_id = Some(node_id.clone());
+        engine.persist_timeline_nodes();
+        engine.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Failed,
+        );
+
+        engine
+            .start_generation(provider_config(), false)
+            .await
+            .expect("explicit reopen should re-arm a failed SingleCandidate session");
+
+        let node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .expect("original failed author node");
+        assert_eq!(
+            node.status,
+            crate::web::workspace_ws_types::TimelineNodeStatus::Failed
+        );
+        assert_eq!(
+            node.completed_at.as_deref(),
+            Some(original_completed_at.as_str())
+        );
+        assert_eq!(node.summary.as_deref(), Some(original_summary.as_str()));
+    }
+}

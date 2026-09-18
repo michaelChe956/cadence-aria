@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
 /// spec-design-dialog-revision T6：HumanConfirm/ReviewDecision 已从 Story/Design 流程退役，
 /// 存量会话恢复时迁移回 AuthorConfirm（保留产物与消息，review verdict 留在消息流）。
@@ -758,6 +759,20 @@ impl WorkspaceEngine {
         provider_config: ProviderConfigSnapshot,
         reviewer_enabled: bool,
     ) -> Result<(TimelineNode, WsOutMessage), String> {
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+            let store = self
+                .lifecycle_store
+                .as_ref()
+                .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+            let expected = store
+                .get_workspace_session(&self.session.session_id)
+                .map_err(|error| format!("load session for explicit reopen failed: {error}"))?;
+            let saved = store
+                .rearm_failed_single_candidate_for_start_generation(&expected)
+                .map_err(|error| format!("reopen SingleCandidate session rejected: {error}"))?;
+            self.session = WorkspaceSession::from_record(saved);
+        }
+
         let mut locked_snapshot = provider_config;
         locked_snapshot.permission_modes.author = permission_mode_for_provider(
             &locked_snapshot.author,
@@ -813,12 +828,14 @@ impl WorkspaceEngine {
                     locked_snapshot.permission_modes.clone(),
                 )
                 .map_err(|error| format!("persist permission mode lock failed: {error}"))?;
-            store
-                .update_workspace_session_status(
-                    &self.session.session_id,
-                    WorkspaceSessionStatus::Running,
-                )
-                .map_err(|error| format!("persist workspace status failed: {error}"))?;
+            if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+                store
+                    .update_workspace_session_status(
+                        &self.session.session_id,
+                        WorkspaceSessionStatus::Running,
+                    )
+                    .map_err(|error| format!("persist workspace status failed: {error}"))?;
+            }
         }
 
         self.complete_active_node(Some("上下文已确认".to_string()))

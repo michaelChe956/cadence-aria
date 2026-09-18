@@ -3,7 +3,6 @@ use crate::product::work_item_plan_compiler::grammar;
 
 pub(crate) enum SingleCandidateProviderRunOutcome {
     Completed,
-    AlreadyReserved,
 }
 
 pub(crate) enum SingleCandidateProviderRunError {
@@ -249,7 +248,14 @@ pub(crate) async fn run_single_candidate_author(
         }
     };
     if !should_start {
-        return Ok(SingleCandidateProviderRunOutcome::AlreadyReserved);
+        let phase = engine.session().single_candidate_phase.as_ref();
+        let message = match phase {
+            Some(crate::product::models::SingleCandidatePhase::Completed) => {
+                "SingleCandidate session is already completed".to_string()
+            }
+            _ => "SingleCandidate provider start was already reserved".to_string(),
+        };
+        return Err(SingleCandidateProviderRunError::Message(message));
     }
 
     let lifecycle = LifecycleStore::new(run_context.app_paths.clone());

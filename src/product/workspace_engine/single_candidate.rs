@@ -85,9 +85,16 @@ impl WorkspaceEngine {
         let expected = lifecycle
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| format!("load session for provider reservation failed: {error}"))?;
+        let provider_start_attempt = if expected.single_candidate_phase
+            == Some(crate::product::models::SingleCandidatePhase::Generate)
+        {
+            expected.provider_start_ledger.len().saturating_sub(1)
+        } else {
+            expected.provider_start_ledger.len()
+        };
         let key = format!(
-            "single_candidate_author:{}:{}",
-            expected.id, expected.run_history.repairs_used
+            "single_candidate_author:{}:{provider_start_attempt}",
+            expected.id
         );
         let (saved, should_start) = lifecycle
             .reserve_single_candidate_provider_start(&expected, &key)
