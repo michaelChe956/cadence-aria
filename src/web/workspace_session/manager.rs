@@ -684,7 +684,29 @@ impl WorkspaceSessionManager {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
-        self.durable_projection()
+        self.durable_projection_offload().await
+    }
+
+    /// F-06/F-09：durable 投影的同步读盘挪入阻塞线程池——观察 attach 频发且 run 任务
+    /// 长期持有 engine 锁时，fallback 不得阻塞 async worker。JoinHandle 异常（panic/
+    /// 取消）时退回原同步路径：投影只读，最坏也只是回到旧行为。
+    async fn durable_projection_offload(&self) -> (WsOutMessage, Option<WsOutMessage>) {
+        let app_paths = self.app_paths.clone();
+        let session_record = self.session_record.clone();
+        match tokio::task::spawn_blocking(move || {
+            Self::durable_projection_with(app_paths, session_record)
+        })
+        .await
+        {
+            Ok(projection) => projection,
+            Err(join_error) => {
+                eprintln!(
+                    "[aria-durable-projection] blocking offload join failed session={}: {join_error}",
+                    self.session_id
+                );
+                self.durable_projection()
+            }
+        }
     }
 
     /// 在序列化边界为 attach snapshot 注入当前 event_seq 基线。T10 将在首个 Hello 的
@@ -857,16 +879,25 @@ impl WorkspaceSessionManager {
 
     /// 一次性只读 durable 投影器。禁止将它扩展为第二 engine 状态源：没有 spawn、没有
     /// provider/run 注册、没有 event receiver，并且使用有接收端但永不消费的 channel。
+    /// 读盘重（Lifecycle/Checkpoint 仓库 + JSON 反序列化），async 上下文必须经
+    /// `durable_projection_offload` 调用；`current_session_state` 的同步降级路径是
+    /// 唯一的直接调用方。
     pub(super) fn durable_projection(&self) -> (WsOutMessage, Option<WsOutMessage>) {
-        let lifecycle = LifecycleStore::new(self.app_paths.clone());
-        let checkpoint_store = Arc::new(CheckpointStore::new(self.app_paths.issue_lifecycle_root(
-            &self.session_record.project_id,
-            &self.session_record.issue_id,
-        )));
+        Self::durable_projection_with(self.app_paths.clone(), self.session_record.clone())
+    }
+
+    fn durable_projection_with(
+        app_paths: ProductAppPaths,
+        session_record: WorkspaceSessionRecord,
+    ) -> (WsOutMessage, Option<WsOutMessage>) {
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let checkpoint_store = Arc::new(CheckpointStore::new(
+            app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
+        ));
         let (projection_tx, _projection_rx) = mpsc::channel::<EngineEvent>(1);
-        let mut session = WorkspaceSession::from_record(self.session_record.clone());
+        let mut session = WorkspaceSession::from_record(session_record.clone());
         if let Ok(repository) =
-            workspace_repository_for_session(&self.app_paths, &lifecycle, &self.session_record)
+            workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
         {
             session.repository_path = Some(repository.path);
         }

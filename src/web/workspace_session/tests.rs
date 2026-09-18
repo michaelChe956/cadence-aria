@@ -35,6 +35,68 @@ async fn resubscribe_snapshot_includes_connection_id_before_socket_decoration() 
     assert_eq!(snapshot["connection_id"], "connection");
 }
 
+/// F-06 锚：cursor 重订阅必须走 journal 增量回放（replay_after），只发 cursor 之后
+/// 的增量帧、不发全量 session_state 基线；重订阅完成后直播事件仍可达。
+#[tokio::test]
+async fn resubscribe_replays_journal_events_without_full_baseline() {
+    use crate::web::workspace_ws_types::WsProviderStatus;
+
+    let manager = WorkspaceSessionManager::test_fixture("session_resubscribe_replay");
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(16);
+    manager.register_attachment("connection", outbound_tx.clone());
+
+    // 三条广播进 journal（attachment 仍 pending，不接收直播）
+    manager
+        .broadcast_test_event(WsProviderStatus::Running)
+        .await; // seq 1
+    manager
+        .broadcast_test_event(WsProviderStatus::Aborted)
+        .await; // seq 2
+    manager
+        .broadcast_test_event(WsProviderStatus::Running)
+        .await; // seq 3
+
+    manager.resubscribe(&outbound_tx, "connection", 1).await;
+
+    let mut replayed = Vec::new();
+    while let Ok(control) = outbound_rx.try_recv() {
+        let OutboundControl::Text(json) = control else {
+            panic!("cursor resubscribe must only send text frames");
+        };
+        replayed.push(json);
+    }
+    assert_eq!(
+        replayed.len(),
+        2,
+        "cursor 回放只发增量帧，不得附带全量基线：{replayed:?}"
+    );
+    for (index, json) in replayed.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(json).expect("replay JSON");
+        assert_eq!(
+            value["type"], "provider_status",
+            "回放帧是原广播事件而非 session_state 基线"
+        );
+        assert_eq!(
+            value["event_seq"],
+            serde_json::json!(index as u64 + 2),
+            "回放只含 cursor 之后的事件"
+        );
+    }
+
+    // 重订阅后连接已激活：直播事件继续到达（事件驱动更新仍达）
+    manager
+        .broadcast_test_event(WsProviderStatus::Completed)
+        .await;
+    match outbound_rx.recv().await {
+        Some(OutboundControl::Text(json)) => {
+            let value: serde_json::Value = serde_json::from_str(&json).expect("live JSON");
+            assert_eq!(value["type"], "provider_status");
+            assert_eq!(value["event_seq"], serde_json::json!(4));
+        }
+        other => panic!("live event after cursor resubscribe expected, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn start_run_supersedes_active_run_with_token_equality_guard() {
     let manager = WorkspaceSessionManager::test_fixture("session_arb");

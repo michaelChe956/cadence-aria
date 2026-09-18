@@ -25,6 +25,8 @@ const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> =
   "stopped_needs_human",
 ]);
 const OBSERVER_PING_INTERVAL_MS = 25_000;
+/** F-06：周期轮降级为假死兜底——距上一帧超过该阈值的观察连接才重建；健康长连接不重连。 */
+export const OBSERVER_STALL_THRESHOLD_MS = 5 * 60_000;
 
 type WorkspaceSessionStateMessage = Extract<
   WsOutMessage,
@@ -40,24 +42,26 @@ export interface WorkspaceObserverRecord {
 export interface WorkspaceObserverSocket {
   close(): void;
 }
-
 export interface WorkspaceObserverSocketCallbacks {
   onSnapshot(state: WorkspaceWsState): void;
+  /** 每收到一帧上报：无 event_seq 的帧（如 pong）也计入连接活跃；有则同步 cursor。 */
+  onFrame?(eventSeq: number | null): void;
   onClose(): void;
   onError(): void;
+}
+
+export interface WorkspaceObserverSocketOptions {
+  /** 本会话已消费的最大 event_seq；重连 hello 携带它换取服务端增量回放。 */
+  resumeEventSeq: number | null;
+  /** 断线前已归约的观察态；cursor 回放帧直接在其上续算，无需全量基线。 */
+  seedState: WorkspaceWsState | null;
 }
 
 export type WorkspaceObserverSocketFactory = (
   sessionId: string,
   callbacks: WorkspaceObserverSocketCallbacks,
+  options: WorkspaceObserverSocketOptions,
 ) => WorkspaceObserverSocket;
-
-export interface WorkspaceObserverControllerOptions {
-  refreshIntervalMs: number;
-  reconnectDelayMs: number;
-  schedule?(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  cancel?(timer: ReturnType<typeof setTimeout>): void;
-}
 
 export interface WorkspaceObserverController {
   replaceWatchedSessionIds(sessionIds: readonly string[]): Promise<void>;
@@ -87,10 +91,10 @@ export function selectWatchedSessionIds(
     .map(({ session }) => session.workspace_session_id);
 }
 
-export function watchWindowCopy(watchLimit: number, refreshIntervalMs: number): string {
-  return `仅监视最近 ${watchLimit} 个候选；集合外不计入计数，集合内准实时（最多 ${Math.ceil(refreshIntervalMs / 1000)} 秒陈旧）`;
-}
 
+export function watchWindowCopy(watchLimit: number): string {
+  return `仅监视最近 ${watchLimit} 个候选；集合外不计入计数，集合内实时推送（假死连接最多 ${Math.ceil(OBSERVER_STALL_THRESHOLD_MS / 60_000)} 分钟自愈）`;
+}
 export function selectObservedInbox(
   records: readonly WorkspaceObserverRecord[],
 ): CockpitInboxItem[] {
@@ -107,6 +111,17 @@ export function selectObservedInbox(
     .map(({ sessionId, item }) => ({ ...item, id: `${sessionId}:${item.id}` }));
 }
 
+/** 浏览器定时器句柄（DOM 环境下 setTimeout/setInterval 返回 number）。 */
+export type ObserverTimer = number;
+
+export interface WorkspaceObserverControllerOptions {
+  refreshIntervalMs: number;
+  reconnectDelayMs: number;
+  schedule?(callback: () => void, delayMs: number): ObserverTimer;
+  cancel?(timer: ObserverTimer): void;
+  now?(): number;
+}
+
 export function createObserverController(
   socketFactory: WorkspaceObserverSocketFactory = createWorkspaceObserverSocket,
   onRecordsChange: (records: readonly WorkspaceObserverRecord[]) => void = () => undefined,
@@ -118,10 +133,13 @@ export function createObserverController(
   const sockets = new Map<string, WorkspaceObserverSocket>();
   const snapshots = new Map<string, WorkspaceWsState>();
   const watchedSessionIds = new Set<string>();
-  const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const reconnectTimers = new Map<string, ObserverTimer>();
+  const cursors = new Map<string, number>();
+  const lastFrameAt = new Map<string, number>();
   const schedule = options.schedule ?? setTimeout;
   const cancel = options.cancel ?? clearTimeout;
-  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const now = options.now ?? Date.now;
+  let refreshTimer: ObserverTimer | null = null;
   let disposed = false;
   let refreshIntervalMs = options.refreshIntervalMs;
 
@@ -145,18 +163,35 @@ export function createObserverController(
     if (disposed || !watchedSessionIds.has(sessionId) || sockets.has(sessionId)) {
       return;
     }
+    lastFrameAt.set(sessionId, now());
     sockets.set(
       sessionId,
-      socketFactory(sessionId, {
-        onSnapshot: (state) => {
-          if (!disposed && watchedSessionIds.has(sessionId)) {
-            snapshots.set(sessionId, state);
-            notifyRecordsChanged();
-          }
+      socketFactory(
+        sessionId,
+        {
+          onSnapshot: (state) => {
+            if (!disposed && watchedSessionIds.has(sessionId)) {
+              snapshots.set(sessionId, state);
+              notifyRecordsChanged();
+            }
+          },
+          onFrame: (eventSeq) => {
+            if (disposed || !watchedSessionIds.has(sessionId)) {
+              return;
+            }
+            lastFrameAt.set(sessionId, now());
+            if (eventSeq !== null) {
+              cursors.set(sessionId, Math.max(cursors.get(sessionId) ?? eventSeq, eventSeq));
+            }
+          },
+          onClose: () => scheduleReconnect(sessionId),
+          onError: () => scheduleReconnect(sessionId),
         },
-        onClose: () => scheduleReconnect(sessionId),
-        onError: () => scheduleReconnect(sessionId),
-      }),
+        {
+          resumeEventSeq: cursors.get(sessionId) ?? null,
+          seedState: snapshots.get(sessionId) ?? null,
+        },
+      ),
     );
   };
   const scheduleReconnect = (sessionId: string) => {
@@ -170,15 +205,27 @@ export function createObserverController(
     }, options.reconnectDelayMs);
     reconnectTimers.set(sessionId, timer);
   };
+  // F-06：周期轮降级为假死兜底——只有距上一帧超过阈值的连接才重建，健康长连接
+  // （事件流或 ping/pong 存活）永不重连，从而消除周期性全量 attach 基线风暴。
   const scheduleRefresh = () => {
     if (disposed || refreshIntervalMs <= 0) {
       return;
     }
     refreshTimer = schedule(() => {
       refreshTimer = null;
-      void refresh();
+      reclaimStalledSockets();
       scheduleRefresh();
     }, refreshIntervalMs);
+  };
+  const reclaimStalledSockets = () => {
+    const currentNow = now();
+    for (const sessionId of watchedSessionIds) {
+      const lastFrame = lastFrameAt.get(sessionId);
+      if (lastFrame !== undefined && currentNow - lastFrame >= OBSERVER_STALL_THRESHOLD_MS) {
+        clearSocket(sessionId);
+        ensureSocket(sessionId);
+      }
+    }
   };
   const refresh = async () => {
     for (const sessionId of watchedSessionIds) {
@@ -197,6 +244,8 @@ export function createObserverController(
           clearSocket(sessionId);
           watchedSessionIds.delete(sessionId);
           snapshots.delete(sessionId);
+          cursors.delete(sessionId);
+          lastFrameAt.delete(sessionId);
         }
       }
       for (const sessionId of sessionIds) {
@@ -235,6 +284,8 @@ export function createObserverController(
       watchedSessionIds.clear();
       sockets.clear();
       snapshots.clear();
+      cursors.clear();
+      lastFrameAt.clear();
       notifyRecordsChanged();
     },
   };
@@ -243,10 +294,13 @@ export function createObserverController(
 function createWorkspaceObserverSocket(
   sessionId: string,
   callbacks: WorkspaceObserverSocketCallbacks,
+  options: WorkspaceObserverSocketOptions,
 ): WorkspaceObserverSocket {
   const socket = new WebSocket(workspaceSessionWebSocketUrl(sessionId));
-  let state: WorkspaceWsState | null = null;
-  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  // 断线重连时以 seedState 续算，hello 携带 cursor 换取服务端增量回放而非全量基线。
+  let state: WorkspaceWsState | null = options.seedState;
+  let lastEventSeq = options.resumeEventSeq;
+  let pingTimer: ObserverTimer | null = null;
   let closed = false;
 
   const close = () => {
@@ -278,6 +332,7 @@ function createWorkspaceObserverSocket(
         session_id: sessionId,
         last_seen_node_id: null,
         role: "observer",
+        ...(lastEventSeq !== null ? { after_event_seq: lastEventSeq } : {}),
       }),
     );
     pingTimer = setInterval(() => {
@@ -291,6 +346,21 @@ function createWorkspaceObserverSocket(
   socket.onmessage = (event) => {
     try {
       const message = JSON.parse(event.data) as WorkspaceObserverMessage;
+      const eventSeq = typeof message.event_seq === "number" ? message.event_seq : null;
+      // 任何帧（含 pong）都证明连接存活；cursor 只在去重通过后由回调方记单调最大值。
+      callbacks.onFrame?.(eventSeq);
+      if (eventSeq !== null) {
+        if (
+          message.type !== "session_state" &&
+          lastEventSeq !== null &&
+          eventSeq <= lastEventSeq
+        ) {
+          // cursor 回放与直播的重叠帧按 event_seq 去重（与驾驶连接同一惯例）；
+          // session_state 是重基线帧，无条件接受并重置游标。
+          return;
+        }
+        lastEventSeq = eventSeq;
+      }
       if (message.type === "session_state" && message.session_id === sessionId) {
         state = observerStateFromSessionState(message as WorkspaceSessionStateMessage);
         callbacks.onSnapshot(state);

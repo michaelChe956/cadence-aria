@@ -284,10 +284,7 @@ export function ChatCockpitPage({
   const observedInbox = useCockpitShellInbox();
   const observedRecords = useCockpitObservedRecords();
   const watchSession = useCockpitSessionWatch();
-  const watchWindow = watchWindowCopy(
-    cockpitSettings.watchLimit,
-    cockpitSettings.observerRefreshIntervalMs,
-  );
+  const watchWindow = watchWindowCopy(cockpitSettings.watchLimit);
   const selectedState =
     takeoverSessionId === null
       ? state

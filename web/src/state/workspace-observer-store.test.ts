@@ -56,6 +56,9 @@ class ObserverMockWebSocket {
   readonly sent: string[] = [];
   readyState = 0;
   onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
 
   constructor(_url: string) {
     ObserverMockWebSocket.instances.push(this);
@@ -73,6 +76,55 @@ class ObserverMockWebSocket {
     this.readyState = 1;
     this.onopen?.();
   }
+
+  receive(payload: unknown) {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+
+  closed() {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+
+  errored() {
+    this.onerror?.();
+  }
+}
+
+function sessionStateFrame(
+  sessionId: string,
+  eventSeq: number,
+): Record<string, unknown> {
+  return {
+    type: "session_state",
+    session_id: sessionId,
+    workspace_type: "work_item",
+    stage: "running",
+    superpowers_enabled: false,
+    openspec_enabled: false,
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code", reviewer: null },
+    timeline_nodes: [],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    active_run_id: null,
+    human_presentation_revisions: [],
+    session_status: "running",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    event_seq: eventSeq,
+  };
 }
 
 describe("workspace observer store", () => {
@@ -90,7 +142,7 @@ describe("workspace observer store", () => {
     expect(
       selectObservedInbox(records.filter((record) => ids.includes(record.sessionId))),
     ).toHaveLength(1);
-    expect(watchWindowCopy(2, 15_000)).toBe("仅监视最近 2 个候选；集合外不计入计数，集合内准实时（最多 15 秒陈旧）");
+    expect(watchWindowCopy(2)).toBe("仅监视最近 2 个候选；集合外不计入计数，集合内实时推送（假死连接最多 5 分钟自愈）");
   });
 
   it("keeps API order for active candidates and excludes terminal statuses including failed", () => {
@@ -162,18 +214,22 @@ describe("workspace observer store", () => {
   });
 
 
-  it("refreshes a record from the next scheduled connection snapshot", async () => {
+  it("keeps healthy observer sockets long-lived across periodic ticks (F-06: no rebuild, no full-frame refresh)", async () => {
     type SocketCallbacks = {
       onSnapshot: (state: WorkspaceWsState) => void;
+      onFrame: (eventSeq: number | null) => void;
       onClose: () => void;
       onError: () => void;
     };
     const sockets: SocketCallbacks[] = [];
+    const closedSockets: number[] = [];
     const scheduled: Array<() => void> = [];
+    let fakeNow = 0;
     const controller = createObserverController(
       (_sessionId, callbacks) => {
-        sockets.push(callbacks);
-        return { close: vi.fn() };
+        sockets.push(callbacks as SocketCallbacks);
+        const index = sockets.length - 1;
+        return { close: () => closedSockets.push(index) };
       },
       undefined,
       {
@@ -184,18 +240,167 @@ describe("workspace observer store", () => {
           return 0 as never;
         },
         cancel: vi.fn(),
+        now: () => fakeNow,
       },
     );
     await controller.replaceWatchedSessionIds(["a"]);
     sockets[0]?.onSnapshot(observedState("a", { sessionStatus: "running" }));
 
+    // 静止期推进 15s/30s/45s：每 25s 仍有帧（pong/事件）到达 → 不重建、不重发全量
+    fakeNow = 15_000;
     scheduled[0]?.();
-    sockets[1]?.onSnapshot(observedState("a", { sessionStatus: "stopped_needs_human" }));
+    fakeNow = 25_000;
+    sockets[0]?.onFrame(null);
+    fakeNow = 30_000;
+    scheduled[1]?.();
+    fakeNow = 45_000;
+    scheduled[2]?.();
+    fakeNow = 50_000;
+    sockets[0]?.onFrame(9);
+    fakeNow = 60_000;
+    scheduled[3]?.();
 
+    expect(sockets).toHaveLength(1);
+    expect(closedSockets).toEqual([]);
+  });
+
+  it("rebuilds an observer socket only after the stall threshold passes with no frames at all", async () => {
+    type SocketCallbacks = {
+      onSnapshot: (state: WorkspaceWsState) => void;
+      onClose: () => void;
+      onError: () => void;
+    };
+    const sockets: SocketCallbacks[] = [];
+    const close = vi.fn();
+    const scheduled: Array<() => void> = [];
+    let fakeNow = 0;
+    const controller = createObserverController(
+      (_sessionId, callbacks) => {
+        sockets.push(callbacks);
+        return { close };
+      },
+      undefined,
+      {
+        refreshIntervalMs: 15_000,
+        reconnectDelayMs: 0,
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return 0 as never;
+        },
+        cancel: vi.fn(),
+        now: () => fakeNow,
+      },
+    );
+    await controller.replaceWatchedSessionIds(["a"]);
+    sockets[0]?.onSnapshot(observedState("a", { sessionStatus: "running" }));
+
+    fakeNow = 15_000;
+    scheduled[0]?.(); // 距建连 15s 无帧：未达阈值，不重建
+    expect(close).not.toHaveBeenCalled();
+
+    fakeNow = 5 * 60_000;
+    scheduled[1]?.(); // ≥5min 无任何帧：假死兜底重建
+    expect(close).toHaveBeenCalledTimes(1);
     expect(sockets).toHaveLength(2);
+
+    // 重建后的新连接重新起算假死窗口；其快照仍进入 records
+    sockets[1]?.onSnapshot(observedState("a", { sessionStatus: "stopped_needs_human" }));
     expect(controller.records()).toEqual([
       { sessionId: "a", state: expect.objectContaining({ sessionStatus: "stopped_needs_human" }) },
     ]);
+    fakeNow = 5 * 60_000 + 4 * 60_000;
+    scheduled[2]?.(); // 新连接 4min 无帧：仍不重建
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the last session event_seq cursor in reconnect hello without cross-session leakage", async () => {
+    ObserverMockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", ObserverMockWebSocket);
+    const scheduled: Array<() => void> = [];
+    const controller = createObserverController(undefined, undefined, {
+      refreshIntervalMs: 0,
+      reconnectDelayMs: 1_000,
+      schedule: (callback) => {
+        scheduled.push(callback);
+        return 0 as never;
+      },
+      cancel: vi.fn(),
+    });
+
+    try {
+      await controller.replaceWatchedSessionIds(["s1", "s2"]);
+      const s1 = ObserverMockWebSocket.instances[0];
+      const s2 = ObserverMockWebSocket.instances[1];
+      if (!s1 || !s2) throw new Error("observer sockets were not created");
+      s1.open();
+      s2.open();
+      expect(JSON.parse(s1.sent[0])).not.toHaveProperty("after_event_seq");
+
+      s1.receive(sessionStateFrame("s1", 7));
+      s2.receive(sessionStateFrame("s2", 3));
+
+      s1.closed();
+      scheduled.at(-1)?.(); // 重连计时器触发 → 只重建 s1
+
+      expect(ObserverMockWebSocket.instances).toHaveLength(3);
+      const replacement = ObserverMockWebSocket.instances[2];
+      replacement?.open();
+      expect(JSON.parse(replacement?.sent[0] ?? "")).toMatchObject({
+        type: "hello",
+        session_id: "s1",
+        role: "observer",
+        after_event_seq: 7,
+      });
+    } finally {
+      controller.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("applies replayed incremental frames on the seeded state after cursor reconnect and dedups stale overlap", async () => {
+    ObserverMockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", ObserverMockWebSocket);
+    const scheduled: Array<() => void> = [];
+    const controller = createObserverController(undefined, undefined, {
+      refreshIntervalMs: 0,
+      reconnectDelayMs: 1_000,
+      schedule: (callback) => {
+        scheduled.push(callback);
+        return 0 as never;
+      },
+      cancel: vi.fn(),
+    });
+
+    try {
+      await controller.replaceWatchedSessionIds(["s1"]);
+      const first = ObserverMockWebSocket.instances[0];
+      if (!first) throw new Error("observer socket was not created");
+      first.open();
+      first.receive(sessionStateFrame("s1", 7));
+      expect(controller.records()[0]?.state.stage).toBe("running");
+
+      first.closed();
+      scheduled.at(-1)?.();
+      const replacement = ObserverMockWebSocket.instances[1];
+      if (!replacement) throw new Error("replacement socket was not created");
+      replacement.open();
+      expect(JSON.parse(replacement.sent[0])).toMatchObject({ after_event_seq: 7 });
+
+      // cursor 回放帧（无 session_state 基线）直接落在断线前的观察态上
+      replacement.receive({ type: "stage_change", stage: "human_confirm", event_seq: 8 });
+      expect(controller.records()[0]?.state.stage).toBe("human_confirm");
+
+      // 回放/直播重叠的旧帧按 event_seq 去重，不回退状态
+      replacement.receive({ type: "stage_change", stage: "running", event_seq: 6 });
+      expect(controller.records()[0]?.state.stage).toBe("human_confirm");
+
+      // 事件驱动更新仍达：新事件照常推进
+      replacement.receive({ type: "stage_change", stage: "reviewing", event_seq: 9 });
+      expect(controller.records()[0]?.state.stage).toBe("reviewing");
+    } finally {
+      controller.dispose();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("reschedules the next observed refresh when the interval changes", async () => {
