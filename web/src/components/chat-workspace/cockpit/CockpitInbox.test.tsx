@@ -250,4 +250,57 @@ describe("CockpitInbox", () => {
 
     expect(screen.getByText("暂无待处理项")).toBeVisible();
   });
+
+  const staleLeaseItem: CockpitInboxItem = {
+    id: "session_001:hard_error:protocol:STALE_DRIVER_LEASE",
+    kind: "hard_error",
+    severity: 3,
+    title: "协议错误 STALE_DRIVER_LEASE",
+    summary: "driver connection no longer holds the lease for write message advance",
+    triage: false,
+    source: "protocol_error",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    protocolErrorCode: "STALE_DRIVER_LEASE",
+  };
+
+  it("offers a confirmed lease retake on the stale driver lease error (F-11)", async () => {
+    const user = userEvent.setup();
+    const onRetakeLease = vi.fn();
+    render(
+      <CockpitInbox
+        items={[staleLeaseItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onRetakeLease={onRetakeLease}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "重新接管" }));
+    await user.click(screen.getByRole("button", { name: "确认重新接管" }));
+
+    expect(onRetakeLease).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer a lease retake for other hard errors or without a handler", () => {
+    const { rerender } = render(
+      <CockpitInbox
+        items={[{ ...staleLeaseItem, protocolErrorCode: "OTHER_CODE" }]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onRetakeLease={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
+
+    rerender(
+      <CockpitInbox
+        items={[staleLeaseItem]}
+        actions={actions}
+        actionableSessionId="session_001"
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
+  });
 });

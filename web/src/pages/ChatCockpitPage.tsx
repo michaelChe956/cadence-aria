@@ -39,6 +39,7 @@ import {
   gateActionBlockReason as gateActionBlockReasonForState,
   selectCockpitFlow,
   selectGateProjection,
+  STALE_DRIVER_LEASE_CODE,
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
 import { useBulkConfirmStore } from "../state/bulk-confirm-store";
@@ -88,14 +89,30 @@ function useNowTicker(intervalMs = 1000): number {
   return now;
 }
 
+/** 引擎侧 provider 正在产出的阶段；starting 残留遇这些阶段一律按「正在生成」呈现（F-04）。 */
+const GENERATING_STAGES: Record<string, true> = {
+  running: true,
+  cross_review: true,
+  revision: true,
+};
+/** timeline 节点终态：引擎已落盘的运行结论，优先于连接态 providerStatus（F-01/F-04）。 */
+const TERMINAL_NODE_STATUSES: Record<string, true> = {
+  completed: true,
+  failed: true,
+  skipped: true,
+};
+type TerminalNodeContext = {
+  status: "completed" | "failed" | "skipped";
+  elapsedMs: number | null;
+};
+
 function runningProviderName(
   stage: string,
   providers: { author: string; reviewer?: string | null } | null,
 ): string | null {
   if (!providers) return null;
-  if (stage === "cross_review") return providers.reviewer ?? null;
-  if (stage === "running" || stage === "revision") return providers.author;
-  return null;
+  if (GENERATING_STAGES[stage] !== true) return null;
+  return stage === "cross_review" ? (providers.reviewer ?? null) : providers.author;
 }
 
 function formatElapsedMs(elapsedMs: number): string {
@@ -107,20 +124,75 @@ function formatElapsedMs(elapsedMs: number): string {
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
+
+/** 终态节点的固定时长：优先 duration_ms，退化用 completed_at−started_at；无法确定时省略。 */
+function terminalElapsedMs(node: {
+  duration_ms?: number | null;
+  started_at: string;
+  completed_at?: string | null;
+}): number | null {
+  if (typeof node.duration_ms === "number") {
+    return node.duration_ms;
+  }
+  if (node.completed_at == null) {
+    return null;
+  }
+  const startedAtMs = Date.parse(node.started_at);
+  const completedAtMs = Date.parse(node.completed_at);
+  if (Number.isNaN(startedAtMs) || Number.isNaN(completedAtMs)) {
+    return null;
+  }
+  return Math.max(0, completedAtMs - startedAtMs);
+}
+
 function generationStatusText(
   providerStatus: string,
   stage: string,
   running: { provider: string | null; elapsedMs: number | null } | null,
+  terminal: TerminalNodeContext | null,
 ) {
   if (providerStatus === "not_started") {
     return "等待发起 · 选择 Provider 后点击「开始生成」";
   }
 
   const stageLabel = workspaceStageLabel(stage);
+
+  // F-01/F-04：session_state 快照会把 providerStatus 重置回 starting，而 timeline
+  // 节点终态是引擎落盘的事实——终态优先呈现，「已用」冻结在节点结束时刻，
+  // 不再随墙钟给死 run 计时。
+  if (terminal !== null && (providerStatus === "starting" || providerStatus === "running")) {
+    const label =
+      terminal.status === "failed"
+        ? "生成失败"
+        : terminal.status === "completed"
+          ? "生成完成"
+          : "生成已跳过";
+    return [
+      label,
+      stageLabel,
+      terminal.elapsedMs === null ? null : `已用 ${formatElapsedMs(terminal.elapsedMs)}`,
+    ]
+      .filter((segment): segment is string => segment !== null)
+      .join(" · ");
+  }
+
   switch (providerStatus) {
     case "running":
     case "starting": {
-      const statusLabel = providerStatus === "running" ? "正在生成" : "正在启动生成";
+      // F-04：引擎 stage 已进入生成类阶段时，starting 只是快照重置残留——统一为
+      // 「正在生成」，避免与「运行中」同屏拼接；starting 遇到确认/终态等非生成
+      // 阶段则不呈现残留前缀，直接给出阶段事实。
+      if (
+        providerStatus === "starting" &&
+        GENERATING_STAGES[stage] !== true &&
+        stage !== "prepare_context"
+      ) {
+        return stageLabel;
+      }
+      const statusLabel =
+        providerStatus === "starting" && stage === "prepare_context"
+          ? "正在启动生成"
+          : "正在生成";
       const segments = [
         statusLabel,
         running?.provider,
@@ -229,8 +301,21 @@ export function ChatCockpitPage({
   const activeStartedAtMs = activeTimelineNode
     ? Date.parse(activeTimelineNode.started_at)
     : NaN;
+  const activeNodeTerminalStatus =
+    activeTimelineNode !== null && TERMINAL_NODE_STATUSES[activeTimelineNode.status] === true
+      ? (activeTimelineNode.status as TerminalNodeContext["status"])
+      : null;
+  // F-01：终态节点不挂活动计时——elapsed 冻结在节点结束时刻，不随墙钟增长。
+  const terminalContext: TerminalNodeContext | null =
+    activeTimelineNode !== null && activeNodeTerminalStatus !== null
+      ? {
+          status: activeNodeTerminalStatus,
+          elapsedMs: terminalElapsedMs(activeTimelineNode),
+        }
+      : null;
   const runningContext =
-    statusState.providerStatus === "running" || statusState.providerStatus === "starting"
+    activeNodeTerminalStatus === null &&
+    (statusState.providerStatus === "running" || statusState.providerStatus === "starting")
       ? {
           provider: runningProviderName(statusState.stage, statusState.providers ?? null),
           elapsedMs: Number.isNaN(activeStartedAtMs)
@@ -510,6 +595,19 @@ export function ChatCockpitPage({
     const commandId = item.id.slice(item.id.lastIndexOf(":") + 1);
     workspaceWs.sendAdvance(commandId);
   }, [workspaceWs.sendAdvance]);
+  // F-11：裸 driver 抢走租约后，本连接写操作被 STALE_DRIVER_LEASE 拒绝——重发
+  // driver hello 即重新持有租约（服务端 bind_role 对既有连接同样执行 lease.acquire），
+  // 并撤下协议错误条目。
+  const handleRetakeLease = useCallback(() => {
+    const current = useWorkspaceStore.getState();
+    if (current.protocolError?.code !== STALE_DRIVER_LEASE_CODE) {
+      return;
+    }
+    const lastSeenNodeId =
+      current.activeNodeId ?? current.timelineNodes.at(-1)?.node_id ?? null;
+    workspaceWs.sendHello(sessionId, lastSeenNodeId);
+    current.setProtocolError(null);
+  }, [sessionId, workspaceWs.sendHello]);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const takeoverButtonRef = useRef<ConfirmTwiceButtonHandle | null>(null);
   const takeoverTargetSessionId = useMemo(
@@ -747,6 +845,7 @@ export function ChatCockpitPage({
             actions={actions}
             onTakeover={handleTakeover}
             onRetry={handleRetry}
+            onRetakeLease={handleRetakeLease}
             actionableSessionId={sessionId}
             takeoverButtonRef={takeoverButtonRef}
             onBulkConfirm={handleBulkConfirm}
@@ -773,6 +872,7 @@ export function ChatCockpitPage({
                   isEmptyUnstarted ? "not_started" : statusState.providerStatus,
                   statusState.stage,
                   runningContext,
+                  terminalContext,
                 )}
               </p>
               <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>

@@ -10,6 +10,7 @@ import {
 import {
   cockpitInboxItemSessionId,
   gateActionBlockCopy,
+  isStaleDriverLeaseItem,
   type CockpitInboxItem,
 } from "../../../state/workspace-cockpit-projection";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
@@ -33,6 +34,7 @@ export function CockpitInbox({
   actions,
   onTakeover,
   onRetry,
+  onRetakeLease,
   actionableSessionId,
   takeoverButtonRef,
   onBulkConfirm,
@@ -45,6 +47,7 @@ export function CockpitInbox({
   actions?: CockpitActionFacade;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
+  onRetakeLease?: () => void;
   actionableSessionId?: string;
   takeoverButtonRef?: Ref<ConfirmTwiceButtonHandle>;
   onBulkConfirm?: (items: readonly CockpitInboxItem[]) => void;
@@ -124,6 +127,7 @@ export function CockpitInbox({
             onTakeover={onTakeover}
             onRetry={onRetry}
             actionable={actionableSessionId === cockpitInboxItemSessionId(item.id)}
+            onRetakeLease={onRetakeLease}
             selectable={selectableIds.has(item.id)}
             selected={selectedIds.has(item.id)}
             onSelectionChange={() => toggleSelected(item)}
@@ -145,6 +149,7 @@ function CockpitInboxRow({
   actions,
   onTakeover,
   onRetry,
+  onRetakeLease,
   actionable,
   selectable,
   selected,
@@ -158,6 +163,7 @@ function CockpitInboxRow({
   actions?: CockpitActionFacade;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
+  onRetakeLease?: () => void;
   actionable: boolean;
   selectable: boolean;
   selected: boolean;
@@ -269,6 +275,13 @@ function CockpitInboxRow({
         ) : null}
         {item.kind === "hard_error" && actions && actionable ? (
           <div className="mt-2 flex flex-wrap gap-2">
+            {isStaleDriverLeaseItem(item) && onRetakeLease ? (
+              <ConfirmTwiceButton
+                label="重新接管"
+                confirmLabel="确认重新接管"
+                onConfirm={onRetakeLease}
+              />
+            ) : null}
             <button
               type="button"
               disabled={item.source !== "advance"}

@@ -197,6 +197,15 @@ export interface CockpitInboxItem {
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
+  /** protocol_error 来源条目的机器码（如 STALE_DRIVER_LEASE）；其余来源缺省。 */
+  protocolErrorCode?: string | null;
+}
+
+/** 裸 driver 抢走租约后，本连接写操作被拒的协议码（F-11 恢复入口依据）。 */
+export const STALE_DRIVER_LEASE_CODE = "STALE_DRIVER_LEASE";
+
+export function isStaleDriverLeaseItem(item: CockpitInboxItem): boolean {
+  return item.source === "protocol_error" && item.protocolErrorCode === STALE_DRIVER_LEASE_CODE;
 }
 
 /** 收件箱条目 id（`${sessionId}:gate:${key}` 等形态）的会话归属；无会话前缀返回 null。 */
@@ -270,6 +279,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       createdAt: null,
       gate: null,
       inlineError: null,
+      protocolErrorCode: state.protocolError.code,
     });
   }
 

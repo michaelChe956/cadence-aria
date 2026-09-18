@@ -6,6 +6,7 @@ import {
   formatFlowElapsed,
   gateActionBlockCopy,
   gateActionBlockReason,
+  isStaleDriverLeaseItem,
   selectCockpitFlow,
   selectCockpitInbox,
   selectGateProjection,
@@ -325,6 +326,23 @@ describe("workspace cockpit inbox projection", () => {
         summary: "confirm is rejected on this gate",
       }),
     ]);
+  });
+
+  it("exposes the protocol error code so the inbox can offer a lease retake (F-11)", () => {
+    useWorkspaceStore.getState().setProtocolError({
+      code: "STALE_DRIVER_LEASE",
+      message: "driver connection no longer holds the lease",
+    });
+
+    const items = selectCockpitInbox(useWorkspaceStore.getState());
+
+    expect(items).toHaveLength(1);
+    expect(items[0]?.protocolErrorCode).toBe("STALE_DRIVER_LEASE");
+    expect(isStaleDriverLeaseItem(items[0]!)).toBe(true);
+    expect(
+      isStaleDriverLeaseItem({ ...items[0]!, protocolErrorCode: "OTHER_CODE" }),
+    ).toBe(false);
+    expect(isStaleDriverLeaseItem({ ...items[0]!, source: "engine_error" })).toBe(false);
   });
 
   it("keeps a real advance rejection and drops a replayed one", () => {

@@ -731,6 +731,28 @@ describe("ChatCockpitPage", () => {
 
     expect(sendAdvance).toHaveBeenCalledWith("command_001");
   });
+  it("重新接管：STALE_DRIVER_LEASE 后重发 driver hello 夺回租约并撤下协议错误（F-11）", async () => {
+    const user = userEvent.setup();
+    const sendHello = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendHello });
+    useWorkspaceStore.setState({
+      protocolError: {
+        code: "STALE_DRIVER_LEASE",
+        message: "driver connection no longer holds the lease for write message advance",
+      },
+      activeNodeId: "author-1",
+      timelineNodes: [timelineNode({ node_id: "author-1" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "重新接管" }));
+    await user.click(screen.getByRole("button", { name: "确认重新接管" }));
+
+    expect(sendHello).toHaveBeenCalledWith("session_001", "author-1");
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(screen.queryByTestId("cockpit-inbox-item-hard_error")).toBeNull();
+  });
 
   it("routes a manual advance through workspace sendAdvance only after a confirmed gate", async () => {
     const sendAdvance = vi.fn(() => true);
@@ -1160,6 +1182,101 @@ describe("cockpit generation status identity and boundaries", () => {
     expect(status).toHaveTextContent(label);
     expect(status).not.toHaveTextContent("正在生成");
   });
+  it("freezes the elapsed clock on a failed run instead of ticking a dead timer (F-01)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-18T10:00:00Z"));
+      const workspaceWs = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        providerStatus: "starting",
+        stage: "prepare_context",
+        providers: { author: "pi", reviewer: "codex" } as const,
+        activeNodeId: "author-1",
+        timelineNodes: [
+          timelineNode({
+            node_id: "author-1",
+            status: "failed",
+            started_at: new Date("2026-09-18T06:29:01Z").toISOString(),
+            completed_at: new Date("2026-09-18T06:33:52Z").toISOString(),
+          }),
+        ],
+      });
+
+      renderCockpitWith(workspaceWs);
+
+      const status = screen.getByTestId("cockpit-generation-status");
+      expect(status).toHaveTextContent("生成失败");
+      expect(status).not.toHaveTextContent("正在启动生成");
+
+      act(() => {
+        vi.advanceTimersByTime(10 * 60_000);
+      });
+
+      expect(status).toHaveTextContent("已用 4:51");
+      expect(status).not.toHaveTextContent("3:40:59");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("unifies the running label once the engine stage is already generating (F-04)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-18T15:13:00Z"));
+      const workspaceWs = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        providerStatus: "starting",
+        stage: "running",
+        providers: { author: "pi", reviewer: "codex" } as const,
+        activeNodeId: "author-1",
+        timelineNodes: [
+          timelineNode({
+            node_id: "author-1",
+            status: "active",
+            started_at: new Date("2026-09-18T14:48:33Z").toISOString(),
+          }),
+        ],
+      });
+
+      renderCockpitWith(workspaceWs);
+
+      expect(screen.getByTestId("cockpit-generation-status")).toHaveTextContent(
+        "正在生成 · pi · 运行中 · 已用 24:27",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["completed", "生成完成"],
+    ["skipped", "生成已跳过"],
+  ] as const)(
+    "reports a %s timeline node over the stale starting prefix (F-04)",
+    (nodeStatus, label) => {
+      const workspaceWs = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        providerStatus: "starting",
+        stage: "prepare_context",
+        activeNodeId: "author-1",
+        timelineNodes: [
+          timelineNode({
+            node_id: "author-1",
+            status: nodeStatus,
+            started_at: new Date("2026-09-18T06:29:01Z").toISOString(),
+            completed_at: new Date("2026-09-18T06:33:52Z").toISOString(),
+          }),
+        ],
+      });
+
+      renderCockpitWith(workspaceWs);
+
+      const status = screen.getByTestId("cockpit-generation-status");
+      expect(status).toHaveTextContent(label);
+      expect(status).not.toHaveTextContent("正在启动生成");
+      expect(status).toHaveTextContent("已用 4:51");
+    },
+  );
 });
 
   it("shows a successful takeover through the shared audit view", async () => {
