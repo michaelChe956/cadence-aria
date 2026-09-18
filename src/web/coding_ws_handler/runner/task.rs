@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::CodingExecutionAttempt;
+use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionAttempt};
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
@@ -176,6 +176,53 @@ async fn run_coding_runner_task_body(
                 );
             }
         } else {
+            // F-14：runner（gate_response retry_coding 放行 / attach 半启动重启
+            // 拉起）在进入任何受管状态（Blocked / WaitingForHuman / terminal）
+            // 之前失败时，attempt 仍停留 Running+Coding——attach 侧
+            // `ensure_runner_for_resumed_attempt` 会再次重启 runner、再开 5s
+            // stage gate、再次死亡，形成「gate 反复创建过期 + provider 零启动」
+            // 静默死循环（现场 coding_attempt_0556a410：stage gate 0006/0007
+            // 相继过期、attempt updated_at 冻结在放行时刻）。与 resumption 的
+            // B 兜底同款 fail-closed：转 AwaitingManualRecovery（abort-only、
+            // 可见、持久 reason），打断重连空转；转换失败仅告警（fail-visible，
+            // 不吞没后续 protocol error）。
+            if let Ok(latest) =
+                coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                && latest.status == CodingAttemptStatus::Running
+            {
+                match coding_store.transition_to_awaiting_manual_recovery(
+                    &attempt.id,
+                    "coding_runner_failed_while_running",
+                ) {
+                    Ok(()) => {
+                        if let Ok(manual_recovery) = coding_store.get_attempt(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                        ) && let Err(snapshot_error) = emit_current_session_state(
+                            &event_tx,
+                            &coding_store,
+                            &manual_recovery,
+                            &cancellation,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                attempt_id = attempt.id.as_str(),
+                                error = %snapshot_error,
+                                "failed to emit manual-recovery session state after runner failure"
+                            );
+                        }
+                    }
+                    Err(transition_error) => {
+                        tracing::warn!(
+                            attempt_id = attempt.id.as_str(),
+                            error = %transition_error,
+                            "coding runner failed while running; manual-recovery transition failed"
+                        );
+                    }
+                }
+            }
             let code = match &error {
                 CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
                     "work_item_execution_plan_not_confirmed".to_string()

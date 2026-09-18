@@ -52,6 +52,7 @@ mod code_review_router;
 mod failed_review_recovery;
 mod plan_repair;
 mod runner_cleanup;
+mod runner_recovery;
 
 #[tokio::test]
 async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() {

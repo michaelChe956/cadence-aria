@@ -160,10 +160,27 @@ async fn coding_ws_start_coding_pushes_engine_stage_and_timeline_events() {
         }
         other => panic!("expected coding timeline node event, got {other:?}"),
     }
-    let updated = store
+    // F-14 契约：该 fixture 的 worktree prepare 会确定性失败，runner 死亡不得
+    // 把 attempt 留在 Running（僵尸 + attach 重连空转），必须 fail-closed 转
+    // AwaitingManualRecovery；失败事件（protocol error）仍推送到 WS。
+    let mut updated = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while updated.status == CodingAttemptStatus::Running {
+        if std::time::Instant::now() > deadline {
+            panic!("runner failure must fail closed to awaiting_manual_recovery");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        updated = store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("updated attempt");
+    }
+    assert_eq!(updated.status, CodingAttemptStatus::AwaitingManualRecovery);
+    assert_eq!(
+        updated.manual_recovery_reason.as_deref(),
+        Some("coding_runner_failed_while_running")
+    );
     assert_eq!(updated.stage, CodingExecutionStage::WorktreePrepare);
 
     ws.close(None).await.expect("close ws");
@@ -385,8 +402,7 @@ async fn coding_ws_permission_mode_select_normalizes_pi_to_auto() {
             ..
         } => {
             assert_eq!(
-                role_provider_config_snapshot
-                    .permission_mode_for_role(&CodingProviderRole::Coder),
+                role_provider_config_snapshot.permission_mode_for_role(&CodingProviderRole::Coder),
                 CodingProviderPermissionMode::Auto
             );
         }
@@ -435,7 +451,10 @@ async fn coding_ws_stage_gate_timeout_auto_starts_stage() {
         cadence_aria::web::workspace_ws_types::WsExecutionEventStatus::Completed
     );
     let detail = marker.detail.expect("auto-continue detail");
-    assert!(detail.contains(&gate.gate_id), "detail carries gate id: {detail}");
+    assert!(
+        detail.contains(&gate.gate_id),
+        "detail carries gate id: {detail}"
+    );
     assert!(
         detail.contains(&format!("{:?}", CodingExecutionStage::Coding)),
         "detail carries stage: {detail}"
@@ -629,11 +648,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_review_request_complet
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
-                observed.push(format!(
-                    "gate:{:?}:{:?}",
-                    gate.kind,
-                    gate.stage.as_ref()
-                ));
+                observed.push(format!("gate:{:?}:{:?}", gate.kind, gate.stage.as_ref()));
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
