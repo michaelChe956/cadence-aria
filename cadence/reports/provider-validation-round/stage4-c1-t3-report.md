@@ -17,7 +17,7 @@
 
 ## 2. 暴露问题/concerns（呈报 controller）
 
-1. **Internal Reviewer 终态证据缺口（结论=受限登记的直接原因）**：attempt 0556a410 在服务端继续自主推进（末次实读 running/WI-003:running）——controller 可续观察收口（usage_by_role 若补 internal_reviewer 键+internal_pr_review_complete 事件即可升级转正），或后续轮以更长 `ARIA_CODING_HARD_TIMEOUT_MS`（建议 ≥90min）重跑收口。
+1. **Internal Reviewer 终态证据缺口（结论=受限登记的直接原因）**：attempt 0556a410 后续 +80min 实读转 **blocked**——WI-003 Coder 报 plan defect「文件系统只读挂载、git add 无法建 index.lock」（**幻觉环境误报**，convergence-36 收官跑同款谱系）→ 分诊门 coding_blocked_gate_0001「Coder 输出需要人工分诊」**正确拦截**（实现与验证 CHECK-003 已完成，仅提交环节被误报阻塞）。正面证据：plan-defect 上报通道+分诊门在真实跑正确工作。处置移交 controller：人工分诊放行（finding 为误报）即可续跑收口（usage_by_role 补 internal_reviewer 键+internal_pr_review_complete 事件即升级转正），或后续轮以更长 `ARIA_CODING_HARD_TIMEOUT_MS`（建议 ≥90min）重跑收敛。
 2. **v24 provider 继承路径缺口**：single_candidate+auto_if_valid 直建 coding attempt 回落仓默认 codex（`coding.rs:592-644` runtime binding 只认 Confirmed per-WI session，SC flow 下恒 open）；kimi 验证必须走 typed advance（journal 冻结 plan session provider）。本轮已验证该路径可行（advance-confirmed-plan.mjs 驱动脚本留档复用）。
 3. **Failed advance record 无生产清除路径**：永久阻塞同 plan 后续 advance（AdvanceStore 无 delete API）；本轮手动清自产残留（备份在档）——建议后续 change 补恢复面。
 4. **rep3 interactive 返修预算耗尽**：kimi plan 质量 5 轮 revise 游走（R2），35min 硬超时停 waiting_for_human——convergence-36 同谱系，非缺陷。
