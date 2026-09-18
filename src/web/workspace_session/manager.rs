@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::journal::EventJournal;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::cross_cutting::streaming_provider::ChoiceRequestSource;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
@@ -20,16 +19,16 @@ use crate::web::workspace_session::{
     ConnectionRole, LeaseState, WorkspaceSessionRegistry, is_write_message,
 };
 use crate::web::workspace_ws_handler::{
-    OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind, map_engine_event,
+    OutboundControl, ProviderCommand, ProviderRunContext, ProviderRunKind,
     planning_resume_decision_with_fresh_index, planning_resume_run_kind,
-    spawn_provider_run_from_event, spawn_provider_run_from_handler,
+    spawn_provider_run_from_handler,
 };
 use crate::web::workspace_ws_types::{WsInMessage, WsOutMessage};
 
-struct Attachment {
-    outbound_tx: mpsc::Sender<OutboundControl>,
+pub(super) struct Attachment {
+    pub(super) outbound_tx: mpsc::Sender<OutboundControl>,
     /// 一旦直播通道溢出，该连接只能通过重连回到一致状态；此后 router 不再向其投递。
-    degraded: bool,
+    pub(super) degraded: bool,
     // Hello 前的一个 RTT 内，连接维持 legacy driver 等价，待 Hello 归一后覆盖。
     role: ConnectionRole,
     after_event_seq: Option<u64>,
@@ -37,14 +36,14 @@ struct Attachment {
     provisional_lease: Option<LeaseState>,
 }
 
-struct ManagerState {
+pub(super) struct ManagerState {
     /// 尚未由首条入站或宽限期裁决的连接不可接收直播帧，保证初帧/回放顺序。
     pending_attachments: HashMap<String, Attachment>,
     /// 已完成首帧或 cursor 回放裁决的连接接收直播帧。
-    attachments: HashMap<String, Attachment>,
+    pub(super) attachments: HashMap<String, Attachment>,
     next_run_id: u64,
     active_run: Option<ActiveRun>,
-    journal: EventJournal,
+    pub(super) journal: EventJournal,
     lease: LeaseState,
     recovery_error: Option<String>,
 }
@@ -69,12 +68,12 @@ pub struct ActiveRun {
 /// 不驱动 provider、不登记 run、不订阅 engine event；它保留第二连接立即可读的能力，
 /// 但不再创建第二个拥有 run 所有权的 engine。
 pub struct WorkspaceSessionManager {
-    engine: Arc<Mutex<WorkspaceEngine>>,
+    pub(super) engine: Arc<Mutex<WorkspaceEngine>>,
     engine_tx: mpsc::Sender<EngineEvent>,
-    state: StdMutex<ManagerState>,
+    pub(super) state: StdMutex<ManagerState>,
     /// 序号在 manager 生命周期内严格单调；manager 被回收后 durable 重建会改走
     /// snapshot 基线，故不需要将它持久化。
-    next_event_seq: AtomicU64,
+    pub(super) next_event_seq: AtomicU64,
     pub session_id: String,
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
@@ -858,7 +857,7 @@ impl WorkspaceSessionManager {
 
     /// 一次性只读 durable 投影器。禁止将它扩展为第二 engine 状态源：没有 spawn、没有
     /// provider/run 注册、没有 event receiver，并且使用有接收端但永不消费的 channel。
-    fn durable_projection(&self) -> (WsOutMessage, Option<WsOutMessage>) {
+    pub(super) fn durable_projection(&self) -> (WsOutMessage, Option<WsOutMessage>) {
         let lifecycle = LifecycleStore::new(self.app_paths.clone());
         let checkpoint_store = Arc::new(CheckpointStore::new(self.app_paths.issue_lifecycle_root(
             &self.session_record.project_id,
@@ -993,248 +992,6 @@ impl WorkspaceSessionManager {
         Ok(())
     }
 
-    /// session-owned event router：只持有 manager 弱引用，registry 回收最后一个强引用后
-    /// 即退出，避免 router 与 engine sender 构成自引用环。
-    fn spawn_event_router(
-        self: &Arc<Self>,
-        mut engine_rx: mpsc::Receiver<EngineEvent>,
-        workspace_runs: crate::web::state::WorkspaceRunRegistry,
-    ) {
-        let manager = Arc::downgrade(self);
-        tokio::spawn(async move {
-            while let Some(event) = engine_rx.recv().await {
-                let Some(manager) = manager.upgrade() else {
-                    break;
-                };
-                match event {
-                    EngineEvent::ProviderRunRequested { kind, node_id } => {
-                        let outbound = manager
-                            .state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .attachments
-                            .values()
-                            .next()
-                            .map(|attachment| attachment.outbound_tx.clone())
-                            .unwrap_or_else(|| {
-                                // F-1：无活动 run 且无订阅者时仍以一次性出站通道接力 spawn。
-                                // 事件照常入 journal，下一次 attach 经 cursor 回放或 snapshot 基线取回。
-                                eprintln!(
-                                    "[aria-broadcast] provider run requested without attachment; spawning with throwaway outbound session={}",
-                                    manager.session_id
-                                );
-                                mpsc::channel(1).0
-                            });
-                        let run_context = manager.provider_run_context(workspace_runs.clone());
-                        tokio::spawn(async move {
-                            if let Err(message) = spawn_provider_run_from_event(
-                                run_context,
-                                kind,
-                                node_id,
-                                outbound.clone(),
-                            )
-                            .await
-                            {
-                                let _ = outbound.try_send(OutboundControl::Text(
-                                    serde_json::to_string(&WsOutMessage::Error { message })
-                                        .unwrap_or_else(|_| {
-                                            "{\"type\":\"error\",\"message\":\"serialization failed\"}"
-                                                .to_string()
-                                        }),
-                                ));
-                            }
-                        });
-                    }
-                    EngineEvent::HumanGateOpened { stage: _ } => {
-                        let session_state = manager.engine.lock().await.build_session_state();
-                        manager.broadcast(session_state);
-                    }
-                    EngineEvent::ArtifactBatchUpdate { mut updates } => {
-                        updates.sort_by_key(|update| update.version);
-                        for update in updates {
-                            manager.broadcast(
-                                crate::web::workspace_ws_handler::ws_artifact_update(
-                                    update.version,
-                                    update.payload,
-                                ),
-                            );
-                        }
-                    }
-                    EngineEvent::ChoiceRequest {
-                        id,
-                        prompt,
-                        options,
-                        allow_multiple,
-                        allow_free_text,
-                        questions,
-                        source,
-                    } => {
-                        if source != ChoiceRequestSource::TextFallback
-                            && let Some(run) = manager.active_run().await
-                        {
-                            run.pending_choice_ids.lock().await.insert(id.clone());
-                        }
-                        manager.broadcast(WsOutMessage::ChoiceRequest {
-                            id,
-                            prompt,
-                            options: options
-                                .into_iter()
-                                .map(crate::web::workspace_ws_handler::ws_choice_option)
-                                .collect(),
-                            allow_multiple,
-                            allow_free_text,
-                            questions: questions
-                                .into_iter()
-                                .map(crate::web::workspace_ws_handler::ws_choice_question)
-                                .collect(),
-                            source: source.as_str().to_string(),
-                        });
-                    }
-                    event => {
-                        if let Some(message) = map_engine_event(event) {
-                            manager.broadcast(message);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /// 从序列化边界注入增量 wire 字段，避免侵入所有 `WsOutMessage` 变体。旧客户端
-    /// 忽略未知字段；同一 stamped JSON 同时写 journal 并 fan-out 到所有 attachment。
-    fn current_session_state(&self) -> WsOutMessage {
-        if let Ok(engine) = self.engine.try_lock() {
-            engine.build_session_state()
-        } else {
-            self.durable_projection().0
-        }
-    }
-    fn broadcast(&self, message: WsOutMessage) {
-        let Ok(serialized) = serde_json::to_string(&message) else {
-            eprintln!(
-                "[aria-broadcast] serialize failed session={}",
-                self.session_id
-            );
-            return;
-        };
-        let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
-        let Some(json) = inject_event_seq(serialized, seq) else {
-            eprintln!(
-                "[aria-broadcast] event sequence injection failed session={}",
-                self.session_id
-            );
-            return;
-        };
-        let attachments = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.journal.push(seq, json.clone());
-            state
-                .attachments
-                .iter()
-                .map(|(connection_id, attachment)| (connection_id.clone(), attachment.degraded))
-                .collect::<Vec<_>>()
-        };
-        let recovery_baseline = attachments
-            .iter()
-            .any(|(_, degraded)| *degraded)
-            .then(|| self.current_session_state())
-            .and_then(|snapshot| serde_json::to_string(&snapshot).ok())
-            .and_then(|baseline| inject_event_seq(baseline, seq));
-        for (connection_id, degraded) in attachments {
-            if degraded {
-                if let Some(baseline) = recovery_baseline.as_deref() {
-                    self.try_recover_degraded_attachment(&connection_id, baseline);
-                }
-            } else {
-                self.try_send_live_event(&connection_id, &json);
-            }
-        }
-    }
-
-    /// 直播发送只允许 `try_send`：任何 attachment 都不能使 provider/router 等待。
-    /// 队列满时仅标记该 attachment；不发送可被同样丢弃的 `ResyncRequired`。下一次
-    /// 广播会先试投递带当前 event_seq 的全量 session_state，成功后恢复直播。
-    fn try_send_live_event(&self, connection_id: &str, json: &str) {
-        let sender = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.attachments.get(connection_id).and_then(|attachment| {
-                (!attachment.degraded).then(|| attachment.outbound_tx.clone())
-            })
-        };
-        let Some(sender) = sender else {
-            return;
-        };
-
-        match sender.try_send(OutboundControl::Text(json.to_string())) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(attachment) = state.attachments.get_mut(connection_id)
-                    && attachment.outbound_tx.same_channel(&sender)
-                {
-                    attachment.degraded = true;
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .attachments
-                    .remove(connection_id);
-            }
-        }
-    }
-
-    /// 降级连接只尝试一次无等待投递；它收到的 session_state 即当前事件序号的基线，
-    /// 因而即使溢出时的增量帧已丢失，也能安全继续接收后续单调 event_seq 帧。
-    fn try_recover_degraded_attachment(&self, connection_id: &str, baseline: &str) {
-        let sender = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state
-                .attachments
-                .get(connection_id)
-                .and_then(|attachment| attachment.degraded.then(|| attachment.outbound_tx.clone()))
-        };
-        let Some(sender) = sender else {
-            return;
-        };
-
-        match sender.try_send(OutboundControl::Text(baseline.to_string())) {
-            Ok(()) => {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(attachment) = state.attachments.get_mut(connection_id)
-                    && attachment.degraded
-                    && attachment.outbound_tx.same_channel(&sender)
-                {
-                    attachment.degraded = false;
-                }
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .attachments
-                    .remove(connection_id);
-            }
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn attachment_is_degraded(&self, connection_id: &str) -> bool {
         self.state
@@ -1317,7 +1074,7 @@ async fn send_optional_message(
 }
 
 /// 保持 `WsOutMessage` schema 不变，在 JSON 顶层增加可选 `event_seq`。
-fn inject_event_seq(message: String, seq: u64) -> Option<String> {
+pub(super) fn inject_event_seq(message: String, seq: u64) -> Option<String> {
     let mut value = serde_json::from_str::<serde_json::Value>(&message).ok()?;
     let object = value.as_object_mut()?;
     object.insert("event_seq".to_string(), serde_json::Value::from(seq));
