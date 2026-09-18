@@ -430,7 +430,12 @@ async fn corrupt_outline_revision_journal_fails_closed_without_starting_provider
     let messages = recv_ws_until(
         &mut reconnected_ws,
         Duration::from_secs(5),
-        |messages| messages.iter().any(|message| message["type"] == "error"),
+        |messages| {
+            // 恢复错误先于初帧基线投递（register_attachment 即时投递 error，
+            // session_state 在 grace 激活时投递）；两者都必须收到。
+            messages.iter().any(|message| message["type"] == "error")
+                && messages.iter().any(|message| message["type"] == "session_state")
+        },
     )
     .await;
     let error = messages

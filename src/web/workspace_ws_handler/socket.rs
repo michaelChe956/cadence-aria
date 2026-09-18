@@ -418,7 +418,11 @@ mod tests {
                 manager_for_flush.as_ref(),
                 "connection",
                 &outbound_for_flush,
-                Some(("baseline".to_string(), None)),
+                Some(InitialAttach {
+                    session_state: WsOutMessage::Pong,
+                    choice: None,
+                    attach_seq: 0,
+                }),
             )
             .await;
         });
@@ -439,33 +443,42 @@ mod tests {
     }
 }
 
+/// 初帧载荷：未注入 `event_seq` 的 snapshot、可选补发 choice，以及 snapshot 构建
+/// 时刻的基线序号（投递时若存在活跃 run 补发窗口，基线会被压低到窗口首事件
+/// 之前，见 `activate_attachment_with_initial_frames`）。
+struct InitialAttach {
+    session_state: WsOutMessage,
+    choice: Option<WsOutMessage>,
+    attach_seq: u64,
+}
+
 async fn flush_initial_attachment(
     manager: &WorkspaceSessionManager,
     connection_id: &str,
     outbound_tx: &mpsc::Sender<OutboundControl>,
-    initial: Option<(String, Option<WsOutMessage>)>,
+    initial: Option<InitialAttach>,
 ) {
-    struct ActivationGuard<'a> {
-        manager: &'a WorkspaceSessionManager,
-        connection_id: &'a str,
-    }
-
-    impl Drop for ActivationGuard<'_> {
-        fn drop(&mut self) {
-            self.manager.activate_attachment(self.connection_id);
+    // 激活与补发窗口冻结在投递前完成：中途取消也保持已激活，直播帧不会丢失。
+    let frames = match initial {
+        Some(initial) => manager.activate_attachment_with_initial_frames(
+            connection_id,
+            initial.session_state,
+            initial.choice,
+            initial.attach_seq,
+        ),
+        // 初帧已被更早路径投递（或本就没有）：仅保底完成激活。
+        None => {
+            manager.activate_attachment(connection_id);
+            Vec::new()
         }
-    }
-
-    let _activation_guard = ActivationGuard {
-        manager,
-        connection_id,
     };
-    if let Some((session_state, choice)) = initial {
-        let _ = outbound_tx.send(OutboundControl::Text(session_state)).await;
-        if let Some(choice) = choice
-            && let Ok(json) = serde_json::to_string(&choice)
+    for frame in frames {
+        if outbound_tx
+            .send(OutboundControl::Text(frame))
+            .await
+            .is_err()
         {
-            let _ = outbound_tx.send(OutboundControl::Text(json)).await;
+            return;
         }
     }
 }
@@ -505,11 +518,11 @@ pub(crate) async fn handle_workspace_socket(
         connection_id.clone(),
     ));
     let (session_state, restored_choice_request) = manager.attached_session_state().await;
-    let pending_initial = Arc::new(Mutex::new(
-        manager
-            .serialize_attach_session_state(session_state.with_connection_id(&connection_id))
-            .map(|session_state| (session_state, restored_choice_request)),
-    ));
+    let pending_initial = Arc::new(Mutex::new(Some(InitialAttach {
+        session_state: session_state.with_connection_id(&connection_id),
+        choice: restored_choice_request,
+        attach_seq: manager.attach_baseline_seq(),
+    })));
 
     let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
     state

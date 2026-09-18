@@ -123,9 +123,17 @@ async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
 
     drop(first_driver);
     send_json(&mut second_driver, &WsInMessage::Abort).await;
-    match recv_json(&mut second_driver).await {
-        WsOutMessage::ProviderStatus { status } => assert_eq!(status, WsProviderStatus::Aborted),
-        other => panic!("lease holder abort should cancel the active run, got {other:?}"),
+    loop {
+        match recv_json(&mut second_driver).await {
+            WsOutMessage::ProviderStatus { status } => {
+                assert_eq!(status, WsProviderStatus::Aborted);
+                break;
+            }
+            // 该连接 attach 时活跃 run 已在推进：初帧基线之后的 journal 补发帧
+            // 先于 abort 响应到达，跳过直至 holder 的中止状态。
+            WsOutMessage::Error { message } => panic!("second driver ws error: {message}"),
+            _ => continue,
+        }
     }
 
     drop(second_driver);

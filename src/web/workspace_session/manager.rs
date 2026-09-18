@@ -709,15 +709,62 @@ impl WorkspaceSessionManager {
         }
     }
 
-    /// 在序列化边界为 attach snapshot 注入当前 event_seq 基线。T10 将在首个 Hello 的
-    /// cursor 分支抑制该初帧，确保回放事件不会被前端基线去重吞掉；本阶段仍维持既有
-    /// 立即 attach。返回 JSON 而非重新反序列化枚举，以保留增量字段。
-    pub(crate) fn serialize_attach_session_state(&self, message: WsOutMessage) -> Option<String> {
-        let seq = self
-            .next_event_seq
+    /// 初帧 attach 基线序号：snapshot 构建时刻的当前 event_seq。初帧投递时若存在
+    /// 活跃 run 补发窗口，基线会进一步压到窗口首事件之前（见
+    /// `activate_attachment_with_initial_frames`），保证补发帧不会被客户端按
+    /// event_seq 去重吞掉。
+    pub(crate) fn attach_baseline_seq(&self) -> u64 {
+        self.next_event_seq
             .load(Ordering::Relaxed)
-            .saturating_sub(1);
-        inject_event_seq(serde_json::to_string(&message).ok()?, seq)
+            .saturating_sub(1)
+    }
+
+    /// 初帧投递的帧序列：同一状态锁内完成 pending→attachments 激活与 journal 补发
+    /// 窗口冻结，投递由调用方在锁外进行（与 `resubscribe` 的顺序契约同构）。
+    ///
+    /// 恢复触发的 run 在连接登记 attachment 之前就已开始——其事件（如恢复出的
+    /// Provider Prompt）先于任何连接侧标记进入 journal。无 cursor 的旧客户端在
+    /// grace/首条入站消息激活时必须经活跃 run 窗口补发才能取回这些事件；快照
+    /// 基线压到首个补发事件之前，重叠帧由客户端按 event_seq 去重。
+    pub(crate) fn activate_attachment_with_initial_frames(
+        &self,
+        connection_id: &str,
+        session_state: WsOutMessage,
+        choice: Option<WsOutMessage>,
+        attach_seq: u64,
+    ) -> Vec<String> {
+        let active_window = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(attachment) = state.pending_attachments.remove(connection_id) {
+                state
+                    .attachments
+                    .insert(connection_id.to_string(), attachment);
+            }
+            state.journal.active_run_window()
+        };
+        let baseline_seq = match &active_window {
+            Some((first_seq, _)) => (*first_seq).saturating_sub(1),
+            None => attach_seq,
+        };
+        let mut frames = Vec::new();
+        if let Some(json) = serde_json::to_string(&session_state)
+            .ok()
+            .and_then(|json| inject_event_seq(json, baseline_seq))
+        {
+            frames.push(json);
+        }
+        if let Some(choice) = choice
+            && let Ok(json) = serde_json::to_string(&choice)
+        {
+            frames.push(json);
+        }
+        if let Some((_, events)) = active_window {
+            frames.extend(events);
+        }
+        frames
     }
 
     /// 完成 cursor 重订阅：先在同一状态锁内确认 attachment 在直播表中，再冻结

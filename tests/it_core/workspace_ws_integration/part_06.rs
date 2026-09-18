@@ -642,17 +642,22 @@ async fn workspace_ws_observer_write_commands_are_rejected_and_run_untouched() {
         },
     ] {
         send_json(&mut observer, &message).await;
-        match recv_json(&mut observer).await {
-            WsOutMessage::ProtocolError {
-                code,
-                context: Some(context),
-                ..
-            } => {
-                assert_eq!(code, "OBSERVER_WRITE_REJECTED");
-                assert_eq!(context["role"], "observer");
-                assert_eq!(context["received"], message_type_for_test(&message));
+        loop {
+            match recv_json(&mut observer).await {
+                WsOutMessage::ProtocolError {
+                    code,
+                    context: Some(context),
+                    ..
+                } => {
+                    assert_eq!(code, "OBSERVER_WRITE_REJECTED");
+                    assert_eq!(context["role"], "observer");
+                    assert_eq!(context["received"], message_type_for_test(&message));
+                    break;
+                }
+                // observer attach 时活跃 run 已在推进：初帧基线之后的 journal
+                // 补发帧先于写拒绝到达，跳过直至本次写的协议错误。
+                _ => continue,
             }
-            other => panic!("observer write must be rejected diagnostically, got {other:?}"),
         }
     }
 
