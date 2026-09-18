@@ -699,33 +699,36 @@ mod tests {
         assert_eq!(result.exit_code, None);
     }
 
+    // —— 唯一保留的真实进程端到端用例（DEF-7 桶收敛，D4）——
+    // create→输出流→wait_for_exit→release 全链路 + cap 生效最小断言；
+    // 预算 60s=机器负载不敏感口径（原三测试 10-15s 紧墙钟预算已废除）。
     #[cfg(unix)]
     #[tokio::test]
-    async fn output_is_capped_and_truncation_flagged_once() {
+    async fn real_process_pipe_smoke_cap_end_to_end() {
         let dir = tempfile::tempdir().expect("dir");
-        // Emit exactly MAX+1 bytes on a single stream (stdout) so the test is
-        // deterministic: no cross-stream budget race, no timing dependence.
-        // The cap must retain the first MAX bytes and flag truncation once.
         let script = format!(
             "head -c {} /dev/zero | tr '\\0' 'a'",
             MAX_TERMINAL_OUTPUT_BYTES + 1
         );
-        let bin = write_executable(dir.path(), "big", &script);
-        let manager = manager(Duration::from_secs(30));
+        let bin = write_executable(dir.path(), "smoke-cap", &script);
+        let manager = manager(Duration::from_secs(60));
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
             .expect("create");
         manager.start(&id).expect("start");
-        let (result, combined) = tokio::time::timeout(Duration::from_secs(10), async {
+        let (result, combined) = tokio::time::timeout(Duration::from_secs(60), async {
             let result = manager.wait_for_exit(&id).await.expect("wait");
             let combined = manager.output(&id).expect("retained output").len();
             (result, combined)
         })
         .await
-        .expect("terminal output test timed out");
+        .expect("real-process smoke timed out (60s load-insensitive budget)");
+        assert_eq!(result.exit_code, Some(0));
         assert!(result.truncated);
         assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
+        manager.release(&id).await.expect("release");
+        manager.release(&id).await.expect("idempotent release");
     }
 
     #[cfg(unix)]
@@ -759,66 +762,6 @@ mod tests {
             Some(0),
             "transient ETXTBSY must be retried, not swallowed: {result:?}"
         );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn output_exactly_at_cap_is_not_truncated() {
-        let dir = tempfile::tempdir().expect("dir");
-        // Emit exactly MAX bytes on stdout: everything must be returned and
-        // truncation must not be flagged (boundary case, MAX = 1048576).
-        let script = format!(
-            "head -c {} /dev/zero | tr '\\0' 'a'",
-            MAX_TERMINAL_OUTPUT_BYTES
-        );
-        let bin = write_executable(dir.path(), "exact", &script);
-        let manager = manager(Duration::from_secs(30));
-        let id = manager
-            .create(command(&bin, dir.path(), &[]))
-            .await
-            .expect("create");
-        manager.start(&id).expect("start");
-        let (result, combined) = tokio::time::timeout(Duration::from_secs(10), async {
-            let result = manager.wait_for_exit(&id).await.expect("wait");
-            let combined = manager.output(&id).expect("retained output").len();
-            (result, combined)
-        })
-        .await
-        .expect("terminal output test timed out");
-        assert_eq!(result.exit_code, Some(0));
-        assert!(!result.truncated);
-        assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_streams_share_budget_without_overdraw() {
-        let dir = tempfile::tempdir().expect("dir");
-        // Both stdout and stderr each emit MAX bytes concurrently. The shared
-        // cap must still be honored exactly: total retained output == MAX and
-        // truncation is flagged. With the old load/store race this could
-        // overdraw; the atomic CAS reservation keeps it exact under any
-        // interleaving.
-        let script = format!(
-            "head -c {} /dev/zero | tr '\\0' 'a' > /dev/stdout & head -c {} /dev/zero | tr '\\0' 'b' > /dev/stderr & wait",
-            MAX_TERMINAL_OUTPUT_BYTES, MAX_TERMINAL_OUTPUT_BYTES
-        );
-        let bin = write_executable(dir.path(), "dual", &script);
-        let manager = manager(Duration::from_secs(30));
-        let id = manager
-            .create(command(&bin, dir.path(), &[]))
-            .await
-            .expect("create");
-        manager.start(&id).expect("start");
-        let (result, combined) = tokio::time::timeout(Duration::from_secs(15), async {
-            let result = manager.wait_for_exit(&id).await.expect("wait");
-            let combined = manager.output(&id).expect("retained output").len();
-            (result, combined)
-        })
-        .await
-        .expect("concurrent dual-stream test timed out");
-        assert!(result.truncated);
-        assert_eq!(combined, MAX_TERMINAL_OUTPUT_BYTES);
     }
 
     #[cfg(unix)]
@@ -906,5 +849,75 @@ mod tests {
         manager.cleanup_all();
         let result = manager.wait_for_exit(&id).await.expect("wait");
         assert!(result.killed);
+    }
+    // —— DEF-7 桶确定性边界族（D4/kimi-acp MODIFIED 确定性验证条款）——
+    // 受控内存流（tokio::io::duplex）直接驱动 read_terminal_stream 的预算/截断
+    // 逻辑：无真实进程、无墙钟预算，任何机器负载下结果恒定。真实进程端到端
+    // 行为由下方唯一 smoke 覆盖（原三测试的真实进程形态已删除，不保留双份）。
+
+    async fn drive_read_terminal_stream(
+        payloads: &[Vec<u8>],
+    ) -> (Arc<AtomicUsize>, Arc<AtomicBool>, String) {
+        use tokio::io::AsyncWriteExt;
+
+        let budget = Arc::new(AtomicUsize::new(0));
+        let truncated = Arc::new(AtomicBool::new(false));
+        let retained = Arc::new(Mutex::new(String::new()));
+        let mut readers = Vec::new();
+        let mut writers = Vec::new();
+        for payload in payloads {
+            let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+            readers.push(tokio::spawn(read_terminal_stream(
+                reader,
+                budget.clone(),
+                truncated.clone(),
+                retained.clone(),
+            )));
+            let payload = payload.clone();
+            writers.push(tokio::spawn(async move {
+                writer.write_all(&payload).await.expect("write payload");
+                writer.shutdown().await.expect("shutdown writer");
+            }));
+        }
+        for writer in writers {
+            writer.await.expect("writer task");
+        }
+        for reader in readers {
+            reader.await.expect("reader task");
+        }
+        let output = retained.lock().expect("terminal output lock").clone();
+        (budget, truncated, output)
+    }
+
+    #[tokio::test]
+    async fn cap_boundary_exactly_at_cap_retains_all_without_truncation_deterministic() {
+        let (budget, truncated, output) =
+            drive_read_terminal_stream(&[vec![b'a'; MAX_TERMINAL_OUTPUT_BYTES]]).await;
+        assert_eq!(output.len(), MAX_TERMINAL_OUTPUT_BYTES);
+        assert!(!truncated.load(Ordering::Acquire));
+        assert_eq!(budget.load(Ordering::Acquire), MAX_TERMINAL_OUTPUT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn cap_boundary_over_cap_truncates_once_deterministic() {
+        let (budget, truncated, output) =
+            drive_read_terminal_stream(&[vec![b'a'; MAX_TERMINAL_OUTPUT_BYTES + 1]]).await;
+        assert_eq!(output.len(), MAX_TERMINAL_OUTPUT_BYTES);
+        assert!(output.bytes().all(|byte| byte == b'a'));
+        assert!(truncated.load(Ordering::Acquire));
+        assert_eq!(budget.load(Ordering::Acquire), MAX_TERMINAL_OUTPUT_BYTES);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_boundary_concurrent_streams_share_budget_without_overdraw_deterministic() {
+        let (budget, truncated, output) = drive_read_terminal_stream(&[
+            vec![b'a'; MAX_TERMINAL_OUTPUT_BYTES],
+            vec![b'b'; MAX_TERMINAL_OUTPUT_BYTES],
+        ])
+        .await;
+        // 交错不敏感不变式：合计恰为上限，不超额、不丢更新（CAS 预留语义）。
+        assert_eq!(output.len(), MAX_TERMINAL_OUTPUT_BYTES);
+        assert!(truncated.load(Ordering::Acquire));
+        assert_eq!(budget.load(Ordering::Acquire), MAX_TERMINAL_OUTPUT_BYTES);
     }
 }
