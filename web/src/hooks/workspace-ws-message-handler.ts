@@ -81,8 +81,14 @@ const store = useWorkspaceStore.getState();
           isActiveProviderNode &&
           typeof nodeId === "string" &&
           !invalidatedPreStageNodeIds.has(nodeId);
+        // work_item_plan 的单候选流不进入 WorkspaceStage 状态机，stage 恒为 null；
+        // 以生成期标记和活跃 run 一同确认该 provider chunk 仍属当前生成。
+        const isSingleCandidateGenerating =
+          store.singleCandidatePhase === "generate" && Boolean(store.activeRunId);
         const acceptsActiveProviderChunk =
-          ACTIVE_PROVIDER_STAGES.has(store.stage) || isPendingInitialProviderNode;
+          ACTIVE_PROVIDER_STAGES.has(store.stage) ||
+          isPendingInitialProviderNode ||
+          isSingleCandidateGenerating;
         if (!acceptsActiveProviderChunk) {
           break;
         }
