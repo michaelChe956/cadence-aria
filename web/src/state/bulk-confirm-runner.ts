@@ -76,100 +76,100 @@ export function confirmGateOnSession(
   options: { timeoutMs?: number } = {},
 ): Promise<BulkConfirmItemOutcome> {
   const timeoutMs = options.timeoutMs ?? BULK_CONFIRM_TIMEOUT_MS;
-  const { promise, resolve } = Promise.withResolvers<BulkConfirmItemOutcome>();
-  let settled = false;
-  let sawSessionState = false;
-  let auditRecordId: string | null = null;
-  let socket: BulkSocket | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const base = {
-    itemId: target.itemId,
-    sessionId: target.sessionId,
-    gateKey: target.gateKey,
-    title: target.title,
-    atIso: new Date().toISOString(),
-  };
-  const finish = (status: BulkConfirmItemStatus, detail: string | null) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    if (timer !== null) {
-      clearTimeout(timer);
-    }
-    try {
-      socket?.close();
-    } catch {
-      // 已关闭
-    }
-    resolve({ ...base, status, detail });
-  };
-  socket = socketFactory(target.sessionId, {
-    onOpen: () => {
-      socket?.send(
-        JSON.stringify({
-          type: "hello",
-          session_id: target.sessionId,
-          last_seen_node_id: null,
-          role: "driver",
-        }),
-      );
-    },
-    onMessage: (data) => {
-      let frame: ParsedFrame;
-      try {
-        frame = JSON.parse(data) as ParsedFrame;
-      } catch {
-        return; // 畸形帧不影响协议（observer 同款纪律）
-      }
-      if (frame.type === "session_state" && !sawSessionState) {
-        sawSessionState = true;
-        socket?.send(JSON.stringify({ type: "human_confirm", decision: "confirm", payload: null }));
-        auditRecordId = useOperationAuditStore.getState().record({
-          sessionId: target.sessionId,
-          gateId: target.gateKey,
-          operation: "confirm",
-          source: "chat",
-          outcome: "sent",
-          detail: "bulk",
-        });
+  return new Promise((resolve) => {
+    let settled = false;
+    let sawSessionState = false;
+    let auditRecordId: string | null = null;
+    let socket: BulkSocket | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const base = {
+      itemId: target.itemId,
+      sessionId: target.sessionId,
+      gateKey: target.gateKey,
+      title: target.title,
+      atIso: new Date().toISOString(),
+    };
+    const finish = (status: BulkConfirmItemStatus, detail: string | null) => {
+      if (settled) {
         return;
       }
-      if (frame.type === "human_gate_closed") {
-        if (auditRecordId === null) {
-          // 他方并发关门窗口：confirm 尚未发出——不误报 confirmed、不虚构审计行
-          finish("failed", "gate_closed_before_confirm");
+      settled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      try {
+        socket?.close();
+      } catch {
+        // 已关闭
+      }
+      resolve({ ...base, status, detail });
+    };
+    socket = socketFactory(target.sessionId, {
+      onOpen: () => {
+        socket?.send(
+          JSON.stringify({
+            type: "hello",
+            session_id: target.sessionId,
+            last_seen_node_id: null,
+            role: "driver",
+          }),
+        );
+      },
+      onMessage: (data) => {
+        let frame: ParsedFrame;
+        try {
+          frame = JSON.parse(data) as ParsedFrame;
+        } catch {
+          return; // 畸形帧不影响协议（observer 同款纪律）
+        }
+        if (frame.type === "session_state" && !sawSessionState) {
+          sawSessionState = true;
+          socket?.send(JSON.stringify({ type: "human_confirm", decision: "confirm", payload: null }));
+          auditRecordId = useOperationAuditStore.getState().record({
+            sessionId: target.sessionId,
+            gateId: target.gateKey,
+            operation: "confirm",
+            source: "chat",
+            outcome: "sent",
+            detail: "bulk",
+          });
           return;
         }
-        useOperationAuditStore.getState().markCompleted(auditRecordId);
-        finish("confirmed", null);
-        return;
-      }
-      if (frame.type === "protocol_error" || frame.type === "error") {
-        const code = frame.type === "protocol_error" && typeof frame.code === "string"
-          ? frame.code
-          : "server_error";
-        if (auditRecordId !== null) {
-          useOperationAuditStore.getState().markRejected(auditRecordId, code);
+        if (frame.type === "human_gate_closed") {
+          if (auditRecordId === null) {
+            // 他方并发关门窗口：confirm 尚未发出——不误报 confirmed、不虚构审计行
+            finish("failed", "gate_closed_before_confirm");
+            return;
+          }
+          useOperationAuditStore.getState().markCompleted(auditRecordId);
+          finish("confirmed", null);
+          return;
         }
-        finish("rejected", code);
-        return;
-      }
-    },
-    onClose: () => {
-      finish(
-        "failed",
-        sawSessionState ? "connection_closed_before_result" : "connection_closed_before_session_state",
-      );
-    },
-    onError: () => {
-      finish("failed", "socket_error");
-    },
+        if (frame.type === "protocol_error" || frame.type === "error") {
+          const code = frame.type === "protocol_error" && typeof frame.code === "string"
+            ? frame.code
+            : "server_error";
+          if (auditRecordId !== null) {
+            useOperationAuditStore.getState().markRejected(auditRecordId, code);
+          }
+          finish("rejected", code);
+          return;
+        }
+      },
+      onClose: () => {
+        finish(
+          "failed",
+          sawSessionState ? "connection_closed_before_result" : "connection_closed_before_session_state",
+        );
+      },
+      onError: () => {
+        finish("failed", "socket_error");
+      },
+    });
+    timer = setTimeout(() => {
+      finish("failed", `timeout_after_${timeoutMs}ms`);
+    }, timeoutMs);
   });
-  timer = setTimeout(() => {
-    finish("failed", `timeout_after_${timeoutMs}ms`);
-  }, timeoutMs);
-  return promise;
 }
 
 /**
