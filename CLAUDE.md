@@ -108,9 +108,6 @@ Skill 调用：Claude/Kimi 原生调用；Codex/pi/omp 清单选择后将用途�
 
 - **产物自动提交（design/plan/code）**：打开
 
-### Subagents 使用规范（所有会话强制）
-- **所有 subagent 派工（实施/审查/勘察/裁决/并行分组）必须遵循 `cadence/project-rules/subagent-usage.md`**
-- 核心要点：能并行的尽量并行（不设上限）；计划必双审；每 Task k3 审+fix loop≤5；worker 显式列文件提交；详见该文件
 
 ## 当前日期
 

@@ -118,6 +118,10 @@
   - 若宿主机 Rust 工具链或组件缺失，应按 `rust-toolchain.toml` 修复宿主机环境，而不是改用 Docker 绕过。
   - 目录中旧 Docker 开发指南仅作为历史文档保留，不属于已启用项目规则。
 
+
+- **Subagents 使用规范**
+  - 所有会话的 subagent 派工（实施/审查/勘察/裁决/并行分组）必须遵循 `cadence/project-rules/subagent-usage.md`。
+  - 核心要点：能并行的尽量并行（不设并行度上限）；计划必双审；每 Task k3 独立审查+fix loop≤5；worker 显式列文件提交；冲突回退走 stash 三步协议。详见该文件。
 - **Rust 构建/测试/检查命令规范**
   - 标准命令、`-j 1` 禁令、定向快反馈命令、性能预期等强制规范，详见 `cadence/project-rules/build-test-commands.md`。
 
