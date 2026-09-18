@@ -1,3 +1,4 @@
+> **[已被吸收]** 本 change 已被 `close-provider-validation` 吸收（契约唯一权威版本=该 change 的 claude-code-structured-interaction delta），禁止单独 archive；归档动作由 close-provider-validation WP4.3 统一执行。
 # Proposal: fix-claude-code-ask-user-question-headless
 
 ## Why

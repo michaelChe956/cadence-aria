@@ -1,3 +1,4 @@
+> **[已被吸收]** 本 change 已被 `close-provider-validation` 吸收（契约唯一权威版本=该 change 的 claude-code-structured-interaction delta），禁止单独 archive；归档动作由 close-provider-validation WP4.3 统一执行。
 ## 1. 提交 C：AskUserQuestion 结果所有权归 control_request
 
 - [ ] 1.1 先重写失败测试：把 `claude_provider_deduplicates_assistant_then_control_ask_user_question` 改为 `claude_provider_answers_ask_user_question_only_via_control_response`（断言 ChoiceRequest 的 request_id 来自 control_request；aria 不得写 stdin tool_result；由 fixture 输出原生 tool_result 后正常完成），运行 `cargo test -p cadence-aria --lib claude_provider_answers_ask_user_question_only_via_control_response` 确认红
