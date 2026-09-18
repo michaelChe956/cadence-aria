@@ -13,9 +13,9 @@
 | initialize | `session.rs:142-151`（protocolVersion:1+clientCapabilities+clientInfo） | `fixtures/initialize.jsonl:1-2`（agentCapabilities.loadSession/sessionCapabilities.resume/agentInfo.version） | 一致（§2.1：消费面字段全在，余为纯增量） | — |
 | session/new | `:210-214`（cwd+mcpServers） | 生产消费面 `:224-234`（result.sessionId）+`kimi_acp_fast_fixture.sh` | 一致（§2.2：sessionId 在场，configOptions/modes 同键 richer 内容） | — |
 | session/prompt | `:716-721`（sessionId+prompt 数组） | `text_turn.jsonl`/`tool_call_turn.jsonl`（session/update 通知族+result stopReason 终态） | 一致（§2.3：result `{"stopReason":"end_turn"}` 逐字同形） | — |
-| session/request_permission | server→client（`:601` 分发；回写 `:723-728` outcome.selected） | `acp_request_permission_bash.redacted.json`（options+approve_once） | **本探测不主动触发**——登记「待 T3 验证轮实跑回填」（coding 链 bash 审批必然触发 `coding_permission_request`） | T3 回填 |
+| session/request_permission | server→client（`:601` 分发；回写 `:723-728` outcome.selected） | `acp_request_permission_bash.redacted.json`（options+approve_once） | **T3 验证轮仍未触发**（auto 权限模式全程零 `coding_permission_request` 帧、permission_approvals=0，evidence-matrix §5）——如实登记非虚构 | 未触发（后续轮 Supervised 模式回填） |
 | session/load | `:188-192`（sessionId+cwd+mcpServers） | `kimi_acp_resume_fixture.sh`/`kimi_acp_load_failure_fixture.sh`（含同进程 load 探测形态注记） | 一致（消费面，§2.5：同进程成功响应不含 sessionId，生产 `:229` 显式回退持有 resume_id） | —（注记在案） |
-| session/update | 通知族（parse.rs 消费：text/tool_call/tool_call_update） | `text_turn.jsonl`/`tool_call_turn.jsonl`+`acp_session_update_tool_call_update.redacted.json` | 已触发 4 族全一致（§2.6）；tool_call 族本轮未触发 | tool_call 族 T3 回填 |
+| session/update | 通知族（parse.rs 消费：text/tool_call/tool_call_update） | `text_turn.jsonl`/`tool_call_turn.jsonl`+`acp_session_update_tool_call_update.redacted.json` | 已触发 4 族全一致（§2.6）；**T3 回填**：coding 链真实工具调用全程（679 帧 `coding_execution_event` kind=command, agent=kimi_code，Bash/Read/Edit）零协议错误零 parse 失败——行为级一致（适配器消费面未被破坏）；ACP wire 原文级帧本轮无服务端落盘通道，wire 级引用待后续轮 | 行为级已回填；wire 级原文待后续轮 |
 
 ## §2 实收明细（transcript 逐帧实读）
 

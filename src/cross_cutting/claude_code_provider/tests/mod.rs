@@ -18,6 +18,7 @@ use super::ClaudeCodeProvider;
 
 mod args;
 mod ask_user_question;
+mod live_claude;
 mod permissions;
 mod policy_session;
 mod process;

@@ -1,0 +1,394 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0278",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "kimi_code",
+  "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/coding-kimi_code-coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+  "startedAt": "2026-09-18T17:44:26.327Z",
+  "finishedAt": "2026-09-18T18:44:26.329Z",
+  "elapsedSec": 3600.003,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.2,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.322,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 1246.703,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1700.411,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 1700.411,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 3315.737,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 3315.737,
+      "source": "coding_stage_change"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.406,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1246.701,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1700.411,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0003",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 3091.219,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0004",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 3315.737,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0005",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于工作树终态与人工检查完成前端工作项审查：CT-004 满足，web/level-select.js 位于静态根下可经静态路径获取，源码以相对路径引用 /api/levels 且有测试断言请求路径；正确消费 WI-001 的 CT-001 输入契约，非成功响应统一呈现可读错误；测试共 2 个文件 13 个用例，覆盖加载流程、渲染、锁定态与 9 类异常分支，逐分支与实现一致、无自相矛盾，用例数非零；范围合规，修改时间聚类显示本次仅新增 web/** 与 tests/frontend/**，禁止范围文件均停留在上一工作项时间簇，package.json 未改动。reviewer 终端只读无法复跑 CHECK-002，执行证据以平台 coding_unit_run_0002 为准且无相反证据。存在一项不影响交付行为的非阻塞观察：渲染前清空列表依赖类数组 pop 方法，真实 DOM 下若未来出现二次调用才会触发，当前无该调用路径且不属于任何契约场景。未发现阻塞问题。",
+      "created_at": "2026-09-18T18:39:41.518020001+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于工作树终态与人工检查完成前端工作项审查：CT-004 满足，web/level-select.js 位于静态根下可经静态路径获取，源码以相对路径引用 /api/levels 且有测试断言请求路径；正确消费 WI-001 的 CT-001 输入契约，非成功响应统一呈现可读错误；测试共 2 个文件 13 个用例，覆盖加载流程、渲染、锁定态与 9 类异常分支，逐分支与实现一致、无自相矛盾，用例数非零；范围合规，修改时间聚类显示本次仅新增 web/** 与 tests/frontend/**，禁止范围文件均停留在上一工作项时间簇，package.json 未改动。reviewer 终端只读无法复跑 CHECK-002，执行证据以平台 coding_unit_run_0002 为准且无相反证据。存在一项不影响交付行为的非阻塞观察：渲染前清空列表依赖类数组 pop 方法，真实 DOM 下若未来出现二次调用才会触发，当前无该调用路径且不属于任何契约场景。未发现阻塞问题。",
+      "created_at": "2026-09-18T18:39:41.518020001+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于工作树终态与人工检查完成前端工作项审查：CT-004 满足，web/level-select.js 位于静态根下可经静态路径获取，源码以相对路径引用 /api/levels 且有测试断言请求路径；正确消费 WI-001 的 CT-001 输入契约，非成功响应统一呈现可读错误；测试共 2 个文件 13 个用例，覆盖加载流程、渲染、锁定态与 9 类异常分支，逐分支与实现一致、无自相矛盾，用例数非零；范围合规，修改时间聚类显示本次仅新增 web/** 与 tests/frontend/**，禁止范围文件均停留在上一工作项时间簇，package.json 未改动。reviewer 终端只读无法复跑 CHECK-002，执行证据以平台 coding_unit_run_0002 为准且无相反证据。存在一项不影响交付行为的非阻塞观察：渲染前清空列表依赖类数组 pop 方法，真实 DOM 下若未来出现二次调用才会触发，当前无该调用路径且不属于任何契约场景。未发现阻塞问题。",
+      "created_at": "2026-09-18T18:39:41.518020001+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于 main..worktree 终态代码与人工检查完成审查：CT-001 错误响应契约、CT-002 端口 0 生命周期契约、CT-003 静态入口契约均与实现和测试一致；测试套件共 6 个文件约 20 个用例覆盖全部验收场景且与实现无自相矛盾；交付物严格限于 server/**、data/levels.json、tests/backend/** 排他范围，未触及任何禁止范围。reviewer 终端为只读无法复跑 CHECK-001，验证执行以平台记录的 coding_unit_run_0001 为准，本会话无任何相反证据，不构成否决理由。未发现需要返修的实现缺陷。",
+      "created_at": "2026-09-18T18:12:46.254364064+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "基于工作树终态与人工检查完成前端工作项审查：CT-004 满足，web/level-select.js 位于静态根下可经静态路径获取，源码以相对路径引用 /api/levels 且有测试断言请求路径；正确消费 WI-001 的 CT-001 输入契约，非成功响应统一呈现可读错误；测试共 2 个文件 13 个用例，覆盖加载流程、渲染、锁定态与 9 类异常分支，逐分支与实现一致、无自相矛盾，用例数非零；范围合规，修改时间聚类显示本次仅新增 web/** 与 tests/frontend/**，禁止范围文件均停留在上一工作项时间簇，package.json 未改动。reviewer 终端只读无法复跑 CHECK-002，执行证据以平台 coding_unit_run_0002 为准且无相反证据。存在一项不影响交付行为的非阻塞观察：渲染前清空列表依赖类数组 pop 方法，真实 DOM 下若未来出现二次调用才会触发，当前无该调用路径且不属于任何契约场景。未发现阻塞问题。",
+      "created_at": "2026-09-18T18:39:41.518020001+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0278",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0278",
+    "head_commit": "954efab94b7c122c7ad85c9c2fb654fec3e4b1e9",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 5320,
+    "output_tokens": 4493,
+    "cache_read_tokens": 161088
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 1642,
+      "output_tokens": 2700,
+      "cache_read_tokens": 100800,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 3678,
+      "output_tokens": 1793,
+      "cache_read_tokens": 60288,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-18T17:44:26.645995011+00:00",
+      "completed_at": "2026-09-18T17:44:26.674065234+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-18T17:44:31.731948142+00:00",
+      "completed_at": "2026-09-18T18:05:12.902209051+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-18T18:05:18.033167305+00:00",
+      "completed_at": "2026-09-18T18:12:46.269164836+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-18T18:12:51.703721877+00:00",
+      "completed_at": "2026-09-18T18:35:57.395002429+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-18T18:36:02.544023185+00:00",
+      "completed_at": "2026-09-18T18:39:41.539013739+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0006",
+      "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "running",
+      "agent_role": "author",
+      "summary": null,
+      "started_at": "2026-09-18T18:39:47.052473601+00:00",
+      "completed_at": null,
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "hard_timeout",
+  "error": "Coding 硬超时 3600000ms",
+  "completed": false
+}

@@ -1,0 +1,299 @@
+{
+  "provider": "kimi_code",
+  "repetition": 2,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep2",
+  "startedAt": "2026-09-18T16:28:36.628Z",
+  "finishedAt": "2026-09-18T16:59:23.852Z",
+  "elapsedSec": 1847.223,
+  "issue_id": "issue_0278",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0444",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.618,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.678,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1181.592,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1847.148,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 1847.15,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 1181.592,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听 required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-004::web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels",
+          "evidence": "work_item=WI-003 contract=CT-004 capability=web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels",
+          "message": "required_capability_missing: provider WI-002 contract CT-004 lacks capability web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels required by WI-003",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-004 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels",
+          "severity": "must_fix"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 1847.148,
+      "findings": [
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "Projection Validation Report.findings[0]: code=integration_or_e2e_skipped_risk, severity=warning, work_item_ids=[]；AC-010/TASK-011 明确不启动浏览器；WI-003 的 CHECK-003 仅断言 HTTP 可观测契约（AC-011 至 AC-015）。",
+          "message": "机械校验提示 e2e（浏览器级）测试被跳过：WI-002 明确以最小 DOM 替身不启动浏览器、WI-003 仅覆盖 HTTP 集成层，真实浏览器渲染与交互无自动证据；建议验收前补充一次人工冒烟验证或在变更说明中显式声明放弃浏览器级 e2e 的理由。",
+          "required_action": "验收前补充人工冒烟验证，或在 OpenSpec 变更说明中显式记录不纳入浏览器级 e2e 的决策依据。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "TASK-002 仅规定默认监听地址与环境变量 PORT；AC-002/CT-002/CT-003 均以注入 dataPath 与 staticRoot 为前提；WI-003 AC-011（服务以默认配置启动）与 TASK-012（以 createServer 默认配置并以 port 为 0 调用 start）依赖未显式声明的默认 dataPath/staticRoot。",
+          "message": "WI-003 AC-011/TASK-012 要求以 createServer 默认配置启动并断言真实页面与 level-select.js 脚本可达，但 WI-001 契约仅规定默认监听 127.0.0.1:3000 与 PORT 覆盖（TASK-002），未规定默认 dataPath 与 staticRoot 的取值（如 data/levels.json 与 web/），默认配置语义存在隐式假设；建议在 WI-001 中显式声明。",
+          "required_action": "在 WI-001 的 TASK-002 或相应 output_contract capabilities 中显式声明默认 dataPath 与 staticRoot 取值。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts.CT-003.capabilities",
+          "evidence": "CT-003 capabilities=「GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html」；AC-012/TASK-013 断言经 HTTP 获取 web/level-select.js 返回 200 及源码相对引用 /api/levels；WI-001→WI-003 contract_edges 仅含 CT-001/CT-002/CT-003。",
+          "message": "WI-003 AC-012/TASK-013 依赖 WI-001 静态托管经 HTTP 提供 web/level-select.js（对应 AC-005/TASK-006 的任意静态路径服务能力），但 WI-001→WI-003 的 required_contracts 中 CT-003 capabilities 仅覆盖 GET / 入口页 HTML，静态脚本服务能力未被契约打包；建议扩展 CT-003 或新增能力条目，使未来静态托管行为变更能被契约比对捕获。当前该能力仍受 CHECK-001（AC-005）与 CHECK-003（AC-012）双层测试覆盖，验证可归因，不构成缺口。",
+          "required_action": "扩展 CT-003 capabilities 或为 WI-001 新增静态脚本服务能力条目（web/level-select.js 经静态路径 200 可获取且 Content-Type 正确），并纳入 WI-003 input_contracts。",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听 required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-004::web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels",
+      "evidence": "work_item=WI-003 contract=CT-004 capability=web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels",
+      "message": "required_capability_missing: provider WI-002 contract CT-004 lacks capability web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels required by WI-003",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-004 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels",
+      "severity": "must_fix"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "Projection Validation Report.findings[0]: code=integration_or_e2e_skipped_risk, severity=warning, work_item_ids=[]；AC-010/TASK-011 明确不启动浏览器；WI-003 的 CHECK-003 仅断言 HTTP 可观测契约（AC-011 至 AC-015）。",
+      "message": "机械校验提示 e2e（浏览器级）测试被跳过：WI-002 明确以最小 DOM 替身不启动浏览器、WI-003 仅覆盖 HTTP 集成层，真实浏览器渲染与交互无自动证据；建议验收前补充一次人工冒烟验证或在变更说明中显式声明放弃浏览器级 e2e 的理由。",
+      "required_action": "验收前补充人工冒烟验证，或在 OpenSpec 变更说明中显式记录不纳入浏览器级 e2e 的决策依据。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "TASK-002 仅规定默认监听地址与环境变量 PORT；AC-002/CT-002/CT-003 均以注入 dataPath 与 staticRoot 为前提；WI-003 AC-011（服务以默认配置启动）与 TASK-012（以 createServer 默认配置并以 port 为 0 调用 start）依赖未显式声明的默认 dataPath/staticRoot。",
+      "message": "WI-003 AC-011/TASK-012 要求以 createServer 默认配置启动并断言真实页面与 level-select.js 脚本可达，但 WI-001 契约仅规定默认监听 127.0.0.1:3000 与 PORT 覆盖（TASK-002），未规定默认 dataPath 与 staticRoot 的取值（如 data/levels.json 与 web/），默认配置语义存在隐式假设；建议在 WI-001 中显式声明。",
+      "required_action": "在 WI-001 的 TASK-002 或相应 output_contract capabilities 中显式声明默认 dataPath 与 staticRoot 取值。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts.CT-003.capabilities",
+      "evidence": "CT-003 capabilities=「GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html」；AC-012/TASK-013 断言经 HTTP 获取 web/level-select.js 返回 200 及源码相对引用 /api/levels；WI-001→WI-003 contract_edges 仅含 CT-001/CT-002/CT-003。",
+      "message": "WI-003 AC-012/TASK-013 依赖 WI-001 静态托管经 HTTP 提供 web/level-select.js（对应 AC-005/TASK-006 的任意静态路径服务能力），但 WI-001→WI-003 的 required_contracts 中 CT-003 capabilities 仅覆盖 GET / 入口页 HTML，静态脚本服务能力未被契约打包；建议扩展 CT-003 或新增能力条目，使未来静态托管行为变更能被契约比对捕获。当前该能力仍受 CHECK-001（AC-005）与 CHECK-003（AC-012）双层测试覆盖，验证可归因，不构成缺口。",
+      "required_action": "扩展 CT-003 capabilities 或为 WI-001 新增静态脚本服务能力条目（web/level-select.js 经静态路径 200 可获取且 Content-Type 正确），并纳入 WI-003 input_contracts。",
+      "severity": "suggestion"
+    },
+    {
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "severity": "warning",
+      "work_item_ids": []
+    },
+    {
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "severity": "warning",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 10883,
+      "output_tokens": 1422,
+      "cache_read_tokens": 38784,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 1,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0444:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0444:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 1847223,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.06,
+    "1:running": 1179.914,
+    "2:cross_review": 665.556,
+    "3:running": 0.002,
+    "4:completed": 0.073
+  }
+}
