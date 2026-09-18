@@ -252,7 +252,9 @@ pub(crate) fn map_engine_event(event: EngineEvent) -> Option<WsOutMessage> {
         },
         EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
         EngineEvent::ArtifactUpdate { version, payload } => ws_artifact_update(version, payload),
-        EngineEvent::ArtifactBatchUpdate { .. } | EngineEvent::ProviderRunRequested { .. } => {
+        EngineEvent::ArtifactBatchUpdate { .. }
+        | EngineEvent::ProviderRunRequested { .. }
+        | EngineEvent::HumanGateOpened { .. } => {
             return None;
         }
         EngineEvent::PermissionRequest {

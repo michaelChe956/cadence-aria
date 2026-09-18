@@ -1045,6 +1045,10 @@ impl WorkspaceSessionManager {
                             }
                         });
                     }
+                    EngineEvent::HumanGateOpened { stage: _ } => {
+                        let session_state = manager.engine.lock().await.build_session_state();
+                        manager.broadcast(session_state);
+                    }
                     EngineEvent::ArtifactBatchUpdate { mut updates } => {
                         updates.sort_by_key(|update| update.version);
                         for update in updates {
@@ -1098,6 +1102,13 @@ impl WorkspaceSessionManager {
 
     /// 从序列化边界注入增量 wire 字段，避免侵入所有 `WsOutMessage` 变体。旧客户端
     /// 忽略未知字段；同一 stamped JSON 同时写 journal 并 fan-out 到所有 attachment。
+    fn current_session_state(&self) -> WsOutMessage {
+        if let Ok(engine) = self.engine.try_lock() {
+            engine.build_session_state()
+        } else {
+            self.durable_projection().0
+        }
+    }
     fn broadcast(&self, message: WsOutMessage) {
         let Ok(serialized) = serde_json::to_string(&message) else {
             eprintln!(
@@ -1114,33 +1125,39 @@ impl WorkspaceSessionManager {
             );
             return;
         };
-        {
+        let attachments = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.journal.push(seq, json.clone());
-        }
-        let resync = serde_json::to_string(&WsOutMessage::ResyncRequired { event_seq: seq })
-            .expect("resync required message serializes");
-        let attachment_ids = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.attachments.keys().cloned().collect::<Vec<_>>()
+            state
+                .attachments
+                .iter()
+                .map(|(connection_id, attachment)| (connection_id.clone(), attachment.degraded))
+                .collect::<Vec<_>>()
         };
-        for connection_id in attachment_ids {
-            self.try_send_live_event(&connection_id, &json, &resync);
+        let recovery_baseline = attachments
+            .iter()
+            .any(|(_, degraded)| *degraded)
+            .then(|| self.current_session_state())
+            .and_then(|snapshot| serde_json::to_string(&snapshot).ok())
+            .and_then(|baseline| inject_event_seq(baseline, seq));
+        for (connection_id, degraded) in attachments {
+            if degraded {
+                if let Some(baseline) = recovery_baseline.as_deref() {
+                    self.try_recover_degraded_attachment(&connection_id, baseline);
+                }
+            } else {
+                self.try_send_live_event(&connection_id, &json);
+            }
         }
     }
 
     /// 直播发送只允许 `try_send`：任何 attachment 都不能使 provider/router 等待。
-    ///
-    /// 满队列将连接永久标为本次 attachment 生命周期内的 degraded，并仅尝试一次
-    /// `ResyncRequired` 控制帧。若并发出站泵恰好腾出一个槽位，客户端立即得知须重连；
-    /// 否则丢弃控制帧，客户端仍可依自身关闭/重订阅恢复。已关闭的 sender 只清理自身。
-    fn try_send_live_event(&self, connection_id: &str, json: &str, resync: &str) {
+    /// 队列满时仅标记该 attachment；不发送可被同样丢弃的 `ResyncRequired`。下一次
+    /// 广播会先试投递带当前 event_seq 的全量 session_state，成功后恢复直播。
+    fn try_send_live_event(&self, connection_id: &str, json: &str) {
         let sender = {
             let state = self
                 .state
@@ -1157,21 +1174,15 @@ impl WorkspaceSessionManager {
         match sender.try_send(OutboundControl::Text(json.to_string())) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                let sender = {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let Some(attachment) = state.attachments.get_mut(connection_id) else {
-                        return;
-                    };
-                    if attachment.degraded {
-                        return;
-                    }
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(attachment) = state.attachments.get_mut(connection_id)
+                    && attachment.outbound_tx.same_channel(&sender)
+                {
                     attachment.degraded = true;
-                    attachment.outbound_tx.clone()
-                };
-                let _ = sender.try_send(OutboundControl::Text(resync.to_string()));
+                }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.state
@@ -1182,6 +1193,48 @@ impl WorkspaceSessionManager {
             }
         }
     }
+
+    /// 降级连接只尝试一次无等待投递；它收到的 session_state 即当前事件序号的基线，
+    /// 因而即使溢出时的增量帧已丢失，也能安全继续接收后续单调 event_seq 帧。
+    fn try_recover_degraded_attachment(&self, connection_id: &str, baseline: &str) {
+        let sender = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .attachments
+                .get(connection_id)
+                .and_then(|attachment| attachment.degraded.then(|| attachment.outbound_tx.clone()))
+        };
+        let Some(sender) = sender else {
+            return;
+        };
+
+        match sender.try_send(OutboundControl::Text(baseline.to_string())) {
+            Ok(()) => {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(attachment) = state.attachments.get_mut(connection_id)
+                    && attachment.degraded
+                    && attachment.outbound_tx.same_channel(&sender)
+                {
+                    attachment.degraded = false;
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .attachments
+                    .remove(connection_id);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn attachment_is_degraded(&self, connection_id: &str) -> bool {
         self.state
@@ -1208,6 +1261,45 @@ impl WorkspaceSessionManager {
         status: crate::web::workspace_ws_types::WsProviderStatus,
     ) {
         self.broadcast(WsOutMessage::ProviderStatus { status });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture_with_event_router(session_id: &str) -> Arc<Self> {
+        let root = tempfile::tempdir().expect("router fixture root");
+        let app_paths = ProductAppPaths::new(root.keep().join(".aria"));
+        let session_record = test_session_record(session_id);
+        let (engine_tx, engine_rx) = mpsc::channel(8);
+        let engine = WorkspaceEngine::new_persistent(
+            Arc::new(CheckpointStore::new(std::env::temp_dir().join(session_id))),
+            LifecycleStore::new(app_paths.clone()),
+            engine_tx.clone(),
+            WorkspaceSession::from_record(session_record.clone()),
+        );
+        let manager = Arc::new(Self {
+            engine: Arc::new(Mutex::new(engine)),
+            engine_tx,
+            state: StdMutex::new(ManagerState {
+                pending_attachments: HashMap::new(),
+                attachments: HashMap::new(),
+                next_run_id: 0,
+                active_run: None,
+                lease: LeaseState::default(),
+                journal: EventJournal::default(),
+                recovery_error: None,
+            }),
+            session_id: session_id.to_string(),
+            session_record,
+            app_paths,
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
+            next_event_seq: AtomicU64::new(1),
+            registry: WorkspaceSessionRegistry::default(),
+        });
+        manager.spawn_event_router(
+            engine_rx,
+            crate::web::state::WorkspaceRunRegistry::default(),
+        );
+        manager
     }
 }
 

@@ -79,6 +79,26 @@ pub(super) fn gate_fixture_with_event_rx(
     (root, lifecycle, engine, event_rx)
 }
 
+#[tokio::test]
+async fn enter_human_confirm_emits_human_gate_opened_after_gate_state_is_current() {
+    let (_root, _lifecycle, mut engine, mut event_rx) = gate_fixture_with_event_rx(1);
+    engine
+        .enter_human_confirm(Some("门已打开".to_string()))
+        .await;
+
+    let mut opened_stage = None;
+    while let Ok(event) = event_rx.try_recv() {
+        if let EngineEvent::HumanGateOpened { stage } = event {
+            opened_stage = Some(stage);
+        }
+    }
+    assert_eq!(
+        opened_stage.as_deref(),
+        Some("human_confirm"),
+        "门开启事件必须在状态与时间线节点写入后通知 runtime 构建全量快照"
+    );
+}
+
 pub(super) fn feedback(command_id: &str) -> HumanGateFeedbackInput {
     HumanGateFeedbackInput {
         command_id: command_id.to_string(),

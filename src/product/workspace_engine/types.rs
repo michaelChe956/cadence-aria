@@ -353,6 +353,10 @@ pub enum EngineEvent {
         decision: String,
         stage: String,
     },
+    /// 人工门已开启；Web runtime 以当前全量 session_state 同步所有已连接页面。
+    HumanGateOpened {
+        stage: String,
+    },
     Error {
         message: String,
     },

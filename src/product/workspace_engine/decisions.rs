@@ -1009,5 +1009,11 @@ impl WorkspaceEngine {
         {
             self.session.session_status = record.status;
         }
+        let _ = self
+            .event_tx
+            .send(EngineEvent::HumanGateOpened {
+                stage: self.session.stage.as_str().to_string(),
+            })
+            .await;
     }
 }

@@ -5,9 +5,11 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::CreateStorySpecInput;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::models::{SingleCandidatePhase, WorkspaceType};
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
-use crate::product::workspace_engine::ProviderRunKind;
+use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, WorkItemPlanFlowKind};
+use crate::product::workspace_engine::{EngineEvent, ProviderRunKind};
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::workspace_ws_handler::OutboundControl;
@@ -350,16 +352,15 @@ async fn manager_broadcast_stamps_monotonic_seq_per_session() {
     );
 }
 
-/// REQ-WCR-04：某个 attachment 的有界队列满时，仅该连接被降级；其他 attachment
-/// 继续逐事件接收，router 从不等待慢连接。
+/// REQ-WCR-04：满队列 attachment 会被暂时降级；后续广播在队列恢复容量后必须以
+/// 最新 session_state 基线恢复该连接，不能依赖可能已经丢失的 ResyncRequired 控制帧。
 #[tokio::test]
-async fn manager_degrades_only_full_attachment_without_backpressure() {
+async fn manager_recovers_degraded_attachment_with_session_state_baseline() {
     let manager = WorkspaceSessionManager::test_fixture("session_slow_attachment");
     let (slow_tx, mut slow_rx) = mpsc::channel(1);
     let (fast_tx, mut fast_rx) = mpsc::channel(8);
     manager.attach("slow", slow_tx).await;
     manager.attach("fast", fast_tx).await;
-
     manager
         .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Starting)
         .await;
@@ -368,7 +369,7 @@ async fn manager_degrades_only_full_attachment_without_backpressure() {
         .await;
     assert!(
         manager.attachment_is_degraded("slow"),
-        "满队列 attachment 必须被标为 degraded，之后不再接收直播帧"
+        "满队列 attachment 必须被标为 degraded"
     );
 
     let first_slow = slow_rx.recv().await.expect("slow attachment first event");
@@ -377,11 +378,23 @@ async fn manager_degrades_only_full_attachment_without_backpressure() {
         .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Completed)
         .await;
     assert!(
-        matches!(slow_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-        "满队列时重同步控制帧允许被一次性丢弃，降级 attachment 不得继续直播"
+        !manager.attachment_is_degraded("slow"),
+        "队列恢复容量后必须摘除 degraded 标记"
+    );
+    assert!(
+        matches!(slow_rx.recv().await, Some(OutboundControl::Text(json)) if serde_json::from_str::<serde_json::Value>(&json).expect("recovery baseline JSON")["type"] == "session_state"),
+        "恢复的 attachment 必须先收到 session_state 基线"
     );
 
-    let fast_sequences = (0..3)
+    manager
+        .broadcast_test_event(crate::web::workspace_ws_types::WsProviderStatus::Completed)
+        .await;
+    assert!(
+        matches!(slow_rx.recv().await, Some(OutboundControl::Text(json)) if json.contains("provider_status")),
+        "恢复后的 attachment 必须重新接收后续直播帧"
+    );
+
+    let fast_sequences = (0..4)
         .map(|_| {
             match fast_rx
                 .try_recv()
@@ -395,7 +408,64 @@ async fn manager_degrades_only_full_attachment_without_backpressure() {
             }
         })
         .collect::<Vec<_>>();
-    assert_eq!(fast_sequences, vec![1, 2, 3]);
+    assert_eq!(fast_sequences, vec![1, 2, 3, 4]);
+}
+
+/// F-09：门开启时，已经激活的两个 attachment 都必须收到全量 session_state；否则
+/// 老 tab 的 phase/snapshot 仍停留在门开启前，新 tab 却会因 attach 快照而正确。
+#[tokio::test]
+async fn human_gate_open_rebuilds_session_state_for_existing_attachments() {
+    let manager =
+        WorkspaceSessionManager::test_fixture_with_event_router("session_human_gate_opened");
+    let (existing_tx, mut existing_rx) = mpsc::channel(8);
+    let (other_tx, mut other_rx) = mpsc::channel(8);
+    manager.attach("existing", existing_tx).await;
+    manager.attach("other", other_tx).await;
+
+    {
+        let engine = manager.engine();
+        let mut engine = engine.lock().await;
+        engine.session.workspace_type = WorkspaceType::WorkItemPlan;
+        engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+        engine.session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+        engine.session.human_gate_snapshot = Some(HumanGateSnapshot {
+            findings: Vec::new(),
+            repeated_fingerprints: Vec::new(),
+            attempts_used: 0,
+            manual_repairs_remaining: 1,
+            trigger: HumanReason::NativeHumanRequired,
+            resumable: false,
+        });
+    }
+    manager
+        .engine_tx()
+        .send(EngineEvent::HumanGateOpened {
+            stage: "human_confirm".to_string(),
+        })
+        .await
+        .expect("send human gate opened event");
+
+    for outbound_rx in [&mut existing_rx, &mut other_rx] {
+        let state = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let Some(OutboundControl::Text(json)) = outbound_rx.recv().await else {
+                    panic!("attachment closed before session_state");
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&json).expect("outbound session state JSON");
+                if value["type"] == "session_state" {
+                    break value;
+                }
+            }
+        })
+        .await
+        .expect("human gate open must broadcast a session_state frame");
+        assert_eq!(state["single_candidate_phase"], "approval");
+        assert!(
+            state["human_gate_snapshot"].is_object(),
+            "session_state must carry the current human gate snapshot"
+        );
+    }
 }
 // F-1 回归（P2 终审 p38-p2-final-review-k3.md §6）：「无活动 run 且无订阅者」窗口的
 // 接力 ProviderRunRequested 不得被 continue 丢弃——必须以 throwaway outbound 通道
