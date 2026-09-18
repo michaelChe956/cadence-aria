@@ -8,14 +8,13 @@ use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::workspace_engine::ProviderRunKind;
-use crate::product::workspace_engine::WorkspaceSession;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::workspace_ws_handler::OutboundControl;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
