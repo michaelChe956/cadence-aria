@@ -69,3 +69,5 @@ Tests       722 passed (722)
 ## Concerns
 
 无代码阻塞项。当前验证为前端定向测试；引擎协议矩阵未改动，真实浏览器端到端复验仍可在下一次部署后按 F-08 的干净人工门路径执行。
+
+legacy story/design 的裸 Confirm 仍由既有 `session_state` 状态转换驱动门卡重建并消失；该路径不发送 single-candidate 专用 `human_gate_closed`，因此不再显示写入成功即产生的「已确认」乐观徽标。此行为避免把引擎拒绝伪装成成功，且不影响确认协议或后续状态转换。

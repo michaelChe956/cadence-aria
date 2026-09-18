@@ -480,6 +480,7 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   const sendHumanConfirm = useCallback(
     (decision: HumanConfirmDecision, payload?: unknown) => {
+      // Confirm 是无 payload 的 unit WS variant；反馈只能走 typed human_confirm。
       const sent =
         decision === "confirm"
           ? sendJson({ type: "confirm" })
