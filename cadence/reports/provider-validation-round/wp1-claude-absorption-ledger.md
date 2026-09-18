@@ -40,7 +40,7 @@
 |---|---|---|
 | `cargo fmt --check` | 0 | 无输出，干净 |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | 0 | `Finished dev profile … in 16.85s`，零告警 |
-| `cargo test --locked` | 101 | lib **3368 passed / 0 failed / 3 ignored**（41.12s）；doc-test 1 passed；集成面 it_web **404 passed / 4 failed / 12 ignored**（143.90s），其余集成族（175/43/210/54/31）全绿——唯一红面=`tests/it_web/web_work_item_plan_mode/` 4 例（见下 RR-3 定性） |
+| `cargo test --locked` | 101 | lib **3368 passed / 0 failed / 3 ignored**（41.12s）；集成二进制 aggregate_initialization 1 passed（cargo 因 it_web 红中止，Doc-tests 未执行）；集成面 it_web **404 passed / 4 failed / 12 ignored**（143.90s），其余集成族（175/43/210/54/31）全绿——唯一红面=`tests/it_web/web_work_item_plan_mode/` 4 例（见下 RR-3 定性） |
 | `cargo test --locked claude_`（族过滤复核） | 0 | lib 56 passed（args/permissions/ask_user_question 全族）+ it_web 4 + it_core 4 = **64 passed / 0 failed** |
 
 ### it_web 4 失败的 RR-3 定性（既有基线红，非本 change 面——如实登记呈报 controller）
