@@ -1,3 +1,4 @@
+> **核账说明（2026-09-19，close-provider-validation WP4）**：已勾项经抽查补证（见 `cadence/reports/provider-validation-round/wp4-archive-accounting.md` §2 抽查表）；2.2/2.3 为**显式 defer**（不实施，限制如实登记于同文件 §2 defer 台账，REQ-PVR-05 场景 2/D5——3.6 先例：限制如实标注可归档）。
 ## 1. Provider 目录与可用性
 
 - [x] 1.1 将 Pi 纳入活跃流式 Provider 的名称（`ProviderName`）、健康检查、状态接口和前端选择目录。
