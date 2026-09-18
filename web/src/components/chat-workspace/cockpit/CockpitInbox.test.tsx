@@ -178,12 +178,13 @@ describe("CockpitInbox", () => {
     expect(within(inbox).queryByRole("button", { name: "终止" })).toBeNull();
   });
 
-  it("selects the current session's projected gate and batch confirms it once", async () => {
+  it("跨会话多选：观察会话的开态门可选（REQ-CFC-06 解锁 3.7 同会话限定）；当前会话门亦可选", async () => {
     const user = userEvent.setup();
     const onBulkConfirm = vi.fn();
     const current: CockpitInboxItem = {
       ...gateItem,
       id: "s1:gate:snapshot:2026-09-15T00:00:00Z:fp",
+      title: "方案定稿 gate",
       gate: {
         ...gateItem.gate!,
         key: "snapshot:2026-09-15T00:00:00Z:fp",
@@ -192,6 +193,7 @@ describe("CockpitInbox", () => {
     const observed: CockpitInboxItem = {
       ...gateItem,
       id: "s2:gate:g2",
+      title: "方案定稿 gate",
       gate: { ...gateItem.gate!, key: "g2" },
     };
     const stopped: CockpitInboxItem = {
@@ -218,14 +220,23 @@ describe("CockpitInbox", () => {
       />,
     );
 
-    await user.click(screen.getByLabelText("选择 门禁等待"));
+    const gateChoices = screen.getAllByRole("checkbox", { name: "选择 方案定稿 gate" });
+    expect(gateChoices).toHaveLength(2);
+    await user.click(gateChoices[0]);
+    await user.click(gateChoices[1]);
     expect(screen.queryByLabelText("选择 stop")).toBeNull();
     expect(screen.queryByLabelText("选择 error")).toBeNull();
-    expect(screen.queryByLabelText("选择 g2")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "批量确认 1 项" }));
+    const button = screen.getByRole("button", { name: /批量确认/ });
+    expect(button).toHaveTextContent("2");
+    await user.click(button);
 
-    expect(onBulkConfirm).toHaveBeenCalledWith([current]);
-    expect(screen.queryByRole("button", { name: "批量确认 1 项" })).toBeNull();
+    expect(onBulkConfirm).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "s1:gate:snapshot:2026-09-15T00:00:00Z:fp" }),
+        expect.objectContaining({ id: "s2:gate:g2" }),
+      ]),
+    );
+    expect(screen.queryByRole("button", { name: /批量确认 2/ })).toBeNull();
   });
 
   it("renders a custom empty hint when provided", () => {

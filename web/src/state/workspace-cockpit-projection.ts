@@ -199,6 +199,18 @@ export interface CockpitInboxItem {
   inlineError: { code: string; message: string } | null;
 }
 
+/** 收件箱条目 id（`${sessionId}:gate:${key}` 等形态）的会话归属；无会话前缀返回 null。 */
+export function cockpitInboxItemSessionId(itemId: string): string | null {
+  const separator = itemId.indexOf(":");
+  if (separator <= 0) {
+    return null;
+  }
+  const sessionId = itemId.slice(0, separator);
+  return sessionId === "gate" || sessionId === "hard_error" || sessionId === "stopped"
+    ? null
+    : sessionId;
+}
+
 export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] {
   const items: CockpitInboxItem[] = [];
   const gate = selectGateProjection(state);

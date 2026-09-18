@@ -17,6 +17,7 @@ import {
   DisconnectBanner,
   loadAcknowledgedAbortedNodes,
 } from "../components/workspace/DisconnectBanner";
+import { BulkConfirmReport } from "../components/chat-workspace/cockpit/BulkConfirmReport";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { PlanApprovalPanel } from "../components/chat-workspace/cockpit/PlanApprovalPanel";
@@ -34,11 +35,14 @@ import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
+  cockpitInboxItemSessionId,
   gateActionBlockReason as gateActionBlockReasonForState,
   selectCockpitFlow,
   selectGateProjection,
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
+import { useBulkConfirmStore } from "../state/bulk-confirm-store";
+import type { BulkConfirmTarget } from "../state/bulk-confirm-runner";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import { watchWindowCopy } from "../state/workspace-observer-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
@@ -464,23 +468,40 @@ export function ChatCockpitPage({
     setTakeoverSessionId(child.workspace_session_id);
   };
   const handleBulkConfirm = useCallback((items: readonly CockpitInboxItem[]) => {
-    const current = useWorkspaceStore.getState();
-    const gate = selectGateProjection(current);
-    if (gate === null || gate.action_block_reason !== null) {
-      return;
+    // 当前会话必须复用既有 live driver 连接；另开 driver WS 会接管其 lease，
+    // 令后续写操作收到 STALE_DRIVER_LEASE。
+    const currentSessionItems = items.filter((item) => item.id.startsWith(`${sessionId}:gate:`));
+    const otherSessionItems = items.filter((item) => {
+      const itemSessionId = cockpitInboxItemSessionId(item.id);
+      return itemSessionId !== null && itemSessionId !== sessionId;
+    });
+    if (currentSessionItems.length > 0) {
+      const current = useWorkspaceStore.getState();
+      const gate = selectGateProjection(current);
+      if (gate !== null && gate.action_block_reason === null) {
+        const expectedId = `${sessionId}:gate:${gate.key}`;
+        if (currentSessionItems.some(
+          (item) => item.id === expectedId && item.kind === "gate" &&
+            item.gate?.key === gate.key && item.gate.action_block_reason === null,
+        )) {
+          actions.confirm();
+        }
+      }
     }
-    const expectedId = `${sessionId}:gate:${gate.key}`;
-    const matchingItem = items.find(
-      (item) =>
-        item.id === expectedId &&
-        item.kind === "gate" &&
-        item.gate?.key === gate.key &&
-        item.gate.action_block_reason === null,
-    );
-    if (matchingItem === undefined) {
-      return;
+    if (otherSessionItems.length > 0) {
+      useBulkConfirmStore.getState().start(
+        otherSessionItems
+          .map((item) => ({
+            itemId: item.id,
+            sessionId: cockpitInboxItemSessionId(item.id) ?? "",
+            gateKey: item.gate?.key ?? null,
+            title: item.title,
+          }))
+          .filter((target): target is BulkConfirmTarget =>
+            target.sessionId !== "" && target.gateKey !== null,
+          ),
+      );
     }
-    actions.confirm();
   }, [actions, sessionId]);
   const handleRetry = useCallback((item: { id: string; source: string }) => {
     if (item.source !== "advance") {
@@ -719,19 +740,22 @@ export function ChatCockpitPage({
       ) : null}
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 lg:grid-cols-[20rem_minmax(0,1fr)]">
-        <CockpitInbox
-          items={observedInbox}
-          actions={actions}
-          onTakeover={handleTakeover}
-          onRetry={handleRetry}
-          actionableSessionId={sessionId}
-          takeoverButtonRef={takeoverButtonRef}
-          onBulkConfirm={handleBulkConfirm}
-          emptyHint={inboxEmptyHint}
-          artifactVersions={selectedState?.artifactVersions}
-          latestReviewSummary={latestReviewReport ?? null}
-          repairReservation={state.repairReservation}
-        />
+        <div className="flex min-h-0 flex-col gap-2">
+          <BulkConfirmReport />
+          <CockpitInbox
+            items={observedInbox}
+            actions={actions}
+            onTakeover={handleTakeover}
+            onRetry={handleRetry}
+            actionableSessionId={sessionId}
+            takeoverButtonRef={takeoverButtonRef}
+            onBulkConfirm={handleBulkConfirm}
+            emptyHint={inboxEmptyHint}
+            artifactVersions={selectedState?.artifactVersions}
+            latestReviewSummary={latestReviewReport ?? null}
+            repairReservation={state.repairReservation}
+          />
+        </div>
 
         <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
           <section

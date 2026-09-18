@@ -30,6 +30,15 @@ import {
   installChatWorkspacePageTestHooks,
   mockWorkspaceWs,
 } from "./ChatWorkspacePage.test-utils";
+const { bulkConfirmStart } = vi.hoisted(() => ({ bulkConfirmStart: vi.fn() }));
+
+vi.mock("../state/bulk-confirm-store", () => ({
+  useBulkConfirmStore: Object.assign(
+    (selector: (state: { runs: readonly unknown[] }) => unknown) => selector({ runs: [] }),
+    { getState: () => ({ start: bulkConfirmStart }) },
+  ),
+}));
+
 vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
@@ -100,6 +109,8 @@ describe("ChatCockpitPage", () => {
     vi.mocked(takeoverWorkspaceSession).mockReset();
     sessionStorage.clear();
     useOperationAuditStore.getState().reset();
+    bulkConfirmStart.mockReset();
+
     useWorkspaceStore.setState({
       stage: "human_confirm",
       flowKind: "single_candidate",
@@ -742,7 +753,7 @@ describe("ChatCockpitPage", () => {
     expect(sendAdvance).not.toHaveBeenCalled();
   });
 
-  it("confirms the matching current gate once and ignores a cross-session selected entry", async () => {
+  it("跨会话批量：当前会话条目走既有 actions.confirm；其他会话条目进短命连接通道且不混入当前会话", async () => {
     const user = userEvent.setup();
     const sendHumanConfirm = vi.fn(() => true);
     mockWorkspaceWs({ sendHumanConfirm });
@@ -753,12 +764,23 @@ describe("ChatCockpitPage", () => {
 
     renderCockpit("session_001", false);
 
-    await user.click(screen.getByLabelText("选择 门禁等待"));
-    expect(screen.queryByLabelText("选择 g2")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "批量确认 1 项" }));
+    const gateChoices = screen.getAllByRole("checkbox", { name: "选择 门禁等待" });
+    expect(gateChoices).toHaveLength(2);
+    await user.click(gateChoices[0]);
+    await user.click(gateChoices[1]);
+    await user.click(screen.getByRole("button", { name: /批量确认/ }));
 
     expect(sendHumanConfirm).toHaveBeenCalledTimes(1);
     expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(bulkConfirmStart).toHaveBeenCalledTimes(1);
+    expect(bulkConfirmStart).toHaveBeenCalledWith([
+      {
+        itemId: "session_002:gate:g2",
+        sessionId: "session_002",
+        gateKey: "g2",
+        title: "门禁等待",
+      },
+    ]);
     expect(takeoverWorkspaceSession).not.toHaveBeenCalled();
   });
 

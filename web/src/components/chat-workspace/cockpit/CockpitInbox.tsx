@@ -8,6 +8,7 @@ import {
   type ConfirmTwiceButtonHandle,
 } from "../../../state/cockpit-operation-semantics";
 import {
+  cockpitInboxItemSessionId,
   gateActionBlockCopy,
   type CockpitInboxItem,
 } from "../../../state/workspace-cockpit-projection";
@@ -55,11 +56,8 @@ export function CockpitInbox({
 }) {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
-    () =>
-      actionableSessionId === undefined
-        ? []
-        : items.filter((item) => isSelectableGate(item, actionableSessionId)),
-    [actionableSessionId, items],
+    () => (onBulkConfirm ? items.filter(isSelectableGate) : []),
+    [items, onBulkConfirm],
   );
   const selectableIds = useMemo(
     () => new Set(selectableItems.map((item) => item.id)),
@@ -104,7 +102,7 @@ export function CockpitInbox({
     >
       <h2 className="text-sm font-semibold text-[var(--aria-ink)]">待处理</h2>
       <p className="text-xs text-[var(--aria-ink-muted)]">
-        同会话批量确认；当前引擎每会话仅一个开态门，通常只确认 1 项
+        跨会话批量确认；每会话仅一个开态门，每个所选会话恰好确认一次（REQ-CFC-06）
       </p>
       {canBulkApply("confirm") && onBulkConfirm && selectedItems.length > 0 ? (
         <button
@@ -112,7 +110,7 @@ export function CockpitInbox({
           onClick={handleBulkConfirm}
           className="min-h-11 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
         >
-          批量确认 {selectedItems.length} 项
+          批量确认 {selectedItems.length} 项（{new Set(selectedItems.map((item) => cockpitInboxItemSessionId(item.id))).size} 个会话）
         </button>
       ) : null}
       {items.length === 0 ? (
@@ -125,15 +123,15 @@ export function CockpitInbox({
             actions={actions}
             onTakeover={onTakeover}
             onRetry={onRetry}
-            actionable={actionableSessionId === sessionIdForItem(item.id)}
-            selectable={actionableSessionId !== undefined && selectableIds.has(item.id)}
+            actionable={actionableSessionId === cockpitInboxItemSessionId(item.id)}
+            selectable={selectableIds.has(item.id)}
             selected={selectedIds.has(item.id)}
             onSelectionChange={() => toggleSelected(item)}
             artifactVersions={artifactVersions}
             latestReviewSummary={latestReviewSummary}
             repairReservation={repairReservation}
             takeoverButtonRef={
-              actionableSessionId === sessionIdForItem(item.id) ? takeoverButtonRef : undefined
+              actionableSessionId === cockpitInboxItemSessionId(item.id) ? takeoverButtonRef : undefined
             }
           />
         ))
@@ -174,7 +172,7 @@ function CockpitInboxRow({
   const [takeoverError, setTakeoverError] = useState<string | null>(null);
   const [takeoverDisabled, setTakeoverDisabled] = useState(false);
 
-  const sessionId = sessionIdForItem(item.id);
+  const sessionId = cockpitInboxItemSessionId(item.id);
   return (
     <article
       data-testid={`cockpit-inbox-item-${item.kind}`}
@@ -320,7 +318,7 @@ function GateInboxActions({
   const typedGateNeedsNewCommand =
     typed &&
     typeof item.gate?.turn?.command_id !== "string" &&
-    repairReservation?.owner_session_id === sessionIdForItem(item.id) &&
+    repairReservation?.owner_session_id === cockpitInboxItemSessionId(item.id) &&
     (repairReservation.state === "reserved" || repairReservation.state === "provider_started");
   const summary = gateSummary(artifactVersions, latestReviewSummary);
 
@@ -420,20 +418,12 @@ function GateSummary({
   );
 }
 
-function sessionIdForItem(itemId: string): string | null {
-  const separator = itemId.indexOf(":");
-  if (separator <= 0) {
-    return null;
-  }
-  const sessionId = itemId.slice(0, separator);
-  return sessionId === "gate" || sessionId === "hard_error" || sessionId === "stopped"
-    ? null
-    : sessionId;
-}
 
-function isSelectableGate(item: CockpitInboxItem, sessionId: string): boolean {
+function isSelectableGate(item: CockpitInboxItem): boolean {
+  const sessionId = cockpitInboxItemSessionId(item.id);
   return item.kind === "gate" &&
     item.gate?.closed === null &&
     item.gate.action_block_reason === null &&
+    sessionId !== null &&
     item.id === `${sessionId}:gate:${item.gate.key}`;
 }
