@@ -4,6 +4,7 @@ import type { WorkspaceWsState } from "./workspace-ws-store";
 import {
   createObserverController,
   observerStateFromSessionState,
+  reduceObserverMessage,
   selectObservedInbox,
   selectWatchedSessionIds,
   watchWindowCopy,
@@ -448,4 +449,50 @@ describe("workspace observer store", () => {
       ]).map((item) => item.id),
     ).toEqual(["a:hard_error:error", "z:stopped:z"]);
   });
+  it("REQ-CFC-06 场景2：human_gate_closed 广播使观察连接的收件箱门消失（无需刷新）", () => {
+    const state = observerStateFromSessionState({
+      type: "session_state",
+      session_id: "s2",
+      workspace_type: "work_item",
+      stage: "human_confirm",
+      superpowers_enabled: false,
+      openspec_enabled: false,
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+      human_presentation_revisions: [],
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+    });
+    const openBefore = selectObservedInbox([{ sessionId: "s2", state }]).some(
+      (item) => item.kind === "gate",
+    );
+    expect(openBefore).toBe(true);
+
+    const closed = reduceObserverMessage(state, {
+      type: "human_gate_closed",
+      decision: "confirm",
+      stage: "human_confirm",
+    });
+
+    expect(selectObservedInbox([{ sessionId: "s2", state: closed }]).some(
+      (item) => item.kind === "gate",
+    )).toBe(false);
+  });
+
 });

@@ -14,16 +14,18 @@ type ScriptedSocket = BulkSocket & {
   closed: boolean;
 };
 
-function scriptedSocketFactory(onSocket: (socket: ScriptedSocket) => void) {
+function scriptedSocketFactory(
+  onSocket: (socket: ScriptedSocket, sessionId: string) => void,
+) {
   const sockets: ScriptedSocket[] = [];
-  const factory = vi.fn((_sessionId: string, handlers: BulkSocketHandlers): BulkSocket => {
+  const factory = vi.fn((sessionId: string, handlers: BulkSocketHandlers): BulkSocket => {
     const socket: ScriptedSocket = {
       sent: [], handlers, closed: false,
       send: function (data: string) { this.sent.push(data); },
       close: function () { this.closed = true; },
     };
     sockets.push(socket);
-    onSocket(socket);
+    onSocket(socket, sessionId);
     return socket;
   });
   return { factory, sockets };
@@ -129,6 +131,36 @@ describe("runBulkConfirm", () => {
     for (const socket of sockets) {
       expect(socket.sent.filter((data) => JSON.parse(data).type === "human_confirm")).toHaveLength(1);
     }
+  });
+
+  it("REQ-CFC-06 场景1（自动化面）：两个会话各恰好收到一次 human_confirm，无重复动作", async () => {
+    const confirmsBySession = new Map<string, number>();
+    const { factory } = scriptedSocketFactory((socket, sessionId) => {
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        send(data);
+        const frame = JSON.parse(data) as { type: string };
+        if (frame.type === "hello") {
+          queueMicrotask(() => socket.handlers.onMessage(
+            JSON.stringify({ type: "session_state", session_id: sessionId }),
+          ));
+        }
+        if (frame.type === "human_confirm") {
+          confirmsBySession.set(sessionId, (confirmsBySession.get(sessionId) ?? 0) + 1);
+          queueMicrotask(() => socket.handlers.onMessage(
+            JSON.stringify({ type: "human_gate_closed", decision: "confirm" }),
+          ));
+        }
+      };
+      queueMicrotask(() => socket.handlers.onOpen());
+    });
+    const s3 = { ...target, itemId: "s3:gate:g3", sessionId: "s3", gateKey: "g3", title: "T3" };
+
+    const outcomes = await runBulkConfirm([target, s3, { ...s3, itemId: "s3:gate:g3-dup" }], factory, undefined, { concurrency: 2 });
+
+    expect(outcomes).toHaveLength(2);
+    expect(confirmsBySession.get("s2")).toBe(1);
+    expect(confirmsBySession.get("s3")).toBe(1);
   });
 
   it("并发上限：5 目标 concurrency=3 时同时打开的连接至多 3 条", async () => {

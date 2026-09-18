@@ -40,4 +40,11 @@ describe("cockpit operation semantics", () => {
     expect(isTextEditingTarget(document.createElement("select"))).toBe(true);
     expect(isTextEditingTarget(document.createElement("button"))).toBe(false);
   });
+  it("REQ-CFC-06 场景3：批量白名单仍仅含 confirm，危险动作不参与批量", () => {
+    expect([...BULK_OPERATION_WHITELIST]).toEqual(["confirm"]);
+    expect(canBulkApply("terminate")).toBe(false);
+    expect(canBulkApply("request_change")).toBe(false);
+    expect(canBulkApply("feedback")).toBe(false);
+  });
+
 });

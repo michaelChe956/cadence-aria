@@ -359,7 +359,7 @@ export function observerStateFromSessionState(
   } as unknown as WorkspaceWsState;
 }
 
-function reduceObserverMessage(
+export function reduceObserverMessage(
   state: WorkspaceWsState,
   message: WorkspaceObserverMessage,
 ): WorkspaceWsState {
