@@ -60,4 +60,4 @@
 ## §5 T2 矩阵回填素材（wire 证据）
 
 - **session/request_permission**：本轮 kimi coding 三角色全程 permission_approvals=0、ws.jsonl 无 `coding_permission_request` 帧（auto 权限模式+gate 均 stage_gate 自动放行型）——**本轮未触发**，与 T2 探测同口径如实登记「未触发」，不虚构 wire 引用；后续轮（Supervised 权限模式）回填。
-- **session/update tool_call/tool_call_update 族**：coding WS 侧 `coding_execution_event`(kind=command, agent=kimi_code) 679 帧在档（Bash/Read/Edit 工具调用翻译层证据）；ACP wire 原文（session/update tool_call 通知）在服务端内部消费，本轮无服务端 wire 日志落盘通道——适配器消费面证据沿用 T2 冻结基线+本轮行为级证据（工具调用全程零协议错误/零 parse 失败），wire 级原文回填待后续轮服务端日志通道。
+- **session/update tool_call/tool_call_update 族**：coding WS 侧 `coding_execution_event`(679 帧 coding_execution_event，其中 kind=command 565 帧，agent=kimi_code)在档（Bash/Read/Edit 工具调用翻译层证据）；ACP wire 原文（session/update tool_call 通知）在服务端内部消费，本轮无服务端 wire 日志落盘通道——适配器消费面证据沿用 T2 冻结基线+本轮行为级证据（工具调用全程零协议错误/零 parse 失败），wire 级原文回填待后续轮服务端日志通道。
