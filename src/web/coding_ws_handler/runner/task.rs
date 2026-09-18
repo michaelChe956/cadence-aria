@@ -195,23 +195,34 @@ async fn run_coding_runner_task_body(
                     "coding_runner_failed_while_running",
                 ) {
                     Ok(()) => {
-                        if let Ok(manual_recovery) = coding_store.get_attempt(
+                        match coding_store.get_attempt(
                             &attempt.project_id,
                             &attempt.issue_id,
                             &attempt.id,
-                        ) && let Err(snapshot_error) = emit_current_session_state(
-                            &event_tx,
-                            &coding_store,
-                            &manual_recovery,
-                            &cancellation,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                attempt_id = attempt.id.as_str(),
-                                error = %snapshot_error,
-                                "failed to emit manual-recovery session state after runner failure"
-                            );
+                        ) {
+                            Ok(manual_recovery) => {
+                                if let Err(snapshot_error) = emit_current_session_state(
+                                    &event_tx,
+                                    &coding_store,
+                                    &manual_recovery,
+                                    &cancellation,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        attempt_id = attempt.id.as_str(),
+                                        error = %snapshot_error,
+                                        "failed to emit manual-recovery session state after runner failure"
+                                    );
+                                }
+                            }
+                            Err(read_error) => {
+                                tracing::warn!(
+                                    attempt_id = attempt.id.as_str(),
+                                    error = %read_error,
+                                    "failed to re-read attempt for manual-recovery snapshot after runner failure"
+                                );
+                            }
                         }
                     }
                     Err(transition_error) => {
