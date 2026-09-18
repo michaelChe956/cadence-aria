@@ -616,6 +616,16 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         manager_for_task.finish_run(run_token).await;
                         return;
                     }
+                    Err(single_candidate::SingleCandidateProviderRunError::Superseded) => {
+                        // 败者让位：键的持有者（健康在途 run 或已完结会话）继续
+                        // 拥有本次启动。迟到 run 静默退场——不落 failed 节点、
+                        // 不广播 Error、不改写 durable phase（k3 P2）。
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        drop(provider_drive_guard.take());
+                        manager_for_task.finish_run(run_token).await;
+                        return;
+                    }
                     Err(single_candidate::SingleCandidateProviderRunError::Message(message)) => {
                         engine
                             .finish_active_run_with_failed_node(message.clone())

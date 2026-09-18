@@ -1241,3 +1241,195 @@ async fn single_candidate_reopen_preserves_failed_author_node_terminal_fields() 
         assert_eq!(node.summary.as_deref(), Some(original_summary.as_str()));
     }
 }
+
+/// 永不完成的 provider：一旦被（错误地）启动即可被 starts 计数捕获。
+struct HeldStartProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HeldStartProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("workspace provider-run tests use start")
+    }
+}
+
+/// k3 P2 败者让位锚：provider-start 键已被健康持有者领走（在途 run 持有
+/// `:{id}:0`，durable phase=Generate）时，迟到的第二条 StartGeneration run 必须
+/// 静默让位——不启动 provider、不落 Failed 节点、不广播 Error、不翻转 durable
+/// phase。修复前 `Ok(false)` 一律映射 Message：失败节点 + Error 广播 + 会话
+/// 呈现与键持有者的健康在途状态矛盾。
+#[tokio::test]
+async fn single_candidate_late_run_yields_silently_when_start_key_already_claimed() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    // 模拟健康胜者：reserve 已领取首轮键（phase Prepare→Generate，ledger [:0]）。
+    {
+        let mut engine = fixture.engine.lock().await;
+        let claimed = engine
+            .reserve_single_candidate_author_start()
+            .expect("healthy winner claims the first provider start key");
+        assert!(claimed);
+    }
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(HeldStartProvider {
+        starts: starts.clone(),
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    let outbound_errors = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = outbound_errors.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(control) = outbound_rx.recv().await {
+            let OutboundControl::Text(text) = control else {
+                continue;
+            };
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+                && value["type"] == "error"
+            {
+                recorded
+                    .lock()
+                    .await
+                    .push(value["message"].as_str().unwrap_or("").to_string());
+            }
+        }
+    });
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    // 等待迟到 run 退场（manager 注册被 finish_run 清空）。
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while fixture.manager.active_run().await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("late run must exit instead of hanging on the claimed key");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        0,
+        "败者不得启动 provider——键的持有者独占本次启动"
+    );
+    assert!(
+        outbound_errors.lock().await.is_empty(),
+        "败者让位不得广播 Error：{:?}",
+        outbound_errors.lock().await
+    );
+    let (failed_nodes, phase) = {
+        let engine = fixture.engine.lock().await;
+        (
+            engine
+                .timeline_nodes
+                .iter()
+                .filter(|node| {
+                    node.status == crate::web::workspace_ws_types::TimelineNodeStatus::Failed
+                })
+                .count(),
+            engine.session.single_candidate_phase.clone(),
+        )
+    };
+    assert_eq!(failed_nodes, 0, "败者让位不得产生虚假 Failed 节点");
+    assert_eq!(
+        phase,
+        Some(crate::product::models::SingleCandidatePhase::Generate),
+        "败者让位不得翻转 durable phase"
+    );
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Generate),
+        "durable phase 必须保持键持有者留下的 Generate"
+    );
+    drain.abort();
+}
+
+/// k3 P2 区分锚的另一半：终态 Failed 且无他者在跑时（恢复/迟到 spawn 形态，
+/// 不经过入站 re-arm），无法启动必须保持可见 Message 失败路径——Error 广播 +
+/// PrepareContext 回滚是既有恢复入口，不得被让位语义吞掉。
+#[tokio::test]
+async fn single_candidate_terminal_failed_start_reports_visible_recovery_error() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    {
+        let mut engine = fixture.engine.lock().await;
+        engine.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Failed,
+        );
+    }
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(HeldStartProvider {
+        starts: starts.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider);
+    let mut run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        fixture.engine.clone(),
+        fixture.workspace_runs.clone(),
+        fixture.record.id.clone(),
+        fixture.app_paths.clone(),
+        fixture.record.clone(),
+    );
+    run_context.manager = fixture.manager.clone();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
+
+    spawn_provider_run_from_event(
+        run_context,
+        ProviderRunKind::WorkItemPlanSingleCandidateAuthor,
+        None,
+        outbound_tx,
+    )
+    .await
+    .expect("spawn the terminal-failed start attempt");
+
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("已终态失败"),
+        "terminal-failed start must stay visibly rejected, got: {message}"
+    );
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        0,
+        "终态失败会话不得再启动 provider"
+    );
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Failed),
+        "durable 终态必须保持 Failed（恢复入口语义）"
+    );
+    let _ = fixture.manager.abort_active_run().await;
+    drop(outbound_rx);
+}

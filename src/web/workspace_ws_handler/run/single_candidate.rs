@@ -7,6 +7,10 @@ pub(crate) enum SingleCandidateProviderRunOutcome {
 
 pub(crate) enum SingleCandidateProviderRunError {
     AlreadyFinished,
+    /// 败者让位（k3 P2 / RCA 修法 3）：本次启动的 ledger 键已被健康持有者
+    /// 领走（在途 run 或已完成的会话）。迟到 run 必须静默退场——不落 failed
+    /// 节点、不广播 Error、不改写 durable phase。
+    Superseded,
     Message(String),
 }
 
@@ -248,14 +252,21 @@ pub(crate) async fn run_single_candidate_author(
         }
     };
     if !should_start {
-        let phase = engine.session().single_candidate_phase.as_ref();
-        let message = match phase {
-            Some(crate::product::models::SingleCandidatePhase::Completed) => {
-                "SingleCandidate session is already completed".to_string()
+        // 败者让位 vs 无法启动（k3 P2 / RCA 修法 3）：键已被领走时按重载后的
+        // durable phase 区分——Failed 表示终态失败且无他者在跑（唯一真实失败
+        // 已由失败方自己落盘），保留可见 Message 失败路径作为恢复入口（回滚
+        // PrepareContext + Error 广播）；Completed/Generate 表示键的持有者是
+        // 健康在途 run 或已完结会话，迟到 run 静默让位，不产生虚假 failed
+        // 节点与误导性错误。
+        return match engine.session().single_candidate_phase.as_ref() {
+            Some(crate::product::models::SingleCandidatePhase::Failed) => {
+                Err(SingleCandidateProviderRunError::Message(
+                    "SingleCandidate session 已终态失败，本次运行无法启动；请显式重新开始生成"
+                        .to_string(),
+                ))
             }
-            _ => "SingleCandidate provider start was already reserved".to_string(),
+            _ => Err(SingleCandidateProviderRunError::Superseded),
         };
-        return Err(SingleCandidateProviderRunError::Message(message));
     }
 
     let lifecycle = LifecycleStore::new(run_context.app_paths.clone());

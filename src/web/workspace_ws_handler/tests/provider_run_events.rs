@@ -511,7 +511,12 @@ impl StreamingProviderAdapter for PendingStartProvider {
 fn sc_context_with_registry(
     fixture: &ProviderRunFixture,
     registry: ProviderRegistry,
-) -> (WorkspaceInboundContext, mpsc::Receiver<OutboundControl>) {
+) -> (
+    WorkspaceInboundContext,
+    mpsc::Receiver<OutboundControl>,
+    ProviderRunContext,
+    mpsc::Sender<OutboundControl>,
+) {
     let mut run_context = ProviderRunContext::test_fixture(
         Arc::new(registry),
         fixture.engine.clone(),
@@ -530,11 +535,13 @@ fn sc_context_with_registry(
                 crate::web::runtime::WebRuntime::new_fake(root),
             ),
             engine: fixture.engine.clone(),
-            run_context,
-            outbound_tx,
+            run_context: run_context.clone(),
+            outbound_tx: outbound_tx.clone(),
             session_id: fixture.record.id.clone(),
         },
         outbound_rx,
+        run_context,
+        outbound_tx,
     )
 }
 
@@ -688,12 +695,37 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
     persist_review_rounds(&fixture, 1);
     let relay_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorded = relay_kinds.clone();
+    let relay_spawn = Arc::new(Mutex::new(
+        Option::<(ProviderRunContext, mpsc::Sender<OutboundControl>)>::None,
+    ));
+    let spawn_slot = relay_spawn.clone();
     let drain_engine = tokio::spawn(async move {
         let mut rx = engine_rx;
         while let Some(event) = rx.recv().await {
-            match &event {
-                EngineEvent::ProviderRunRequested { kind, .. } => {
+            match event {
+                EngineEvent::ProviderRunRequested { kind, node_id } => {
                     recorded.lock().await.push(format!("relay:{kind:?}"));
+                    // 与生产 forward 任务同构（mapping.rs spawn_engine_event_forward_task）：
+                    // 每个事件 tokio::spawn 独立派发，接收循环绝不内联 await spawn——
+                    // 否则 spawn 等 engine 锁（在途 run 持有）与 run 后续事件发送
+                    // 阻塞互锁。接力事件必须真正 spawn run，「事件已发射」才是
+                    // 真启动（k3 P0 审查发现的假绿）。ReviewOnly 事件不 spawn——
+                    // 生产语义里它在有在途 run 时由 drain 分支让位（在途 run 的
+                    // followups 自续评审，本测试 run-1 正是内联驱动了 reviewer），
+                    // 串行 drain 下补 spawn 只会双驱动。
+                    if matches!(kind, ProviderRunKind::WorkItemPlanSingleCandidateAuthor)
+                        && let Some((run_context, outbound_tx)) = spawn_slot.lock().await.clone()
+                    {
+                        tokio::spawn(async move {
+                            let _ = spawn_provider_run_from_event(
+                                run_context,
+                                kind,
+                                node_id,
+                                outbound_tx,
+                            )
+                            .await;
+                        });
+                    }
                 }
                 EngineEvent::StageChange { stage } => {
                     recorded.lock().await.push(format!("stage:{stage}"));
@@ -720,7 +752,9 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, author);
     registry.register(ProviderName::Codex, reviewer);
-    let (context, mut outbound_rx) = sc_context_with_registry(&fixture, registry);
+    let (context, mut outbound_rx, run_context, outbound_tx) =
+        sc_context_with_registry(&fixture, registry);
+    *relay_spawn.lock().await = Some((run_context, outbound_tx));
     let outbound_errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorded_outbound = outbound_errors.clone();
     let drain_outbound = tokio::spawn(async move {
@@ -780,6 +814,37 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
             review_starts.load(Ordering::SeqCst),
         );
     }
+    // k3 P0 真启动锚：接力事件必须实际启动 provider（author 第二次 start），
+    // 而不是只发射事件后死在 reserve 键碰撞上（修复前 phase==Generate 启发式
+    // 复用 run1 的 :0 键 → already reserved → Message 失败 + Error 广播）。
+    let relay_started = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if author_starts.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            // sleep 而非纯 yield_now 自旋：current_thread 运行时下永真自旋会
+            // 饿死计时器，令本 timeout 永不触发（挂死而非失败）。
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if relay_started.is_err() {
+        let kinds = relay_kinds.lock().await.clone();
+        let errors = outbound_errors.lock().await.clone();
+        let (phase, stage) = {
+            let engine = fixture.engine.lock().await;
+            (
+                format!("{:?}", engine.session.single_candidate_phase),
+                format!("{:?}", engine.session.stage),
+            )
+        };
+        panic!(
+            "SC author relay run must actually start the provider (second author start); \
+             author_starts={} review_starts={} phase={phase} stage={stage} events={kinds:?} outbound_errors={errors:?}",
+            author_starts.load(Ordering::SeqCst),
+            review_starts.load(Ordering::SeqCst),
+        );
+    }
     // 让修复前的误燃窗口（第二轮 reviewer start）有机会发生。
     let _ = tokio::time::timeout(std::time::Duration::from_millis(400), async {
         while review_starts.load(Ordering::SeqCst) < 2 {
@@ -796,8 +861,8 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
     );
     assert_eq!(
         author_starts.load(Ordering::SeqCst),
-        1,
-        "首轮 SC author 只应驱动一次；返修重跑由接力 run 承担"
+        2,
+        "首轮恰一次 + 接力 run 真启动恰一次；接力是唯一接续路径"
     );
     assert!(
         relay_kinds
@@ -808,11 +873,63 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
         "委托仍必须发射全名 kind 的 SC author 接力事件（唯一接续路径）"
     );
     assert!(
-        fixture.manager.active_run().await.is_none(),
-        "run 任务必须在让位接力后退场（manager 不得残留 run-1）"
+        outbound_errors.lock().await.is_empty(),
+        "接力链路不得产生任何 Error 广播（键碰撞死亡/败者虚假失败都会在此现形）：{:?}",
+        outbound_errors.lock().await
     );
-
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload session after relay start");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Generate),
+        "接力 run 在途时 durable phase 必须停留 Generate"
+    );
+    assert!(
+        durable
+            .provider_start_ledger
+            .iter()
+            .any(|entry| entry.provider_start_idempotency_key
+                == format!("single_candidate_author:{}:1", durable.id)
+                && entry.started),
+        "预领的接力键 :1 必须已在 ledger（k3 P0 原子预领）"
+    );
+    assert!(
+        durable
+            .repair_reservation
+            .as_ref()
+            .is_some_and(|reservation| {
+                reservation.provider_start_idempotency_key
+                    == format!("single_candidate_author:{}:1", durable.id)
+                    && reservation.state
+                        == crate::product::work_item_plan_policy::RepairReservationState::ProviderStarted
+            }),
+        "接力 run 真启动后预领 reservation 必须推进为 ProviderStarted"
+    );
+    assert!(
+        fixture.manager.active_run().await.is_some(),
+        "接力 run 的在途 provider 由 manager 持有（run-1 已被 supersede 退场）"
+    );
+    // timeline 检查读 durable 副本：接力 run 在途驱动 held provider 时持有 engine
+    // 锁，此刻取内存锁会永久阻塞（挂死而非失败）；abort 则会制造取消足迹污染
+    // 断言。durable timeline 由引擎在节点变更时同步落盘，口径与内存一致。
+    let durable_nodes = fixture
+        .lifecycle
+        .load_timeline_nodes(&fixture.record.id)
+        .expect("load durable timeline nodes");
+    assert_eq!(
+        durable_nodes
+            .iter()
+            .filter(|node| {
+                node.status == crate::web::workspace_ws_types::TimelineNodeStatus::Failed
+            })
+            .count(),
+        0,
+        "接力链路不得产生虚假 Failed 节点（k3 P0 键碰撞死亡 / P2 败者虚假失败）"
+    );
     let _ = fixture.manager.abort_active_run().await;
+
     drain_engine.abort();
     drain_outbound.abort();
 }

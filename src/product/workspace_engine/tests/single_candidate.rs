@@ -1094,6 +1094,26 @@ mod contract_prerevision {
             Some(SingleCandidatePhase::Generate),
             "TriggerAggregateRepair must route back to Generate for the author rerun"
         );
+        assert!(
+            persisted.provider_start_ledger.iter().any(|entry| {
+                entry.provider_start_idempotency_key
+                    == format!("single_candidate_author:{}:0", persisted.id)
+                    && entry.started
+            }),
+            "TriggerAggregateRepair must atomically preclaim the next author provider key"
+        );
+        assert!(
+            persisted
+                .repair_reservation
+                .as_ref()
+                .is_some_and(|reservation| {
+                    reservation.provider_start_idempotency_key
+                    == format!("single_candidate_author:{}:0", persisted.id)
+                    && reservation.state
+                        == crate::product::work_item_plan_policy::RepairReservationState::Reserved
+                }),
+            "the repair route must mark its preclaimed provider key consumable by the relay"
+        );
     }
 
     /// E3-2：首轮无缺口路径零变化——干净候选不产生 verdict、不消费预算、

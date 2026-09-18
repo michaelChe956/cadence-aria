@@ -361,11 +361,19 @@ impl WorkspaceEngine {
         let Some(node_id) = self.active_node_id.clone() else {
             return;
         };
-        if self
-            .timeline_nodes
-            .iter()
-            .any(|node| node.node_id == node_id && node.status == TimelineNodeStatus::Active)
-        {
+        // F-05：Failed/Paused/Skipped 节点不得被改写为 Completed——重开场景下
+        // active_node_id 可能仍指向上一次失败的 author 节点，其终态与历史字段
+        // （summary/completed_at）必须原样保留。已 Completed 的节点允许幂等
+        // 重放完成：review 流程先在 complete_review 落 verdict summary，路由腿
+        // 再覆写流程 summary（如「Review 完成，报告已进入对话流」），这是既有
+        // 双写契约，不得被守卫吞掉。
+        if self.timeline_nodes.iter().any(|node| {
+            node.node_id == node_id
+                && matches!(
+                    node.status,
+                    TimelineNodeStatus::Active | TimelineNodeStatus::Completed
+                )
+        }) {
             self.update_timeline_node(&node_id, TimelineNodeStatus::Completed, summary)
                 .await;
         }

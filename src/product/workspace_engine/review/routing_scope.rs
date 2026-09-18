@@ -13,6 +13,71 @@ use crate::product::work_item_plan_source_store::{
     SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
 };
 
+/// k3 P0 接力键碰撞修复：SingleCandidate 的 TriggerAggregateRepair 在 Generate
+/// 迁移的同一 CAS 内原子预领下一把 author provider-start ledger 键（对齐 human
+/// gate turn open 的既有模式）。`RepairReservation{Reserved}` 标记该键可被接力
+/// run 消费：store 层 `reserve_single_candidate_provider_start` 命中 Reserved 预领
+/// 时推进为 ProviderStarted 并放行真启动；接力 run 因此不再与 run1 的旧键碰撞
+/// （phase==Generate 启发式下 attempt=len-1 会复用已消费的 run1 键）。
+fn provider_start_ledger_for_action(
+    expected: &crate::product::models::WorkspaceSessionRecord,
+    action: &RoutingAction,
+    invoked_scope: Option<&ReviewInvocationScope>,
+) -> (
+    Option<crate::product::work_item_plan_policy::RepairReservation>,
+    Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+) {
+    if expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        || !matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+    {
+        return (
+            expected.repair_reservation.clone(),
+            expected.provider_start_ledger.clone(),
+        );
+    }
+
+    let (reservation, entry) = preclaimed_repair_start(
+        &expected.id,
+        expected.provider_start_ledger.len(),
+        invoked_scope
+            .map(|scope| scope.scope_digest().to_string())
+            .unwrap_or_else(|| "review_unknown".to_string()),
+    );
+    let mut provider_start_ledger = expected.provider_start_ledger.clone();
+    provider_start_ledger.push(entry);
+    (Some(reservation), provider_start_ledger)
+}
+
+/// 预领的单次构造（持久化路径与内存路径共用，键形与字段口径不得漂移）。
+/// `owner_run_id` 绑定本次路由的新 invocation scope digest。
+fn preclaimed_repair_start(
+    session_id: &str,
+    provider_start_attempt: usize,
+    owner_run_id: String,
+) -> (
+    crate::product::work_item_plan_policy::RepairReservation,
+    crate::product::work_item_plan_policy::ProviderStartLedgerEntry,
+) {
+    let provider_start_idempotency_key = format!(
+        "single_candidate_author:{}:{provider_start_attempt}",
+        session_id
+    );
+    (
+        crate::product::work_item_plan_policy::RepairReservation {
+            token: format!("single_candidate_author_repair:{session_id}:{provider_start_attempt}"),
+            owner_session_id: session_id.to_string(),
+            owner_run_id,
+            provider_start_idempotency_key: provider_start_idempotency_key.clone(),
+            state: crate::product::work_item_plan_policy::RepairReservationState::Reserved,
+            commit_id: None,
+        },
+        crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+            provider_start_idempotency_key,
+            started: true,
+        },
+    )
+}
+
 /// 计算 verdict 的非 advisory findings 指纹集合（F5-B 闸门口径）：复用 policy
 /// classify_finding 的 class/fingerprint 推导，剔除 class=Advisory 条目。与
 /// evaluate.rs 的 actionable_findings 语义一致：措辞变化在 category 存在时不改指纹。
@@ -454,6 +519,8 @@ impl WorkspaceEngine {
         let Some(expected) = expected else {
             return Ok(None);
         };
+        let (repair_reservation, provider_start_ledger) =
+            provider_start_ledger_for_action(expected, action, scope.as_ref());
         store
             .compare_and_save_policy_route(
                 expected,
@@ -464,8 +531,8 @@ impl WorkspaceEngine {
                     scope,
                     gate,
                     diagnostics,
-                    repair_reservation: expected.repair_reservation.clone(),
-                    provider_start_ledger: expected.provider_start_ledger.clone(),
+                    repair_reservation,
+                    provider_start_ledger,
                 },
             )
             .map(Some)
@@ -510,6 +577,25 @@ impl WorkspaceEngine {
             self.policy_scope_for_action(invocation, action, None);
         self.session.human_gate_snapshot = gate;
         self.session.policy_diagnostics = diagnostics;
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+        {
+            // 与持久化路径（persist_policy_route）同源的原子预领：内存回退分支
+            // 不得与 CAS 落盘的键形/字段口径漂移。
+            let owner_run_id = self
+                .session
+                .review_invocation_scope
+                .as_ref()
+                .map(|scope| scope.scope_digest().to_string())
+                .unwrap_or_else(|| "review_unknown".to_string());
+            let (reservation, entry) = preclaimed_repair_start(
+                &self.session.session_id,
+                self.session.provider_start_ledger.len(),
+                owner_run_id,
+            );
+            self.session.repair_reservation = Some(reservation);
+            self.session.provider_start_ledger.push(entry);
+        }
         self.session.session_status = status;
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
             self.session.single_candidate_phase = if fail_closed {

@@ -180,6 +180,24 @@ impl LifecycleStore {
                 });
             }
             if stored
+                .repair_reservation
+                .as_ref()
+                .is_some_and(|reservation| {
+                    reservation.provider_start_idempotency_key == provider_start_idempotency_key
+                        && reservation.state
+                            == crate::product::work_item_plan_policy::RepairReservationState::Reserved
+                })
+            {
+                stored
+                    .repair_reservation
+                    .as_mut()
+                    .expect("repair reservation checked above")
+                    .state = crate::product::work_item_plan_policy::RepairReservationState::ProviderStarted;
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &stored)?;
+                return Ok((stored, true));
+            }
+            if stored
                 .provider_start_ledger
                 .iter()
                 .any(|entry| entry.provider_start_idempotency_key == provider_start_idempotency_key)
@@ -721,6 +739,91 @@ mod tests {
             .expect("replay provider start");
         assert!(!did_replay);
         assert_eq!(replayed, started);
+    }
+
+    #[test]
+    fn preclaimed_single_candidate_repair_key_starts_provider_once() {
+        let temp = tempdir().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+        let session = store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    run_policy: RunPolicy::Interactive,
+                    rollout_snapshot: true,
+                }),
+            })
+            .expect("create candidate session");
+        let first_key = format!("single_candidate_author:{}:0", session.id);
+        let (started, did_start) = store
+            .reserve_single_candidate_provider_start(&session, &first_key)
+            .expect("reserve first provider start");
+        assert!(did_start);
+
+        let repair_key = format!("single_candidate_author:{}:1", session.id);
+        let reservation = crate::product::work_item_plan_policy::RepairReservation {
+            token: format!("single_candidate_author_repair:{}:1", session.id),
+            owner_session_id: session.id.clone(),
+            owner_run_id: "reviewer-run-1".to_string(),
+            provider_start_idempotency_key: repair_key.clone(),
+            state: crate::product::work_item_plan_policy::RepairReservationState::Reserved,
+            commit_id: None,
+        };
+        let mut ledger = started.provider_start_ledger.clone();
+        ledger.push(
+            crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+                provider_start_idempotency_key: repair_key.clone(),
+                started: true,
+            },
+        );
+        let preclaimed = store
+            .compare_and_save_policy_route(
+                &started,
+                super::PolicyRoutePersist {
+                    status: crate::product::models::WorkspaceSessionStatus::Running,
+                    single_candidate_phase: Some(SingleCandidatePhase::Generate),
+                    run_history: started.run_history.clone(),
+                    scope: started.review_invocation_scope.clone(),
+                    gate: started.human_gate_snapshot.clone(),
+                    diagnostics: started.policy_diagnostics.clone(),
+                    repair_reservation: Some(reservation),
+                    provider_start_ledger: ledger,
+                },
+            )
+            .expect("preclaim repair provider key with the route");
+
+        let (provider_started, did_start) = store
+            .reserve_single_candidate_provider_start(&preclaimed, &repair_key)
+            .expect("consume the preclaimed repair provider key");
+        assert!(
+            did_start,
+            "a freshly preclaimed repair key must start its provider"
+        );
+        assert_eq!(
+            provider_started.provider_start_ledger,
+            preclaimed.provider_start_ledger
+        );
+        assert_eq!(
+            provider_started
+                .repair_reservation
+                .as_ref()
+                .map(|reservation| reservation.state),
+            Some(crate::product::work_item_plan_policy::RepairReservationState::ProviderStarted)
+        );
+
+        let (_replayed, replayed) = store
+            .reserve_single_candidate_provider_start(&provider_started, &repair_key)
+            .expect("replay repair provider start");
+        assert!(!replayed, "the consumed repair key remains one-shot");
     }
 
     #[test]
