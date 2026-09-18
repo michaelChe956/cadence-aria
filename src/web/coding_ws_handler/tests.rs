@@ -10,9 +10,10 @@ use crate::product::coding_attempt_store::{
 use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptScope, CodingAttemptStatus,
     CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderPermissionMode,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, GroupFinalReadinessSnapshot,
-    GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
+    CodingProviderRole, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunEventType, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, GroupFinalReadinessSnapshot, GroupFinalReadinessStatus,
+    GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
 };
 use crate::product::coding_work_item_context::select_work_item_markdown;
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
@@ -733,6 +734,113 @@ fn coding_session_state_does_not_reactivate_historical_blocked_node() {
     };
 
     assert!(active_node_id.is_none());
+}
+
+#[test]
+fn coding_session_state_replays_execution_event_history_from_role_run_journal() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save coding attempt");
+    let run = coding_store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("create coder role run");
+
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "provider": "pi",
+                "role": "Coder",
+                "prompt": "实现 work item 001"
+            }),
+        )
+        .expect("append provider prompt journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::StatusChanged,
+            serde_json::json!({"status": "Starting"}),
+        )
+        .expect("append status changed journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "provider",
+                "kind": "Provider",
+                "status": "Started",
+                "title": "Pi provider started"
+            }),
+        )
+        .expect("append provider started journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "cmd_0001",
+                "kind": "Command",
+                "status": "Completed",
+                "title": "Run tests",
+                "command": "pnpm vitest run src/state",
+                "output": "tests passed",
+                "exit_code": 0
+            }),
+        )
+        .expect("append command journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({"content": "stream delta"}),
+        )
+        .expect("append text delta journal event");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState {
+        execution_events, ..
+    } = state
+    else {
+        panic!("expected coding session state");
+    };
+
+    let titles: Vec<&str> = execution_events
+        .iter()
+        .map(|replay| replay.event.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Provider Prompt",
+            "Provider starting",
+            "Pi provider started",
+            "Run tests",
+        ],
+        "刷新回放必须包含 prompt、provider 生命周期与命令执行历史；TextDelta 仍仅走实时流"
+    );
+    assert_eq!(
+        execution_events[0].event.output.as_deref(),
+        Some("实现 work item 001")
+    );
+    assert_eq!(
+        execution_events[3].event.command.as_deref(),
+        Some("pnpm vitest run src/state")
+    );
 }
 
 #[test]

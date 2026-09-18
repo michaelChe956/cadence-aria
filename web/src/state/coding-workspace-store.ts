@@ -240,6 +240,13 @@ export const useCodingWorkspaceStore = create<
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
       const pendingGates = mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates);
       const roleRuns = withRetryExhaustion(snapshot.role_runs ?? [], pendingGates);
+      const chatEntries = mergePendingChoiceEntries(
+        mergeChatEntriesByTimestamp(
+          (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
+          executionEventChatEntries(snapshot.execution_events ?? [], timelineNodes),
+        ),
+        snapshot.pending_choices ?? [],
+      );
       return {
         projectId: snapshot.project_id,
         issueId: snapshot.issue_id,
@@ -263,10 +270,7 @@ export const useCodingWorkspaceStore = create<
         timelineNodes,
         activeNodeId: snapshot.active_node_id,
         selectedNodeId,
-        chatEntries: mergePendingChoiceEntries(
-          (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
-          snapshot.pending_choices ?? [],
-        ),
+        chatEntries,
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
@@ -600,6 +604,36 @@ function executionEventMessage(event: ExecutionEvent, node?: CodingTimelineNode 
 
 function isProviderPromptEvent(event: ExecutionEvent) {
   return event.title === "Provider Prompt" && typeof event.output === "string";
+}
+
+/// F-13 刷新回放：coding_session_state 快照携带的历史执行事件 → 运行对话消息。
+/// 与实时 addExecutionEvent 同构（id=event_id、内容取命令/标题、role 随节点），
+/// 后续实时事件按同 id upsert 覆盖，不会重复。
+function executionEventChatEntries(
+  replays: Extract<CodingWsOutMessage, { type: "coding_session_state" }>["execution_events"],
+  nodes: CodingTimelineNode[],
+): ChatEntry[] {
+  return (replays ?? []).map(({ event, created_at }) => {
+    const node = nodeForEvent(nodes, event.node_id ?? null);
+    return {
+      id: event.event_id,
+      type: "execution_event" as const,
+      role: chatRoleForNode(nodes, event.node_id ?? null),
+      content: executionEventMessage(event, node),
+      timestamp: created_at,
+      node_id: event.node_id ?? undefined,
+      metadata: event as unknown as Record<string, unknown>,
+    };
+  });
+}
+
+/// 持久化 chat entries 与回放执行事件按时间稳定归并（两组各自有序）。
+function mergeChatEntriesByTimestamp(persisted: ChatEntry[], replayed: ChatEntry[]): ChatEntry[] {
+  if (persisted.length === 0) return replayed;
+  if (replayed.length === 0) return persisted;
+  return [...persisted, ...replayed].sort((left, right) =>
+    left.timestamp.localeCompare(right.timestamp),
+  );
 }
 
 function updateLegacyProviderConfig(

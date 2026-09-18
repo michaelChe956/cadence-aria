@@ -428,6 +428,7 @@ mod tests {
             ),
             provider_config_snapshot: Box::new(fixture.attempt.provider_config_snapshot.clone()),
             chat_entries: Box::new(Vec::new()),
+            execution_events: Box::new(Vec::new()),
             timeline_nodes: Box::new(Vec::new()),
             active_node_id: Box::new(None),
             code_review_reports: Box::new(Vec::new()),

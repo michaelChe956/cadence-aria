@@ -22,6 +22,14 @@ use crate::web::workspace_ws_types::{
     ChoiceOption, ProviderConfigSnapshot, WsExecutionEvent, WsPermissionRiskLevel,
 };
 
+/// 刷新回放单元：role-run 审计 journal 重建出的历史执行事件（与实时
+/// `coding_execution_event` 同形），附 journal 落盘时间供前端按序装载。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingExecutionEventReplay {
+    pub event: WsExecutionEvent,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodingWsOutMessage {
@@ -50,6 +58,8 @@ pub enum CodingWsOutMessage {
         role_provider_config_snapshot: Box<CodingRoleProviderConfigSnapshot>,
         provider_config_snapshot: Box<ProviderConfigSnapshot>,
         chat_entries: Box<Vec<CodingChatEntry>>,
+        #[serde(default)]
+        execution_events: Box<Vec<CodingExecutionEventReplay>>,
         timeline_nodes: Box<Vec<CodingTimelineNode>>,
         active_node_id: Box<Option<String>>,
         code_review_reports: Box<Vec<CodeReviewReport>>,

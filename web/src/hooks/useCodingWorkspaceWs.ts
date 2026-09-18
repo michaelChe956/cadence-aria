@@ -31,6 +31,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const startupAuditRecordIdsRef = useRef(new Map<string, string>());
+  const replayedLogEventIdsRef = useRef(new Set<string>());
 
   useLayoutEffect(() => {
     const ws = wsRef.current;
@@ -44,6 +45,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    replayedLogEventIdsRef.current.clear();
     useCodingWorkspaceStore.getState().reset();
     useCodingLogStore.getState().reset();
   }, [attemptId, issueId, projectId]);
@@ -305,7 +307,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
           const message = JSON.parse(event.data) as CodingWsServerMessage;
           markStartupRejection(message, scopedAttemptId, startupAuditRecordIdsRef.current);
           markStartupCompletion(message, scopedAttemptId, startupAuditRecordIdsRef.current);
-          handleCodingWsMessage(message, streamBatcher);
+          handleCodingWsMessage(message, streamBatcher, replayedLogEventIdsRef.current);
         } catch {
           // Ignore malformed websocket messages; backend protocol errors are handled explicitly.
         }
@@ -418,12 +420,17 @@ function createCodingStreamBatcher() {
   };
 }
 
-function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: CodingStreamBatcher) {
+function handleCodingWsMessage(
+  message: CodingWsServerMessage,
+  streamBatcher: CodingStreamBatcher,
+  replayedLogEventIds: Set<string>,
+) {
   const store = useCodingWorkspaceStore.getState();
   switch (message.type) {
     case "coding_session_state":
       streamBatcher.clear();
       store.setSessionState(message as Extract<CodingWsOutMessage, { type: "coding_session_state" }>);
+      replayCodingLogLines(message, replayedLogEventIds);
       break;
     case "coding_stage_change":
       store.updateStage(message.stage as never);
@@ -735,4 +742,31 @@ function codingLogNodeTitle(nodeId: string | null): string | null {
 
 function codingExecutionEventLogText(event: ExecutionEvent): string {
   return [event.title, event.command].filter(Boolean).join(" · ");
+}
+
+/// F-13 刷新回放：快照携带的历史执行事件同步装载到运行日志（Logs 面板），
+/// 与实时 coding_execution_event 的日志写入同构。
+function replayCodingLogLines(
+  message: CodingWsServerMessage,
+  replayedEventIds: Set<string>,
+) {
+  const replays = (message.execution_events ?? []) as {
+    event: ExecutionEvent;
+    created_at: string;
+  }[];
+  const pending = replays.filter(({ event }) => {
+    if (replayedEventIds.has(event.event_id)) return false;
+    replayedEventIds.add(event.event_id);
+    return true;
+  });
+  if (pending.length === 0) return;
+  useCodingLogStore.getState().appendLines(
+    pending.map(({ event, created_at }) => ({
+      nodeId: event.node_id ?? null,
+      nodeTitle: codingLogNodeTitle(event.node_id ?? null),
+      text: codingExecutionEventLogText(event),
+      at: created_at,
+      kind: "event" as const,
+    })),
+  );
 }

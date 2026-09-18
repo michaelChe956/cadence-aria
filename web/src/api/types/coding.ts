@@ -372,6 +372,11 @@ export type CodingChatEntry = {
   created_at: string;
 };
 
+export type CodingExecutionEventReplay = {
+  event: ExecutionEvent;
+  created_at: string;
+};
+
 export type CodingGateActionType =
   | "send_to_coder"
   | "confirm_stage"
@@ -535,6 +540,7 @@ export type CodingWsOutMessage =
       pushed_remote: string | null;
       role_provider_config_snapshot: CodingRoleProviderConfigSnapshot;
       chat_entries: CodingChatEntry[];
+      execution_events?: CodingExecutionEventReplay[];
       work_item_markdown: string | null;
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;

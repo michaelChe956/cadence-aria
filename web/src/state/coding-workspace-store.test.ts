@@ -873,4 +873,75 @@ describe("coding workspace store", () => {
 
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.goal).toBe("实现后端 API");
   });
+
+  it("replays execution event history from a session snapshot after refresh", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      sessionState({
+        execution_events: [
+          {
+            event: {
+              event_id: "coding_node_0001_prompt",
+              node_id: "coding_node_0001",
+              agent: "pi",
+              kind: "output",
+              status: "started",
+              title: "Provider Prompt",
+              output: "实现 work item 001",
+            },
+            created_at: "2026-09-18T08:00:00+00:00",
+          },
+          {
+            event: {
+              event_id: "coding_node_0001_provider_status_starting",
+              node_id: "coding_node_0001",
+              agent: "pi",
+              kind: "provider",
+              status: "started",
+              title: "Provider starting",
+            },
+            created_at: "2026-09-18T08:00:01+00:00",
+          },
+          {
+            event: {
+              event_id: "cmd_0001",
+              node_id: "coding_node_0001",
+              agent: "pi",
+              kind: "command",
+              status: "completed",
+              title: "Run tests",
+              command: "pnpm vitest run src/state",
+              output: "tests passed",
+              exit_code: 0,
+            },
+            created_at: "2026-09-18T08:00:02+00:00",
+          },
+        ],
+      } as Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>>),
+    );
+
+    const entries = useCodingWorkspaceStore.getState().chatEntries;
+    expect(entries.map((entry) => entry.type)).toEqual([
+      "execution_event",
+      "execution_event",
+      "execution_event",
+    ]);
+    expect(entries[0]).toMatchObject({
+      id: "coding_node_0001_prompt",
+      role: "coder",
+      content: "代码编写 · Provider Prompt",
+      node_id: "coding_node_0001",
+      timestamp: "2026-09-18T08:00:00+00:00",
+    });
+    expect(entries[1]).toMatchObject({
+      id: "coding_node_0001_provider_status_starting",
+      content: "Provider starting",
+    });
+    expect(entries[2]).toMatchObject({
+      id: "cmd_0001",
+      content: "pnpm vitest run src/state",
+      metadata: { command: "pnpm vitest run src/state" },
+    });
+  });
 });
