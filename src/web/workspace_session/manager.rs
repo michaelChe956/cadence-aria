@@ -1017,10 +1017,8 @@ impl WorkspaceSessionManager {
                             .next()
                             .map(|attachment| attachment.outbound_tx.clone())
                             .unwrap_or_else(|| {
-                                // F-1（P2 终审 §6）：「无活动 run 且无订阅者」窗口不丢弃接力 run——
-                                // 降级为一次性出站通道（恢复链 recover_outline_run 同款 mpsc::channel(1)），
-                                // 保持「run 持续至真实终态」语义。期间事件照常 seq 化入 journal，下一次
-                                // attach 经 cursor 回放或 snapshot 基线取回。
+                                // F-1：无活动 run 且无订阅者时仍以一次性出站通道接力 spawn。
+                                // 事件照常入 journal，下一次 attach 经 cursor 回放或 snapshot 基线取回。
                                 eprintln!(
                                     "[aria-broadcast] provider run requested without attachment; spawning with throwaway outbound session={}",
                                     manager.session_id
@@ -1211,137 +1209,6 @@ impl WorkspaceSessionManager {
     ) {
         self.broadcast(WsOutMessage::ProviderStatus { status });
     }
-}
-
-// F-1 回归（P2 终审 p38-p2-final-review-k3.md §6）：「无活动 run 且无订阅者」窗口的
-// 接力 ProviderRunRequested 不得被 continue 丢弃——必须以 throwaway outbound 通道
-// spawn（恢复链 recover_outline_run 同款），run 持续至真实终态。修复前本测试超时必红。
-#[cfg(test)]
-#[tokio::test]
-async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
-    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
-    use crate::cross_cutting::streaming_provider::{
-        ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
-        StreamingProviderInput,
-    };
-    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
-    use crate::product::models::ProviderName;
-    use crate::product::models::WorkspaceType;
-    use crate::web::state::WorkspaceRunRegistry;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio_util::sync::CancellationToken;
-
-    // 与 provider_run_events.rs:467-497 PendingStartProvider 同款：start 计数并把事件
-    // 端扣在手里（run 挂起不完成），保证 active_run 断言窗口确定。
-    struct HeldStartProvider {
-        starts: Arc<AtomicUsize>,
-        event_tx: StdMutex<Option<mpsc::Sender<ProviderEvent>>>,
-    }
-    #[async_trait::async_trait]
-    impl StreamingProviderAdapter for HeldStartProvider {
-        async fn start(
-            &self,
-            _input: StreamingProviderInput,
-            _cancel: CancellationToken,
-        ) -> Result<ProviderSession, ProviderAdapterError> {
-            self.starts.fetch_add(1, Ordering::SeqCst);
-            let (event_tx, event_rx) = mpsc::channel(1);
-            *self
-                .event_tx
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(event_tx);
-            let (command_tx, _command_rx) = mpsc::channel(1);
-            Ok(ProviderSession {
-                native_session_id: None,
-                events: event_rx,
-                commands: command_tx,
-            })
-        }
-        async fn run_streaming(
-            &self,
-            _input: &crate::protocol::contracts::AdapterInput,
-            _cancel: CancellationToken,
-        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-            unreachable!("workspace runs use start")
-        }
-    }
-
-    let root = tempfile::tempdir().expect("root");
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let session_record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 0,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-            work_item_plan_options: None,
-        })
-        .expect("workspace session");
-    let (engine_tx, engine_rx) = mpsc::channel(8);
-    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
-        lifecycle,
-        engine_tx.clone(),
-        WorkspaceSession::from_record(session_record.clone()),
-    )));
-    let starts = Arc::new(AtomicUsize::new(0));
-    let mut provider_registry = ProviderRegistry::new();
-    provider_registry.register(
-        ProviderName::ClaudeCode,
-        Arc::new(HeldStartProvider {
-            starts: starts.clone(),
-            event_tx: StdMutex::new(None),
-        }),
-    );
-    let workspace_runs = WorkspaceRunRegistry::default();
-    let manager = Arc::new(WorkspaceSessionManager {
-        engine,
-        engine_tx: engine_tx.clone(),
-        state: StdMutex::new(ManagerState {
-            pending_attachments: HashMap::new(),
-            attachments: HashMap::new(), // F-1 现场：零订阅者
-            next_run_id: 0,
-            active_run: None,
-            journal: EventJournal::default(),
-            lease: LeaseState::default(),
-            recovery_error: None,
-        }),
-        next_event_seq: AtomicU64::new(1),
-        session_id: session_record.id.clone(),
-        session_record: session_record.clone(),
-        app_paths: app_paths.clone(),
-        provider_registry: Arc::new(provider_registry),
-        workspace_runs: workspace_runs.clone(),
-        registry: WorkspaceSessionRegistry::default(),
-    });
-    manager.spawn_event_router(engine_rx, workspace_runs);
-
-    engine_tx
-        .send(EngineEvent::ProviderRunRequested {
-            kind: ProviderRunKind::Author {
-                content: "relay without subscribers".to_string(),
-            },
-            node_id: None,
-        })
-        .await
-        .expect("queue provider run request");
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if starts.load(Ordering::SeqCst) >= 1 && manager.active_run().await.is_some() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("无订阅者时接力 run 必须仍被 spawn（F-1：修复前事件被 continue 丢弃，本断言超时必红）");
 }
 
 async fn send_optional_message(

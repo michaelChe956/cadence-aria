@@ -1,11 +1,23 @@
 use super::journal::{EventJournal, JOURNAL_HARD_CAP, JOURNAL_TAIL};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use super::{WorkspaceSessionManager, WorkspaceSessionRegistry};
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::checkpoint_store::CheckpointStore;
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+use crate::product::lifecycle_store::CreateStorySpecInput;
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::workspace_engine::ProviderRunKind;
+use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
+use crate::web::runtime::WebRuntime;
+use crate::web::state::WebAppState;
 use crate::web::workspace_ws_handler::OutboundControl;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn resubscribe_snapshot_includes_connection_id_before_socket_decoration() {
@@ -386,4 +398,144 @@ async fn manager_degrades_only_full_attachment_without_backpressure() {
         })
         .collect::<Vec<_>>();
     assert_eq!(fast_sequences, vec![1, 2, 3]);
+}
+// F-1 回归（P2 终审 p38-p2-final-review-k3.md §6）：「无活动 run 且无订阅者」窗口的
+// 接力 ProviderRunRequested 不得被 continue 丢弃——必须以 throwaway outbound 通道
+// spawn（恢复链 recover_outline_run 同款），run 持续至真实终态。修复前本测试超时必红。
+#[tokio::test]
+async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::streaming_provider::{
+        ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
+        StreamingProviderInput,
+    };
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::models::ProviderName;
+    use crate::product::models::WorkspaceType;
+
+    // 与 provider_run_events.rs:467-497 PendingStartProvider 同款：start 计数并把事件
+    // 端扣在手里（run 挂起不完成），保证 active_run 断言窗口确定。
+    struct HeldStartProvider {
+        starts: Arc<AtomicUsize>,
+        event_tx: StdMutex<Option<mpsc::Sender<ProviderEvent>>>,
+    }
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for HeldStartProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            let (event_tx, event_rx) = mpsc::channel(1);
+            *self
+                .event_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(event_tx);
+            let (command_tx, _command_rx) = mpsc::channel(1);
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+        async fn run_streaming(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            unreachable!("workspace runs use start")
+        }
+    }
+
+    let root = tempfile::tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let project = ProjectStore::new(app_paths.clone())
+        .create(CreateProjectInput {
+            name: "throwaway run test".to_string(),
+            description: None,
+        })
+        .expect("project");
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: project.id.clone(),
+            name: "fixture repository".to_string(),
+            path: root.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "throwaway-run-test-repository".to_string(),
+        })
+        .expect("repository");
+    let issue = IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project.id.clone(),
+            repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
+            title: "throwaway run issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            repository_id: repository.id,
+            title: "throwaway run story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story");
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: project.id,
+            issue_id: issue.id,
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("workspace session");
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut provider_registry = ProviderRegistry::new();
+    provider_registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(HeldStartProvider {
+            starts: starts.clone(),
+            event_tx: StdMutex::new(None),
+        }),
+    );
+    let manager = WorkspaceSessionManager::create(
+        &WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            provider_registry,
+        ),
+        &session_record.id,
+    )
+    .await
+    .expect("create workspace session manager");
+    manager
+        .engine()
+        .lock()
+        .await
+        .request_provider_run(ProviderRunKind::Author {
+            content: "relay without subscribers".to_string(),
+        })
+        .await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if starts.load(Ordering::SeqCst) >= 1 && manager.active_run().await.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("无订阅者时接力 run 必须仍被 spawn（F-1：修复前事件被 continue 丢弃，本断言超时必红）");
 }
