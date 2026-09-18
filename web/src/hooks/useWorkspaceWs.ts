@@ -480,13 +480,18 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   const sendHumanConfirm = useCallback(
     (decision: HumanConfirmDecision, payload?: unknown) => {
-      const sent = sendJson({ type: "human_confirm", decision, payload: payload ?? null });
+      const sent =
+        decision === "confirm"
+          ? sendJson({ type: "confirm" })
+          : sendJson({ type: "human_confirm", decision, payload: payload ?? null });
       if (sent) {
         recordSentOperation(
           decision === "request-change" ? "request_change" : decision,
           decision,
         );
-        useWorkspaceStore.getState().resolveGateEntry(decision);
+        if (decision !== "confirm") {
+          useWorkspaceStore.getState().resolveGateEntry(decision);
+        }
       }
       return sent;
     },

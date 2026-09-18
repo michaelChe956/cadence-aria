@@ -201,7 +201,7 @@ describe("useWorkspaceWs outgoing actions", () => {
     ]);
   });
 
-  it("sends human confirm decisions with nullable payload", () => {
+  it("sends typed revision decisions but a bare confirm frame", () => {
     const harness = renderWorkspaceHook();
 
     act(() => {
@@ -217,11 +217,7 @@ describe("useWorkspaceWs outgoing actions", () => {
         decision: "request-change",
         payload: { reason: "需要补充" },
       }),
-      JSON.stringify({
-        type: "human_confirm",
-        decision: "confirm",
-        payload: null,
-      }),
+      JSON.stringify({ type: "confirm" }),
     ]);
   });
 
@@ -262,7 +258,7 @@ describe("useWorkspaceWs outgoing actions", () => {
     ]);
   });
 
-  it("marks the latest gate prompt resolved when a human confirm decision is sent", () => {
+  it("waits for the engine gate-close event before resolving a gate prompt", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().appendChatEntry({
       id: "gate-1",
@@ -275,14 +271,39 @@ describe("useWorkspaceWs outgoing actions", () => {
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      harness.api.sendHumanConfirm("terminate");
+      harness.api.sendHumanConfirm("confirm");
+    });
+
+    const gateEntry = useWorkspaceStore.getState().chatEntries[0];
+    expect(gateEntry).toMatchObject({ id: "gate-1" });
+    expect(gateEntry).not.toHaveProperty("resolved");
+    expect(gateEntry).not.toHaveProperty("resolution");
+  });
+
+  it("resolves a confirmed gate only after the engine confirms closure", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-05-21T10:00:00Z",
+    });
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "human_gate_closed",
+        decision: "confirm",
+        stage: "completed",
+      });
     });
 
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
       expect.objectContaining({
         id: "gate-1",
         resolved: true,
-        resolution: "terminate",
+        resolution: "confirm",
       }),
     ]);
   });

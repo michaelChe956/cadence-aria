@@ -1242,6 +1242,25 @@ describe("cockpit generation status identity and boundaries", () => {
     expect(within(gateEntry).getByRole("button", { name: "确认产物" })).toBeVisible();
     expect(within(gateEntry).getByRole("button", { name: "终止" })).toBeVisible();
   });
+  it("sends plan gate confirmation from the 确认产物 button", async () => {
+    const sendHumanConfirm = vi.fn(() => true);
+    mockWorkspaceWs({ sendHumanConfirm });
+    const store = useWorkspaceStore.getState();
+    store.setStage("human_confirm");
+    useWorkspaceStore.setState({
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+    });
+    store.applyHumanGateTurnOpen("turn_confirm", "cmd_confirm", 1);
+    store.rebuildChatEntries();
+
+    renderCockpit("session_001", false);
+
+    await userEvent.click(screen.getByRole("button", { name: "确认产物" }));
+
+    expect(sendHumanConfirm).toHaveBeenCalledOnce();
+    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+  });
 
   it("dispatches typed gate feedback through the typed websocket helper", async () => {
     const feedback = vi.fn(() => true);
