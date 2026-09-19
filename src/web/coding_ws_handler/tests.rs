@@ -909,6 +909,52 @@ fn awaiting_manual_recovery_attempt_allows_only_abort_message() {
 }
 
 #[test]
+fn recover_coding_message_allowed_only_in_awaiting_manual_recovery() {
+    // F-16：人工恢复态的显式恢复通道——RecoverCoding 是 AbortAttempt 之外唯一
+    // 放行的入站消息（重走 admission CAS 回到 Running + 重启 runner）。
+    for stage in [
+        CodingExecutionStage::Coding,
+        CodingExecutionStage::WorktreePrepare,
+        CodingExecutionStage::FinalConfirm,
+    ] {
+        assert!(
+            is_coding_ws_message_allowed(
+                &CodingAttemptStatus::AwaitingManualRecovery,
+                &stage,
+                &CodingWsInMessage::RecoverCoding,
+            ),
+            "AwaitingManualRecovery 必须放行显式恢复动作（stage={stage:?}）"
+        );
+    }
+    // 其余状态一律拒绝：恢复通道是人工恢复态专属，不得成为绕过状态机的旁路。
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Running,
+        &CodingExecutionStage::Coding,
+        &CodingWsInMessage::RecoverCoding,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Blocked,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::RecoverCoding,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::RecoverCoding,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Created,
+        &CodingExecutionStage::PrepareContext,
+        &CodingWsInMessage::RecoverCoding,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Aborted,
+        &CodingExecutionStage::Coding,
+        &CodingWsInMessage::RecoverCoding,
+    ));
+}
+
+#[test]
 fn manual_continue_gate_response_does_not_auto_resume_runner() {
     let mut attempt = CodingExecutionAttempt {
         id: "coding_attempt_0001".to_string(),

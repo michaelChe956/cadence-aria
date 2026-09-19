@@ -188,6 +188,100 @@ async fn coding_ws_start_coding_pushes_engine_stage_and_timeline_events() {
 }
 
 #[tokio::test]
+async fn coding_ws_recover_coding_revives_awaiting_manual_recovery_attempt() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    // F-14 链：该 fixture 的 worktree prepare 确定性失败 → fail-closed 转
+    // AwaitingManualRecovery。
+    let mut updated = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while updated.status != CodingAttemptStatus::AwaitingManualRecovery {
+        if std::time::Instant::now() > deadline {
+            panic!("runner failure must fail closed to awaiting_manual_recovery");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        updated = store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("attempt");
+    }
+    let version_at_manual_recovery = updated.version;
+
+    // F-16：人工恢复态发送显式恢复动作，不得被状态门拒绝（KimiUpgrade v25
+    // 三探测均被 coding_message_not_allowed 拒——本测试的红面）。
+    send_json(&mut ws, &CodingWsInMessage::RecoverCoding).await;
+
+    // 恢复 = admission CAS 回 Running（version +1）+ runner 重启 + 同一确定性
+    // 失败再次 fail-closed 回人工恢复（version 再 +1）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        updated = store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("attempt");
+        if updated.status == CodingAttemptStatus::AwaitingManualRecovery
+            && updated.version >= version_at_manual_recovery + 2
+        {
+ break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "RecoverCoding must re-admit the attempt and restart the runner \
+                 (version {version_at_manual_recovery} -> {})",
+                updated.version
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        updated.manual_recovery_reason.as_deref(),
+        Some("coding_runner_failed_while_running"),
+        "恢复后的再次失败必须重新持久化稳定 reason 码"
+    );
+
+    // wire 面：任何帧都不得再出现 F-16 拒绝形态 coding_message_not_allowed。
+    let mut rejection = None;
+    let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < drain_deadline {
+        match timeout(Duration::from_millis(250), ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(frame) = serde_json::from_str::<CodingWsOutMessage>(&text)
+                    && let CodingWsOutMessage::CodingProtocolError { code, .. } = &frame
+                    && code == "coding_message_not_allowed"
+                {
+                    rejection = Some(frame);
+                    break;
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => break,
+            Ok(Some(Err(_))) => break,
+            Err(_) => {}
+        }
+    }
+    assert!(
+        rejection.is_none(),
+        "RecoverCoding in awaiting_manual_recovery must not be rejected: {rejection:?}"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
 async fn coding_ws_start_coding_waits_at_stage_gate_and_confirm_resumes_runner() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");

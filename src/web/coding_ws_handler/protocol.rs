@@ -200,6 +200,9 @@ pub enum CodingWsInMessage {
     FinalConfirm,
     RetryPush,
     AbortAttempt,
+    /// F-16：`awaiting_manual_recovery` 的显式恢复动作——重走 admission CAS
+    /// 回到 Running 并重启 runner（人工恢复态唯一非 Abort 放行消息）。
+    RecoverCoding,
     RequestManualPause,
     CodingPing,
 }

@@ -5,9 +5,9 @@
     use crate::product::coding_attempt_store::locking::register_lock_attempt_hook;
     use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
     use crate::product::coding_models::{
-        AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt,
+        AttemptTargetSnapshot, CodingAgentRole, CodingAttemptStatus, CodingEntryType,
+        CodingExecutionAttempt,
     };
-    use crate::product::json_store::{ProductStoreError, read_json, write_json};
     use crate::product::logical_codebase::{
         AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
         IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
@@ -759,6 +759,141 @@
             .expect("amendment resume through admission");
         assert_eq!(attempt.status, CodingAttemptStatus::Running);
         assert!(attempt.admission_ticket_consumed_at.is_some());
+    }
+
+    #[test]
+    fn manual_recovery_attempt_recovers_through_explicit_channel() {
+        let fixture = legacy_fixture();
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("ticket");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("running");
+        fixture
+            .store
+            .transition_to_awaiting_manual_recovery(
+                &fixture.attempt.id,
+                "coding_runner_failed_while_running",
+            )
+            .expect("quarantine");
+
+        let recovered = fixture
+            .store
+            .recover_attempt_from_manual_recovery(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("explicit recovery channel");
+        assert_eq!(recovered.status, CodingAttemptStatus::Running);
+        assert_eq!(recovered.version, 3);
+        assert!(
+            recovered.admission_ticket_consumed_at.is_some(),
+            "恢复 CAS 必须重新锚定 admission 会话 marker"
+        );
+        assert_eq!(
+            recovered.manual_recovery_reason, None,
+            "恢复成功必须清除人工恢复 reason（会话结束）"
+        );
+    }
+
+    #[test]
+    fn recovery_channel_rejects_non_manual_recovery_sources() {
+        let fixture = legacy_fixture();
+        let error = fixture
+            .store
+            .recover_attempt_from_manual_recovery(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect_err("Created 态无恢复语义");
+        assert!(matches!(&error, ProductStoreError::Io(message)
+            if message.contains("attempt_not_awaiting_manual_recovery")));
+
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("ticket");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("running");
+        let error = fixture
+            .store
+            .recover_attempt_from_manual_recovery(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect_err("Running 态不得经恢复通道重复进入");
+        assert!(matches!(&error, ProductStoreError::Io(message)
+            if message.contains("attempt_not_awaiting_manual_recovery")));
+    }
+
+    #[test]
+    fn general_admission_still_rejects_awaiting_manual_recovery() {
+        // F-14 零回归钉：恢复只能走显式通道（wire 动作 recover_coding），
+        // 一般 admission（半启动重启 / sc_advance 等自动路径共用入口）对
+        // AwaitingManualRecovery 保持 fail-closed 拒绝。
+        let fixture = legacy_fixture();
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("ticket");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("running");
+        fixture
+            .store
+            .transition_to_awaiting_manual_recovery(
+                &fixture.attempt.id,
+                TARGET_SNAPSHOT_IDENTITY_DRIFTED,
+            )
+            .expect("quarantine");
+        let error = fixture
+            .store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect_err("general admission must fail closed for awaiting_manual_recovery");
+        assert!(
+            matches!(&error, ProductStoreError::Io(message)
+                if message == ATTEMPT_AWAITING_MANUAL_RECOVERY),
+            "unexpected error: {error:?}"
+        );
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::AwaitingManualRecovery);
+    }
+
+    #[test]
+    fn manual_recovery_persists_diagnostic_chat_entry() {
+        // 死因可考（§3#5）：人工恢复转换同步落 System/SystemEvent 尾帧
+        // （稳定 reason 码 + 原始错误串），durable 层不再零痕迹。
+        let fixture = legacy_fixture();
+        fixture
+            .store
+            .append_manual_recovery_diagnostic(
+                &fixture.attempt,
+                "coding_runner_failed_while_running",
+                "provider spawn failed: exit 127",
+            )
+            .expect("diagnostic entry");
+        let entries = fixture
+            .store
+            .list_chat_entries(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("entries");
+        let entry = entries
+            .iter()
+            .find(|entry| matches!(
+                &entry.entry_type,
+                CodingEntryType::SystemEvent { event_type, .. }
+                    if event_type == "manual_recovery_transition"
+            ))
+            .expect("manual recovery diagnostic entry");
+        assert_eq!(entry.role, CodingAgentRole::System);
+        match &entry.entry_type {
+            CodingEntryType::SystemEvent { message, .. } => {
+                assert_eq!(
+                    message,
+                    "coding_runner_failed_while_running: provider spawn failed: exit 127"
+                );
+            }
+            other => panic!("unexpected entry type: {other:?}"),
+        }
     }
 
     fn legacy_fixture() -> Fixture {

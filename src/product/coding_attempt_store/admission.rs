@@ -146,6 +146,7 @@ impl CodingAttemptStore {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
+                false,
             )
         })
         .map_err(admission_store_code)
@@ -171,6 +172,7 @@ impl CodingAttemptStore {
                 &attempt.issue_id,
                 &attempt.id,
                 ticket,
+                false,
             )
         })
         .map_err(admission_store_code)
@@ -291,6 +293,7 @@ impl CodingAttemptStore {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
+                false,
             )
         }) {
             Ok(ticket) => ticket,
@@ -311,6 +314,7 @@ impl CodingAttemptStore {
                 &attempt.issue_id,
                 &attempt.id,
                 &ticket,
+                false,
             )
         }) {
             tracing::warn!(
@@ -325,26 +329,64 @@ impl CodingAttemptStore {
         self.get_attempt(project_id, issue_id, attempt_id)
     }
 
+    /// F-16：`awaiting_manual_recovery` 的显式恢复通道入口（wire 动作
+    /// `recover_coding` 专用）。仅接受当前处于 AwaitingManualRecovery 的
+    /// attempt，在同一 attempt 锁内重走完整路由/快照/policy admission 校验
+    /// （签发 ticket → CAS 消费）回到 Running，并清除 `manual_recovery_reason`。
+    ///
+    /// 与一般 admission（`admit_and_transition_attempt_to_executable` 等，对
+    /// AwaitingManualRecovery fail-closed 拒绝）刻意分离：半启动重启 / sc_advance
+    /// 等自动路径对人工恢复态依旧零动作（F-14 fail-closed 语义零回归），恢复
+    /// 只能由显式人工动作触发并重验目标身份。
+    pub(crate) fn recover_attempt_from_manual_recovery(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let current = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if current.status != CodingAttemptStatus::AwaitingManualRecovery {
+                return Err(ProductStoreError::Io(format!(
+                    "attempt_not_awaiting_manual_recovery: {:?}",
+                    current.status
+                )));
+            }
+            let ticket =
+                self.admit_attempt_for_execution_locked(project_id, issue_id, attempt_id, true)?;
+            self.transition_to_executable_locked(project_id, issue_id, attempt_id, &ticket, true)
+        })?;
+        self.get_attempt(project_id, issue_id, attempt_id)
+    }
+
     fn admit_attempt_for_execution_locked(
         &self,
         project_id: &str,
         issue_id: &str,
         attempt_id: &str,
+        allow_manual_recovery: bool,
     ) -> Result<AdmissionTicketRecord, ProductStoreError> {
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery {
+        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery && !allow_manual_recovery {
             return Err(ProductStoreError::Io(
                 ATTEMPT_AWAITING_MANUAL_RECOVERY.to_string(),
             ));
         }
-        if !super::attempt::valid_executable_admission_transition(&attempt.status) {
+        // F-16 恢复通道：AwaitingManualRecovery 只经
+        // `recover_attempt_from_manual_recovery`（allow=true）进入校验，其余
+        // 状态照走一般 admission 源状态表。
+        let source_valid = super::attempt::valid_executable_admission_transition(&attempt.status)
+            || (allow_manual_recovery
+                && attempt.status == CodingAttemptStatus::AwaitingManualRecovery);
+        if !source_valid {
             return Err(ProductStoreError::Io(format!(
                 "invalid_coding_attempt_status_transition: {:?} -> {:?}",
                 attempt.status,
                 CodingAttemptStatus::Running
             )));
         }
-
         let routing =
             RepositoryRouting::load_for_issue(&self.paths, &attempt.project_id, &attempt.issue_id)?;
         // v1.3：policy 读取与 routing 同一 lc_id 子树（逻辑 issue 的 target snapshot
@@ -409,9 +451,12 @@ impl CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
         ticket: &AdmissionTicketRecord,
+        allow_manual_recovery: bool,
     ) -> Result<(), ProductStoreError> {
         let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery {
+        let recovering_from_manual_recovery =
+            attempt.status == CodingAttemptStatus::AwaitingManualRecovery;
+        if recovering_from_manual_recovery && !allow_manual_recovery {
             return Err(ProductStoreError::Io(
                 ATTEMPT_AWAITING_MANUAL_RECOVERY.to_string(),
             ));
@@ -439,9 +484,11 @@ impl CodingAttemptStore {
         if ticket_expired(&persisted)? {
             return Err(ProductStoreError::Io(ADMISSION_TICKET_EXPIRED.to_string()));
         }
+        let source_valid = super::attempt::valid_executable_admission_transition(&attempt.status)
+            || (allow_manual_recovery && recovering_from_manual_recovery);
         if persisted.attempt_version != attempt.version
             || attempt.status == CodingAttemptStatus::Running
-            || !super::attempt::valid_executable_admission_transition(&attempt.status)
+            || !source_valid
         {
             return Err(ProductStoreError::Io(ADMISSION_TICKET_INVALID.to_string()));
         }
@@ -451,6 +498,11 @@ impl CodingAttemptStore {
         attempt.version += 1;
         attempt.updated_at = now.clone();
         attempt.admission_ticket_consumed_at = Some(now);
+        if recovering_from_manual_recovery {
+            // F-16：恢复成功即结束本次人工恢复会话——清除稳定 reason，回到
+            // 干净的 Running 语义（新会话由 CAS marker 重新锚定）。
+            attempt.manual_recovery_reason = None;
+        }
         self.save_coding_attempt_with_status(&attempt)?;
         // The attempt record is authoritative. Cleanup is intentionally best-effort: a failed
         // ticket-file deletion cannot turn a successfully committed transition into an error.

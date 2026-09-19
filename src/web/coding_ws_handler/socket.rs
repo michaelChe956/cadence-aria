@@ -358,6 +358,59 @@ async fn handle_coding_socket(
                     runner_started = true;
                     runner_command_tx = Some(command_tx);
                     drop(mutation_lease);
+                } else if inbound == CodingWsInMessage::RecoverCoding {
+                    // F-16：人工恢复态的显式恢复通道——重走 admission CAS 回到
+                    // Running（完整路由/快照/policy 重验），再复用 StartCoding
+                    // 同款 spawn 路径重启 runner。失败 fail-visible
+                    // （coding_recover_failed），不吞错误；状态门保证该分支只
+                    // 在 AwaitingManualRecovery 下可达。
+                    let recovered = coding_store.recover_attempt_from_manual_recovery(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                    );
+                    match recovered {
+                        Ok(updated) => {
+                            let Some(command_tx) = spawn_coding_runner(
+                                state.clone(),
+                                coding_store.clone(),
+                                event_tx.clone(),
+                                updated.clone(),
+                            ) else {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_runner_already_started".to_string(),
+                                        message:
+                                            "coding runner is already active for this attempt"
+                                                .to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            };
+                            runner_started = true;
+                            runner_command_tx = Some(command_tx);
+                            drop(mutation_lease);
+                            if let Ok(snapshot) =
+                                build_coding_session_state(&coding_store, updated)
+                            {
+                                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                            }
+                        }
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_recover_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 } else if inbound == CodingWsInMessage::FinalConfirm {
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
@@ -895,7 +948,13 @@ pub fn is_coding_ws_message_allowed(
         );
     }
     if *status == CodingAttemptStatus::AwaitingManualRecovery {
-        return matches!(message, CodingWsInMessage::AbortAttempt);
+        // F-16：AbortAttempt（终态出口）之外仅放行显式恢复动作 RecoverCoding
+        // （重走 admission CAS 回 Running + 重启 runner）；F-14 fail-closed
+        // 白名单的其余收紧面不动。
+        return matches!(
+            message,
+            CodingWsInMessage::AbortAttempt | CodingWsInMessage::RecoverCoding
+        );
     }
     match stage {
         CodingExecutionStage::PrepareContext => matches!(

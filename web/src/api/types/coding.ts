@@ -515,6 +515,8 @@ export type CodingWsInMessage =
   | { type: "final_confirm" }
   | { type: "retry_push" }
   | { type: "abort_attempt" }
+  /** F-16：awaiting_manual_recovery 显式恢复动作（重走 admission CAS 回 running）。 */
+  | { type: "recover_coding" }
   | { type: "request_manual_pause" }
   | { type: "coding_ping" };
 

@@ -771,6 +771,9 @@ pub(super) fn valid_status_transition(
         return false;
     }
     if current == &CodingAttemptStatus::AwaitingManualRecovery {
+        // 直达表保持 abort-only（F-14 fail-closed 不动）：恢复唯一通道是
+        // admission.rs 的 `recover_attempt_from_manual_recovery`（显式 wire
+        // 动作 recover_coding → 重验后 CAS 回 Running，F-16）。
         return next == &CodingAttemptStatus::Aborted;
     }
     if current == next {

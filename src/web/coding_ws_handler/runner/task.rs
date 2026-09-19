@@ -190,6 +190,37 @@ async fn run_coding_runner_task_body(
                 coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
                 && latest.status == CodingAttemptStatus::Running
             {
+                // 死因可考（KimiUpgrade §3#5）：runner pre-provider 死亡此前只发
+                // WS 瞬时帧（连接不在即丢）+ 服务 tty 无落盘，durable 层零痕迹。
+                // 双通道：aria-cancellation 同款 eprintln 直写 stdout（生产可见，
+                // 测试构建保留 tracing）；失败详情随转换落 chat-entries 尾帧。
+                #[cfg(not(test))]
+                eprintln!(
+                    "[aria-runner-death] coding runner failed while running trigger=pre_provider_failure project_id={} issue_id={} attempt_id={} reason={} error={}",
+                    attempt.project_id,
+                    attempt.issue_id,
+                    attempt.id,
+                    "coding_runner_failed_while_running",
+                    error
+                );
+                #[cfg(test)]
+                tracing::warn!(
+                    attempt_id = attempt.id.as_str(),
+                    reason = "coding_runner_failed_while_running",
+                    error = %error,
+                    "coding runner failed while running (pre-provider death)"
+                );
+                if let Err(diagnostic_error) = coding_store.append_manual_recovery_diagnostic(
+                    &latest,
+                    "coding_runner_failed_while_running",
+                    &error.to_string(),
+                ) {
+                    tracing::warn!(
+                        attempt_id = attempt.id.as_str(),
+                        error = %diagnostic_error,
+                        "failed to persist manual-recovery diagnostic chat entry"
+                    );
+                }
                 match coding_store.transition_to_awaiting_manual_recovery(
                     &attempt.id,
                     "coding_runner_failed_while_running",

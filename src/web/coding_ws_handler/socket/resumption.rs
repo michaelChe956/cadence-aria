@@ -169,6 +169,17 @@ fn fail_over_to_manual_recovery(
             %error,
             "semi-started runner restart manual-recovery transition failed"
         );
+    } else if let Err(diagnostic_error) =
+        coding_store.append_manual_recovery_diagnostic(attempt, reason, detail)
+    {
+        // 死因可考（F-16/§3#5）：转换成功但诊断尾帧落盘失败——warn 不吞，
+        // 状态转换与 reason 已 durable，错误详情仅缺 chat-entry 面。
+        tracing::warn!(
+            attempt_id = attempt.id.as_str(),
+            reason,
+            error = %diagnostic_error,
+            "semi-started runner restart manual-recovery diagnostic entry failed"
+        );
     }
     ResumedAttemptRunner::ManualRecovery {
         reason: reason.to_string(),
