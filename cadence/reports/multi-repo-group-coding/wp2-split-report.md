@@ -2,7 +2,7 @@
 
 - **change**: `openspec/changes/multi-repo-group-coding/`
 - **计划**: `cadence/plans/2026-09-19_计划文档_阶段4-C2_多仓group编码_v1.0.md`（v1.1）Task 2
-- **状态**: **全量交付（Batch 3 续做收口，C2T2b）**——Step 2/Step 4（`4830bf03`）+ Step 3 存储面（`942a8373`）+ Step 3 分流循环/engine 测试族/嵌套检查/审计占位（`d9324b44` 归一化+`b154839f`，§八）+隔离树终验全绿（§九）。「六、剩余工作」清单六项全部闭环（§十）。
+- **状态**: **全量交付（Batch 3 续做收口+C2T2b；fix round 1 已收，§十一）**——Step 2/Step 4（`4830bf03`）+ Step 3 存储面（`942a8373`）+ Step 3 分流循环/engine 测试族/嵌套检查/审计占位（`d9324b44` 归一化+`b154839f`，§八）+隔离树终验全绿（§九）+k3 P1 修复（`5c50ae64`，§十一）。「六、剩余工作」清单六项全部闭环（§十）。
 
 ## 一、已交付清单（按 commit）
 
@@ -150,3 +150,17 @@ advance 全族 78/78、workspace_engine 全量 1182/1182、coding_attempt_store 
 ## 十、结论
 
 §六交接清单六项全量闭环：①分流循环（`b154839f`）②T2S3 嵌套共存检查（同 commit，负向钉死）③审计占位（`record_split_audit` 空实现+T5 注释）④engine 级多 target 测试族 8 项红→绿 ⑤隔离树终验全绿（§九）⑥本报告补齐（2.1-2.4 证据清单全量+无自动编排断言+单值 schema 零改动自查）。WP2 拆分创建面收口；同批交付红线（T2+T3 一体关闸）维持——聚合视图（WP3）落地前不单独宣布拆分能力可用。
+
+## 十一、Fix round 1（k3 审 P1，`5c50ae64`，2026-09-19）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | Batch 3 的桶收窄（`validate_group_attempt_structure`）在**单 target Logical group 权威 units 漂移为 Some+None 混合**时提前以 `coding_group_attempt_incomplete` 拒绝——既抢在 `validate_group_attempt_integrity` 的 `validate_group_single_target` 之前，又把 it_web `mixed_target_group_recovery_rejects_drifted_some_none` 钉死的 `mixed_target_group_rejected`（422 稳定码）契约改成了 incomplete（400） |
+| 根因 | 桶收窄的适用面写成「带冻结快照即收窄」，漏了单 target plan 的漂移退化态：快照在场+权威 [Some(t), None] 时桶过滤丢掉 None unit → units.len()≠桶长 → incomplete 先炸 |
+| 修法（k3 给定） | 桶收窄门控于**权威 plan 自身 ≥2 桶**（`units_by_target(&authoritative).by_target.len() >= 2`——镜像 advance 分流门）；单 target plan（含漂移混合态）保持 whole-plan 语义 → 漂移继续由 `validate_group_single_target` 以 `mixed_target_group_rejected` 稳定码拒绝 |
+| 影响面 | 多 target 桶权威不受影响（分流 plan 恒 ≥2 桶，收窄照常）；单 target 语义回到 Batch 3 前形态 |
+| **逃逸原因登记** | §九隔离树终验只跑 `--lib`（单测面），未含 `--test it_web` 集成面——漂移稳定码契约只由 it_web 钉死，lib 面无同款断言故全绿逃逸。**本轮补**：隔离树（干净 HEAD=`58cc2df5`+仅本 fix patch+独立 target dir）加跑 `cargo test --locked --test it_web mixed_target_group` |
+
+**验证（隔离树）**：it_web `mixed_target_group_{creation_some_none_is_rejected_422, recovery_rejects_drifted_some_none, replay_rejects_drifted_some_none}` 3/3 绿（契约恢复）；`advance_split_targets` 8/8（多 target 桶权威保持）；`coding_attempt_store` 157/157；`workspace_engine::tests::advance` 36/36；fmt 幂等+clippy `--lib` 0 error（仅 pre-existing `contract_autorepair.rs` warning）。
+
+主树本轮并发说明：fix 期间 WP3 兄弟（plan_group_projection 等在途文件）暂态破坏主树编译面（inputs 导出族 E0432），故本轮验证全部在隔离树完成——与 §九先例同因同法。
