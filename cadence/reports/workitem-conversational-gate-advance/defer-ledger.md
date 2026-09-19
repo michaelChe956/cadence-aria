@@ -20,11 +20,12 @@
 | DEF-1 | 前端 UI（对话式人工门/advance 的 UI 呈现，D12 Non-Goals） | 不在阶段 3 范围 | 后续 UI change（派工前先读 `.agents/skills/ui-ux-pro-max/SKILL.md` 规划） |
 | DEF-2 | 真实 provider Confirmed campaign（真实链完成证据） | 不在阶段 3 收官范围（与 RR-1 对应：如实记缺口，不伪造不冒充） | 专项测量轮（重新授权+小规模预试验→修正→正式跑→单独测量报告） |
 | DEF-3 | SC 子 session 只读呈现形态（阶段 3 只锁 typed transcript/事件面） | 不在阶段 3 范围 | 后续呈现层 change |
-| DEF-4 | 未来 `auto_start_coding` 显式语义（advance 到 Ready 即止，不自动启动 coding provider） | 不在阶段 3 范围 | 后续 change |
+| DEF-4 | 未来 `auto_start_coding` 显式语义（advance 到 Ready 即止，不自动启动 coding provider） | 已销账（change ③ WP4：契约显式化入 `work-item-plan-advance` REQ-ADV-05；auto 通道降级为红线条件 defer 项 DEF-4A） | change ③ WP4（已闭环） |
 | DEF-5 | 多仓 coding（group coding 多仓库执行） | 不在阶段 3 范围 | 后续 change |
 | DEF-6 | 旧协议退役门（`HumanConfirmDecision` 等旧枚举在 REQ-WSC-07 退役门满足前不删） | 不在阶段 3 范围（legacy 零改动红线） | 退役门 change |
 | DEF-7 | 各任务复审 minor/info/observation 账（已过审不阻塞，终审逐项裁量）：1.2 residual（行为级区分 fixture 已由 2.2 兑现）/2.2 m1-m4/2.3 minor（活会话 stub 死胡同已由 3.2 消除）/3.3 M4 负向组合等/4.2 LOW-1..4/4.3 low×5（TOCTOU/双写窗口等）/5.x minor/6.1 Minor×5/6.2 info×2/6.3 minor（spy 埋点面）/7.1 R2-m1..m3+info×2/7.2 Minor-1（注释失实）+info×4/8.2 O1-O3/8.3 Minor-1..3+info/8.4 ⑦.2 | 终审裁量项；均非验收缺口（各自 review pass 在案） | controller 终审 |
 | DEF-8 | 7.2 Medium-1（`probe_amendment_gate_context` 无 context 分支错误码）已由用户拍板提前修复核销（`07e54dbf`）；7.2 Info-1 REST `workspace_session_confirm` 对 SC plan session 可达性封堵确认在案 | 已核销/确认，登记备查 | controller（已闭环） |
+| DEF-4A | 显式 opt-in auto 启动通道（红线五条：opt-in 持久化 run_policy/默认 off/per-attempt 单发/绝不批量/不动唯一人工门） | 条件 defer（触发=autopilot/驾驶舱真实 auto 需求；MUST 另行 change 显式定义，MUST NOT 以隐式或随 advance 形态落地） | REQ-ADV-05（work-item-plan-advance） |
 
 ## 台账反查入口
 

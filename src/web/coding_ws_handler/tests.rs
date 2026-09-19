@@ -53,6 +53,7 @@ mod failed_review_recovery;
 mod plan_repair;
 mod runner_cleanup;
 mod runner_recovery;
+mod sc_start_guard;
 
 #[tokio::test]
 async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() {

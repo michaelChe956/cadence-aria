@@ -271,6 +271,15 @@ mod tests {
             &key,
             &resumed_attempt(CodingAttemptStatus::Blocked, CodingExecutionStage::Coding)
         ));
+        // 未启动（Created）：恢复/重放路径不隐式启动 runner（REQ-ADV-05 句②锚）。
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(
+                CodingAttemptStatus::Created,
+                CodingExecutionStage::PrepareContext
+            )
+        ));
         assert!(!resumed_attempt_needs_runner(
             &registry,
             &key,
