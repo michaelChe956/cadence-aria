@@ -270,7 +270,9 @@ impl super::CodingAttemptStore {
         }
         let original = self.group_initialization_journal_path(project_id, issue_id, plan_id);
         if super::path_is_regular_file(&original)? {
-            return Ok(vec![self.get_group_initialization(project_id, issue_id, plan_id)?]);
+            return Ok(vec![
+                self.get_group_initialization(project_id, issue_id, plan_id)?,
+            ]);
         }
         let directory = self
             .coding_attempts_root(project_id, issue_id)
@@ -292,10 +294,7 @@ impl super::CodingAttemptStore {
         for entry in entries {
             let path = entry
                 .map_err(|error| {
-                    ProductStoreError::Io(format!(
-                        "read {} entry: {error}",
-                        directory.display()
-                    ))
+                    ProductStoreError::Io(format!("read {} entry: {error}", directory.display()))
                 })?
                 .path();
             if path.extension().and_then(|value| value.to_str()) == Some("json") {

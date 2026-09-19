@@ -58,5 +58,5 @@ pub(crate) fn map_advance_outcome(command_id: String, outcome: AdvanceOutcome) -
             workspace_entry,
             target_attempts,
         },
-}
+    }
 }

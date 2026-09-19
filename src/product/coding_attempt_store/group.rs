@@ -148,7 +148,6 @@ impl super::CodingAttemptStore {
             .map(|snapshot| snapshot.logical_repository_id)
     }
 
-
     #[cfg(test)]
     pub fn ensure_group_attempt_for_advance(
         &self,
@@ -227,10 +226,9 @@ impl super::CodingAttemptStore {
         let existing_attempts: Vec<CodingExecutionAttempt> = super::list_json_records(
             &self.coding_attempts_root(&input.project_id, &input.issue_id),
         )?;
-        if let Some(active) = existing_attempts
-            .into_iter()
-            .find(|attempt| attempt.status.is_active() && Self::attempt_target_bucket(attempt) == input_target)
-        {
+        if let Some(active) = existing_attempts.into_iter().find(|attempt| {
+            attempt.status.is_active() && Self::attempt_target_bucket(attempt) == input_target
+        }) {
             return Err(ProductStoreError::Io(format!(
                 "active_coding_attempt_exists: {}",
                 active.id

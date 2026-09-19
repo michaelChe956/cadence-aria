@@ -25,7 +25,10 @@ fn target_snapshot(logical_id: LogicalRepositoryId) -> AttemptTargetSnapshot {
     }
 }
 
-fn group_input(plan_id: &str, target: Option<LogicalRepositoryId>) -> CreateGroupCodingAttemptInput {
+fn group_input(
+    plan_id: &str,
+    target: Option<LogicalRepositoryId>,
+) -> CreateGroupCodingAttemptInput {
     CreateGroupCodingAttemptInput {
         project_id: PROJECT_ID.to_string(),
         issue_id: ISSUE_ID.to_string(),
@@ -55,7 +58,6 @@ fn complete_attempt(store: &CodingAttemptStore, attempt: &mut CodingExecutionAtt
         .write_coding_attempt_for_test(attempt)
         .expect("persist terminal attempt fixture");
 }
-
 
 #[test]
 fn same_target_second_attempt_rejected_per_plan_target() {
@@ -103,12 +105,22 @@ fn per_target_retrieval_returns_only_matching_bucket() {
         .expect("target B attempt");
 
     let retrieved_a = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, "work_item_plan_0001", Some(TARGET_A))
+        .get_attempt_for_work_item_group(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_plan_0001",
+            Some(TARGET_A),
+        )
         .expect("retrieve target A bucket")
         .expect("target A attempt exists");
     assert_eq!(retrieved_a.id, attempt_a.id);
     let retrieved_b = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, "work_item_plan_0001", Some(TARGET_B))
+        .get_attempt_for_work_item_group(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_plan_0001",
+            Some(TARGET_B),
+        )
         .expect("retrieve target B bucket")
         .expect("target B attempt exists");
     assert_eq!(retrieved_b.id, attempt_b.id);
@@ -153,18 +165,31 @@ fn snapshotless_attempt_never_blocks_or_pollutes_target_buckets() {
         .expect("A1: snapshotless attempt does not block target attempt creation");
 
     let retrieved = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, "work_item_plan_0001", Some(TARGET_A))
+        .get_attempt_for_work_item_group(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_plan_0001",
+            Some(TARGET_A),
+        )
         .expect("target bucket")
         .expect("A2: the bucket holds the target attempt, never the legacy one");
     assert_eq!(retrieved.id, target_attempt.id);
     assert!(
         store
-            .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, "work_item_plan_0001", Some(TARGET_B))
+            .get_attempt_for_work_item_group(
+                PROJECT_ID,
+                ISSUE_ID,
+                "work_item_plan_0001",
+                Some(TARGET_B)
+            )
             .expect("empty target bucket")
             .is_none(),
         "A2: legacy attempt is not silently attributed to another target"
     );
-    assert!(legacy.status.is_active(), "fixture keeps legacy attempt active");
+    assert!(
+        legacy.status.is_active(),
+        "fixture keeps legacy attempt active"
+    );
 }
 
 #[test]
@@ -225,19 +250,26 @@ fn logical_routing_fixture() -> (TempDir, CodingAttemptStore, Vec<String>) {
         .unwrap();
     let issue_id = issue.id;
     crate::product::logical_codebase::IssueCodebaseSelectionStore::new(paths.clone())
-        .save(&crate::product::logical_codebase::IssueCodebaseSelection::explicit(
-            &project.id,
-            &issue_id,
-            vec![target_a, target_b],
-            Vec::new(),
-            vec![target_a],
-            None,
-        ))
+        .save(
+            &crate::product::logical_codebase::IssueCodebaseSelection::explicit(
+                &project.id,
+                &issue_id,
+                vec![target_a, target_b],
+                Vec::new(),
+                vec![target_a],
+                None,
+            ),
+        )
         .unwrap();
     (
         tmp,
         CodingAttemptStore::new(paths),
-        vec![project.id, issue_id, target_a.0.to_string(), target_b.0.to_string()],
+        vec![
+            project.id,
+            issue_id,
+            target_a.0.to_string(),
+            target_b.0.to_string(),
+        ],
     )
 }
 
@@ -286,7 +318,14 @@ fn split_journal_lives_in_target_subpath_and_lists_back() {
             Some(target_a),
         )
         .expect("prepare per-target journal");
-    assert_eq!(journal_a.attempt.target_snapshot.as_ref().map(|s| s.logical_repository_id), Some(target_a));
+    assert_eq!(
+        journal_a
+            .attempt
+            .target_snapshot
+            .as_ref()
+            .map(|s| s.logical_repository_id),
+        Some(target_a)
+    );
 
     // 原路径不落文件（单 target 原路径零迁移的反向：多 target 不占原路径）。
     assert!(
@@ -316,7 +355,10 @@ fn split_journal_lives_in_target_subpath_and_lists_back() {
     let listed = store
         .list_group_initialization_journals_for_plan(project_id, issue_id, plan_id)
         .expect("list per-target journals");
-    let mut listed_ids = listed.iter().map(|j| j.attempt.id.clone()).collect::<Vec<_>>();
+    let mut listed_ids = listed
+        .iter()
+        .map(|j| j.attempt.id.clone())
+        .collect::<Vec<_>>();
     let mut expected_ids = vec![journal_a.attempt.id.clone(), journal_b.attempt.id.clone()];
     listed_ids.sort();
     expected_ids.sort();

@@ -187,7 +187,8 @@ impl super::CodingAttemptStore {
         // attempt——遍历全部 plan attempt 找 open/applying context（单 target
         // 场景仅一 attempt，语义零变化；多目标下 amendment 门以其宿主
         // target-attempt 为准）。
-        let plan_attempts = self.list_attempts_for_work_item_group(project_id, issue_id, plan_id)?;
+        let plan_attempts =
+            self.list_attempts_for_work_item_group(project_id, issue_id, plan_id)?;
         let mut found: Option<PlanAmendmentContext> = None;
         for attempt in &plan_attempts {
             for context in self.list_plan_amendment_contexts(attempt)? {
@@ -196,13 +197,12 @@ impl super::CodingAttemptStore {
                         context.status,
                         PlanAmendmentContextStatus::Open | PlanAmendmentContextStatus::Applying
                     )
+                    && found.replace(context).is_some()
                 {
-                    if found.replace(context).is_some() {
-                        return Err(ProductStoreError::Ambiguous {
-                            kind: "coding_plan_amendment_context_session",
-                            id: plan_session_id.to_string(),
-                        });
-                    }
+                    return Err(ProductStoreError::Ambiguous {
+                        kind: "coding_plan_amendment_context_session",
+                        id: plan_session_id.to_string(),
+                    });
                 }
             }
         }

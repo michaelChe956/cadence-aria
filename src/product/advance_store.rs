@@ -276,10 +276,7 @@ impl AdvanceStore {
 
     /// Test/next-stage orchestration hook. Task 5.1 deliberately never calls this
     /// on a first request; Task 5.2 owns the first durable record write.
-    pub fn put_record(
-        &self,
-        record: &AdvanceRecord,
-    ) -> Result<AdvanceRecord, ProductStoreError> {
+    pub fn put_record(&self, record: &AdvanceRecord) -> Result<AdvanceRecord, ProductStoreError> {
         validate_relative_id(&record.id)?;
         validate_relative_id(&record.command_id)?;
         validate_relative_id(&record.project_id)?;
@@ -757,15 +754,36 @@ mod tests {
         value.target_attempts = Vec::new();
         store.put_record(&value).unwrap();
 
-        assert!(store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_0001", "attempt_0001")
-            .unwrap());
-        assert!(!store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_0001", "attempt_other")
-            .unwrap());
-        assert!(!store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_missing", "attempt_0001")
-            .unwrap());
+        assert!(
+            store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_0001",
+                    "attempt_0001"
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_0001",
+                    "attempt_other"
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_missing",
+                    "attempt_0001"
+                )
+                .unwrap()
+        );
     }
 
     #[test]
@@ -782,16 +800,37 @@ mod tests {
         ];
         store.put_record(&value).unwrap();
 
-        assert!(store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_0001", "attempt_first")
-            .unwrap());
-        assert!(store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_0001", "attempt_second")
-            .unwrap());
+        assert!(
+            store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_0001",
+                    "attempt_first"
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_0001",
+                    "attempt_second"
+                )
+                .unwrap()
+        );
         // 双不匹配 fail-closed（守卫零变化红线）。
-        assert!(!store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_0001", "attempt_unbound")
-            .unwrap());
+        assert!(
+            !store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_0001",
+                    "attempt_unbound"
+                )
+                .unwrap()
+        );
     }
 
     #[test]
@@ -807,9 +846,16 @@ mod tests {
         store.put_record(&value).unwrap();
 
         // 未 Ready 一律拒绝（缺记录由上一测试覆盖）。
-        assert!(!store
-            .advance_is_ready_for_attempt("project_0001", "issue_0001", "plan_0001", "attempt_0001")
-            .unwrap());
+        assert!(
+            !store
+                .advance_is_ready_for_attempt(
+                    "project_0001",
+                    "issue_0001",
+                    "plan_0001",
+                    "attempt_0001"
+                )
+                .unwrap()
+        );
     }
 
     #[test]
