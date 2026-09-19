@@ -4,7 +4,7 @@
 > 基线：worktree `feat-b-0808-add-monorepo` HEAD=`a92151c4`（T4 开工实跑，63 文件=src 61+e2e 2；计划所记 61 为 `4d097c1d` src-only 口径，实施时以实跑为准）。
 > 处置 legend：**切 typed**=改发 typed 帧；**删除**=代码删除；**重钉**=测试断言随行为更新；**退役**=测试删除+理由留档；**保留只读**=呈现/服务端下发值消费，非发送面（T4 不动，T5 归属判定另定）；**待 T5**=T5 归属判定后同批删除。
 
-## 产码（22）
+## 产码（24）
 
 | # | 文件 | legacy 面 | 处置 |
 |---|---|---|---|
@@ -87,3 +87,4 @@
 **已覆盖的证据面**：D4/D5 退役留档（#56，理由与 typed 面 vitest 承接断言族在 spec 内注释+本表）；E4 保留声明（#57，只读行为）；其余 e2e 用例与本次迁移零交集（迁移面=legacy 决策发送/页面动作面，未触及断连重连/timeline 审计/视觉/内存等面）。前端门禁以 **vitest 全量 1489/1489 绿+tsc -b 0+`npm run build` 成功**出具。
 
 **后续**：环境具备 chrome/chromium-1217 后执行 `ARIA_E2E_PORT=<port> npm run test:e2e` 补跑（预期仅环境性失败归零，无迁移面用例）。
+| #64 | web/src/hooks/workspace-ws-message-handler.ts:148（human_confirm gate prompt 条目构建） | 保留只读（消费投影非决策发送——k3 P3 补行） |

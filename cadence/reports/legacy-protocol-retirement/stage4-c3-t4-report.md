@@ -52,3 +52,7 @@
 | `3837ba75` | feat(web): 产码迁移 16 文件（union/发送器/facade/路由/页面/组件，tsc 产码 0） |
 | `e404dfdc` | test(web): 测试面重钉+退役留档+stage key+bulk 帧+e2e D4/D5 退役+ARIA_E2E_PORT 旁路+wp3-frontend-inventory.md |
 | （本提交） | docs: 本报告+inventory e2e 豁免登记 |
+
+## Step 5 冒烟项处置登记（k3 P2 修订）
+
+计划 Step 5 真实构建端到端冒烟（SC 会话 approve/abandon/feedback/plan-repair 路由）**顺延至 T5 完成+部署后执行**：冒烟有效性依赖 T4 前端（typed 发送器）+T5 后端（删除面）同 build 部署——当前 v25 为 T4 前二进制，冒烟会走旧前端路径失真。T6 关闸前由 controller 在新部署上执行并回贴 ws.jsonl/审计证据至本报告与 inventory。非豁免，是顺延（依赖序如实）。
