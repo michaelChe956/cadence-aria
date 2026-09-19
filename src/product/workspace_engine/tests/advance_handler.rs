@@ -718,9 +718,13 @@ async fn advance_checkpoint_recovery_reuses_materialized_units_without_duplicate
 
 #[tokio::test]
 async fn advance_initialization_replay_resumes_same_record_attempt_and_units() {
+    // WP5 恢复矩阵（REQ-MTG-05）：单 target 七 checkpoint 全量（回归零变化锁）。
+    // GroupAttemptPersisted 为 T2 落地的第 7 checkpoint（attempt 落盘后、相位
+    // 推进前中断——durable 态与 JournalPrepared 的差异恰为 attempt 文件在场）。
     let checkpoints = [
         AdvanceInitializationFailpoint::RecordPersisted,
         AdvanceInitializationFailpoint::JournalPrepared,
+        AdvanceInitializationFailpoint::GroupAttemptPersisted,
         AdvanceInitializationFailpoint::AttemptPersisted,
         AdvanceInitializationFailpoint::WorktreeBound,
         AdvanceInitializationFailpoint::PlanBindingSaved,
@@ -772,9 +776,27 @@ async fn advance_initialization_replay_resumes_same_record_attempt_and_units() {
                     first_outer.as_ref().map(|journal| journal.phase),
                     Some(AdvanceInitializationPhase::JournalPrepared)
                 );
+                assert!(
+                    first_attempt_id.as_ref().is_none_or(|id| coding_store
+                        .get_attempt("project_0001", "issue_plan_0001", id)
+                        .is_err()),
+                    "attempt file must not be durable before the group attempt checkpoint"
+                );
+            }
+            AdvanceInitializationFailpoint::GroupAttemptPersisted => {
+                assert_eq!(
+                    first_outer.as_ref().map(|journal| journal.phase),
+                    Some(AdvanceInitializationPhase::JournalPrepared)
+                );
                 assert_eq!(
                     first_group.as_ref().map(|group| group.phase),
                     Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::Prepared)
+                );
+                assert!(
+                    first_attempt_id.as_ref().is_some_and(|id| coding_store
+                        .get_attempt("project_0001", "issue_plan_0001", id)
+                        .is_ok()),
+                    "group attempt file is durable before the phase checkpoint"
                 );
             }
             AdvanceInitializationFailpoint::AttemptPersisted => {
@@ -817,7 +839,6 @@ async fn advance_initialization_replay_resumes_same_record_attempt_and_units() {
                     Some(crate::product::coding_attempt_store::CodingGroupInitializationPhase::UnitsMaterialized)
                 );
             }
-            AdvanceInitializationFailpoint::GroupAttemptPersisted => unreachable!(),
         }
 
         let mut restarted = build_advance_engine(&root, lifecycle);
@@ -862,6 +883,15 @@ async fn advance_initialization_replay_resumes_same_record_attempt_and_units() {
             replay,
             AdvanceOutcome::Replayed { record } if record.status == AdvanceStatus::Ready
         ));
+        // WP5 恢复矩阵（REQ-MTG-05）：增殖审计为分流专属——单 target 全
+        // checkpoint 恢复路径不落任何 split-audit 记录（回归零变化锁）。
+        assert!(
+            coding_store
+                .get_split_audits_for_plan("project_0001", "issue_plan_0001", "work_item_plan_0001")
+                .unwrap()
+                .is_empty(),
+            "{checkpoint:?} single-target recovery must not write split audits"
+        );
     }
 }
 

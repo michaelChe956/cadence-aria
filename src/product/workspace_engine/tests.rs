@@ -4,6 +4,7 @@ include!("tests/part_01.rs");
 mod advance_handler;
 #[path = "tests/advance_initialization.rs"]
 mod advance_initialization;
+mod advance_split_recovery_matrix;
 mod advance_split_targets;
 include!("tests/part_02.rs");
 include!("tests/part_03.rs");

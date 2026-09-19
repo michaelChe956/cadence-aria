@@ -29,6 +29,8 @@ mod recovery;
 mod report;
 mod role_run;
 mod role_run_event;
+mod split_audit;
+pub use split_audit::*;
 pub mod target_snapshot;
 mod timeline;
 mod unit_run;

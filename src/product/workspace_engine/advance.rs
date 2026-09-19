@@ -160,7 +160,8 @@ pub use crate::product::advance_store::{
 use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
 use crate::product::coding_attempt_store::{
     AuthoritativeGroupPlanBinding, CodingAttemptStore, CreateGroupCodingAttemptInput,
-    UnitsByTarget, topologically_order_unit_bindings, units_by_target,
+    SplitAuditRecord, SplitAuditTrigger, SplitAuditTriggerKind, UnitsByTarget,
+    topologically_order_unit_bindings, units_by_target,
 };
 use crate::product::coding_models::CodingAdmissionKind;
 use crate::product::issue_store::IssueStore;
@@ -978,6 +979,17 @@ impl WorkspaceEngine {
                     )
                     .map_err(|error| format!("prepare group initialization failed: {error}"))?,
             };
+            // REQ-MTG-05（WP5 增殖审计）：分流创建/恢复/重放每过此点都以幂等
+            // 语义落审计（store 侧首写定档——身份一致命中不重写；中断后重放
+            // 补齐缺口不漂移，R7「创建/恢复/重放入口」全覆盖）。审计只记
+            // 事实，不承载调度。
+            record_split_audit(
+                &coding_store,
+                &input,
+                &authoritative,
+                &target,
+                &journal.attempt.id,
+            )?;
             let order_index = journal
                 .units
                 .iter()
@@ -1327,8 +1339,6 @@ impl WorkspaceEngine {
         advance_store
             .update_record(&ready_record)
             .map_err(|error| format!("persist ready advance record failed: {error}"))?;
-        // REQ-MTG-05（WP5）审计挂点：`record_split_audit`（本文件占位）在 T5 落地
-        // 真实现并接线；本 Task 不在分流成功点落任何 durable 审计记录。
         Ok(AdvanceOutcome::Completed {
             record: ready_record,
             attempt_id: first_attempt_id,
@@ -1497,18 +1507,34 @@ impl WorkspaceEngine {
     }
 }
 
-/// REQ-MTG-05（WP5 增殖审计）：分流创建成功点的审计挂点占位（T2 预留，T5 落地）。
-///
-/// T5 将以真实 durable 审计记录实现替换（`coding_attempt_store::split_audit`
-/// 新模块：增殖审计记录+per-(plan,target) 检索）并在 `initialize_advance_split`
-/// 成功返回前接线调用；本 Task 只钉住调用形态（编译期接口），不落任何记录、
-/// 不接任何调用。
-#[allow(dead_code)]
+/// REQ-MTG-05（WP5 增殖审计）：per-target 分流审计写入（T2 占位的真实现，
+/// R10 交接——签名按计划 Interfaces 定案结构从 T2 编译期接口演化为逐 target
+/// 调用：定案记录需 bound_plan_revision_id/dependency_graph_revision_id/trigger
+/// 三类 T2 占位签名未承载的字段）。落点
+/// `issue_lifecycle_root/{project}/{issue}/split-audit/{attempt_id}.json`，
+/// 一 target-attempt 一条；`trigger.command_id` 从 `AdvanceInput` 透传。
 fn record_split_audit(
-    _project_id: &str,
-    _issue_id: &str,
-    _plan_id: &str,
-    _command_id: &str,
-    _target_attempts: &[AdvanceTargetAttemptBinding],
-) {
+    coding_store: &CodingAttemptStore,
+    input: &AdvanceInput,
+    authoritative: &AuthoritativeGroupPlanBinding,
+    target: &crate::product::logical_codebase::LogicalRepositoryId,
+    attempt_id: &str,
+) -> Result<(), String> {
+    coding_store
+        .record_split_audit(&SplitAuditRecord {
+            id: attempt_id.to_string(),
+            project_id: input.project_id.clone(),
+            issue_id: input.issue_id.clone(),
+            plan_id: input.plan_id.clone(),
+            target_repository_id: target.0.to_string(),
+            attempt_id: attempt_id.to_string(),
+            bound_plan_revision_id: authoritative.plan_revision_id.clone(),
+            dependency_graph_revision_id: authoritative.dependency_graph_revision_id.clone(),
+            trigger: SplitAuditTrigger {
+                kind: SplitAuditTriggerKind::Advance,
+                command_id: Some(input.command_id.clone()),
+            },
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .map_err(|error| format!("record split audit failed: {error}"))
 }

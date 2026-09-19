@@ -335,4 +335,63 @@ mod tests {
             sc_advance_restart_blocked(&state, &unready).expect("unready sc_advance blocked");
         assert_eq!(reason, "sc_advance_restart_not_durable_ready");
     }
+
+    /// WP5 恢复矩阵（REQ-MTG-05 断连重连格）：多 target 分流的 Ready record 以
+    /// `target_attempts` 集绑定时，attach 重启门对集内每个 target-attempt 放行
+    /// （per-attempt 判定=精确匹配或集合包含）；集外 attempt 仍 fail-closed。
+    #[test]
+    fn sc_advance_restart_gate_accepts_split_target_attempt_set_membership() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        let advance_store = crate::product::advance_store::AdvanceStore::new(
+            crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria")),
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        advance_store
+            .put_record(&crate::product::advance_store::AdvanceRecord {
+                id: "advance_record_0001".to_string(),
+                command_id: "command_split_attach".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                plan_revision_id: "work_item_revision_0001".to_string(),
+                attempt_id: Some("coding_attempt_split_api".to_string()),
+                target_attempts: vec![
+                    crate::product::advance_store::AdvanceTargetAttemptBinding {
+                        target_repository_id: "logical_repo_api".to_string(),
+                        attempt_id: "coding_attempt_split_api".to_string(),
+                    },
+                    crate::product::advance_store::AdvanceTargetAttemptBinding {
+                        target_repository_id: "logical_repo_web".to_string(),
+                        attempt_id: "coding_attempt_split_web".to_string(),
+                    },
+                ],
+                status: crate::product::advance_store::AdvanceStatus::Ready,
+                workspace_entry: Some("workspace://coding_attempt_split_api".to_string()),
+                error: None,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .expect("seed split ready record");
+
+        let mut split_api =
+            resumed_attempt(CodingAttemptStatus::Running, CodingExecutionStage::Coding);
+        split_api.admission_kind = CodingAdmissionKind::ScAdvance;
+        split_api.work_item_group_id = Some("work_item_plan_0001".to_string());
+        split_api.id = "coding_attempt_split_api".to_string();
+        let mut split_web = split_api.clone();
+        split_web.id = "coding_attempt_split_web".to_string();
+
+        assert!(sc_advance_restart_blocked(&state, &split_api).is_none());
+        assert!(sc_advance_restart_blocked(&state, &split_web).is_none());
+
+        let mut foreign = split_api.clone();
+        foreign.id = "coding_attempt_foreign".to_string();
+        let (reason, _) = sc_advance_restart_blocked(&state, &foreign)
+            .expect("attempt outside the split set stays blocked");
+        assert_eq!(reason, "sc_advance_restart_not_durable_ready");
+    }
 }

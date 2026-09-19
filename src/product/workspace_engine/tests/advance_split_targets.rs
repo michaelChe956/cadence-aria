@@ -25,20 +25,22 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::process::Command;
 
-const SPLIT_PROJECT_ID: &str = "project_0001";
-const SPLIT_ISSUE_ID: &str = "issue_plan_0001";
-const SPLIT_PLAN_ID: &str = "work_item_plan_0001";
+pub(super) const SPLIT_PROJECT_ID: &str = "project_0001";
+pub(super) const SPLIT_ISSUE_ID: &str = "issue_plan_0001";
+pub(super) const SPLIT_PLAN_ID: &str = "work_item_plan_0001";
 
-struct SplitAdvanceFixture {
-    _root: tempfile::TempDir,
-    paths: ProductAppPaths,
-    api: LogicalRepositoryId,
-    web: LogicalRepositoryId,
-    lifecycle: LifecycleStore,
+pub(super) struct SplitAdvanceFixture {
+    pub(super) _root: tempfile::TempDir,
+    pub(super) paths: ProductAppPaths,
+    pub(super) api: LogicalRepositoryId,
+    pub(super) web: LogicalRepositoryId,
+    /// WP5 恢复矩阵（R4 抽样）：3-target 抽样组合的第三仓（2-target 为 None）。
+    pub(super) extra: Option<LogicalRepositoryId>,
+    pub(super) lifecycle: LifecycleStore,
 }
 
 impl SplitAdvanceFixture {
-    fn engine(&self) -> WorkspaceEngine {
+    pub(super) fn engine(&self) -> WorkspaceEngine {
         let session_record = self
             .lifecycle
             .list_workspace_sessions(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID)
@@ -58,12 +60,12 @@ impl SplitAdvanceFixture {
         )
     }
 
-    fn coding_store(&self) -> CodingAttemptStore {
+    pub(super) fn coding_store(&self) -> CodingAttemptStore {
         CodingAttemptStore::new(self.paths.clone())
     }
 }
 
-fn run_git(cwd: &std::path::Path, args: &[&str]) {
+pub(super) fn run_git(cwd: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -74,7 +76,21 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
 
 /// 两 logical 仓 + manifest + selection + bootstrap policy + per-unit target 草稿。
 /// `unattributed` 为 true 时 wi_unrelated 不带 target（fail-closed 负向夹具）。
-async fn split_advance_fixture(unattributed: bool) -> SplitAdvanceFixture {
+pub(super) async fn split_advance_fixture(unattributed: bool) -> SplitAdvanceFixture {
+    split_advance_fixture_with_target_count(2, unattributed).await
+}
+
+/// WP5 恢复矩阵（R4 抽样）：`target_count`=2 保持 T2 既有映射
+/// （[api, api, web]——wi_core+wi_registration 同桶）；=3 每桶恰一 unit
+/// （[t0, t1, t2]）。`unattributed` 仅对 2-target 有定义。
+pub(super) async fn split_advance_fixture_with_target_count(
+    target_count: usize,
+    unattributed: bool,
+) -> SplitAdvanceFixture {
+    assert!(
+        matches!(target_count, 2 | 3),
+        "split fixture supports 2 or 3 targets"
+    );
     let root = tempfile::tempdir().unwrap();
     crate::web::test_controls::PlanRepairFixtureRuntime::seed(
         root.path(),
@@ -92,8 +108,12 @@ async fn split_advance_fixture(unattributed: bool) -> SplitAdvanceFixture {
         .delete_attempt(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, &seeded_attempt.id)
         .unwrap();
 
+    let names: Vec<&str> = match target_count {
+        2 => vec!["split-api", "split-web"],
+        _ => vec!["split-api", "split-web", "split-extra-3"],
+    };
     let mut targets = Vec::new();
-    for name in ["split-api", "split-web"] {
+    for name in names {
         let canonical_path = root.path().join(name);
         fs::create_dir_all(&canonical_path).unwrap();
         run_git(&canonical_path, &["init", "--quiet"]);
@@ -127,9 +147,8 @@ async fn split_advance_fixture(unattributed: bool) -> SplitAdvanceFixture {
                 .expect("logical repository ID"),
         );
     }
-    let [api, web] = targets.as_slice() else {
-        panic!("fixture must register two targets");
-    };
+    let [api, web] = [targets[0], targets[1]];
+    let extra = targets.get(2).copied();
     let manifest = LogicalCodebaseStore::new(paths.clone())
         .load_manifest(SPLIT_PROJECT_ID)
         .unwrap()
@@ -141,33 +160,46 @@ async fn split_advance_fixture(unattributed: bool) -> SplitAdvanceFixture {
         .save(&IssueCodebaseSelection::explicit(
             SPLIT_PROJECT_ID,
             SPLIT_ISSUE_ID,
-            vec![*api, *web],
+            targets.clone(),
             Vec::new(),
             Vec::new(),
             None,
         ))
         .unwrap();
 
-    // unattributed 负向夹具：wi_registration 挪到 web 桶（保持 2 个 attributed
-    // 桶），wi_unrelated 置 None——触发「≥2 桶+无归属 unit」fail-closed。
-    let wi_registration_target = if unattributed { *web } else { *api };
+    // 2-target：wi_core+wi_registration 同桶（api）；unattributed 时 wi_registration
+    // 挪 web、wi_unrelated 置 None。3-target：每桶恰一 unit。
     let mut per_unit_targets = BTreeMap::new();
-    per_unit_targets.insert("wi_core", Some(*api));
-    per_unit_targets.insert("wi_registration", Some(wi_registration_target));
-    per_unit_targets.insert("wi_unrelated", if unattributed { None } else { Some(*web) });
+    match target_count {
+        2 => {
+            let wi_registration_target = if unattributed { web } else { api };
+            per_unit_targets.insert("wi_core", Some(api));
+            per_unit_targets.insert("wi_registration", Some(wi_registration_target));
+            per_unit_targets.insert("wi_unrelated", if unattributed { None } else { Some(web) });
+        }
+        _ => {
+            per_unit_targets.insert("wi_core", Some(targets[0]));
+            per_unit_targets.insert("wi_registration", Some(targets[1]));
+            per_unit_targets.insert("wi_unrelated", Some(targets[2]));
+        }
+    }
     seed_split_draft_records(&paths, &per_unit_targets);
+    if target_count == 3 {
+        clear_split_dependency_edges(&paths);
+    }
 
     let lifecycle = LifecycleStore::new(paths.clone());
     SplitAdvanceFixture {
         _root: root,
         paths,
-        api: *api,
-        web: *web,
+        api,
+        web,
+        extra,
         lifecycle,
     }
 }
 
-fn seed_split_draft_records(
+pub(super) fn seed_split_draft_records(
     app_paths: &ProductAppPaths,
     per_unit_targets: &BTreeMap<&str, Option<LogicalRepositoryId>>,
 ) {
@@ -222,7 +254,56 @@ fn seed_split_draft_records(
     }
 }
 
-fn split_input(command_id: &str) -> AdvanceInput {
+/// 3-target 抽样组合的依赖图手术：种子图的 wi_core→wi_registration 边在
+/// 「每桶恰一 unit」形态下构成跨桶依赖（一期显式 fail-closed——无跨 attempt
+/// 编排），将两侧 edge 清单一致改写为空（合法 plan 形态：units 无依赖边）。
+/// graph 与 plan projection 的全等约束见 group_validation
+/// 「plan projection dependencies do not match the bound dependency graph」。
+fn clear_split_dependency_edges(app_paths: &ProductAppPaths) {
+    use crate::product::models::DependencyGraphRevision;
+    let revision_store =
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(app_paths.clone());
+    let lineage = revision_store
+        .get_plan_lineage(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, SPLIT_PLAN_ID)
+        .unwrap();
+    let revision_id = lineage
+        .active_revision_id
+        .clone()
+        .expect("active plan revision");
+    let revision = revision_store
+        .get_plan_revision(
+            SPLIT_PROJECT_ID,
+            SPLIT_ISSUE_ID,
+            SPLIT_PLAN_ID,
+            &revision_id,
+        )
+        .unwrap();
+    let plan_root = app_paths
+        .issue_root(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID)
+        .join("work-item-revisions")
+        .join(SPLIT_PLAN_ID);
+
+    let mut graph: DependencyGraphRevision = revision_store
+        .get_dependency_graph_revision(&lineage, &revision.dependency_graph_revision_id)
+        .unwrap();
+    graph.edges.clear();
+    let graph_path = plan_root
+        .join("dependency-graph-revisions")
+        .join(format!("{}.json", graph.id));
+    std::fs::write(&graph_path, serde_json::to_vec(&graph).unwrap()).unwrap();
+
+    let mut projection = revision_store
+        .get_plan_projection_bundle(&lineage, &revision.plan_projection_bundle_id)
+        .unwrap();
+    projection.coder_group_context.dependency_edges = graph.edges.clone();
+    projection.reviewer_group_matrix.dependency_edges = graph.edges.clone();
+    let projection_path = plan_root
+        .join("plan-projection-bundles")
+        .join(format!("{}.json", projection.id));
+    std::fs::write(&projection_path, serde_json::to_vec(&projection).unwrap()).unwrap();
+}
+
+pub(super) fn split_input(command_id: &str) -> AdvanceInput {
     AdvanceInput {
         command_id: command_id.to_string(),
         project_id: SPLIT_PROJECT_ID.to_string(),
