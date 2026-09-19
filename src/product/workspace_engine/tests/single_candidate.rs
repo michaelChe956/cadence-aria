@@ -869,10 +869,12 @@ async fn sc_legacy_revise_gate_forces_human_confirm_on_consecutive_identical_fin
     engine.start_review().await;
     complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-001 capability"))
         .await;
+    // L2 重钉（T5/REQ-RET-02）：review_decision 阶段唯一消息族已删除——SC 首轮
+    // revise 改道 human gate（typed 三命令可应答），不再进入 review decision。
     assert_eq!(
         engine.session().stage,
-        WorkspaceStage::ReviewDecision,
-        "首轮 revise 不触发闸门，仍进入既有 review decision 路由"
+        WorkspaceStage::HumanConfirm,
+        "首轮 revise 即进 human gate（review_decision 消息族已随 L2 退役）"
     );
 
     // 第二轮：author 重跑后同一 candidate 再次收到实质相同 findings。
@@ -924,8 +926,8 @@ async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition
         .await;
     assert_eq!(
         engine.session().stage,
-        WorkspaceStage::ReviewDecision,
-        "不同指纹的连续 revise 不触发闸门"
+        WorkspaceStage::HumanConfirm,
+        "不同指纹的连续 revise 不触发闸门（L2 重钉：SC revise 一律进 human gate）"
     );
 
     // advisory-only findings 连续两轮相同：非 advisory 集合为空，不触发闸门。
@@ -951,8 +953,8 @@ async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition
     .await;
     assert_eq!(
         engine2.session().stage,
-        WorkspaceStage::ReviewDecision,
-        "advisory-only findings 重复不触发闸门"
+        WorkspaceStage::HumanConfirm,
+        "advisory-only findings 重复不触发闸门（L2 重钉：SC revise 一律进 human gate）"
     );
 }
 
