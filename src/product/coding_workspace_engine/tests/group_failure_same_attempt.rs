@@ -393,7 +393,8 @@ async fn group_failure_exhausted_enters_manual_recovery_without_new_attempt() {
             .get_attempt_for_work_item_group(
                 &attempt.project_id,
                 &attempt.issue_id,
-                "work_item_plan_0001"
+                "work_item_plan_0001",
+                None,
             )
             .expect("group attempts")
             .expect("attempt")

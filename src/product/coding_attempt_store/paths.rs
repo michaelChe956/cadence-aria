@@ -241,6 +241,22 @@ impl super::CodingAttemptStore {
             .join(format!("{plan_id}.json"))
     }
 
+    /// REQ-MTG-02（OQ2，WP2 分流创建）：多 target per-target journal 子路径
+    /// `group-initializations/{plan_id}/{logical_repository_id}.json`（单 target
+    /// journal 保持原路径 `{plan_id}.json` 零迁移——见上）。
+    pub(crate) fn group_initialization_journal_path_for_target(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        target: &crate::product::logical_codebase::LogicalRepositoryId,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("group-initializations")
+            .join(plan_id)
+            .join(format!("{}.json", target.0))
+    }
+
     pub(crate) fn amendment_applications_root(
         &self,
         project_id: &str,

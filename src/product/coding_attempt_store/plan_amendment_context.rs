@@ -183,26 +183,28 @@ impl super::CodingAttemptStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(plan_id)?;
         validate_relative_id(plan_session_id)?;
-        let Some(attempt) = self.get_attempt_for_work_item_group(project_id, issue_id, plan_id)?
-        else {
-            return Ok(None);
-        };
-        let mut matching = self
-            .list_plan_amendment_contexts(&attempt)?
-            .into_iter()
-            .filter(|context| {
-                context.plan_session_id == plan_session_id
+        // REQ-MTG-02（WP2 消费面适配）：多 target 拆分后一个 plan 可能有多
+        // attempt——遍历全部 plan attempt 找 open/applying context（单 target
+        // 场景仅一 attempt，语义零变化；多目标下 amendment 门以其宿主
+        // target-attempt 为准）。
+        let plan_attempts = self.list_attempts_for_work_item_group(project_id, issue_id, plan_id)?;
+        let mut found: Option<PlanAmendmentContext> = None;
+        for attempt in &plan_attempts {
+            for context in self.list_plan_amendment_contexts(attempt)? {
+                if context.plan_session_id == plan_session_id
                     && matches!(
                         context.status,
                         PlanAmendmentContextStatus::Open | PlanAmendmentContextStatus::Applying
                     )
-            });
-        let found = matching.next();
-        if found.is_some() && matching.next().is_some() {
-            return Err(ProductStoreError::Ambiguous {
-                kind: "coding_plan_amendment_context_session",
-                id: plan_session_id.to_string(),
-            });
+                {
+                    if found.replace(context).is_some() {
+                        return Err(ProductStoreError::Ambiguous {
+                            kind: "coding_plan_amendment_context_session",
+                            id: plan_session_id.to_string(),
+                        });
+                    }
+                }
+            }
         }
         Ok(found)
     }

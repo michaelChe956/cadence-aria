@@ -40,6 +40,7 @@ async fn group_initialization_recovers_all_journaled_restart_boundaries() {
                 "project_0001",
                 "issue_0001",
                 "work_item_plan_0001",
+                None,
             )
             .expect("interrupted group attempt lookup")
             .expect("interrupted group attempt");

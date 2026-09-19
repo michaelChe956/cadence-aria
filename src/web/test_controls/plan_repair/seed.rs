@@ -59,7 +59,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
 
     let store = CodingAttemptStore::new(paths.clone());
     if store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .is_some()
     {
@@ -488,7 +488,7 @@ pub(super) async fn route_upstream_contract_invalid(
 ) -> Result<PlanRepairFixtureWaiting, PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment {
@@ -523,7 +523,7 @@ pub(super) async fn start_plan_repair_finding(
 ) -> Result<(), PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     let revision_store = WorkItemRevisionStore::new(store.paths());

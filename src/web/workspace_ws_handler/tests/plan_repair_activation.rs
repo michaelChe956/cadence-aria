@@ -57,7 +57,12 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = store
-        .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .get_attempt_for_work_item_group(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001",
+            None,
+        )
         .unwrap()
         .unwrap();
     crate::web::coding_ws_handler::build_coding_session_state(&store, attempt.clone())

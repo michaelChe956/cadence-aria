@@ -721,7 +721,7 @@ pub(super) fn fixture_attempt(
     store: &CodingAttemptStore,
 ) -> Result<crate::product::coding_models::CodingExecutionAttempt, PlanRepairFixtureError> {
     store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .ok_or_else(|| fixture_error("fixture attempt is missing"))
 }

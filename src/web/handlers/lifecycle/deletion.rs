@@ -39,8 +39,10 @@ pub async fn delete_work_item_plan(
     // item 时还会再过一次 work item 级门禁（见 delete_work_item_with_cleanup）。
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     if let Some(attempt) = coding_store
-        .get_attempt_for_work_item_group(&project_id, &issue_id, &plan_id)
+        .list_attempts_for_work_item_group(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?
+        .into_iter()
+        .next()
     {
         return Err(coding_workspace_exists_error(&plan_id, &attempt.id));
     }
@@ -182,11 +184,12 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
     plan_id: &str,
     _lineage: &crate::product::models::WorkItemPlanLineage,
 ) -> ApiResult<()> {
-    // 门禁：存在 group coding attempt 时拒绝，要求用户先删 coding workspace。
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     if let Some(attempt) = coding_store
-        .get_attempt_for_work_item_group(project_id, issue_id, plan_id)
+        .list_attempts_for_work_item_group(project_id, issue_id, plan_id)
         .map_err(product_store_api_error)?
+        .into_iter()
+        .next()
     {
         return Err(coding_workspace_exists_error(plan_id, &attempt.id));
     }
@@ -274,6 +277,12 @@ fn purge_attempt_lock_residue(
     let journal_dir = coding_attempts_root.join("group-initializations");
     let _ = remove_file_if_exists(&journal_dir.join(format!("{plan_id}.json")));
     let _ = remove_file_if_exists(&journal_dir.join(format!(".{plan_id}.json.lock")));
+    // group-initializations/{plan_id}/ 子目录（WP2 多 target per-target journal）
+    // 连同子目录内 lock 整目录清理，NotFound 视为成功。
+    let plan_journal_dir = journal_dir.join(plan_id);
+    if plan_journal_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&plan_journal_dir);
+    }
 
     // work-item-attempt-locks/：single coding attempt 创建时按 work_item_id 命名的锁。
     // 这是 issue 级共享目录，多 plan 共 issue 时其他 plan 的 work_item 锁也在此，

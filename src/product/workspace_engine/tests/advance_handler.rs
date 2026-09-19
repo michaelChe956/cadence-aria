@@ -200,7 +200,12 @@ async fn advance_fixture() -> (TempDir, ProductAppPaths, LifecycleStore, Workspa
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .get_attempt_for_work_item_group(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001",
+            None,
+        )
         .unwrap()
         .expect("seeded group attempt");
     coding_store
@@ -253,7 +258,12 @@ async fn advance_valid_path_persists_ready_group_and_emits_completion() {
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .get_attempt_for_work_item_group(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001",
+            None,
+        )
         .unwrap()
         .expect("seeded group attempt");
     coding_store
@@ -391,7 +401,12 @@ async fn advance_checkpoint_recovery_reuses_prepared_attempt_and_unit_ids() {
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .get_attempt_for_work_item_group(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001",
+            None,
+        )
         .unwrap()
         .expect("seeded group attempt");
     coding_store
@@ -531,7 +546,12 @@ async fn advance_checkpoint_recovery_reuses_materialized_units_without_duplicate
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .get_attempt_for_work_item_group(
+            "project_0001",
+            "issue_plan_0001",
+            "work_item_plan_0001",
+            None,
+        )
         .unwrap()
         .expect("seeded group attempt");
     coding_store

@@ -165,15 +165,19 @@ pub async fn issue_lifecycle(
             ));
         }
 
-        let group_attempt = coding_store
-            .get_attempt_for_work_item_group(&project_id, &issue_id, &plan.id)
+        // REQ-MTG-02（WP2 消费面适配）：多 target 拆分后一个 plan 可有多
+        // attempt——全部纳入 DTO 与 units 索引（单 target 场景仅一 attempt，
+        // 语义零变化；units 按 target 分入各自 attempt，logical id 跨 attempt
+        // 不重复，完整性检查语义保持）。
+        let group_attempts = coding_store
+            .list_attempts_for_work_item_group(&project_id, &issue_id, &plan.id)
             .map_err(product_store_api_error)?;
-        let units_by_logical_id = if let Some(attempt) = group_attempt.as_ref() {
+        let mut units_by_logical_id = BTreeMap::new();
+        for attempt in &group_attempts {
             coding_attempts.push(coding_attempt_dto(&coding_store, attempt)?);
             let units = coding_store
                 .list_coding_units(&project_id, &issue_id, &attempt.id)
                 .map_err(product_store_api_error)?;
-            let mut units_by_logical_id = BTreeMap::new();
             for unit in units {
                 if unit.plan_id != plan.id
                     || plan_revision
@@ -192,10 +196,7 @@ pub async fn issue_lifecycle(
                     ));
                 }
             }
-            units_by_logical_id
-        } else {
-            BTreeMap::new()
-        };
+        }
 
         for human_projection in &plan_projection.human_group_projection.work_items {
             let work_item_revision_id = plan_revision
@@ -244,8 +245,12 @@ pub async fn issue_lifecycle(
                 &WorkspaceType::WorkItem,
             );
             let unit = units_by_logical_id.get(&human_projection.logical_work_item_id);
-            let latest_attempt = match group_attempt.as_ref() {
-                Some(attempt) => Some(coding_attempt_dto(&coding_store, attempt)?),
+            let latest_attempt = match unit {
+                Some(unit) => group_attempts
+                    .iter()
+                    .find(|attempt| attempt.id == unit.attempt_id)
+                    .map(|attempt| coding_attempt_dto(&coding_store, attempt))
+                    .transpose()?,
                 None => None,
             };
             work_items.push(lifecycle_work_item_runtime_dto(

@@ -67,12 +67,48 @@ impl super::CodingAttemptStore {
         Ok(target)
     }
 
+    /// REQ-MTG-02（WP2 检索细化，D2.1 A2）：per-`(plan, target)` 检索。
+    ///
+    /// - `Some(target)`：仅命中该 target 的 attempt（按 attempt 取最早，确定性
+    ///   兜底）；无快照 attempt 不入任何 target 桶，永不作为某 target 的命中
+    ///   返回（「取最早」歧义由 per-(plan,target) 检索+增殖审计面取代）。
+    /// - `None`：无快照桶（legacy 语义保持——单 target/legacy 场景行为零变化；
+    ///   routing 为 Legacy 时所有 attempt 均无快照）。
     pub fn get_attempt_for_work_item_group(
         &self,
         project_id: &str,
         issue_id: &str,
         plan_id: &str,
+        target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
     ) -> Result<Option<CodingExecutionAttempt>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        let mut attempts: Vec<CodingExecutionAttempt> =
+            super::list_json_records(&self.coding_attempts_root(project_id, issue_id))?
+                .into_iter()
+                .filter(|attempt: &CodingExecutionAttempt| {
+                    attempt.work_item_group_id.as_deref() == Some(plan_id)
+                        && Self::attempt_target_bucket(attempt) == target
+                })
+                .collect();
+        attempts.sort_by(|left, right| {
+            left.attempt_no
+                .cmp(&right.attempt_no)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(attempts.into_iter().next())
+    }
+
+    /// REQ-MTG-02（WP2）：plan 级全量列表（消费面迭代形态——删除门禁/投影/
+    /// amendment 路由用；按 attempt_no 升序）。单 target 场景与
+    /// `get_attempt_for_work_item_group(..., None)` 的「取最早」结果一致。
+    pub fn list_attempts_for_work_item_group(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Vec<CodingExecutionAttempt>, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         validate_relative_id(plan_id)?;
@@ -88,8 +124,30 @@ impl super::CodingAttemptStore {
                 .cmp(&right.attempt_no)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        Ok(attempts.into_iter().next())
+        Ok(attempts)
     }
+
+    /// attempt 的 target 桶键：快照在场取 `logical_repository_id`，否则 `None`
+    /// （D2.1 A2/A4：无快照 attempt 不计入任何 target 桶）。
+    pub(crate) fn attempt_target_bucket(
+        attempt: &CodingExecutionAttempt,
+    ) -> Option<crate::product::logical_codebase::LogicalRepositoryId> {
+        attempt
+            .target_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.logical_repository_id)
+    }
+
+    /// 建组输入的 target 桶键（输入快照在场取其 logical_repository_id）。
+    pub(crate) fn attempt_target_bucket_from_input(
+        input: &CreateGroupCodingAttemptInput,
+    ) -> Option<crate::product::logical_codebase::LogicalRepositoryId> {
+        input
+            .target_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.logical_repository_id)
+    }
+
 
     #[cfg(test)]
     pub fn ensure_group_attempt_for_advance(
@@ -110,6 +168,7 @@ impl super::CodingAttemptStore {
             &input.project_id,
             &input.issue_id,
             &input.plan_id,
+            Self::attempt_target_bucket_from_input(input),
         )? {
             if existing.admission_kind != CodingAdmissionKind::ScAdvance {
                 return Err(ProductStoreError::Conflict {
@@ -146,11 +205,14 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.plan_id)?;
         validate_relative_id(&input.current_work_item_id)?;
         super::validate_max_auto_rework(input.max_auto_rework)?;
-
+        let input_target = Self::attempt_target_bucket_from_input(&input);
+        // REQ-MTG-02（2.2 唯一性细化）：per-(plan,target) 第二 attempt 拒——
+        // D2.1 A1：无快照 attempt 不参与 per-(plan,target) 唯一性判定。
         if let Some(existing) = self.get_attempt_for_work_item_group(
             &input.project_id,
             &input.issue_id,
             &input.plan_id,
+            input_target,
         )? {
             return Err(ProductStoreError::Io(format!(
                 "coding_attempt_group_already_exists: {}",
@@ -158,12 +220,16 @@ impl super::CodingAttemptStore {
             )));
         }
 
+        // REQ-MTG-02（2.2 单 active 细化）：issue 级单 active 细化为
+        // per-(issue,target)——同 target 串行保留、异 target 并行解禁；
+        // D2.1 A4：无快照 active attempt 不计入任何桶（物理互斥由三元键
+        // worktree lock 兜底）。
         let existing_attempts: Vec<CodingExecutionAttempt> = super::list_json_records(
             &self.coding_attempts_root(&input.project_id, &input.issue_id),
         )?;
         if let Some(active) = existing_attempts
             .into_iter()
-            .find(|attempt| attempt.status.is_active())
+            .find(|attempt| attempt.status.is_active() && Self::attempt_target_bucket(attempt) == input_target)
         {
             return Err(ProductStoreError::Io(format!(
                 "active_coding_attempt_exists: {}",

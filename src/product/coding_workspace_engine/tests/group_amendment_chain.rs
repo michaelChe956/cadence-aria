@@ -321,7 +321,7 @@ fn publish_amendment_manifest(
     resume_mode: AmendmentResumeMode,
 ) -> PlanAmendmentManifest {
     let attempt = store
-        .get_attempt_for_work_item_group("project_0001", "issue_0001", &plan.id)
+        .get_attempt_for_work_item_group("project_0001", "issue_0001", &plan.id, None)
         .unwrap()
         .expect("group attempt");
     let old_revision = revision_store

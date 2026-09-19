@@ -119,6 +119,29 @@ impl super::CodingAttemptStore {
         unit_bindings: &[AuthoritativeCodingUnitBinding],
         admission_kind: CodingAdmissionKind,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
+        self.prepare_group_initialization_with_admission_for_target(
+            input,
+            bound_plan_revision_id,
+            unit_bindings,
+            admission_kind,
+            None,
+        )
+    }
+
+    /// REQ-MTG-02（OQ2 journal 路径规则，WP2 分流创建消费）：多 target 拆分的
+    /// per-target journal 变体。`journal_target=Some(t)` 时 journal 落
+    /// `group-initializations/{plan_id}/{t}.json` 子目录（单 target 保持原路径
+    /// `{plan_id}.json` 零迁移——本函数对既有调用方（`None`）行为零变化）。
+    /// attempt 级前置（唯一性/单 active）按输入快照 target 桶细化，与存储路径
+    /// 键无关。
+    pub fn prepare_group_initialization_with_admission_for_target(
+        &self,
+        input: &CreateGroupCodingAttemptInput,
+        bound_plan_revision_id: &str,
+        unit_bindings: &[AuthoritativeCodingUnitBinding],
+        admission_kind: CodingAdmissionKind,
+        journal_target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
+    ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         let routing =
             RepositoryRouting::load_for_issue(&self.paths, &input.project_id, &input.issue_id)?;
         let ordered_unit_bindings = if admission_kind == CodingAdmissionKind::ScAdvance {
@@ -132,11 +155,19 @@ impl super::CodingAttemptStore {
             &ordered_unit_bindings,
             &routing,
         )?;
-        let path = self.group_initialization_journal_path(
-            &input.project_id,
-            &input.issue_id,
-            &input.plan_id,
-        );
+        let path = match journal_target {
+            None => self.group_initialization_journal_path(
+                &input.project_id,
+                &input.issue_id,
+                &input.plan_id,
+            ),
+            Some(target) => self.group_initialization_journal_path_for_target(
+                &input.project_id,
+                &input.issue_id,
+                &input.plan_id,
+                &target,
+            ),
+        };
         if super::path_is_regular_file(&path)? {
             let journal: CodingGroupInitializationJournal = read_json(&path)?;
             validate_group_initialization_journal(&journal)?;
@@ -155,10 +186,14 @@ impl super::CodingAttemptStore {
             ));
         }
 
+        let input_target = super::CodingAttemptStore::attempt_target_bucket_from_input(input);
+        // REQ-MTG-02（2.2 唯一性细化，D2.1 A1）：per-(plan,target) 前置——无快照
+        // attempt 不参与唯一性判定（不阻塞 target-attempt 的 journal 准备）。
         if let Some(existing) = self.get_attempt_for_work_item_group(
             &input.project_id,
             &input.issue_id,
             &input.plan_id,
+            input_target,
         )? {
             return Err(incomplete_group_attempt(
                 &existing.id,
@@ -168,10 +203,12 @@ impl super::CodingAttemptStore {
         let existing_attempts: Vec<CodingExecutionAttempt> = super::list_json_records(
             &self.coding_attempts_root(&input.project_id, &input.issue_id),
         )?;
-        if let Some(active) = existing_attempts
-            .into_iter()
-            .find(|attempt| attempt.status.is_active())
-        {
+        // REQ-MTG-02（2.2 单 active 细化，D2.1 A4）：per-(issue,target)——无快照
+        // active attempt 不计入任何桶。
+        if let Some(active) = existing_attempts.into_iter().find(|attempt| {
+            attempt.status.is_active()
+                && super::CodingAttemptStore::attempt_target_bucket(attempt) == input_target
+        }) {
             return Err(ProductStoreError::Io(format!(
                 "active_coding_attempt_exists: {}",
                 active.id
@@ -183,6 +220,7 @@ impl super::CodingAttemptStore {
             bound_plan_revision_id,
             &ordered_unit_bindings,
             admission_kind,
+            journal_target,
         )?;
         write_json(&path, &journal)?;
         Ok(journal)
@@ -218,6 +256,71 @@ impl super::CodingAttemptStore {
         Ok(journal)
     }
 
+    /// REQ-MTG-02（OQ2 读取规则，WP2）：plan 的全部初始化 journal——先试原路径
+    /// （存量单 target journal 零迁移），原路径不存在再列 `{plan_id}/` 子目录
+    /// （按文件名=target UUID 升序，确定性）。
+    pub fn list_group_initialization_journals_for_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Vec<CodingGroupInitializationJournal>, ProductStoreError> {
+        for id in [project_id, issue_id, plan_id] {
+            validate_relative_id(id)?;
+        }
+        let original = self.group_initialization_journal_path(project_id, issue_id, plan_id);
+        if super::path_is_regular_file(&original)? {
+            return Ok(vec![self.get_group_initialization(project_id, issue_id, plan_id)?]);
+        }
+        let directory = self
+            .coding_attempts_root(project_id, issue_id)
+            .join("group-initializations")
+            .join(plan_id);
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| {
+                    ProductStoreError::Io(format!(
+                        "read {} entry: {error}",
+                        directory.display()
+                    ))
+                })?
+                .path();
+            if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        let mut journals = Vec::with_capacity(paths.len());
+        for path in paths {
+            let journal: CodingGroupInitializationJournal = read_json(&path)?;
+            validate_group_initialization_journal(&journal)?;
+            if journal.project_id != project_id
+                || journal.issue_id != issue_id
+                || journal.plan_id != plan_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_initialization_journal",
+                    id: plan_id.to_string(),
+                });
+            }
+            journals.push(journal);
+        }
+        Ok(journals)
+    }
+
     pub fn ensure_group_initialization_attempt(
         &self,
         journal: &CodingGroupInitializationJournal,
@@ -230,11 +333,17 @@ impl super::CodingAttemptStore {
             &journal.issue_id,
             &journal.lock_work_item_id,
         )?;
+        // REQ-MTG-02（2.2 异 target 并行解禁）：active 检查按 target 桶细化——
+        // 本 journal 的桶内必须恰为自身；异 target active（D2.1 A4 无快照亦同）
+        // 不阻塞。
+        let journal_target = Self::attempt_target_bucket(&journal.attempt);
         let active_attempts = super::list_json_records::<CodingExecutionAttempt>(
             &self.coding_attempts_root(&journal.project_id, &journal.issue_id),
         )?
         .into_iter()
-        .filter(|attempt| attempt.status.is_active())
+        .filter(|attempt| {
+            attempt.status.is_active() && Self::attempt_target_bucket(attempt) == journal_target
+        })
         .collect::<Vec<_>>();
         let attempt_path =
             self.attempt_path(&journal.project_id, &journal.issue_id, &journal.attempt.id);
@@ -311,11 +420,15 @@ impl super::CodingAttemptStore {
                 "persisted attempt differs from initialization journal",
             ));
         }
+        // REQ-MTG-02（2.2）：同 ensure——active 检查按 target 桶细化。
+        let journal_target = Self::attempt_target_bucket(&journal.attempt);
         let active_attempts = super::list_json_records::<CodingExecutionAttempt>(
             &self.coding_attempts_root(&journal.project_id, &journal.issue_id),
         )?
         .into_iter()
-        .filter(|attempt| attempt.status.is_active())
+        .filter(|attempt| {
+            attempt.status.is_active() && Self::attempt_target_bucket(attempt) == journal_target
+        })
         .collect::<Vec<_>>();
         if active_attempts.len() != 1 || active_attempts[0].id != journal.attempt.id {
             return Err(incomplete_group_attempt(
@@ -406,11 +519,7 @@ impl super::CodingAttemptStore {
         error: &str,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         validate_group_initialization_journal(journal)?;
-        let path = self.group_initialization_journal_path(
-            &journal.project_id,
-            &journal.issue_id,
-            &journal.plan_id,
-        );
+        let path = self.locate_group_initialization_journal_path(journal)?;
         let mut current: CodingGroupInitializationJournal = read_json(&path)?;
         validate_group_initialization_journal(&current)?;
         if !same_group_initialization_identity(&current, journal) {
@@ -430,11 +539,7 @@ impl super::CodingAttemptStore {
         next: CodingGroupInitializationPhase,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         validate_group_initialization_journal(expected)?;
-        let path = self.group_initialization_journal_path(
-            &expected.project_id,
-            &expected.issue_id,
-            &expected.plan_id,
-        );
+        let path = self.locate_group_initialization_journal_path(expected)?;
         let mut current: CodingGroupInitializationJournal = read_json(&path)?;
         validate_group_initialization_journal(&current)?;
         if !same_group_initialization_identity(&current, expected) {
@@ -463,23 +568,79 @@ impl super::CodingAttemptStore {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), ProductStoreError> {
-        let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        let Some(_plan_id) = attempt.work_item_group_id.as_deref() else {
             return Ok(());
         };
-        let path =
-            self.group_initialization_journal_path(&attempt.project_id, &attempt.issue_id, plan_id);
-        if !super::path_is_regular_file(&path)? {
-            return Ok(());
+        // 先查原路径（单 target journal——mismatch 保持原 fail-closed 报错），
+        // 再查 per-target 子目录（异 target 的 sibling journal 跳过不误删）。
+        let original = self.group_initialization_journal_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            _plan_id,
+        );
+        if super::path_is_regular_file(&original)? {
+            let journal: CodingGroupInitializationJournal = read_json(&original)?;
+            validate_group_initialization_journal(&journal)?;
+            if journal.attempt.id != attempt.id {
+                return Err(incomplete_group_attempt(
+                    &attempt.id,
+                    "delete target differs from initialization journal",
+                ));
+            }
+            return super::remove_file_if_exists(&original);
         }
-        let journal: CodingGroupInitializationJournal = read_json(&path)?;
-        validate_group_initialization_journal(&journal)?;
-        if journal.attempt.id != attempt.id {
-            return Err(incomplete_group_attempt(
-                &attempt.id,
-                "delete target differs from initialization journal",
-            ));
+        if let Some(target) = Self::attempt_target_bucket(attempt) {
+            let target_path = self.group_initialization_journal_path_for_target(
+                &attempt.project_id,
+                &attempt.issue_id,
+                _plan_id,
+                &target,
+            );
+            if super::path_is_regular_file(&target_path)? {
+                let journal: CodingGroupInitializationJournal = read_json(&target_path)?;
+                validate_group_initialization_journal(&journal)?;
+                if journal.attempt.id == attempt.id {
+                    return super::remove_file_if_exists(&target_path);
+                }
+            }
         }
-        super::remove_file_if_exists(&path)
+        Ok(())
+    }
+
+    /// OQ2 定位规则（WP2）：mark/advance 相位函数据此找到 journal 的实际存储
+    /// 位置——先试原路径（存量单 target journal 零迁移），再试 attempt 快照
+    /// 对应的 per-target 子目录；两处 id 均不匹配时回落原路径（由调用方的
+    /// 既有校验产出 fail-closed 错误）。
+    fn locate_group_initialization_journal_path(
+        &self,
+        journal: &CodingGroupInitializationJournal,
+    ) -> Result<std::path::PathBuf, ProductStoreError> {
+        let original = self.group_initialization_journal_path(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.plan_id,
+        );
+        if super::path_is_regular_file(&original)? {
+            let existing: CodingGroupInitializationJournal = read_json(&original)?;
+            if existing.id == journal.id {
+                return Ok(original);
+            }
+        }
+        if let Some(target) = Self::attempt_target_bucket(&journal.attempt) {
+            let target_path = self.group_initialization_journal_path_for_target(
+                &journal.project_id,
+                &journal.issue_id,
+                &journal.plan_id,
+                &target,
+            );
+            if super::path_is_regular_file(&target_path)? {
+                let existing: CodingGroupInitializationJournal = read_json(&target_path)?;
+                if existing.id == journal.id {
+                    return Ok(target_path);
+                }
+            }
+        }
+        Ok(original)
     }
 
     fn build_group_initialization_journal(
@@ -488,6 +649,7 @@ impl super::CodingAttemptStore {
         bound_plan_revision_id: &str,
         unit_bindings: &[AuthoritativeCodingUnitBinding],
         admission_kind: CodingAdmissionKind,
+        journal_target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         let id = self.allocate_coding_attempt_id();
         let attempt_no = self
@@ -562,7 +724,15 @@ impl super::CodingAttemptStore {
             })
             .collect::<Vec<_>>();
         let journal = CodingGroupInitializationJournal {
-            id: format!("coding_group_initialization_{}", input.plan_id),
+            id: match journal_target {
+                // OQ2：单 target journal id 保持原形态（存量零迁移）；多 target
+                // per-target journal 以 target UUID 限定（同 plan 各 journal 身份
+                // 可区分，定位规则按 id 匹配）。
+                None => format!("coding_group_initialization_{}", input.plan_id),
+                Some(target) => {
+                    format!("coding_group_initialization_{}_{}", input.plan_id, target.0)
+                }
+            },
             project_id: input.project_id.clone(),
             issue_id: input.issue_id.clone(),
             plan_id: input.plan_id.clone(),
@@ -713,7 +883,7 @@ fn journal_matches_request(
             })
 }
 
-fn topologically_order_unit_bindings(
+pub(crate) fn topologically_order_unit_bindings(
     bindings: &[AuthoritativeCodingUnitBinding],
 ) -> Result<Vec<AuthoritativeCodingUnitBinding>, ProductStoreError> {
     use std::collections::{BTreeMap, BTreeSet};

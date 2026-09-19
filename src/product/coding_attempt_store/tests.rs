@@ -24,6 +24,7 @@ mod failed_review_recovery_rollback;
 mod git_operation;
 mod git_operation_pointer;
 mod group_final_readiness;
+mod group_split_target;
 mod group_uniqueness;
 mod plan_repair;
 mod pointer_review_request;

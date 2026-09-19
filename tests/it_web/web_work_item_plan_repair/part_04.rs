@@ -72,6 +72,7 @@ async fn child_confirmation_publishes_applies_and_restarts_through_real_websocke
             "project_0001",
             "issue_plan_0001",
             "work_item_plan_0001",
+            None,
         )
         .expect("load group attempt")
         .expect("group attempt");
@@ -200,6 +201,7 @@ async fn child_confirmation_retries_activation_after_coding_socket_connects() {
             "project_0001",
             "issue_plan_0001",
             "work_item_plan_0001",
+            None,
         )
         .expect("load group attempt")
         .expect("group attempt");
@@ -316,6 +318,7 @@ async fn topology_child_confirmation_applies_and_resumes_through_real_websockets
             "project_0001",
             "issue_plan_0001",
             "work_item_plan_0001",
+            None,
         )
         .expect("load group attempt")
         .expect("group attempt");
