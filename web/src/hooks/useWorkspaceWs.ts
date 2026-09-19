@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-// L2 退役（T5/REQ-RET-02）：sendSelectRevisionPath/sendAuthorDecision/send
-// SelectWorkItemGenerationMode/sendRequestOutlineRevision/sendWorkItemDraft
-// Decision/sendWorkItemBatchDecision/sendReviewDecision 发送器随 wire 消息族
-// 删除（wp5-attribution-table.md §1）。
+// L2 退役（T5/REQ-RET-02）：修订路径选择/作者决策/生成模式选择/outline 修订
+// 请求/草稿决策/批量决策/review 决策应答的发送器随 wire 消息族删除
+// （wp5-attribution-table.md §1）。
 import type {
   LinkedWorkspaceAmendmentTarget,
   ProviderConfigSnapshot,

@@ -246,10 +246,10 @@ async fn conversational_gate_terminate_is_durable_and_emits_one_terminal_close_e
 }
 
 /// L0 typed 重承载（REQ-RET-02/REQ-CG-04）红绿锚：SC 门关门决策脱离 legacy
-/// `HumanConfirmDecision`——`HumanGateCloseDecision::Abandon` 经关门链路的
+/// human-confirm 决策枚举——`HumanGateCloseDecision::Abandon` 经关门链路的
 /// 行为与旧 Terminate 路径逐项等价（终态/durable/事件单条、in-flight Busy、
 /// 预算耗尽仍可 abandon），且类型面即证明全程不经 legacy 枚举
-/// （本函数体内不出现 `HumanConfirmDecision`）。
+/// （本函数体内不出现该旧枚举的类型名）。
 #[tokio::test]
 async fn abandon_human_gate_command_closes_gate_without_legacy_enum() {
     // 1) 开门态 typed abandon：终态 Abandoned + durable Terminated + 单条 close 事件。

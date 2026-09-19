@@ -168,8 +168,8 @@ pub struct WorkItemPlanOutlineCandidateDto {
 }
 
 /// Legacy 逐段流的 generation-mode 值类型（T5 退役后仅存于历史 outline candidate
-/// artifact 载荷与 SC 内部诊断记录 `select_internal_generation_mode`——wire 消息
-/// `SelectWorkItemGenerationMode` 已删除，见 wp5-attribution-table.md §1）。
+/// artifact 载荷与 SC 内部诊断记录 `select_internal_generation_mode`——生成模式
+/// 选择 wire 消息已删除，见 wp5-attribution-table.md §1）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemGenerationModeDto {

@@ -246,84 +246,14 @@ pub(crate) fn valid_outline_output() -> Value {
     })
 }
 
-pub(crate) fn context_blocker_outline_output() -> Value {
-    json!({
-        "context_blockers": [
-            {
-                "code": "missing_module_boundary",
-                "message": "无法判断会话 API 应落在 product 还是 web 层。",
-                "needed_context": ["请补充模块边界", "请说明测试策略"]
-            }
-        ]
-    })
-}
+// 退役留档（T5/REQ-RET-02）：context_blocker_outline_output 夹具（ContextBlocker 面已随 L2 删除）随消息族退役。
 
-pub(crate) fn invalid_outline_output_duplicate_ids() -> Value {
-    let mut output = valid_outline_output();
-    let outlines = output["outline"]["work_item_outlines"]
-        .as_array_mut()
-        .expect("outline array");
-    outlines[1]["outline_id"] = json!("outline_backend_session");
-    output
-}
+// 退役留档（T5/REQ-RET-02）：invalid_outline_output_duplicate_ids 夹具为 outline staged 校验重试测试专用，随消息族退役。
 
-pub(crate) fn malformed_outline_structured_stdout() -> String {
-    r#"Fake Work Item Plan streaming draft
+// 退役留档（T5/REQ-RET-02）：malformed_outline_structured_stdout 夹具为 outline structured 解析重试测试专用，随消息族退役。
 
-<ARIA_STRUCTURED_OUTPUT nonce="badjson1">
-{"nonce":"badjson1","outline":{"id":"outline_artifact_wip_0001","project_id":"project_0001","issue_id":"issue_0001","source_story_spec_ids":[],"source_design_spec_ids":[],"strategy_summary":"bad json","work_item_outlines":[{"outline_id":"outline_backend_session","title":"后端：会话 API","kind":"backend","goal":"实现后端会话 API","scope":[],"non_goals":[],"source_story_spec_ids":[],"source_design_spec_ids":[],"exclusive_write_scopes":["src/product/session.rs"],"forbidden_write_scopes":[],"depends_on":[],"verification_intent":[],"handoff_notes":"后续前端依赖 DTO"},"handoff_strategy":"wrongly nested top-level field","risks":[],"status":"draft"},"context_blockers":[]}
-</ARIA_STRUCTURED_OUTPUT>"#
-        .to_string()
-}
 
-pub(crate) fn valid_revision_redo_output() -> Value {
-    json!({
-        "repository_profile": {
-            "confidence": "high",
-            "detected_layers": ["backend", "frontend"],
-            "split_recommendation": "frontend_backend",
-            "languages": ["rust"],
-            "frameworks": [],
-            "package_managers": ["cargo"],
-            "test_frameworks": [],
-            "build_systems": ["cargo"],
-            "verification_capabilities": ["cargo test"],
-            "uncertainties": []
-        },
-        "work_items": [
-            {
-                "title": "实现后端登录会话 API（重做）",
-                "kind": "backend",
-                "sequence_hint": 10,
-                "depends_on": [],
-                "exclusive_write_scopes": ["src/product/session.rs"],
-                "forbidden_write_scopes": ["web/**"],
-                "require_execution_plan_confirm": false
-            }
-        ],
-        "verification_plans": [
-            {
-                "scope": "unit",
-                "commands": [
-                    {
-                        "label": "cargo test backend",
-                        "command": "cargo test --lib session",
-                        "cwd": "",
-                        "purpose": "backend unit tests",
-                        "required": true,
-                        "timeout_seconds": 120,
-                        "safety": "approved"
-                    }
-                ],
-                "manual_checks": [],
-                "required_gates": [],
-                "risk_notes": [],
-                "confidence": "high",
-                "fallback_policy": "manual_gate"
-            }
-        ]
-    })
-}
+// 退役留档（T5/REQ-RET-02）：valid_revision_redo_output 夹具为 legacy full-candidate revision 流测试专用，随消息族退役。
 
 pub(crate) fn invalid_split_output_missing_e2e() -> Value {
     json!({
@@ -376,47 +306,20 @@ pub(crate) fn invalid_split_output_missing_e2e() -> Value {
 
 #[derive(Clone)]
 pub(crate) struct QueuedSplitStreamingProvider {
-    outputs: Arc<Mutex<VecDeque<QueuedSplitOutput>>>,
+    outputs: Arc<Mutex<VecDeque<Value>>>,
     captured_prompts: Option<Arc<Mutex<Vec<String>>>>,
-}
-
-#[derive(Clone)]
-pub(crate) enum QueuedSplitOutput {
-    Json(Value),
-    RawStdout(String),
-    Pending,
 }
 
 impl QueuedSplitStreamingProvider {
     pub(crate) fn new(outputs: Vec<Value>) -> Self {
         Self {
-            outputs: Arc::new(Mutex::new(VecDeque::from(
-                outputs
-                    .into_iter()
-                    .map(QueuedSplitOutput::Json)
-                    .collect::<Vec<_>>(),
-            ))),
+            outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
             captured_prompts: None,
         }
     }
 
     pub(crate) fn new_recording(
         outputs: Vec<Value>,
-        captured_prompts: Arc<Mutex<Vec<String>>>,
-    ) -> Self {
-        Self {
-            outputs: Arc::new(Mutex::new(VecDeque::from(
-                outputs
-                    .into_iter()
-                    .map(QueuedSplitOutput::Json)
-                    .collect::<Vec<_>>(),
-            ))),
-            captured_prompts: Some(captured_prompts),
-        }
-    }
-
-    pub(crate) fn new_raw_recording(
-        outputs: Vec<QueuedSplitOutput>,
         captured_prompts: Arc<Mutex<Vec<String>>>,
     ) -> Self {
         Self {
@@ -442,37 +345,31 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
                 .expect("captured prompts lock")
                 .push(input.prompt.clone());
         }
-        let output = self
+        let mut output = self
             .outputs
             .lock()
             .expect("queued split outputs lock")
             .pop_front()
-            .unwrap_or_else(|| QueuedSplitOutput::Json(valid_split_output()));
-        let full_output = match output {
-            QueuedSplitOutput::Json(mut output) => {
-                let nonce = input
-                    .structured_output_contract
-                    .as_ref()
-                    .map(|contract| contract.nonce.clone())
-                    .unwrap_or_else(|| {
-                        input
-                            .prompt
-                            .split_once("<ARIA_STRUCTURED_OUTPUT nonce=\"")
-                            .and_then(|(_, tail)| tail.split_once('"'))
-                            .map(|(nonce, _)| nonce.to_string())
-                            .unwrap_or_else(|| "FAKE0001".to_string())
-                    });
-                if let Some(object) = output.as_object_mut() {
-                    object.insert("nonce".to_string(), serde_json::json!(nonce));
-                }
-                Some(format!(
-                    "Fake Work Item Plan streaming draft\n\n\
-                     <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{output}</ARIA_STRUCTURED_OUTPUT>",
-                ))
-            }
-            QueuedSplitOutput::RawStdout(output) => Some(output),
-            QueuedSplitOutput::Pending => None,
-        };
+            .unwrap_or_else(valid_split_output);
+        let nonce = input
+            .structured_output_contract
+            .as_ref()
+            .map(|contract| contract.nonce.clone())
+            .unwrap_or_else(|| {
+                input
+                    .prompt
+                    .split_once("<ARIA_STRUCTURED_OUTPUT nonce=\"")
+                    .and_then(|(_, tail)| tail.split_once('"'))
+                    .map(|(nonce, _)| nonce.to_string())
+                    .unwrap_or_else(|| "FAKE0001".to_string())
+            });
+        if let Some(object) = output.as_object_mut() {
+            object.insert("nonce".to_string(), serde_json::json!(nonce));
+        }
+        let full_output = Some(format!(
+            "Fake Work Item Plan streaming draft\n\n\
+             <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{output}</ARIA_STRUCTURED_OUTPUT>",
+        ));
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
 
@@ -672,32 +569,8 @@ pub(crate) async fn app_with_confirmed_story_and_design(
     (app, root)
 }
 
-pub(crate) async fn app_with_confirmed_story_and_design_and_revision_output(
-    output: Value,
-    revision_output: Value,
-) -> (axum::Router, tempfile::TempDir) {
-    let root = tempdir().expect("root");
-    let repo = root.path().join("repo");
-    std::fs::create_dir_all(&repo).expect("create repo dir");
-    let status = Command::new("git")
-        .args(["init"])
-        .current_dir(&repo)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-
-    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
-    let state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
-        Arc::new(MockSplitProviderAdapter {
-            output,
-            revision_output: Some(revision_output),
-        }),
-    );
-    let app = build_web_router(state);
-    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
-
-    (app, root)
-}
+// 退役留档（T5/REQ-RET-02）：app_with_confirmed_story_and_design_and_revision_output 夹具
+// （revision 输出注入）为 legacy full-candidate revision 流测试专用，随消息族退役。
 
 pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_output(
     output: Value,

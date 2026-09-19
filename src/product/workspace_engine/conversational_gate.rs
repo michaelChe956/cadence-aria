@@ -63,7 +63,7 @@ pub(crate) enum HumanGateCloseOutcome {
 
 /// SC 门关门决策（L0 typed 重承载，REQ-RET-02/REQ-CG-04）：approve=既有
 /// `Confirm` 入站变体；abandon=显式 `AbandonHumanGate` 入站命令。与 legacy
-/// `HumanConfirmDecision` 零共用（该旧枚举随 L2 退役删除）；legacy
+/// human-confirm 决策枚举零共用（该旧枚举随 L2 退役删除）；legacy
 /// RequestChange 在此类型面上不可表达（SC 门结构性拒绝，wire 面由 stage
 /// 白名单直接拒绝）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

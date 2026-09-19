@@ -12,9 +12,9 @@ impl WorkspaceEngine {
         }
     }
 
-    // 退役留档（T5/REQ-RET-02）：select_work_item_generation_mode（SelectWorkItem
-    // GenerationMode 消息族唯一引擎入口）随消息族删除（wp5-attribution-table.md
-    // §1）；mode 值类型迁至 artifact.rs（历史 artifact 载荷字段+SC 内部诊断）。
+    // 退役留档（T5/REQ-RET-02）：生成模式选择消息的引擎入口随消息族删除
+    // （wp5-attribution-table.md §1）；mode 值类型迁至 artifact.rs（历史
+    // artifact 载荷字段+SC 内部诊断）。
 
     pub(crate) async fn begin_work_item_draft_review_run(&mut self, outline_id: &str) -> String {
         self.transition_stage(WorkspaceStage::CrossReview).await;

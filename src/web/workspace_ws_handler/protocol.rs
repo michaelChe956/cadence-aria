@@ -140,8 +140,8 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
-        // review_decision 阶段的唯一消息族（ReviewDecisionResponse/
-        // SelectRevisionPath）已随 L2 删除：任何消息在该阶段均不合法（SC 会话
+        // review_decision 阶段的唯一消息族（决策应答与修订路径选择两类
+        // 入站）已随 L2 删除：任何消息在该阶段均不合法（SC 会话
         // 已由 review/routing 的 SC 守卫改道 human gate，不落入此阶段）。
         WorkspaceStage::ReviewDecision => false,
         WorkspaceStage::Revision => {

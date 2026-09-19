@@ -85,8 +85,8 @@ pub(crate) async fn handle_plan_amendment_cancel_from_handler(
 }
 
 /// 非 SC 流（story/design 等）的 `Confirm` 帧直连引擎确认（L2 退役收口：
-/// 原 `handle_human_confirm_from_handler(HumanConfirmDecision::Confirm)` 桥
-/// 随 `HumanConfirm` 消息族删除，approve 帧面按 T4 §4 登记形态保留）。
+/// 原 human-confirm 决策桥接随 `HumanConfirm` 消息族删除，approve 帧面按
+/// T4 §4 登记形态保留）。
 pub(crate) async fn handle_confirm_from_handler(
     run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,

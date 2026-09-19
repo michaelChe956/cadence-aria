@@ -196,7 +196,7 @@ async fn handle_workspace_inbound_message_inner(
                 .await;
             } else {
                 // L2 退役收口：非 SC 流的 approve 帧直连引擎确认（原
-                // HumanConfirmDecision::Confirm 桥随消息族删除）。
+                // human-confirm 决策桥接随消息族删除）。
                 handle_confirm_from_handler(run_context.clone(), outbound_tx.clone()).await;
             }
         }
@@ -349,11 +349,10 @@ async fn handle_workspace_inbound_message_inner(
                 }
             }
         }
-        // 退役留档（T5/REQ-RET-02）：legacy 决策路由分支已删除——ReviewDecision
-        // Response/AuthorDecision/SelectWorkItemGenerationMode/RequestOutline
-        // Revision/WorkItemDraftDecision/WorkItemBatchDecision/SaveHumanPresentation
-        // Revision 消息族 wire 名在 parse 面即被拒收（LEGACY_MESSAGE_RETIRED），
-        // 消费链与处置见 wp5-attribution-table.md。
+        // 退役留档（T5/REQ-RET-02）：legacy 决策路由分支已删除——review 决策
+        // 应答/作者决策/生成模式选择/outline 修订请求/草稿决策/批量决策/
+        // presentation 修订保存消息族的 wire 名在 parse 面即被拒收
+        // （LEGACY_MESSAGE_RETIRED），消费链与处置见 wp5-attribution-table.md。
         WsInMessage::WorkItemPlanCompileRecoveryAction { action, reason } => {
             let result = {
                 let mut engine = engine.lock().await;

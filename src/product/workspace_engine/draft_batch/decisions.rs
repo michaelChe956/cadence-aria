@@ -1,13 +1,12 @@
 use super::*;
 
 impl WorkspaceEngine {
-    // 退役留档（T5/REQ-RET-02）：handle_work_item_batch_decision（WorkItemBatch
-    // Decision 消息族唯一引擎入口）随消息族删除（wp5-attribution-table.md §1）；
-    // accept/rewrite/downgrade 内部函数保留（review routing legacy 臂仍调用，
-    // 服务在途会话读侧状态机）。
+    // 退役留档（T5/REQ-RET-02）：批量决策消息的引擎入口随消息族删除
+    // （wp5-attribution-table.md §1）；accept/rewrite/downgrade 内部函数保留
+    // （review routing legacy 臂仍调用，服务在途会话读侧状态机）。
 
-    // 退役留档（T5/REQ-RET-02）：handle_work_item_draft_decision（WorkItemDraft
-    // Decision 消息族唯一引擎入口）随消息族删除（wp5-attribution-table.md §1）。
+    // 退役留档（T5/REQ-RET-02）：草稿决策消息的引擎入口随消息族删除
+    // （wp5-attribution-table.md §1）。
 
     pub(crate) async fn rewrite_current_work_item_batch(
         &mut self,

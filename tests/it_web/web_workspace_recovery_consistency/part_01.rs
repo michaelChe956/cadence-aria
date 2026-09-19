@@ -22,8 +22,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
-    app_with_confirmed_story_and_design, app_with_confirmed_story_and_design_and_streaming_outputs,
-    request_json, valid_canonical_draft_output, valid_outline_output, valid_split_output,
+    app_with_confirmed_story_and_design_and_streaming_outputs, request_json, valid_outline_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -31,9 +30,7 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn enable_test_controls() -> crate::TestControlsEnvGuard {
-    crate::enable_test_controls().await
-}
+
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -119,25 +116,6 @@ async fn generate_session_to_author_confirm(
     session_id
 }
 
-async fn enable_review_fixture(app: &axum::Router, session_id: &str, verdict: &str) {
-    let (status, response) = request_json(
-        app.clone(),
-        Method::POST,
-        &format!("/api/test/workspace-sessions/{session_id}/review-fixture"),
-        json!({
-            "verdict": verdict,
-            "summary": "审核通过",
-            "comments": "覆盖核心路径",
-            "findings": []
-        }),
-    )
-    .await;
-    assert_eq!(
-        status,
-        axum::http::StatusCode::OK,
-        "enable review fixture failed: {response}"
-    );
-}
 
 fn recover_engine(repo: &tempfile::TempDir, session_id: &str) -> WorkspaceEngine {
     let app_paths = ProductAppPaths::new(repo.path().join(".aria"));
@@ -154,208 +132,10 @@ fn recover_engine(repo: &tempfile::TempDir, session_id: &str) -> WorkspaceEngine
     WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, event_tx, session)
 }
 
-#[tokio::test]
-async fn story_design_work_item_plan_recovery_consistency() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let (app, repo, _prompts) =
-        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
-            .await;
+// 退役留档（T5/REQ-RET-02）：`story_design_work_item_plan_recovery_consistency` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    // 生成新的 Story / Design spec 并运行到 author_confirm（不确认）
-    let story_session_id = generate_session_to_author_confirm(
-        &app,
-        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({
-            "title": "第二个 Story",
-            "author_provider": "fake",
-            "reviewer_provider": null,
-            "review_rounds": 1,
-            "superpowers_enabled": false,
-            "openspec_enabled": true
-        }),
-    )
-    .await;
-
-    let design_session_id = generate_session_to_author_confirm(
-        &app,
-        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
-        json!({
-            "title": "第二个 Design",
-            "story_spec_ids": ["story_spec_0001"],
-            "author_provider": "fake",
-            "reviewer_provider": null,
-            "review_rounds": 1,
-            "superpowers_enabled": false,
-            "openspec_enabled": true
-        }),
-    )
-    .await;
-
-    // WorkItemPlan prepare + start_generation
-    let (_status, prepare_resp) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
-        json!({
-            "title": "恢复一致性测试 Plan",
-            "story_spec_ids": ["story_spec_0001"],
-            "design_spec_ids": ["design_spec_0001"],
-            "author_provider": "fake",
-            "reviewer_provider": null,
-            "review_rounds": 1,
-            "superpowers_enabled": false,
-            "openspec_enabled": true,
-            "include_integration_tests": true,
-            "include_e2e_tests": false,
-            "force_frontend_backend_split": true,
-            "require_execution_plan_confirm": false
-        }),
-    )
-    .await;
-    let plan_session_id = prepare_resp["workspace_session"]["workspace_session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let mut ws = connect_ws(app, &plan_session_id).await;
-    ws.send(Message::Text(
-        json!({
-            "type": "start_generation",
-            "provider_config": { "author": "fake", "reviewer": null, "review_rounds": 0 },
-            "reviewer_enabled": false
-        })
-        .to_string()
-        .into(),
-    ))
-    .await
-    .expect("send start_generation");
-    let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
-        msgs.iter().any(|m| m["type"] == "artifact_update")
-            && msgs
-                .iter()
-                .any(|m| m["type"] == "stage_change" && m["stage"] == "author_confirm")
-    })
-    .await;
-    ws.close(None).await.ok();
-
-    // 恢复 Story session
-    let story_engine = recover_engine(&repo, &story_session_id);
-    let story_state = story_engine.build_session_state();
-    match story_state {
-        WsOutMessage::SessionState {
-            workspace_type,
-            stage,
-            artifact,
-            timeline_nodes,
-            timeline_node_details,
-            ..
-        } => {
-            assert_eq!(workspace_type, WorkspaceType::Story);
-            assert_eq!(stage, "author_confirm");
-            let markdown = artifact
-                .as_ref()
-                .and_then(|a| a.markdown())
-                .expect("story artifact should be markdown");
-            assert!(markdown.contains("# Story Spec"));
-            assert!(
-                timeline_nodes
-                    .iter()
-                    .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
-                "story timeline should contain author_confirm node"
-            );
-            assert!(
-                timeline_node_details.is_empty(),
-                "story session_state should keep details lightweight and use summaries"
-            );
-        }
-        other => panic!("expected SessionState, got {other:?}"),
-    }
-
-    // 恢复 Design session
-    let design_engine = recover_engine(&repo, &design_session_id);
-    let design_state = design_engine.build_session_state();
-    match design_state {
-        WsOutMessage::SessionState {
-            workspace_type,
-            stage,
-            artifact,
-            timeline_nodes,
-            timeline_node_details,
-            ..
-        } => {
-            assert_eq!(workspace_type, WorkspaceType::Design);
-            assert_eq!(stage, "author_confirm");
-            let markdown = artifact
-                .as_ref()
-                .and_then(|a| a.markdown())
-                .expect("design artifact should be markdown");
-            assert!(markdown.contains("# Design Spec"));
-            assert!(
-                timeline_nodes
-                    .iter()
-                    .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
-                "design timeline should contain author_confirm node"
-            );
-            assert!(
-                timeline_node_details.is_empty(),
-                "design session_state should keep details lightweight and use summaries"
-            );
-        }
-        other => panic!("expected SessionState, got {other:?}"),
-    }
-
-    // 恢复 WorkItemPlan session
-    let plan_engine = recover_engine(&repo, &plan_session_id);
-    let plan_state = plan_engine.build_session_state();
-    match plan_state {
-        WsOutMessage::SessionState {
-            workspace_type,
-            stage,
-            artifact,
-            timeline_nodes,
-            timeline_node_details,
-            ..
-        } => {
-            assert_eq!(workspace_type, WorkspaceType::WorkItemPlan);
-            assert_eq!(stage, "author_confirm");
-            let outline_candidate = match artifact {
-                Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) => {
-                    outline_candidate
-                }
-                other => panic!("expected WorkItemPlanOutlineCandidate artifact, got {other:?}"),
-            };
-            assert!(!outline_candidate.outline.work_item_outlines.is_empty());
-            assert!(
-                timeline_nodes
-                    .iter()
-                    .any(|n| n.node_type == TimelineNodeType::WorkItemPlanOutlineConfirm),
-                "work_item_plan timeline should contain outline confirm node"
-            );
-            let progress_detail = timeline_node_details
-                .values()
-                .find(|detail| {
-                    detail.node_type == TimelineNodeType::WorkItemPlanOutlineRun
-                        && detail
-                            .streaming_content
-                            .contains("Fake Work Item Plan streaming draft")
-                })
-                .expect("work_item_plan outline details should include provider stream");
-            assert!(
-                timeline_nodes
-                    .iter()
-                    .any(|node| node.node_id == progress_detail.node_id
-                        && node.node_type == TimelineNodeType::WorkItemPlanOutlineRun),
-                "provider stream detail should belong to recovered outline_run node"
-            );
-            assert!(
-                timeline_node_details.values().all(|detail| detail.node_type
-                    != TimelineNodeType::StartGeneration
-                    || detail.streaming_content.is_empty()),
-                "start_generation should not restore WorkItemPlan provider stream"
-            );
-        }
-        other => panic!("expected SessionState, got {other:?}"),
-    }
-}
 
 // 退役留档（T5/REQ-RET-02）：`story_workspace_review_sentinel_fallback_still_passes` 直接驱动已删除的 legacy 决策面，
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案

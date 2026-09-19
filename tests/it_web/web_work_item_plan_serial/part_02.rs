@@ -30,6 +30,4 @@
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-fn valid_draft_output(outline_id: &str) -> Value {
-    valid_draft_output_with_title(outline_id, "实现后端登录会话 API")
-}
+// 退役留档（T5/REQ-RET-02）：valid_draft_output 构造夹具为 staged serial 族测试专用，随消息族一并退役（title 变体见 part_03）。
