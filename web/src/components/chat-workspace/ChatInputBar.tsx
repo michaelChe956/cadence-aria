@@ -14,10 +14,6 @@ import {
   type FormEvent,
 } from "react";
 import type {
-  AuthorDecisionChoice,
-  WorkItemBatchDecision,
-  WorkItemDraftDecision,
-  WorkItemGenerationMode,
   WorkItemPlanArtifactPayload,
 } from "../../api/types";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
@@ -30,17 +26,8 @@ interface ChatInputBarProps {
   workItemPlanArtifact?: WorkItemPlanArtifactPayload | null;
   onSendContextNote: (content: string) => void;
   onStartGeneration: () => void;
-  // L1 重承载（REQ-RET-02）：legacy 决策回调全部可选——未提供即不渲染对应按钮
-  // （只读宿主）；human_confirm 决策输入发送面（onSendHumanDecision）随旧协议退役删除。
-  onAuthorDecision?: (decision: AuthorDecisionChoice, feedback?: string) => void;
-  onSelectWorkItemGenerationMode?: (mode: WorkItemGenerationMode) => void;
-  onRequestOutlineRevision?: () => void;
-  onWorkItemDraftDecision?: (outlineId: string, decision: WorkItemDraftDecision) => void;
-  onWorkItemBatchDecision?: (
-    decision: WorkItemBatchDecision,
-    feedback?: string,
-    firstAffectedOutlineId?: string,
-  ) => void;
+  // L2 退役（T5/REQ-RET-02）：staged/author 决策回调（outline 确认/生成模式/
+  // outline 返修/draft/batch/author）随 wire 消息族删除——对应按钮分支退役。
   onAbort: () => void;
   disabled?: boolean;
   hideStartGeneration?: boolean;
@@ -65,11 +52,6 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   workItemPlanArtifact = null,
   onSendContextNote,
   onStartGeneration,
-  onAuthorDecision,
-  onSelectWorkItemGenerationMode,
-  onRequestOutlineRevision,
-  onWorkItemDraftDecision,
-  onWorkItemBatchDecision,
   onAbort,
   disabled = false,
   hideStartGeneration = false,
@@ -126,14 +108,6 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     onStartGeneration();
   }
 
-  function handleSendAuthorFeedback() {
-    if (disabled || trimmedInput.length === 0 || !onAuthorDecision) {
-      return;
-    }
-    onAuthorDecision("revise", trimmedInput);
-    setInput("");
-  }
-
   return (
     <form
       data-testid="chat-input-bar"
@@ -174,160 +148,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
               发送
             </button>
           ) : null}
-          {isWorkItemOutlineConfirm && onRequestOutlineRevision && onAuthorDecision ? (
-            <>
-              <button
-                type="button"
-                onClick={() => onRequestOutlineRevision()}
-                disabled={disabled}
-                className="btn-secondary h-9 disabled:opacity-50"
-              >
-                <RefreshCcw className="h-4 w-4" />
-                重写 Outline
-              </button>
-              <button
-                type="button"
-                onClick={() => onAuthorDecision("accept")}
-                disabled={disabled}
-                className="btn-primary h-9 disabled:opacity-50"
-              >
-                <Check className="h-4 w-4" />
-                接受 Outline
-              </button>
-            </>
-          ) : isWorkItemGenerationMode && onSelectWorkItemGenerationMode && onRequestOutlineRevision ? (
-            <>
-              <button
-                type="button"
-                onClick={() => onSelectWorkItemGenerationMode("serial")}
-                disabled={disabled}
-                className="btn-secondary h-9 disabled:opacity-50"
-              >
-                <GitBranch className="h-4 w-4" />
-                逐个生成
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectWorkItemGenerationMode("batch")}
-                disabled={disabled}
-                className="btn-primary h-9 disabled:opacity-50"
-              >
-                <Layers className="h-4 w-4" />
-                自动生成
-              </button>
-              <button
-                type="button"
-                onClick={onRequestOutlineRevision}
-                disabled={disabled}
-                className="btn-secondary h-9 disabled:opacity-50"
-              >
-                <RefreshCcw className="h-4 w-4" />
-                返回 Outline 返修
-              </button>
-            </>
-          ) : isWorkItemDraftConfirm && onWorkItemDraftDecision ? (
-            <>
-              {!draftPayload?.can_accept ? (
-                <DraftValidationFailureNotice findings={draftPayload?.validator_findings} />
-              ) : null}
-              {draftPayload?.can_accept ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "accept")
-                  }
-                  disabled={disabled}
-                  className="btn-primary h-9 disabled:opacity-50"
-                >
-                  <Check className="h-4 w-4" />
-                  接受
-                </button>
-              ) : null}
-              {draftPayload ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "rewrite")
-                    }
-                    disabled={disabled}
-                    className="btn-secondary h-9 disabled:opacity-50"
-                  >
-                    <RefreshCcw className="h-4 w-4" />
-                    {draftPayload.can_accept ? "重写" : "根据校验错误重写"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onWorkItemDraftDecision(draftPayload.draft_record.outline_id, "pause")
-                    }
-                    disabled={disabled}
-                    className="btn-secondary h-9 disabled:opacity-50"
-                  >
-                    <X className="h-4 w-4" />
-                    暂停
-                  </button>
-                </>
-              ) : null}
-            </>
-          ) : isWorkItemBatchConfirm && onWorkItemBatchDecision ? (
-            <>
-              <button
-                type="button"
-                onClick={() => onWorkItemBatchDecision("accept_all")}
-                disabled={disabled}
-                className="btn-primary h-9 disabled:opacity-50"
-              >
-                <Check className="h-4 w-4" />
-                接受全部
-              </button>
-              <button
-                type="button"
-                onClick={() => onWorkItemBatchDecision("rewrite_batch")}
-                disabled={disabled}
-                className="btn-secondary h-9 disabled:opacity-50"
-              >
-                <RefreshCcw className="h-4 w-4" />
-                整组重写
-              </button>
-              <button
-                type="button"
-                onClick={() => onWorkItemBatchDecision("pause")}
-                disabled={disabled}
-                className="btn-secondary h-9 disabled:opacity-50"
-              >
-                <X className="h-4 w-4" />
-                暂停
-              </button>
-              {firstBatchFailureOutlineId ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    onWorkItemBatchDecision(
-                      "downgrade_to_serial",
-                      undefined,
-                      firstBatchFailureOutlineId,
-                    )
-                  }
-                  disabled={disabled}
-                  className="btn-secondary h-9 disabled:opacity-50"
-                >
-                  <GitBranch className="h-4 w-4" />
-                  降级串行
-                </button>
-              ) : null}
-            </>
-          ) : isAuthorConfirm && onAuthorDecision ? (
-            <button
-              type="button"
-              onClick={handleSendAuthorFeedback}
-              disabled={disabled || trimmedInput.length === 0}
-              className="btn-secondary h-9 disabled:opacity-50"
-            >
-              <Send className="h-4 w-4" />
-              发送反馈
-            </button>
-          ) : null}
+          {/* 退役留档（T5/REQ-RET-02）：staged/author 决策按钮分支随消息族删除。 */}
           {isPrepareContext && !hideStartGeneration ? (
             <button
               data-testid="start-generation"

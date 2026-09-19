@@ -66,25 +66,8 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "开始生成" })).toBeNull();
   });
 
-  // spec-workbench-canvas-experience T4：确认并送审/确认定稿/采纳 Review 意见
-  // 已迁移至 ArtifactReviewPanel，此处仅保留反馈发送。
-  it("keeps only the feedback send action at author confirm", () => {
-    const onAuthorDecision = vi.fn();
-    render(
-      <ChatInputBar
-        stage="author_confirm"
-        onSendContextNote={vi.fn()}
-        onStartGeneration={vi.fn()}
-        onAuthorDecision={onAuthorDecision}
-        onAbort={vi.fn()}
-      />,
-    );
-
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "补充回滚策略" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送反馈" }));
-
-    expect(onAuthorDecision).toHaveBeenCalledWith("revise", "补充回滚策略");
-  });
+  // 退役留档（T5/REQ-RET-02）：`keeps only the feedback send action at author confirm` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
   // spec-workbench-canvas-experience T4：预填能力改为 ref 暴露（供面板采纳按钮调用），
   // 覆盖式写入，重复调用不拼接。
@@ -135,17 +118,6 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
   });
 
-  it("keeps the author confirm input usable when the host provides a decision callback", () => {
-    render(
-      <ChatInputBar
-        stage="author_confirm"
-        onSendContextNote={vi.fn()}
-        onStartGeneration={vi.fn()}
-        onAuthorDecision={vi.fn()}
-        onAbort={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByRole("textbox")).toBeEnabled();
-  });
+  // 退役留档（T5/REQ-RET-02）：`keeps the author confirm input usable when the host provides a decision callback` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 });

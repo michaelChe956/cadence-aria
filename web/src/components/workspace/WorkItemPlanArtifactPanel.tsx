@@ -3,7 +3,6 @@ import type {
   HumanPresentationRevision,
   PlanProjectionBundle,
   ProjectionValidationReport,
-  SaveHumanPresentationRevisionMessage,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
   WorkItemProjectionBundle,
@@ -32,7 +31,6 @@ export interface WorkItemPlanArtifactPanelProps {
   missingWorkItemProjectionRefs?: string[];
   humanPresentationRevisions?: Record<string, HumanPresentationRevision>;
   humanPresentationSaveStates?: Record<string, HumanPresentationSaveState>;
-  onSaveHumanPresentation?: (message: SaveHumanPresentationRevisionMessage) => void;
   className?: string;
 }
 
@@ -49,7 +47,6 @@ export function WorkItemPlanArtifactPanel({
   missingWorkItemProjectionRefs = [],
   humanPresentationRevisions = {},
   humanPresentationSaveStates = {},
-  onSaveHumanPresentation,
   className = "",
 }: WorkItemPlanArtifactPanelProps) {
   const [activeTab, setActiveTab] = useState<WorkItemPlanArtifactTab>(() =>
@@ -125,7 +122,6 @@ export function WorkItemPlanArtifactPanel({
             presentations={humanPresentationRevisions}
             presentationSaveStates={humanPresentationSaveStates}
             editable={!readonly}
-            onSavePresentation={onSaveHumanPresentation}
           />
         )
       ) : (

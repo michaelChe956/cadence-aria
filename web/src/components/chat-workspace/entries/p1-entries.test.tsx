@@ -61,27 +61,8 @@ describe("chat workspace p1 entries", () => {
     expect(screen.getByText("内部版本 v2")).toBeInTheDocument();
   });
 
-  it("renders review verdict entries and path actions", () => {
-    const onSelectPath = vi.fn();
-    const entry = makeEntry({
-      type: "review_verdict",
-      role: "reviewer",
-      content: "需要补充失败路径",
-      metadata: { verdict: "revise", comments: "缺少错误处理" },
-    });
-
-    render(<ReviewVerdictEntry entry={entry} onSelectPath={onSelectPath} />);
-    fireEvent.click(screen.getByRole("button", { name: "补充上下文后修订" }));
-    expect(onSelectPath).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("补充返修上下文"), {
-      target: { value: "请补充错误码说明" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "提交补充并修订" }));
-
-    expect(screen.getByText("建议返修")).toBeInTheDocument();
-    expect(screen.getByText("需要补充失败路径")).toBeInTheDocument();
-    expect(onSelectPath).toHaveBeenCalledWith("revise-with-context", "请补充错误码说明");
-  });
+  // 退役留档（T5/REQ-RET-02）：`renders review verdict entries and path actions` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
   it("groups review findings by required and suggestion severity", () => {
     const entry = makeEntry({
@@ -554,20 +535,8 @@ describe("chat workspace p1 entries", () => {
     expect(screen.getByText("补充失败路径")).toBeInTheDocument();
   });
 
-  it("dispatches p1 entries through the renderer", () => {
-    const onSelectPath = vi.fn();
-    const entry = makeEntry({
-      type: "review_verdict",
-      role: "reviewer",
-      content: "需要补充失败路径",
-      metadata: { verdict: "revise" },
-    });
-
-    render(<ChatEntryRenderer entry={entry} onSelectRevisionPath={onSelectPath} />);
-    fireEvent.click(screen.getByRole("button", { name: "接受修订建议" }));
-
-    expect(onSelectPath).toHaveBeenCalledWith("revise");
-  });
+  // 退役留档（T5/REQ-RET-02）：`dispatches p1 entries through the renderer` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 });
 
 function makeEntry(overrides: Partial<ChatEntry>): ChatEntry {

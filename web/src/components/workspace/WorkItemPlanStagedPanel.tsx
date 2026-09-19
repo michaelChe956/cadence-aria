@@ -1,9 +1,6 @@
 import { Check, GitBranch, Layers, Pause, Play, RefreshCw, RotateCcw, UserRound } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 import type {
-  WorkItemBatchDecision,
-  WorkItemDraftDecision,
-  WorkItemGenerationMode,
   WorkItemPlanArtifactPayload,
   WorkItemPlanCompileRecoveryAction,
 } from "../../api/types";
@@ -12,120 +9,19 @@ import { DraftValidationFailureNotice } from "./DraftValidationFailureNotice";
 export interface WorkItemPlanStagedPanelProps {
   activeNodeType: string | null;
   artifact: WorkItemPlanArtifactPayload | null;
-  // L1（REQ-RET-02）：legacy 逐段决策回调可选——只读宿主（如 Legacy 页）不提供即
-  // 不渲染对应分支；compile recovery 为 SC compile 链保留面，回调保持必选。
-  onAcceptOutline?: () => void;
-  onSelectMode?: (mode: WorkItemGenerationMode) => void;
-  onRequestOutlineRevision?: () => void;
-  onDraftDecision?: (outlineId: string, decision: WorkItemDraftDecision) => void;
-  onBatchDecision?: (
-    decision: WorkItemBatchDecision,
-    feedback?: string,
-    firstAffectedOutlineId?: string,
-  ) => void;
+  // L2 退役（T5/REQ-RET-02）：legacy 逐段决策回调（outline 确认/生成模式/outline
+  // 返修/draft/batch）随消息族删除——各分支退役；compile recovery 为 SC compile
+  // 链保留面，回调保持必选。
   onCompileRecoveryAction: (action: WorkItemPlanCompileRecoveryAction) => void;
 }
 
 export function WorkItemPlanStagedPanel({
   activeNodeType,
   artifact,
-  onAcceptOutline,
-  onSelectMode,
-  onRequestOutlineRevision,
-  onDraftDecision,
-  onBatchDecision,
   onCompileRecoveryAction,
 }: WorkItemPlanStagedPanelProps) {
   if (!activeNodeType) {
     return null;
-  }
-
-  if (
-    activeNodeType === "work_item_plan_outline_confirm" &&
-    onAcceptOutline &&
-    onRequestOutlineRevision
-  ) {
-    return (
-      <PanelShell title="Outline 确认" testId="work-item-plan-staged-panel">
-        <ActionButton icon={<Check />} onClick={onAcceptOutline}>
-          接受 Outline
-        </ActionButton>
-        <ActionButton icon={<RefreshCw />} onClick={onRequestOutlineRevision}>
-          重写 Outline
-        </ActionButton>
-      </PanelShell>
-    );
-  }
-
-  if (
-    activeNodeType === "work_item_generation_mode" &&
-    onSelectMode &&
-    onRequestOutlineRevision
-  ) {
-    return (
-      <PanelShell title="生成模式" testId="work-item-plan-staged-panel">
-        <ActionButton icon={<GitBranch />} onClick={() => onSelectMode("serial")}>
-          逐个生成
-        </ActionButton>
-        <ActionButton icon={<Layers />} onClick={() => onSelectMode("batch")}>
-          自动生成
-        </ActionButton>
-        <ActionButton icon={<RefreshCw />} onClick={onRequestOutlineRevision}>
-          返回 Outline 返修
-        </ActionButton>
-      </PanelShell>
-    );
-  }
-
-  if (activeNodeType === "work_item_draft_confirm" && onDraftDecision) {
-    const draftPayload = artifact?.type === "draft_candidate" ? artifact.payload : null;
-    const outlineId = draftPayload?.draft_record.outline_id ?? "";
-    return (
-      <PanelShell title="Draft 确认" testId="work-item-plan-staged-panel">
-        {!draftPayload?.can_accept ? (
-          <DraftValidationFailureNotice findings={draftPayload?.validator_findings} />
-        ) : null}
-        {draftPayload?.can_accept ? (
-          <ActionButton icon={<Check />} onClick={() => onDraftDecision(outlineId, "accept")}>
-            接受
-          </ActionButton>
-        ) : null}
-        <ActionButton icon={<RefreshCw />} onClick={() => onDraftDecision(outlineId, "rewrite")}>
-          {draftPayload?.can_accept ? "重写" : "根据校验错误重写"}
-        </ActionButton>
-        <ActionButton icon={<Pause />} onClick={() => onDraftDecision(outlineId, "pause")}>
-          暂停
-        </ActionButton>
-      </PanelShell>
-    );
-  }
-
-  if (activeNodeType === "work_item_batch_confirm" && onBatchDecision) {
-    const batchPayload = artifact?.type === "batch_state" ? artifact.payload : null;
-    const firstAffectedOutlineId = batchPayload?.failure_summary[0]?.outline_id;
-    return (
-      <PanelShell title="Batch 确认" testId="work-item-plan-staged-panel">
-        <ActionButton icon={<Check />} onClick={() => onBatchDecision("accept_all")}>
-          接受全部
-        </ActionButton>
-        <ActionButton icon={<RefreshCw />} onClick={() => onBatchDecision("rewrite_batch")}>
-          整组重写
-        </ActionButton>
-        <ActionButton icon={<Pause />} onClick={() => onBatchDecision("pause")}>
-          暂停
-        </ActionButton>
-        {firstAffectedOutlineId ? (
-          <ActionButton
-            icon={<GitBranch />}
-            onClick={() =>
-              onBatchDecision("downgrade_to_serial", undefined, firstAffectedOutlineId)
-            }
-          >
-            降级串行
-          </ActionButton>
-        ) : null}
-      </PanelShell>
-    );
   }
 
   if (activeNodeType === "work_item_plan_compile_recovery") {

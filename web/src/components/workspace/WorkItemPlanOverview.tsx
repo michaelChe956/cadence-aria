@@ -1,7 +1,6 @@
 import type {
   HumanGroupProjection,
   HumanPresentationRevision,
-  SaveHumanPresentationRevisionMessage,
   WorkItemProjectionBundle,
 } from "../../api/types";
 import type { HumanPresentationSaveState } from "../../state/workspace-ws-store-types";
@@ -15,7 +14,6 @@ export function WorkItemPlanOverview({
   presentations = {},
   presentationSaveStates = {},
   editable = false,
-  onSavePresentation,
 }: {
   projection: HumanGroupProjection;
   presentation: HumanPresentationRevision | null;
@@ -24,7 +22,6 @@ export function WorkItemPlanOverview({
   presentations?: Record<string, HumanPresentationRevision>;
   presentationSaveStates?: Record<string, HumanPresentationSaveState>;
   editable?: boolean;
-  onSavePresentation?: (message: SaveHumanPresentationRevisionMessage) => void;
 }) {
   const planPresentation =
     presentation ??
@@ -57,25 +54,7 @@ export function WorkItemPlanOverview({
         ) : null}
       </header>
 
-      {editable && onSavePresentation && planProjectionBundleId ? (
-        <HumanPresentationEditor
-          base={{
-            scope: "plan",
-            source_projection_bundle_id: planProjectionBundleId,
-            human_summary: projection.split_reason,
-            why_split: projection.split_reason,
-            dependency_explanation: projection.contract_flow.map(
-              (edge) => `${edge.from} → ${edge.to}: ${edge.contract_id}`,
-            ),
-            risk_explanation: projection.risks,
-            source_refs: projection.source_refs,
-            presentation: planPresentation,
-          }}
-          onSave={onSavePresentation}
-          saving={presentationSaveStates[planProjectionBundleId]?.saving ?? false}
-          error={presentationSaveStates[planProjectionBundleId]?.error ?? null}
-        />
-      ) : null}
+      {/* 退役留档（T5/REQ-RET-02）：presentation 编辑器随保存命令族删除，仅只读呈现。 */}
 
       <div className="grid gap-3 lg:grid-cols-2">
         {projection.work_items.map((workItem) => {
@@ -114,23 +93,7 @@ export function WorkItemPlanOverview({
                 label="来源引用"
                 values={workItemPresentation?.source_refs ?? []}
               />
-              {editable && onSavePresentation && bundle ? (
-                <HumanPresentationEditor
-                  base={{
-                    scope: "work_item",
-                    source_projection_bundle_id: bundle.id,
-                    human_summary: bundle.human_projection.goal,
-                    why_split: null,
-                    dependency_explanation: bundle.human_projection.dependencies,
-                    risk_explanation: [],
-                    source_refs: bundle.human_projection.source_refs,
-                    presentation: workItemPresentation,
-                  }}
-                  onSave={onSavePresentation}
-                  saving={presentationSaveStates[bundle.id]?.saving ?? false}
-                  error={presentationSaveStates[bundle.id]?.error ?? null}
-                />
-              ) : null}
+              {/* 退役留档（T5/REQ-RET-02）：presentation 编辑器随保存命令族删除。 */}
             </article>
           );
         })}

@@ -1,4 +1,3 @@
-import type { RevisionPath } from "../../api/types";
 import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import type { ChatEntry } from "../../state/chat-entries";
 import { ArtifactUpdateEntry } from "./entries/ArtifactUpdateEntry";
@@ -24,7 +23,6 @@ interface ChatEntryRendererProps {
     entry: ChatEntry,
     response: { selected_option_ids: string[]; free_text: string | null },
   ) => void;
-  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
   actions?: CockpitActionFacade;
 }
 
@@ -32,7 +30,6 @@ export function ChatEntryRenderer({
   entry,
   onPermissionResponse,
   onChoiceResponse,
-  onSelectRevisionPath,
   actions,
 }: ChatEntryRendererProps) {
   switch (entry.type) {
@@ -55,7 +52,8 @@ export function ChatEntryRenderer({
     case "artifact_update":
       return <ArtifactUpdateEntry entry={entry} />;
     case "review_verdict":
-      return <ReviewVerdictEntry entry={entry} onSelectPath={onSelectRevisionPath} />;
+      // 退役留档（T5/REQ-RET-02）：review_decision 路径动作面已删，verdict 仅只读呈现。
+      return <ReviewVerdictEntry entry={entry} />;
     case "gate_prompt":
       return <GatePromptEntry entry={entry} actions={actions} />;
     case "human_decision":

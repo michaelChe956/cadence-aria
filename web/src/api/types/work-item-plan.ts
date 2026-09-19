@@ -599,17 +599,8 @@ export type HumanPresentationRevision = {
 
 export type HumanPresentationScope = "plan" | "work_item";
 
-export type SaveHumanPresentationRevisionMessage = {
-  type: "save_human_presentation_revision";
-  source_projection_bundle_id: string;
-  scope: HumanPresentationScope;
-  supersedes: string | null;
-  human_summary: string;
-  why_split: string | null;
-  dependency_explanation: string[];
-  risk_explanation: string[];
-  source_refs: string[];
-};
+// 退役留档（T5/REQ-RET-02）：SaveHumanPresentationRevisionMessage
+// 随保存命令族删除（wp5-attribution-table.md §2）。
 
 export type IssueWorkItemPlanDependencyEdgeDto = {
   from_work_item_id: string;

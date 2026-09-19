@@ -1,13 +1,13 @@
 import { Settings, X } from "lucide-react";
 import { useState, type ComponentProps } from "react";
 import type {
-  RevisionPath,
   ProviderPermissionMode,
   WorkItemPlanArtifactPayload,
   WorkspaceArtifactVersionResponse,
   WorkspaceProviderName,
 } from "../api/types";
-import { ReviewDecisionActions } from "../components/chat-workspace/ReviewDecisionActions";
+// 退役留档（T5/REQ-RET-02）：ReviewDecisionActions/ReviewDecisionActionBar
+//（review_decision 双选项动作面）随消息族删除。
 import { ProviderConfigPanel } from "../components/workspace/ProviderConfigPanel";
 import type { ChatEntry } from "../state/chat-entries";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
@@ -17,25 +17,6 @@ import {
   type TimelineNode,
 } from "../state/workspace-ws-store";
 
-export function ReviewDecisionActionBar({
-  onSelectRevisionPath,
-  onSelectDecision,
-  options,
-}: {
-  onSelectRevisionPath: (path: RevisionPath, extraContext?: string) => void;
-  onSelectDecision: (decision: string) => void;
-  options?: string[];
-}) {
-  return (
-    <div className="border-t border-amber-200 bg-amber-50/80 px-3 py-2">
-      <ReviewDecisionActions
-        options={options}
-        onSelectDecision={onSelectDecision}
-        onSelectPath={onSelectRevisionPath}
-      />
-    </div>
-  );
-}
 
 export function optionalWorkItemPlanReviewDecisionOptions(
   workspaceType: string | null,

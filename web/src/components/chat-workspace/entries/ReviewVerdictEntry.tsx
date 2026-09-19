@@ -1,17 +1,13 @@
 import { MessageSquareText } from "lucide-react";
-import type { RevisionPath } from "../../../api/types";
 import type { ChatEntry } from "../../../state/chat-entries";
-import { ReviewDecisionActions } from "../ReviewDecisionActions";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 import { structuredOutputDiagnosticFromUnknown } from "../../../state/structured-output-diagnostic";
 import { StructuredOutputDiagnosticView } from "./StructuredOutputDiagnostic";
 
 export function ReviewVerdictEntry({
   entry,
-  onSelectPath,
 }: {
   entry: ChatEntry;
-  onSelectPath?: (path: RevisionPath, extraContext?: string) => void;
 }) {
   const verdict = verdictFromEntry(entry);
   const findings = findingsFromEntry(entry);
@@ -53,7 +49,7 @@ export function ReviewVerdictEntry({
         {optionalFindings.length > 0 ? (
           <FindingGroup title="可选建议" tone="optional" findings={optionalFindings} />
         ) : null}
-        {onSelectPath ? <ReviewDecisionActions onSelectPath={onSelectPath} /> : null}
+        {/* 退役留档（T5/REQ-RET-02）：review_decision 路径按钮随消息族删除。 */}
       </div>
     </ChatEntryContainer>
   );

@@ -1,11 +1,9 @@
 import type {
-  AuthorDecision,
   ProviderConfigSnapshot,
   ProviderPermissionMode,
   ProviderWorkspaceConfigInput,
   ReviewGate,
   ReviewVerdictType,
-  RevisionPath,
   StructuredFeedback,
   WorkspaceProviderName,
   WorkspaceReviewFindingSeverity,
@@ -16,7 +14,6 @@ import type {
   ProjectionValidationReport,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
-  WorkItemGenerationMode,
   WorkItemPlanArtifactPayload,
   WorkItemPlanCandidateDto,
   WorkItemPlanCompileReportPayload,
@@ -24,7 +21,6 @@ import type {
   WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
-  SaveHumanPresentationRevisionMessage,
 } from "./work-item-plan";
 import type {
   PlanAmendmentManifest,
@@ -170,19 +166,9 @@ export type ArtifactUpdateMessage =
       plan_amendment_manifest: PlanAmendmentManifest;
     };
 
-export type RevertWorkItemMessage = {
-  type: "revert_work_item";
-  work_item_id: string;
-  feedback?: string | null;
-  clear: boolean;
-};
+// 退役留档（T5/REQ-RET-02）：RevertWorkItemMessage/SaveHumanPresentationRevision
+// 消息族类型随 wire 变体删除（wp5-attribution-table.md §1/§2）。
 
-export type WorkItemDraftDecision = "accept" | "rewrite" | "pause";
-export type WorkItemBatchDecision =
-  | "accept_all"
-  | "rewrite_batch"
-  | "pause"
-  | "downgrade_to_serial";
 export type WorkItemPlanCompileRecoveryAction =
   | "continue"
   | "abort_and_rollback"
@@ -237,31 +223,12 @@ export type WsInMessage =
       free_text?: string | null;
       answers?: ChoiceAnswer[];
     }
-  | { type: "review_decision_response"; decision: string; extra_context?: string | null }
-  | { type: "author_decision"; decision: AuthorDecision }
-  | { type: "select_revision_path"; path: RevisionPath; extra_context?: string | null }
   | { type: "request_revision"; feedback: StructuredFeedback }
-  | RevertWorkItemMessage
-  | { type: "select_work_item_generation_mode"; mode: WorkItemGenerationMode }
-  | { type: "request_outline_revision"; feedback?: string | null }
-  | {
-      type: "work_item_draft_decision";
-      outline_id: string;
-      decision: WorkItemDraftDecision;
-      feedback?: string | null;
-    }
-  | {
-      type: "work_item_batch_decision";
-      decision: WorkItemBatchDecision;
-      feedback?: string | null;
-      first_affected_outline_id?: string | null;
-    }
   | {
       type: "work_item_plan_compile_recovery_action";
       action: WorkItemPlanCompileRecoveryAction;
       reason?: string | null;
     }
-  | SaveHumanPresentationRevisionMessage
   | { type: "abandon_human_gate"; command_id: string }
   | { type: "human_gate_feedback"; command_id: string; feedback: string }
   | { type: "advance"; command_id: string }
@@ -630,12 +597,8 @@ export type WsOutMessage = WithEventSeq<
       workspace_entry: string;
     }
   | { type: "advance_rejected"; command_id: string; code: string; reason: string }
-  | { type: "human_presentation_revision_saved"; revision: HumanPresentationRevision }
-  | {
-      type: "human_presentation_revision_save_failed";
-      source_projection_bundle_id: string;
-      message: string;
-    }
+  // 退役留档（T5/REQ-RET-02）：human_presentation_revision_saved/save_failed 出站
+  // 变体随保存命令族删除（wp5-attribution-table.md §2）。
   | {
       type: "linked_workspace_amendment_created";
       snapshot: LinkedWorkspaceSessionSnapshot;

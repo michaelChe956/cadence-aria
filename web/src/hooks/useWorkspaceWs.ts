@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+// L2 退役（T5/REQ-RET-02）：sendSelectRevisionPath/sendAuthorDecision/send
+// SelectWorkItemGenerationMode/sendRequestOutlineRevision/sendWorkItemDraft
+// Decision/sendWorkItemBatchDecision/sendReviewDecision 发送器随 wire 消息族
+// 删除（wp5-attribution-table.md §1）。
 import type {
-  AuthorDecision,
   LinkedWorkspaceAmendmentTarget,
   ProviderConfigSnapshot,
-  RevisionPath,
   WorkspaceProviderName,
-  WorkItemBatchDecision,
-  WorkItemDraftDecision,
-  WorkItemGenerationMode,
   WorkItemPlanCompileRecoveryAction,
   WsInMessage,
 } from "../api/types";
@@ -443,17 +442,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     return () => window.clearInterval(interval);
   }, [workspaceConnectionStatus]);
 
-  const sendSelectRevisionPath = useCallback(
-    (path: RevisionPath, extraContext?: string) => {
-      const trimmedContext = extraContext?.trim();
-      sendJson({
-        type: "select_revision_path",
-        path,
-        extra_context: trimmedContext ? trimmedContext : null,
-      });
-    },
-    [sendJson],
-  );
 
   const recordSentOperation = useCallback(
     (
@@ -599,18 +587,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendAuthorDecision = useCallback(
-    (decision: AuthorDecision, feedback?: string) => {
-      // spec-design-dialog-revision T8："revise" 以反馈构造 `{revise: {feedback}}`
-      // 线格式（T1 serde externally tagged），其余变体原样透传。
-      const payload: AuthorDecision =
-        decision === "revise"
-          ? { revise: { feedback: (feedback ?? "").trim() } }
-          : decision;
-      sendJson({ type: "author_decision", decision: payload });
-    },
-    [sendJson],
-  );
 
   const sendRequestRevision = useCallback(
     (feedback?: string): boolean => {
@@ -626,54 +602,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendSelectWorkItemGenerationMode = useCallback(
-    (mode: WorkItemGenerationMode) => {
-      sendJson({ type: "select_work_item_generation_mode", mode });
-    },
-    [sendJson],
-  );
-
-  const sendRequestOutlineRevision = useCallback(
-    (feedback?: string) => {
-      const trimmedFeedback = feedback?.trim();
-      sendJson({
-        type: "request_outline_revision",
-        feedback: trimmedFeedback ? trimmedFeedback : null,
-      });
-    },
-    [sendJson],
-  );
-
-  const sendWorkItemDraftDecision = useCallback(
-    (outlineId: string, decision: WorkItemDraftDecision, feedback?: string) => {
-      const trimmedFeedback = feedback?.trim();
-      sendJson({
-        type: "work_item_draft_decision",
-        outline_id: outlineId,
-        decision,
-        feedback: trimmedFeedback ? trimmedFeedback : null,
-      });
-    },
-    [sendJson],
-  );
-
-  const sendWorkItemBatchDecision = useCallback(
-    (
-      decision: WorkItemBatchDecision,
-      feedback?: string,
-      firstAffectedOutlineId?: string,
-    ) => {
-      const trimmedFeedback = feedback?.trim();
-      const trimmedOutlineId = firstAffectedOutlineId?.trim();
-      sendJson({
-        type: "work_item_batch_decision",
-        decision,
-        feedback: trimmedFeedback ? trimmedFeedback : null,
-        first_affected_outline_id: trimmedOutlineId ? trimmedOutlineId : null,
-      });
-    },
-    [sendJson],
-  );
 
   const sendWorkItemPlanCompileRecoveryAction = useCallback(
     (action: WorkItemPlanCompileRecoveryAction, reason?: string) => {
@@ -729,14 +657,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendReviewDecision = useCallback((decision: string, extraContext?: string) => {
-    const trimmedContext = extraContext?.trim();
-    sendJson({
-      type: "review_decision_response",
-      decision,
-      extra_context: trimmedContext ? trimmedContext : null,
-    });
-  }, [sendJson]);
 
   const respondPermission = useCallback(
     (id: string, approved: boolean, reason?: string) => {
@@ -805,13 +725,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendContextNote,
     sendStartGeneration,
     retryInterruptedRun,
-    sendSelectRevisionPath,
-    sendAuthorDecision,
     sendRequestRevision,
-    sendSelectWorkItemGenerationMode,
-    sendRequestOutlineRevision,
-    sendWorkItemDraftDecision,
-    sendWorkItemBatchDecision,
     sendWorkItemPlanCompileRecoveryAction,
     sendConfirmGate,
     sendAbandonGate,
@@ -828,7 +742,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     abort,
     selectProvider,
     sendProviderSelect,
-    sendReviewDecision,
     respondPermission,
     sendPermissionResponse,
     sendChoiceResponse,

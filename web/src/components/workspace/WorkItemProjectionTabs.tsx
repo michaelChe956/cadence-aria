@@ -5,7 +5,6 @@ import type {
   PlanProjectionBundle,
   ProjectionValidationReport,
   ReviewerWorkItemProjection,
-  SaveHumanPresentationRevisionMessage,
   WorkItemProjectionBundle,
   WorkItemProjectionTab,
   WorkItemRevisionHistoryDto,
@@ -30,7 +29,6 @@ export function WorkItemProjectionTabs({
   presentations = {},
   presentationSaveStates = {},
   editable = false,
-  onSavePresentation,
 }: {
   planProjection: PlanProjectionBundle;
   workItemProjections: WorkItemProjectionBundle[];
@@ -39,7 +37,6 @@ export function WorkItemProjectionTabs({
   presentations?: Record<string, HumanPresentationRevision>;
   presentationSaveStates?: Record<string, HumanPresentationSaveState>;
   editable?: boolean;
-  onSavePresentation?: (message: SaveHumanPresentationRevisionMessage) => void;
 }) {
   const [activeTab, setActiveTab] = useState<WorkItemProjectionTab>("overview");
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -118,7 +115,6 @@ export function WorkItemProjectionTabs({
             presentations={presentations}
             presentationSaveStates={presentationSaveStates}
             editable={editable}
-            onSavePresentation={onSavePresentation}
           />
         ) : null}
         {activeTab === "contract" ? (

@@ -72,7 +72,6 @@ import {
   providerConfigFor,
   ProviderConfigDialogButton,
   requestIdFromEntry,
-  ReviewDecisionActionBar,
   scrollTargetEntryIdForNode,
   UNLOAD_GUARDED_STAGES,
   UNLOAD_GUARD_MESSAGE,
@@ -428,12 +427,6 @@ export function ChatCockpitPage({
     const summary = lastCompletedRevision?.summary?.trim();
     return summary ? summary : undefined;
   }, [selectedState?.timelineNodes]);
-  const reviewDecisionOptions = useMemo(
-    () =>
-      state.pendingDecision?.options ??
-      optionalWorkItemPlanReviewDecisionOptions(state.workspaceType, state.chatEntries),
-    [state.chatEntries, state.pendingDecision?.options, state.workspaceType],
-  );
   const artifactContentCacheValues = useMemo(
     () =>
       // 轮次缓存键是裸版本号，跨会话会碰撞（P1，审查 fix round 1）：
@@ -460,16 +453,8 @@ export function ChatCockpitPage({
     },
     [selectedSessionId],
   );
-  const handleAuthorDecision = useCallback(
-    (decision: AuthorDecisionChoice, feedback?: string) => {
-      if (decision === "revise") {
-        workspaceWs.sendAuthorDecision("revise", feedback);
-        return;
-      }
-      workspaceWs.sendAuthorDecision(decision);
-    },
-    [workspaceWs.sendAuthorDecision],
-  );
+  // 退役留档（T5/REQ-RET-02）：handleAuthorDecision（cockpit author 决策面）
+  // 随 author_decision 消息族删除（wp5-attribution-table.md §2）。
   const handleJumpToEntry = useCallback((entryId: string) => {
     setDrilldownView("conversation");
     setJumpEntryId(entryId);
@@ -1009,20 +994,9 @@ export function ChatCockpitPage({
                           <ClipboardCopy className="h-4 w-4" /> 采纳 Review 意见
                         </button>
                       ) : null}
-                      <button
-                        type="button"
-                        className={state.reviewerEnabled ? "btn-primary h-9" : "btn-secondary h-9"}
-                        onClick={() => handleAuthorDecision("accept_with_review")}
-                      >
-                        <GitBranch className="h-4 w-4" /> 确认并送审
-                      </button>
-                      <button
-                        type="button"
-                        className={state.reviewerEnabled ? "btn-secondary h-9" : "btn-primary h-9"}
-                        onClick={() => handleAuthorDecision("accept_finalize")}
-                      >
-                        <Check className="h-4 w-4" /> 确认定稿
-                      </button>
+                      {/* 退役留档（T5/REQ-RET-02）：确认并送审/确认定稿按钮随
+                          author_decision 消息族删除（story/design 产物确认走 HTTP
+                          confirm 端点；wp5-attribution-table.md §2）。 */}
                     </>
                   ) : undefined
                 }
@@ -1071,23 +1045,10 @@ export function ChatCockpitPage({
                 hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
                 onSendContextNote={workspaceWs.sendContextNote}
                 onStartGeneration={handleStartGeneration}
-                onAuthorDecision={handleAuthorDecision}
-                onSelectWorkItemGenerationMode={workspaceWs.sendSelectWorkItemGenerationMode}
-                onRequestOutlineRevision={() => workspaceWs.sendRequestOutlineRevision()}
-                onWorkItemDraftDecision={workspaceWs.sendWorkItemDraftDecision}
-                onWorkItemBatchDecision={workspaceWs.sendWorkItemBatchDecision}
                 onAbort={workspaceWs.abort}
               />
             ) : null}
-            {isCurrentSession && state.stage === "review_decision" ? (
-              <ReviewDecisionActionBar
-                options={reviewDecisionOptions}
-                onSelectDecision={workspaceWs.sendReviewDecision}
-                onSelectRevisionPath={(path, extraContext) =>
-                  workspaceWs.sendSelectRevisionPath(path, extraContext)
-                }
-              />
-            ) : null}
+            {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
           </section>
         </div>
       </main>

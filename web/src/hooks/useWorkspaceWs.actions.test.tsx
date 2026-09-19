@@ -177,29 +177,8 @@ describe("useWorkspaceWs outgoing actions", () => {
     ]);
   });
 
-  it("sends revision path decisions with trimmed optional context", () => {
-    const harness = renderWorkspaceHook();
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.sendSelectRevisionPath("revise-with-context", " 补充边界条件 ");
-      harness.api.sendSelectRevisionPath("skip-to-human", "   ");
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "select_revision_path",
-        path: "revise-with-context",
-        extra_context: "补充边界条件",
-      }),
-      JSON.stringify({
-        type: "select_revision_path",
-        path: "skip-to-human",
-        extra_context: null,
-      }),
-    ]);
-  });
+  // 退役留档（T5/REQ-RET-02）：`sends revision path decisions with trimmed optional context` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
   it("sends a typed abandon_human_gate frame and resolves the open gate entry", () => {
     const harness = renderWorkspaceHook();
@@ -259,42 +238,8 @@ describe("useWorkspaceWs outgoing actions", () => {
     expect(gateEntry).not.toHaveProperty("resolution");
   });
 
-  it("sends author decisions", () => {
-    const harness = renderWorkspaceHook();
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.sendAuthorDecision("accept");
-      harness.api.sendAuthorDecision("reject");
-      harness.api.sendAuthorDecision("revise", "补充回滚策略");
-      harness.api.sendAuthorDecision("accept_with_review");
-      harness.api.sendAuthorDecision("accept_finalize");
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "author_decision",
-        decision: "accept",
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: "reject",
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: { revise: { feedback: "补充回滚策略" } },
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: "accept_with_review",
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: "accept_finalize",
-      }),
-    ]);
-  });
+  // 退役留档（T5/REQ-RET-02）：`sends author decisions` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
   it("waits for the engine gate-close event before resolving a gate prompt", () => {
     const harness = renderWorkspaceHook();
@@ -874,60 +819,6 @@ describe("useWorkspaceWs outgoing actions", () => {
     ]);
   });
 
-  it("sends staged work item plan workflow messages", () => {
-    const harness = renderWorkspaceHook();
-    const api = harness.api as unknown as {
-      sendSelectWorkItemGenerationMode: (mode: "serial" | "batch") => void;
-      sendRequestOutlineRevision: (feedback?: string) => void;
-      sendWorkItemDraftDecision: (
-        outlineId: string,
-        decision: "accept" | "rewrite" | "pause",
-        feedback?: string,
-      ) => void;
-      sendWorkItemBatchDecision: (
-        decision: "accept_all" | "rewrite_batch" | "pause" | "downgrade_to_serial",
-        feedback?: string,
-        firstAffectedOutlineId?: string,
-      ) => void;
-      sendWorkItemPlanCompileRecoveryAction: (
-        action: "continue" | "abort_and_rollback" | "human_triage",
-        reason?: string,
-      ) => void;
-    };
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      api.sendSelectWorkItemGenerationMode("serial");
-      api.sendRequestOutlineRevision(" 需要调整拆分 ");
-      api.sendWorkItemDraftDecision("outline_backend", "rewrite", " 缩小范围 ");
-      api.sendWorkItemBatchDecision("downgrade_to_serial", " 严格校验失败 ", "outline_backend");
-      api.sendWorkItemPlanCompileRecoveryAction("human_triage", " 需要人工检查 ");
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({ type: "select_work_item_generation_mode", mode: "serial" }),
-      JSON.stringify({
-        type: "request_outline_revision",
-        feedback: "需要调整拆分",
-      }),
-      JSON.stringify({
-        type: "work_item_draft_decision",
-        outline_id: "outline_backend",
-        decision: "rewrite",
-        feedback: "缩小范围",
-      }),
-      JSON.stringify({
-        type: "work_item_batch_decision",
-        decision: "downgrade_to_serial",
-        feedback: "严格校验失败",
-        first_affected_outline_id: "outline_backend",
-      }),
-      JSON.stringify({
-        type: "work_item_plan_compile_recovery_action",
-        action: "human_triage",
-        reason: "需要人工检查",
-      }),
-    ]);
-  });
+  // 退役留档（T5/REQ-RET-02）：`sends staged work item plan workflow messages` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 });

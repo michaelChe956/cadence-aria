@@ -1,5 +1,4 @@
 import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
-import type { RevisionPath } from "../../api/types";
 import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../../state/chat-entries";
 import { ChatEntryContainer } from "./ChatEntryContainer";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
@@ -18,7 +17,6 @@ interface MessageGroupViewProps {
   group: MessageGroup;
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
-  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
   actions?: CockpitActionFacade;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
@@ -30,7 +28,6 @@ export function MessageGroupView({
   group,
   onPermissionResponse,
   onChoiceResponse,
-  onSelectRevisionPath,
   actions,
   sessionId,
   contentCache,
@@ -94,7 +91,6 @@ export function MessageGroupView({
                   entry={entry}
                   onPermissionResponse={onPermissionResponse}
                   onChoiceResponse={onChoiceResponse}
-                  onSelectRevisionPath={onSelectRevisionPath}
                   actions={actions}
                 />
               ),

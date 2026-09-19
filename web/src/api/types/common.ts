@@ -252,7 +252,6 @@ export type StructuredFeedback = {
   target_artifact_version?: number | null;
 };
 
-export type RevisionPath = "revise" | "revise-with-context" | "skip-to-human";
 
 /**
  * author_decision 可发送的决策形式（spec-design-dialog-revision T1/T8）。

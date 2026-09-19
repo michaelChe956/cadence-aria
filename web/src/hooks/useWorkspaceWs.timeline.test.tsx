@@ -718,23 +718,8 @@ describe("useWorkspaceWs timeline state", () => {
     ]);
   });
 
-  it("sends review decision responses when connected", () => {
-    const harness = renderWorkspaceHook();
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.sendReviewDecision("continue_with_context", " 补充边界条件 ");
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "review_decision_response",
-        decision: "continue_with_context",
-        extra_context: "补充边界条件",
-      }),
-    ]);
-  });
+  // 退役留档（T5/REQ-RET-02）：`sends review decision responses when connected` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 });
 
 function reviewMetadataSnapshot(metadata: ChatEntry["metadata"] | undefined) {

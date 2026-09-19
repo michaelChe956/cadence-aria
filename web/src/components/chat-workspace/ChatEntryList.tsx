@@ -1,7 +1,6 @@
 import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { RevisionPath } from "../../api/types";
 import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../../state/chat-entries";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
 import { MessageGroupView } from "./MessageGroupView";
@@ -15,7 +14,6 @@ interface ChatEntryListProps {
   entries: ChatEntry[];
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
-  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
   actions?: CockpitActionFacade;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
@@ -31,8 +29,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       entries,
       onPermissionResponse,
       onChoiceResponse,
-      onSelectRevisionPath,
-      actions,
+        actions,
       sessionId,
       contentCache,
       loadContent,
@@ -161,7 +158,6 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                       group={item.group}
                       onPermissionResponse={onPermissionResponse}
                       onChoiceResponse={onChoiceResponse}
-                      onSelectRevisionPath={onSelectRevisionPath}
                       actions={actions}
                       sessionId={sessionId}
                       contentCache={contentCache}
@@ -185,7 +181,6 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                     entry={item.entry}
                     onPermissionResponse={onPermissionResponse}
                     onChoiceResponse={onChoiceResponse}
-                    onSelectRevisionPath={onSelectRevisionPath}
                     actions={actions}
                   />
                 </div>

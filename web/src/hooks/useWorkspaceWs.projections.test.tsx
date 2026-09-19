@@ -111,37 +111,8 @@ describe("useWorkspaceWs projection artifacts", () => {
     expect(useWorkspaceStore.getState().humanPresentationRevisions).toEqual({
       "plan-projection-001": revision,
     });
-
-    act(() => {
-      useWorkspaceStore
-        .getState()
-        .beginHumanPresentationSave("plan-projection-001");
-      harness.ws.receive({
-        type: "human_presentation_revision_saved",
-        revision: { ...revision, id: "presentation-002", human_summary: "更新说明" },
-      });
-    });
-    expect(
-      useWorkspaceStore.getState().humanPresentationSaveStates["plan-projection-001"],
-    ).toEqual({ saving: false, error: null });
-    expect(
-      useWorkspaceStore.getState().humanPresentationRevisions["plan-projection-001"]
-        ?.human_summary,
-    ).toBe("更新说明");
-
-    act(() => {
-      useWorkspaceStore
-        .getState()
-        .beginHumanPresentationSave("plan-projection-001");
-      harness.ws.receive({
-        type: "human_presentation_revision_save_failed",
-        source_projection_bundle_id: "plan-projection-001",
-        message: "supersedes conflict",
-      });
-    });
-    expect(
-      useWorkspaceStore.getState().humanPresentationSaveStates["plan-projection-001"],
-    ).toEqual({ saving: false, error: "supersedes conflict" });
+    // L2 退役留档（T5/REQ-RET-02）：save ack/error 半段（beginHumanPresentation
+    // Save+saved/failed 出站消息）随保存命令族删除——读侧 overlay 恢复断言保留。
   });
 });
 

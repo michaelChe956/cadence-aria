@@ -107,62 +107,14 @@ describe("ChatCockpitPage", () => {
       };
     }
 
-    it("auto-switches a story session to the artifact tab at author confirm and finalizes", async () => {
-      const user = userEvent.setup();
-      const sendAuthorDecision = vi.fn();
-      const workspaceWs = mockWorkspaceWs({ sendAuthorDecision });
-      useWorkspaceStore.setState({
-        stage: "author_confirm",
-        workspaceType: "design",
-        providers: { author: "pi", reviewer: "codex" },
-        reviewerEnabled: true,
-        artifactVersions: [artifactVersionSummaryFixture()],
-        artifact: "# 设计稿",
-      });
+    // 退役留档（T5/REQ-RET-02）：`auto-switches a story session to the artifact tab at author confirm and finalizes` 驱动已删除的 legacy 决策发送面，
+    // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
-      renderCockpitWith(workspaceWs);
+    // 退役留档（T5/REQ-RET-02）：`sends accept-with-review from the artifact tab` 驱动已删除的 legacy 决策发送面，
+    // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
-      const tab = screen.getByTestId("cockpit-artifact-review-tab");
-      expect(tab).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByText("# 设计稿")).toBeVisible();
-
-      await user.click(screen.getByRole("button", { name: "确认定稿" }));
-
-      expect(sendAuthorDecision).toHaveBeenCalledWith("accept_finalize");
-    });
-
-    it("sends accept-with-review from the artifact tab", async () => {
-      const user = userEvent.setup();
-      const sendAuthorDecision = vi.fn();
-      const workspaceWs = mockWorkspaceWs({ sendAuthorDecision });
-      useWorkspaceStore.setState({
-        stage: "author_confirm",
-        workspaceType: "story",
-        providers: { author: "pi", reviewer: "codex" },
-        reviewerEnabled: true,
-        artifactVersions: [artifactVersionSummaryFixture()],
-        artifact: "# 用户故事",
-      });
-
-      renderCockpitWith(workspaceWs);
-      await user.click(screen.getByRole("button", { name: "确认并送审" }));
-
-      expect(sendAuthorDecision).toHaveBeenCalledWith("accept_with_review");
-    });
-
-    it("sends revision feedback from the input bar at author confirm", async () => {
-      const user = userEvent.setup();
-      const sendAuthorDecision = vi.fn();
-      const workspaceWs = mockWorkspaceWs({ sendAuthorDecision });
-      useWorkspaceStore.setState({ stage: "author_confirm", workspaceType: "story" });
-
-      renderCockpitWith(workspaceWs);
-      await user.click(screen.getByTestId("cockpit-conversation-tab"));
-      await user.type(screen.getByTestId("context-note-input"), "第二段改成对话体");
-      await user.click(screen.getByRole("button", { name: "发送反馈" }));
-
-      expect(sendAuthorDecision).toHaveBeenCalledWith("revise", "第二段改成对话体");
-    });
+    // 退役留档（T5/REQ-RET-02）：`sends revision feedback from the input bar at author confirm` 驱动已删除的 legacy 决策发送面，
+    // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
     it("prefills review findings into the input bar via the shared prefill handle", async () => {
       const user = userEvent.setup();
@@ -260,53 +212,11 @@ describe("ChatCockpitPage", () => {
       expect(screen.queryByRole("button", { name: "确认并送审" })).toBeNull();
     });
 
-    it("exposes review decision actions at review decision stage", async () => {
-      const user = userEvent.setup();
-      const sendSelectRevisionPath = vi.fn();
-      const workspaceWs = mockWorkspaceWs({ sendSelectRevisionPath });
-      useWorkspaceStore.setState({ stage: "review_decision", workspaceType: "story" });
+    // 退役留档（T5/REQ-RET-02）：`exposes review decision actions at review decision stage` 驱动已删除的 legacy 决策发送面，
+    // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
-      renderCockpitWith(workspaceWs);
-      await user.click(screen.getByRole("button", { name: "接受修订建议" }));
-
-      expect(sendSelectRevisionPath).toHaveBeenCalledWith("revise", undefined);
-    });
-
-    it("offers optional work item plan finding decisions through the shared options helper", async () => {
-      const user = userEvent.setup();
-      const sendReviewDecision = vi.fn();
-      const workspaceWs = mockWorkspaceWs({ sendReviewDecision });
-      useWorkspaceStore.setState({
-        stage: "review_decision",
-        workspaceType: "work_item_plan",
-        chatEntries: [
-          {
-            id: "review-optional-1",
-            type: "review_verdict",
-            role: "reviewer",
-            content: "仅有可选建议",
-            timestamp: "2026-09-17T10:00:00Z",
-            metadata: {
-              verdict: "pass",
-              review_gate: "user_confirm_allowed",
-              findings: [
-                {
-                  severity: "suggestion",
-                  message: "补充 handoff",
-                  evidence: "当前 handoff 说明过短",
-                  required_action: "补充上下游交接说明",
-                },
-              ],
-            },
-          },
-        ],
-      });
-
-      renderCockpitWith(workspaceWs);
-      await user.click(screen.getByRole("button", { name: "修复这些建议" }));
-
-      expect(sendReviewDecision).toHaveBeenCalledWith("apply_optional_findings");
-    });
+    // 退役留档（T5/REQ-RET-02）：`offers optional work item plan finding decisions through the shared options helper` 驱动已删除的 legacy 决策发送面，
+    // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
     it("does not render ChatInputBar during human confirm", () => {
       useWorkspaceStore.setState({ stage: "human_confirm", workspaceType: "story" });
