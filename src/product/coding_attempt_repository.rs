@@ -237,13 +237,6 @@ fn logical_repository_for_group_attempt(
     attempt: &CodingExecutionAttempt,
     selection: &IssueCodebaseSelection,
 ) -> Result<LogicalRepositoryId, ProductStoreError> {
-    // D1 路由权威转移（REQ-MTG-01/REQ-COD-04 分流化）：attempt 自身冻结快照优先——
-    // 在场直接取 logical_repository_id，不经 authoritative units 收敛（T2 恢复面
-    // 锚：per-target attempt 各自路由，selection 多 focus 不再阻断）。
-    if let Some(snapshot) = attempt.target_snapshot.as_ref() {
-        return Ok(snapshot.logical_repository_id);
-    }
-
     let plan_id = attempt.work_item_group_id.as_deref().ok_or_else(|| {
         routing_error(
             RepositoryRoutingErrorCode::Inconsistent,
@@ -478,53 +471,6 @@ mod tests {
             )
             .unwrap()
         );
-    }
-
-    #[test]
-    fn logical_repository_for_group_attempt_routes_by_frozen_snapshot_first() {
-        // D1 路由权威转移（REQ-MTG-01/REQ-COD-04 分流化）：恢复/replay 面——
-        // attempt 冻结快照在场时直接取 logical_repository_id，不经 authoritative
-        // units 收敛；selection 多 focus 不再阻断（focus 面只约束无快照路径）。
-        // 空存储（无 plan lineage/selection 权威）上现行收敛路径必败——快照优先
-        // 必须先行返回。
-        let root = tempfile::tempdir().unwrap();
-        let paths = ProductAppPaths::new(root.path().join(".aria"));
-        let logical_id = LogicalRepositoryId(uuid::Uuid::new_v4());
-        let other_id = LogicalRepositoryId(uuid::Uuid::new_v4());
-        let mut attempt = attempt_fixture();
-        attempt.work_item_group_id = Some("work_item_plan_0001".to_string());
-        attempt.target_snapshot = Some(target_snapshot_fixture(logical_id));
-        let selection = IssueCodebaseSelection::explicit(
-            &attempt.project_id,
-            &attempt.issue_id,
-            vec![logical_id, other_id],
-            Vec::new(),
-            vec![logical_id, other_id],
-            None,
-        );
-
-        let resolved = logical_repository_for_group_attempt(&paths, &attempt, &selection).unwrap();
-
-        assert_eq!(resolved, logical_id);
-    }
-
-    fn target_snapshot_fixture(
-        logical_id: LogicalRepositoryId,
-    ) -> crate::product::coding_models::AttemptTargetSnapshot {
-        crate::product::coding_models::AttemptTargetSnapshot {
-            logical_repository_id: logical_id,
-            checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
-                uuid::Uuid::new_v4(),
-            ),
-            physical_repository_id: "repository_snapshot".to_string(),
-            canonical_path: std::path::PathBuf::from("/tmp/snapshot"),
-            git_dir_identity: "sha256:snapshot".to_string(),
-            revision: None,
-            policy_digest: "sha256:policy".to_string(),
-            membership_revision: 1,
-            captured_at: "2026-09-19T00:00:00Z".to_string(),
-            capture_source: "test".to_string(),
-        }
     }
 
     fn attempt_fixture() -> CodingExecutionAttempt {

@@ -322,8 +322,9 @@ fn schema_v2_evaluation_context_repository_id(
             )?;
             // D1 路由权威转移（REQ-MTG-01/REQ-COD-04 分流化）：per-attempt 冻结
             // 快照优先——有快照不再经 selection focus 收敛（多 focus 不阻断
-            // target-attempt 评估）；快照 target 仍受有效 selection 成员约束
-            // （fail-closed 保留，与恢复面 resolve_coding_attempt_repository 同款）。
+            // target-attempt 评估）；快照 target 仍受有效 selection 成员约束 +
+            // 权威身份逐字段校验（fail-closed 保留，与恢复面
+            // resolve_coding_attempt_repository 同形态先例）——漂移快照不得静默路由。
             if let Some(snapshot) = attempt.target_snapshot.as_ref() {
                 let selected_ids: std::collections::BTreeSet<
                     crate::product::logical_codebase::LogicalRepositoryId,
@@ -341,6 +342,22 @@ fn schema_v2_evaluation_context_repository_id(
                         "target snapshot repository is not in the effective selection",
                     ));
                 }
+                let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+                    paths,
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                )?;
+                crate::product::logical_codebase::snapshot_validator::validate_snapshot_fields(
+                    paths,
+                    attempt,
+                    lc_id.as_deref(),
+                )
+                .map_err(|code| {
+                    routing_error(
+                        code,
+                        "target snapshot does not match logical codebase authority",
+                    )
+                })?;
                 return store
                     .resolve_logical_repository_strict(
                         &attempt.project_id,
@@ -777,6 +794,8 @@ mod tests {
     fn schema_v2_repository_id_routes_by_frozen_snapshot_over_multi_focus() {
         // D1 路由权威转移（REQ-MTG-01/REQ-COD-04 分流化）：评估上下文面——
         // attempt 冻结快照优先，多 focus 不再阻断 target-attempt 评估。
+        // 快照取 build_attempt_target_snapshot 真实权威产物（伪造快照会因
+        // 身份不符失败，见 rejects_drifted_snapshot——校验生效证明）。
         let fixture = schema_v2_routing_fixture();
         let [api, web] = fixture.targets.as_slice() else {
             panic!("fixture must register two targets");
@@ -791,20 +810,14 @@ mod tests {
                 None,
             ))
             .unwrap();
-        let snapshot = crate::product::coding_models::AttemptTargetSnapshot {
-            logical_repository_id: *api,
-            checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
-                uuid::Uuid::new_v4(),
-            ),
-            physical_repository_id: "repository_snapshot".to_string(),
-            canonical_path: std::path::PathBuf::from("/tmp/snapshot"),
-            git_dir_identity: "sha256:snapshot".to_string(),
-            revision: None,
-            policy_digest: "sha256:policy".to_string(),
-            membership_revision: 1,
-            captured_at: "2026-09-19T00:00:00Z".to_string(),
-            capture_source: "test".to_string(),
-        };
+        let snapshot =
+            crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+                &fixture.paths,
+                "project_0001",
+                *api,
+                None,
+            )
+            .expect("build authoritative target snapshot");
         let attempt = schema_v2_attempt_fixture(Some(snapshot));
 
         let repository_id =
@@ -813,6 +826,47 @@ mod tests {
         assert_eq!(
             repository_id, fixture.api_physical_id,
             "snapshot target must win over multi-focus selection"
+        );
+    }
+
+    #[test]
+    fn schema_v2_repository_id_rejects_drifted_snapshot() {
+        // fix round 1（P2）：快照身份校验生效证明——漂移快照（git_dir_identity
+        // 伪造）不得静默路由，fail-closed 于权威不一致。
+        let fixture = schema_v2_routing_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![*api, *web],
+                Vec::new(),
+                vec![*api, *web],
+                None,
+            ))
+            .unwrap();
+        let mut snapshot =
+            crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+                &fixture.paths,
+                "project_0001",
+                *api,
+                None,
+            )
+            .expect("build authoritative target snapshot");
+        snapshot.git_dir_identity = "sha256:drifted".to_string();
+        let attempt = schema_v2_attempt_fixture(Some(snapshot));
+
+        let error =
+            schema_v2_evaluation_context_repository_id(&fixture.paths, &attempt).unwrap_err();
+
+        let ProductStoreError::InvalidRecord { reason, .. } = &error else {
+            panic!("expected repository_routing InvalidRecord, got {error:?}");
+        };
+        assert!(
+            reason.starts_with("repository_routing_inconsistent"),
+            "drifted snapshot must fail closed, got {reason}"
         );
     }
 
@@ -884,6 +938,13 @@ mod tests {
                     .expect("logical repository ID"),
             );
         }
+        let manifest = LogicalCodebaseStore::new(paths.clone())
+            .load_manifest("project_0001")
+            .unwrap()
+            .expect("manifest");
+        crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .unwrap();
         SchemaV2RoutingFixture {
             _root: root,
             paths,

@@ -10,8 +10,8 @@
 三处校验点+两路由消费面分流化，mixed-target 解析不再一律拒绝：
 
 1. **创建面** `group.rs`：新增 `split_group_targets`/`group_target_snapshots`/`resolve_group_repositories` 多值解析面（≥2 target 逐仓快照/仓 map；0-target focus 唯一回落原样；单值函数零变化，T2 消费）。
-2. **恢复/replay 面** `coding_attempt_repository.rs`：`logical_repository_for_group_attempt` 快照优先；无快照保持现行收敛（D2.1 A3 锚）。
-3. **评估上下文面** `builder.rs`：`schema_v2_evaluation_context_repository_id` 签名 per-attempt + 快照优先（多 focus 不阻断；快照仍受 selection 成员 fail-closed 约束）。
+2. **恢复/replay 面** `coding_attempt_repository.rs`：**零改动**（fix round 1 P3——快照优先由调用方入口 `resolve_coding_attempt_repository` :50-92 既有行为提供，函数内曾加分支不可达已删，文件回退至与本 Task 前逐字节一致）；无快照保持现行收敛（D2.1 A3 锚）。
+3. **评估上下文面** `builder.rs`：`schema_v2_evaluation_context_repository_id` 签名 per-attempt + 快照优先（多 focus 不阻断；快照受 selection 成员 TargetUnknown + `validate_snapshot_fields` 权威身份 Inconsistent 双 fail-closed 约束——fix round 1 P2 补齐身份校验，漂移快照不得静默路由）。
 4. **plan 会话面** `workspace_repository.rs`：`plan_session_repository_target`——多 target+focus 唯一回落成功；0-target 保持 TargetMissing；多 focus 保持 TargetAmbiguous（双审定案全部落实）。
 5. **分组辅助** `group_validation.rs`：`units_by_target`+`UnitsByTarget`（无归属 unit 不入桶，T2 复用）。
 
@@ -33,9 +33,16 @@
 
 ## Commits
 
-- 见下方提交（显式列文件：src 五文件+两报告）。
+- `c16e497c` feat(coding-ws): mixed-target group resolution unblocked via per-target split parsing（WP1 主体：src 五文件+两报告）。
+- fix round 1 提交（本提交；基于 `32dc4de8`，含 builder.rs 身份校验+coding_attempt_repository.rs 回退+两报告修订——hash 见 `git log` 本行）。
 
 ## Concerns
 
 1. 主工作树同批有兄弟 agent 编辑 `admission.rs`/`coding_ws_handler/*`/`work_item_plan_compiler/*`（及归属待查的 `workspace_engine/tests/single_candidate/contract_autorepair.rs`——已向 F16Fix 澄清非本任务文件）；crate 级全量验证以主 agent 收口为准，本任务以隔离树证据交付。
 2. 多 target 建组全流程在 T2（本 Task 后 mixed-target 建组仍走不通创建编排——`group_initialization.rs:617` per-attempt 单值校验按设计保留，预期中间态，T1 验收口径=分流解析成功）。
+
+## fix round 1（k3 审 1×P2+1×P3）
+
+- **P2**：builder 快照分支补 `validate_snapshot_fields`（恢复面同形态先例）；正向测试换 `build_attempt_target_snapshot` 真实权威快照（夹具补 `ensure_bootstrap`），新增 `schema_v2_repository_id_rejects_drifted_snapshot` 负向（伪造 git_dir_identity→`repository_routing_inconsistent`——校验生效证明）。
+- **P3**：删 `logical_repository_for_group_attempt` 不可达快照分支+直调测试（controller 定案选删除）；语义变化表该行修正为「由调用方入口既有行为提供」；`coding_attempt_repository.rs` 与本 Task 前逐字节一致。
+- **验证**：隔离 worktree（`c16e497c`+fix diff）定向 20/20 passed + clippy `-D warnings` 全绿；`rustfmt --edition 2024` 限两文件（主树 `cargo fmt` 被 C2T2 兄弟的 advance_store.rs 中间态挡——整 crate 解析依赖）。
