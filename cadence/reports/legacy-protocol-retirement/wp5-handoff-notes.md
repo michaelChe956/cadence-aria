@@ -8,11 +8,24 @@
 |---|---|
 | d4c39752 | docs(wp5): 归属判定表+首版移交笔记 |
 | cc073879 | refactor(ws)!: 后端 legacy 决策协议删除（52 文件 -8378 行） |
+
 | 88e3dc20 | test(ws): SC revise gate 重钉 human-gate 路由 |
 | ab3d5a0c | feat(lifecycle): preflight 新路径终态收敛+三测试重钉 |
 | b50b09b7 | style(review): routing.rs 1200 行 guard 合规 |
 | ae6aa769 | feat(web)!: 前端归零（28 文件 -1154 行） |
 | c535000e | chore: clippy -D warnings 收口（45 文件 -2006 行：孤儿引擎面/测试夹具/导入卫生） |
+
+## it_web 残余红名单（2026-09-19 实跑，31 failed / 328 passed / 12 ignored，511s）——接手人直接按此退役，无需重跑
+
+- **web_work_item_plan_author（7）**：outline_review_revise_requires_decision_before_next_outline_provider_run / work_item_plan_author_completes_provider_node_before_author_confirm / work_item_plan_author_emits_provider_prompt_event / work_item_plan_author_persists_outline_without_draft_work_items_or_child_sessions / work_item_plan_author_streams_provider_output_before_outline_artifact / work_item_plan_outline_review_revision_reenters_review_after_revised_outline_confirm / work_item_plan_start_generation_returns_outline_artifact
+- **web_work_item_plan_batch（4）**：batch_generation_invokes_one_provider_run_per_outline / batch_local_validation_failure_retries_once / batch_local_validation_second_failure_marks_validation_failed_and_continues / batch_mode_creates_batch_record_for_current_round
+- **web_work_item_plan_mode（5）**：outline_human_confirm_request_change_starts_dedicated_revision_over_websocket / request_outline_revision_on_mode_node_sets_outline_revising / request_revision_on_outline_confirm_returns_to_outline_run_without_round / select_mode_rejected_outside_generation_mode_node / session_state_restores_generation_mode_node_with_outline_payload
+- **web_work_item_plan_outline（7）**：context_blocker_confirm_is_rejected / context_blocker_human_resolution_appends_index_and_next_prompt / context_blockers_enter_context_blocker_node / outline_structured_json_parse_failure_auto_retries_then_accepts_valid_outline / outline_validation_failure_auto_retries_then_human_blocker / valid_outline_enters_outline_confirm / work_item_plan_start_generation_creates_outline_run_node
+- **web_work_item_plan_serial（5）**：local_validation_success_enters_draft_confirm_with_accept / serial_draft_run_emits_provider_prompt_event / serial_item_run_writes_draft_record_not_real_work_item / serial_local_validation_failure_repairs_once_with_findings / serial_mode_starts_first_outline_by_topological_order
+- **web_work_item_plan_staged_flow（1）**：session_state_restores_work_item_plan_staged_artifacts
+- **web_workspace_recovery_consistency（2）**：reviewer_repair_failure_live_diagnostic_matches_reloaded_node_detail / story_design_work_item_plan_recovery_consistency
+
+注意：author/serial 的 start_generation/draft_run 类测试名义锚 start_generation（保留面），但断言链落在 author_confirm→逐段决策（已删面）——整测退役即正确处置（T1 矩阵 legacy 回归留档在案）；处置脚本要点见文末附录。
 
 ## 已完成（全量）
 
