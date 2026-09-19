@@ -43,3 +43,10 @@
 - **TDD**：`not_started_when_pre_start_abort_never_reached_provider` 修前红（`left: Partial, right: NotStarted`——与 k3 诊断吻合）+对偶 `partial_when_pre_start_abort_alongside_real_start`（双向钉死）；修后全绿。
 - **复跑**：plan_group_projection 15/15、web::handlers::lifecycle 9/9、split_advance 8/8、前端 Panel+Drawer 13/13（前端零改动）；rustfmt 幂等+clippy 0 warning。
 - **commit**：本 fix 提交（`fix(coding-ws): WP3 fix round 1 (k3 P2) — pre-start abort excluded from provider-started judgment (multi-repo-group-coding)`，紧随 `093fa312`）
+
+## Fix round 2（k3 复审 1×P1，Main 转交）
+
+- **缺陷**：`advance_to_next_group_unit`（coding_workspace_engine/group.rs:315）在多 unit group attempt 间推进时把 stage 回退 PrepareContext，其后 abort 落盘 (Aborted, PrepareContext) 与 pre-start abort 同形态但已执行过 provider（role_runs 在案）——fix round 1 形态判据误判未启→overall 误翻 NotStarted。
+- **修法**：判据改取 durable provider 执行证据（新私有 `attempt_reached_provider`）：stage 离开 PrepareContext→已达；(Created, PrepareContext)→未达；其余 PrepareContext 停留态（经 admission）→已达；(Aborted, PrepareContext) 以 `list_role_runs` 非空或 `head_commit` 在场消歧（执行铁证在场=已达）。只读派生面保全。
+- **TDD**：`partial_when_stage_reset_abort_has_provider_execution_evidence`（role_runs 通道）+`partial_when_stage_reset_abort_has_head_commit_evidence`（head_commit 通道）双红（`left: NotStarted, right: Partial`——与 k3 诊断吻合）→绿；三用例对照①无证据 pre-start abort→NotStarted（round1 测试保持）②有证据→Partial（新增）③未动→NotStarted（既有保持）。
+- **复跑**：plan_group_projection 17/17、split_advance 8/8、web::handlers::lifecycle 9/9、role_run 族 13/13（新消费 list_role_runs 零回归）；前端零改动；rustfmt 幂等+clippy 0 warning（本文件）。

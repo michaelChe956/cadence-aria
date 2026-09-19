@@ -1,15 +1,16 @@
 //! REQ-MTG-04（WP3）：plan 级 group 聚合只读投影。
 //!
 //! 三值终态判据（约束 9 定案，k3 F4 可测化）：
-//! - **已达 provider 启动** = attempt 离开初始二元组 `!(status == Created
-//!   && stage == PrepareContext)`（`StartCoding` 是唯一入口，离开必经
-//!   `admit_and_transition_attempt_to_executable`）；**pre-start abort 除外**
-//!   （k3 fix round 1）：PrepareContext 期 AbortAttempt 合法落盘
-//!   `(Aborted, PrepareContext)`（Created→Aborted 白名单转换、abort 不改
-//!   stage）——未达 provider 启动，不算离开初始二元组；
+//! - **已达 provider 启动** = attempt 离开初始二元组（`StartCoding` 是唯一
+//!   入口，离开必经 `admit_and_transition_attempt_to_executable`）；
+//!   `(Aborted, PrepareContext)` **双形态消歧**：pre-start abort（无执行
+//!   证据）未达（k3 fix round 1）；多 unit group attempt 在 unit 间推进时
+//!   `advance_to_next_group_unit` 把 stage 回退 PrepareContext，其后 abort
+//!   落盘同形态但已执行过 provider——取该 attempt 的 role_runs 非空或
+//!   head_commit 在场为执行铁证，证据在场即算已达（k3 fix round 2）；
 //! - **未启**（判定优先于「部分」）：无 target-attempt，或全部 target-attempt
-//!   均未离开初始二元组（`(Created, PrepareContext)` 或 pre-start abort 形态
-//!   `(Aborted, PrepareContext)`）；
+//!   均未达 provider 启动（`(Created, PrepareContext)` 未触碰形态或无执行
+//!   证据的 pre-start abort 形态）；
 //! - **全部交付**：存在 target-attempt 且每 target 最新 attempt
 //!   `Completed` 且最新 ReviewRequest `Pushed`——对齐
 //!   `compute_issue_delivery_summary` 口径（issue_delivery.rs:110-113）；
@@ -139,20 +140,15 @@ impl super::CodingAttemptStore {
             let latest = target_attempts
                 .last()
                 .expect("target bucket is never empty");
-            // 已达 provider 启动 = 该 target 任一 attempt 离开初始二元组
-            // （历史事实口径：任一 attempt 曾离开即算）。pre-start abort 排除
-            // （k3 fix round 1）：PrepareContext 期 AbortAttempt 合法落盘
-            // (Aborted, PrepareContext)（Created→Aborted 为状态白名单转换，
-            // abort 不改 stage）——未达 provider 启动，不算离开初始二元组；
-            // 启动后 abort（stage 已离开 PrepareContext）仍算已达。
-            let target_started = target_attempts.iter().any(|attempt| {
-                let never_reached_provider = attempt.stage == CodingExecutionStage::PrepareContext
-                    && matches!(
-                        attempt.status,
-                        CodingAttemptStatus::Created | CodingAttemptStatus::Aborted
-                    );
-                !never_reached_provider
-            });
+            // 已达 provider 启动 = 该 target 任一 attempt 已达（历史事实口径，
+            // 判据见 attempt_reached_provider——k3 fix round 1/2 消歧版）。
+            let mut target_started = false;
+            for attempt in target_attempts {
+                if self.attempt_reached_provider(project_id, issue_id, attempt)? {
+                    target_started = true;
+                    break;
+                }
+            }
             let latest_review = self
                 .list_review_requests(project_id, issue_id, &latest.id)?
                 .into_iter()
@@ -201,6 +197,39 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// 该 attempt 是否已达 provider 启动（k3 fix round 1/2 消歧版判据）。
+    ///
+    /// - stage 已离开 `PrepareContext` → 已达（含启动后 abort）；
+    /// - `(Created, PrepareContext)` → 未达（未触碰，`StartCoding` 唯一入口）；
+    /// - 其余 PrepareContext 停留态（非 Created 非 Aborted）→ 已达：非 Created
+    ///   状态均经 admission，PrepareContext 停留只可能来自 unit 间 stage 回退；
+    /// - `(Aborted, PrepareContext)` **双形态消歧**（fix round 1 排除 pre-start
+    ///   abort；fix round 2 修正误排）：pre-start abort（Created→Aborted 白名单
+    ///   转换、abort 不改 stage、无执行证据）未达；多 unit group attempt 在
+    ///   unit 间推进时 `advance_to_next_group_unit` 会把 stage 回退
+    ///   PrepareContext（coding_workspace_engine/group.rs:315），其后 abort
+    ///   落盘同形态但已执行过 provider——取 durable 执行证据消歧：该 attempt
+    ///   的 role_runs 非空或 head_commit 在场即算已达（只读派生面，两者均在
+    ///   attempt record/子目录可读）。
+    fn attempt_reached_provider(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<bool, ProductStoreError> {
+        if attempt.stage != CodingExecutionStage::PrepareContext {
+            return Ok(true);
+        }
+        match attempt.status {
+            CodingAttemptStatus::Created => Ok(false),
+            CodingAttemptStatus::Aborted => Ok(!self
+                .list_role_runs(project_id, issue_id, &attempt.id)?
+                .is_empty()
+                || attempt.head_commit.is_some()),
+            _ => Ok(true),
+        }
+    }
+
     /// 解析 plan target 的仓展示名（issue_delivery.rs `resolve_repository_name`
     /// 同款）：logical id 经 `resolve_logical_repository_strict` 取 checkout 路径
     /// 末段目录名；解析不出末段时回落 logical id 字符串本身。
@@ -238,7 +267,8 @@ mod tests {
     use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
     use crate::product::coding_models::{
         AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-        PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind,
+        CodingProviderRole, CodingRoleRunTrigger, PushStatus, RemoteKind, ReviewRequest,
+        ReviewRequestKind, ReviewRequestOwnerKind,
     };
     use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::json_store::write_json;
@@ -887,6 +917,74 @@ mod tests {
             projection.overall,
             PlanGroupOverall::Partial,
             "pre-start abort 不拉低已启动 target——任一 target 真正启动即 Partial"
+        );
+    }
+
+    /// k3 fix round 2：多 unit group attempt 在 unit 间推进时
+    /// `advance_to_next_group_unit` 把 stage 回退 PrepareContext
+    /// （coding_workspace_engine/group.rs:315），其后 abort 落盘
+    /// (Aborted, PrepareContext) 与 pre-start abort 同形态——但该 attempt
+    /// 已执行过 provider（role_runs 在案）。判据取 durable 执行证据消歧：
+    /// 证据在场=已达 provider 启动 → Partial（修前误 NotStarted）。
+    #[test]
+    fn partial_when_stage_reset_abort_has_provider_execution_evidence() {
+        let (tmp, store) = setup_store();
+        let (alpha, beta) = seed_two_targets(tmp.path(), &store);
+        let attempt_a = seed_group_attempt(&store, Some(alpha), "aria/issues/i/api");
+        let _attempt_b = seed_group_attempt(&store, Some(beta), "aria/issues/i/web");
+        // 前 unit 已执行：coder role run 在案（provider 执行铁证）。
+        store
+            .create_role_run(
+                &attempt_a,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .unwrap();
+        // unit 间推进回退 stage 后 abort：(Aborted, PrepareContext)+role_runs 非空。
+        let _attempt_a = force_attempt_state(
+            &store,
+            &attempt_a,
+            CodingAttemptStatus::Aborted,
+            CodingExecutionStage::PrepareContext,
+            None,
+        );
+
+        let projection = store
+            .compute_plan_group_projection(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert_eq!(
+            projection.overall,
+            PlanGroupOverall::Partial,
+            "已执行过 provider 的 (Aborted, PrepareContext)（role_runs 在案）不算未启——整体不误翻 NotStarted"
+        );
+    }
+
+    /// k3 fix round 2 证据通道二：head_commit 在场（无 role run）同为执行铁证。
+    #[test]
+    fn partial_when_stage_reset_abort_has_head_commit_evidence() {
+        let (tmp, store) = setup_store();
+        let (alpha, beta) = seed_two_targets(tmp.path(), &store);
+        let attempt_a = seed_group_attempt(&store, Some(alpha), "aria/issues/i/api");
+        let _attempt_b = seed_group_attempt(&store, Some(beta), "aria/issues/i/web");
+        let mut aborted = force_attempt_state(
+            &store,
+            &attempt_a,
+            CodingAttemptStatus::Aborted,
+            CodingExecutionStage::PrepareContext,
+            None,
+        );
+        aborted.head_commit = Some("sha-evidence".to_string());
+        store.write_coding_attempt_for_test(&aborted).unwrap();
+
+        let projection = store
+            .compute_plan_group_projection(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert_eq!(
+            projection.overall,
+            PlanGroupOverall::Partial,
+            "head_commit 在场=执行铁证——(Aborted, PrepareContext) 判已达 provider 启动"
         );
     }
 

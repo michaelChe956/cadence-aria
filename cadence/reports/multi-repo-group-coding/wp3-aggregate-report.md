@@ -115,3 +115,19 @@
 - 新增对偶 `partial_when_pre_start_abort_alongside_real_start`——pre-start abort+另一 target Running/Coding → Partial 语义不变（修前修后均绿，防修过窄/过宽双向钉死）。
 
 **定向复跑**：`plan_group_projection` 全族 **15/15**（13 原有+2 新增）；`web::handlers::lifecycle` 9/9；`split_advance` 8/8（无自动编排测试直读 attempt 状态，与投影判据正交）；前端 Panel+Drawer 13/13（前端零改动——not_started+aborted 行经 `plan-target-blocked-reason` 既有分支显式呈现）；`rustfmt` 幂等+clippy `--lib --tests` 本文件 0 warning。
+
+## 九、Fix round 2（k3 复审 1×P1：stage 回退后的 abort 被 fix round 1 误判未启，2026-09-19）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 多 unit group attempt 在 unit 间推进时 `advance_to_next_group_unit`（coding_workspace_engine/group.rs:315）把 running attempt 的 stage **回退 PrepareContext**，随后 abort 落盘 `(Aborted, PrepareContext)`——与 pre-start abort 同形态但该 attempt **已执行过 provider**（前 unit 的 role_runs 在案）。fix round 1 的形态判据把它误判「未达 provider 启动」→ overall 误翻 NotStarted。 |
+| 修法（k3 方向） | `never_reached_provider` 改取 **durable provider 执行证据**：新增私有判据 `attempt_reached_provider`——stage 已离开 PrepareContext → 已达；`(Created, PrepareContext)` → 未达；其余 PrepareContext 停留态（非 Created 非 Aborted，均经 admission）→ 已达；`(Aborted, PrepareContext)` 双形态消歧：该 attempt 的 `list_role_runs` 非空 **或** `head_commit` 在场即算已达（执行铁证，均在 attempt record/子目录只读可读——只读派生面保全）。模块文档同步改写。 |
+| 语义保全 | pre-start abort（无证据）仍判未达（fix round 1 语义保持）；blocked_reason="aborted" 呈现不变。 |
+
+**TDD（红→绿）**：
+
+- 新增 `partial_when_stage_reset_abort_has_provider_execution_evidence`——role_runs 在案的 (Aborted, PrepareContext) → Partial；修前红（`left: NotStarted, right: Partial`，与 k3 复审诊断吻合）。
+- 新增 `partial_when_stage_reset_abort_has_head_commit_evidence`——head_commit 在场（无 role run）同判 Partial（第二证据通道钉死）。
+- 三用例对照（Main 指令）：①pre-start abort 无 role run → NotStarted（fix round 1 测试保持绿）②stage 回退+abort 有证据 → Partial（新增，红→绿）③正常未动 (Created, PrepareContext) → NotStarted（既有测试保持绿）。
+
+**定向复跑**：`plan_group_projection` 全族 **17/17**（15+2 新增）；`split_advance` 8/8；`web::handlers::lifecycle` 9/9；`role_run` 族 13/13（新消费 `list_role_runs` 零回归）；前端零改动（Panel+Drawer 13/13 上一轮已绿，判据面纯后端）；本文件 rustfmt 幂等+clippy `--lib --tests` 0 warning（主树剩余 fmt diff 均为 WP4 兄弟在途文件 issue_delivery.rs/advance_split_targets.rs，已 IRC 提示）。
