@@ -44,6 +44,7 @@ fn conversational_gate_outbound_events_roundtrip_with_immutable_prefixes() {
                 command_id: "cmd-002".to_string(),
                 attempt_id: "attempt-001".to_string(),
                 workspace_entry: "workspace://work-item-group/001".to_string(),
+                target_attempts: Vec::new(),
             },
             "advance_completed",
         ),
@@ -97,6 +98,7 @@ fn conversational_gate_outbound_events_roundtrip_with_immutable_prefixes() {
                 command_id,
                 attempt_id,
                 workspace_entry,
+                ..
             } => {
                 assert_eq!(json["command_id"], serde_json::json!(command_id));
                 assert_eq!(json["attempt_id"], serde_json::json!(attempt_id));

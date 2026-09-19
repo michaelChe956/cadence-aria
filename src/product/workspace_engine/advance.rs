@@ -737,6 +737,8 @@ impl WorkspaceEngine {
             record: ready_record,
             attempt_id: persisted_attempt.id.clone(),
             workspace_entry: Self::advance_workspace_entry(&persisted_attempt),
+            // 单 target 路径：集绑定为空（wire 不发送），单值 attempt_id 承载不变。
+            target_attempts: Vec::new(),
         })
     }
 

@@ -46,6 +46,7 @@ fn ready_record(attempt_id: &str, status: AdvanceStatus) -> AdvanceRecord {
         plan_id: "work_item_plan_0001".to_string(),
         plan_revision_id: "plan_revision_0001".to_string(),
         attempt_id: Some(attempt_id.to_string()),
+        target_attempts: Vec::new(),
         status,
         workspace_entry: Some("/tmp/ready-only-worktree".to_string()),
         error: None,

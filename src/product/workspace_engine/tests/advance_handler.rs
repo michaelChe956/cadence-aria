@@ -230,6 +230,7 @@ fn stored_record(command_id: &str) -> AdvanceRecord {
         plan_id: PLAN_ID.to_string(),
         plan_revision_id: "revision_advance".to_string(),
         attempt_id: Some("attempt_advance".to_string()),
+        target_attempts: Vec::new(),
         status: AdvanceStatus::Ready,
         workspace_entry: Some("/workspace/attempt_advance".to_string()),
         error: None,
@@ -292,6 +293,7 @@ async fn advance_valid_path_persists_ready_group_and_emits_completion() {
             record,
             attempt_id,
             workspace_entry,
+            ..
         } => (record, attempt_id, workspace_entry),
         other => panic!("valid advance must complete, got {other:?}"),
     };
@@ -305,6 +307,7 @@ async fn advance_valid_path_persists_ready_group_and_emits_completion() {
             record: record.clone(),
             attempt_id: attempt_id.clone(),
             workspace_entry: workspace_entry.clone(),
+            target_attempts: Vec::new(),
         },
     );
     assert!(matches!(
@@ -313,6 +316,7 @@ async fn advance_valid_path_persists_ready_group_and_emits_completion() {
             command_id,
             attempt_id: response_attempt_id,
             workspace_entry: response_workspace_entry,
+            ..
         } if command_id == "command_valid_path"
             && response_attempt_id == attempt_id
             && response_workspace_entry == workspace_entry

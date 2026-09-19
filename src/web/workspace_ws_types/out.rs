@@ -148,6 +148,10 @@ pub enum WsOutMessage {
         command_id: String,
         attempt_id: String,
         workspace_entry: String,
+        /// REQ-MTG-03（OQ1，WP2 additive）：多 target 拆分的全集绑定（单 target
+        /// 空集不发送——wire 零变化；多 target 全集，`attempt_id` 为拓扑序首个）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_attempts: Vec<crate::product::advance_store::AdvanceTargetAttemptBinding>,
     },
     AdvanceRejected {
         command_id: String,

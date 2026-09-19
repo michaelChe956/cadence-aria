@@ -244,6 +244,7 @@ async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start(
         command_id,
         attempt_id,
         workspace_entry,
+        ..
     } = completed
     else {
         panic!("生产 SC 链不 seed 草稿必须能 advance(源 draft 应由编译提交段落盘): {completed:?}");
