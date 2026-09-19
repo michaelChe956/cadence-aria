@@ -344,9 +344,7 @@ async fn group_amendment_reachable_from_real_approval_chain() {
     engine.event_tx = event_tx;
     let plan_session_id = engine.session().session_id.clone();
     let close = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect("real approval chain must confirm");
     assert_eq!(close, HumanGateCloseOutcome::Confirmed);
@@ -460,9 +458,7 @@ async fn amendment_revision_chain_prefix(
     approval_engine.event_tx = event_tx;
     let plan_session_id = approval_engine.session().session_id.clone();
     let close = approval_engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect("real approval chain must confirm");
     assert_eq!(close, HumanGateCloseOutcome::Confirmed);
@@ -666,9 +662,7 @@ async fn forged_reopen_signature_prefix(
     approval_engine.event_tx = event_tx;
     let plan_session_id = approval_engine.session().session_id.clone();
     let close = approval_engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect("real approval chain must confirm");
     assert_eq!(close, HumanGateCloseOutcome::Confirmed);

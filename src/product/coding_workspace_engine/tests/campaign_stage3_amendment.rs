@@ -157,7 +157,7 @@ async fn campaign_confirmed_plan_session(budget: u32) -> (TempDir, LifecycleStor
     let plan_session_id = record.id.clone();
     let close = engine
         .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
+            crate::product::workspace_engine::HumanGateCloseDecision::Approve,
         )
         .await
         .expect("real approval chain must confirm");

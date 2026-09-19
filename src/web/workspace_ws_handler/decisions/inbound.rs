@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use std::pin::Pin;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceInboundContext {
@@ -37,13 +38,27 @@ pub(crate) async fn finish_interrupted_recovery_spawn_error(
         .await;
 }
 
-pub(crate) async fn handle_workspace_inbound_message<E>(
+pub(crate) fn handle_workspace_inbound_message<E>(
     context: WorkspaceInboundContext,
     envelope: E,
-) where
+) -> Pin<Box<dyn Future<Output = ()> + Send>>
+where
     E: Into<WorkspaceInboundEnvelope>,
 {
-    let envelope = envelope.into();
+    // 巨型 match 分发是库内最大 async 状态机之一；socket select 嵌套 + 深链
+    // 测试（campaign_stage3 族）在线程栈上贴边（曾因加臂溢出）。整体装箱：
+    // 语义零变化（WS 入站消息频率低，一次堆分配可忽略），后续加臂不再
+    // 影响调用方栈深。
+    Box::pin(handle_workspace_inbound_message_inner(
+        context,
+        envelope.into(),
+    ))
+}
+
+async fn handle_workspace_inbound_message_inner(
+    context: WorkspaceInboundContext,
+    envelope: WorkspaceInboundEnvelope,
+) {
     let WorkspaceInboundContext {
         app_state,
         engine,
@@ -133,6 +148,23 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
             }
             handle_advance_from_handler(run_context.clone(), outbound_tx.clone(), command_id).await;
         }
+        WsInMessage::AbandonHumanGate { command_id } => {
+            if let Err(err) = validate_command_id(&command_id) {
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
+            }
+            // L0 typed 重承载（REQ-RET-02/REQ-CG-04）：abandon 显式 typed 门命令，
+            // command_id 为幂等/审计键（与 HumanGateFeedback/Advance 同族；
+            // 关门幂等由 durable 会话单飞语义承载——先到者赢）。调用点
+            // Box::pin：本函数 match 已是巨型 async 状态机，低频人机命令
+            // 堆上执行，避免测试线程栈贴边溢出（campaign_stage3_advance 族）。
+            Box::pin(handle_human_gate_termination_from_handler(
+                run_context.clone(),
+                outbound_tx.clone(),
+                HumanGateCloseDecision::Abandon,
+            ))
+            .await;
+        }
         WsInMessage::UserMessage { content } => {
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context.clone(),
@@ -166,7 +198,7 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                 handle_human_gate_termination_from_handler(
                     run_context.clone(),
                     outbound_tx.clone(),
-                    HumanConfirmDecision::Confirm,
+                    HumanGateCloseDecision::Approve,
                 )
                 .await;
             } else {
@@ -844,12 +876,32 @@ pub(crate) async fn handle_workspace_inbound_message<E>(
                     .await;
                     return;
                 }
-                handle_human_gate_termination_from_handler(
-                    run_context.clone(),
-                    outbound_tx.clone(),
-                    decision,
-                )
-                .await;
+                // 双轨期 legacy 桥接（REQ-RET-02 L0）：SC 流的 HumanConfirm 仍
+                // 接受，关门决策映射 typed 枚举——Confirm→Approve、Terminate→
+                // Abandon（L2 删除）；RequestChange 为 legacy-only 关门语义，SC
+                // 门从未支持，保持显式拒绝（原 engine 侧拒绝语义上收到此处）。
+                let close = match decision {
+                    HumanConfirmDecision::Confirm => Some(HumanGateCloseDecision::Approve),
+                    HumanConfirmDecision::Terminate => Some(HumanGateCloseDecision::Abandon),
+                    HumanConfirmDecision::RequestChange => None,
+                };
+                if let Some(close) = close {
+                    handle_human_gate_termination_from_handler(
+                        run_context.clone(),
+                        outbound_tx.clone(),
+                        close,
+                    )
+                    .await;
+                } else {
+                    let _ = send_json_outbound(
+                        &outbound_tx,
+                        &WsOutMessage::Error {
+                            message: "single-candidate human gate does not support request-change; submit feedback through HumanGateFeedback"
+                                .to_string(),
+                        },
+                    )
+                    .await;
+                }
             } else {
                 handle_human_confirm_from_handler(
                     run_context.clone(),

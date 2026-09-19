@@ -440,6 +440,20 @@ impl CampaignStage3Harness {
         }
     }
 
+    /// 短窗口探针：窗口内取到第一条 outbound 则返回（白名单漏加形态锚——
+    /// typed abandon 被真实分发链拒为 STAGE_INVALID protocol error 时在此
+    /// 出现）；窗口静默返回 None（abandon 成功关门路径不发 ws outbound）。
+    pub(super) async fn probe_outbound(&self, window: Duration) -> Option<WsOutMessage> {
+        let mut rx = self.outbound_rx.lock().await;
+        match timeout(window, rx.recv()).await {
+            Ok(Some(OutboundControl::Text(json))) => {
+                Some(serde_json::from_str(&json).expect("outbound ws json"))
+            }
+            Ok(_) => panic!("expected text outbound"),
+            Err(_) => None,
+        }
+    }
+
     pub(super) fn durable_turns(&self) -> Vec<crate::product::models::HumanGateTurn> {
         self.lifecycle
             .list_human_gate_turns(&self.session_id)

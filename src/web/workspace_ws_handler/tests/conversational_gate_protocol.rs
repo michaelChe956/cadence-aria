@@ -38,8 +38,27 @@ fn conversational_gate_inbound_roundtrips_and_preserves_command_ids() {
     assert_eq!(advance_wire["command_id"], "cmd-002");
     assert!(advance_wire.get("Advance").is_none());
 
+    // L0 typed 重承载（REQ-RET-02）：abandon 的 wire 名 `abandon_human_gate`
+    // 是 T4 前端 union 与 T5 protocol error 负向测试的契约依赖，此处钉死。
+    let abandon_json = serde_json::json!({
+        "type": "abandon_human_gate",
+        "command_id": "cmd-003"
+    });
+    let abandon: WsInMessage = serde_json::from_value(abandon_json).unwrap();
+    assert_eq!(
+        abandon,
+        WsInMessage::AbandonHumanGate {
+            command_id: "cmd-003".to_string(),
+        }
+    );
+    let abandon_wire = serde_json::to_value(&abandon).unwrap();
+    assert_eq!(abandon_wire["type"], "abandon_human_gate");
+    assert_eq!(abandon_wire["command_id"], "cmd-003");
+    assert!(abandon_wire.get("AbandonHumanGate").is_none());
+
     assert_eq!(message_type(&feedback), "human_gate_feedback");
     assert_eq!(message_type(&advance), "advance");
+    assert_eq!(message_type(&abandon), "abandon_human_gate");
 }
 
 #[test]
@@ -60,6 +79,61 @@ fn conversational_gate_rejects_blank_command_id_at_handler_boundary() {
     }
 
     assert!(validate_command_id("cmd-001").is_ok());
+}
+
+/// L0 typed 重承载（双审修订锚）：SC HumanConfirm stage 白名单必须显式放行
+/// typed 门命令族（HumanGateFeedback/Confirm/AbandonHumanGate）与双轨期
+/// legacy Terminate 桥接——漏加 AbandonHumanGate 时 typed abandon 在真实
+/// 分发链被拒为 STAGE_INVALID（红测见 campaign_stage3_interactive cases）。
+/// legacy 决策面经 HumanConfirm 通道到达 SC 门时只放行 Terminate 桥接
+/// （approve 的承载是裸 Confirm 变体，RequestChange 为 legacy-only 关门语义）。
+#[test]
+fn single_candidate_human_gate_stage_whitelist_accepts_typed_close_commands() {
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+
+    let accepted = [
+        WsInMessage::HumanGateFeedback {
+            command_id: "cmd-gate".to_string(),
+            feedback: "反馈".to_string(),
+        },
+        WsInMessage::Confirm,
+        WsInMessage::HumanConfirm {
+            decision: HumanConfirmDecision::Terminate,
+            payload: None,
+        },
+        WsInMessage::AbandonHumanGate {
+            command_id: "cmd-abandon".to_string(),
+        },
+    ];
+    for message in accepted {
+        assert!(
+            is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &message,
+                &WorkspaceStage::HumanConfirm
+            ),
+            "SC human gate must accept {message:?}"
+        );
+    }
+    for message in [
+        WsInMessage::HumanConfirm {
+            decision: HumanConfirmDecision::RequestChange,
+            payload: None,
+        },
+        WsInMessage::HumanConfirm {
+            decision: HumanConfirmDecision::Confirm,
+            payload: None,
+        },
+    ] {
+        assert!(
+            !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &message,
+                &WorkspaceStage::HumanConfirm
+            ),
+            "SC human gate must reject legacy-only decision {message:?}"
+        );
+    }
 }
 
 #[tokio::test]

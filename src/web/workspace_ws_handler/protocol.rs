@@ -151,6 +151,9 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
                                 crate::web::workspace_ws_types::HumanConfirmDecision::Terminate,
                             ..
                         }
+                        // L0 typed 重承载（REQ-RET-02/REQ-CG-04）：typed abandon
+                        // 门命令与 HumanGateFeedback/Confirm 同族放行。
+                        | WsInMessage::AbandonHumanGate { .. }
                 )
             } else {
                 matches!(
@@ -279,6 +282,7 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::HumanGateFeedback { .. } => "human_gate_feedback",
         WsInMessage::Advance { .. } => "advance",
+        WsInMessage::AbandonHumanGate { .. } => "abandon_human_gate",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",
     }

@@ -176,15 +176,11 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
         assert!(!step.observed_status.is_empty());
     }
 
-    // 无 legacy RequestChange：本用例全程只发 typed 形态；服务端对 SC 的
-    // RequestChange 分支必须直接拒绝（防回归锁）。
-    {
-        let mut engine = harness.engine.lock().await;
-        let reject = engine
-            .handle_human_gate_termination(HumanConfirmDecision::RequestChange)
-            .await;
-        assert!(reject.is_err(), "SC 人工门必须拒绝 legacy RequestChange");
-    }
+    // 无 legacy RequestChange：本用例全程只发 typed 形态。L0 typed 重承载后
+    // `handle_human_gate_termination` 的参数（HumanGateCloseDecision）已无法
+    // 表达 RequestChange——结构性拒绝；wire 面防回归锁迁移至
+    // campaign_stage3_legacy_request_change_is_rejected_at_sc_gate_wire_boundary
+    //（stage 白名单直接拒为 STAGE_INVALID）。
 }
 
 /// Step 3a —— 预算耗尽：feedback 明确 reason 拒绝且零副作用；approve/abandon 仍可用。
@@ -243,6 +239,88 @@ async fn campaign_stage3_budget_exhaustion_rejects_feedback_but_allows_approve_o
     };
     assert_eq!(record.status, WorkspaceSessionStatus::Terminated);
     assert!(harness.durable_turns().is_empty());
+}
+
+/// Step 3a-L0 —— typed abandon 命令（REQ-RET-02 L0/REQ-CG-04，双审修订红测）：
+/// `AbandonHumanGate{command_id}` 必须走真实 ws inbound 分发链（stage 白名单 →
+/// dispatch → handler → engine close）关门。白名单（protocol.rs
+/// is_message_valid_for_stage_with_flow SC HumanConfirm 分支）漏加该变体时，
+/// 本用例以 WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID protocol error 形态复现
+/// （真实链路红，非仅编译红）。
+#[tokio::test]
+async fn campaign_stage3_abandon_human_gate_typed_command_closes_gate_through_socket_dispatch() {
+    let harness = campaign_stage3_fixture(2, vec![]).await;
+    harness
+        .send(WsInMessage::AbandonHumanGate {
+            command_id: "cmd-campaign-abandon-typed".to_string(),
+        })
+        .await;
+    // 红形态锚：关门成功路径通道静默；被拒时必为 STAGE_INVALID protocol error。
+    if let Some(rejected) = harness.probe_outbound(Duration::from_millis(300)).await {
+        panic!("typed abandon must reach the gate close chain, got rejected: {rejected:?}");
+    }
+    let record = loop {
+        let record = harness.session_record().await;
+        if record.status == WorkspaceSessionStatus::Terminated {
+            break record;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(record.status, WorkspaceSessionStatus::Terminated);
+    assert!(
+        record.human_gate_snapshot.is_none(),
+        "关门后快照清理与 legacy Terminate 路径一致"
+    );
+    assert!(harness.durable_turns().is_empty());
+    assert!(
+        harness.provider_start_keys().is_empty(),
+        "abandon 零 provider start"
+    );
+}
+
+/// Step 3a-L0 —— typed abandon 命令 command_id 边界：空白 command_id 在
+/// handler 边界拒绝（与 HumanGateFeedback/Advance 同族），零 durable 副作用。
+#[tokio::test]
+async fn campaign_stage3_abandon_human_gate_rejects_blank_command_id_without_side_effects() {
+    let harness = campaign_stage3_fixture(2, vec![]).await;
+    let before = harness.session_bytes();
+    harness
+        .send(WsInMessage::AbandonHumanGate {
+            command_id: "   ".to_string(),
+        })
+        .await;
+    let rejected = harness.await_gate_event("protocol_error").await;
+    let WsOutMessage::ProtocolError { code, .. } = rejected else {
+        panic!("expected protocol error, got {rejected:?}");
+    };
+    assert_eq!(code, "INVALID_COMMAND_ID");
+    assert_eq!(harness.session_bytes(), before, "session 零变化");
+    assert!(harness.durable_turns().is_empty(), "不创建 turn");
+}
+
+/// Step 3a-L0 —— legacy RequestChange 在 SC 门 wire 面直接拒绝（原 multi-turn
+/// 用例内直呼 engine 的防回归锁迁移至此：L0 typed 重承载后
+/// `handle_human_gate_termination` 的参数已无法表达 RequestChange——结构性
+/// 保证；此处钉 wire 面：门开启 stage 白名单只放行 HumanGateFeedback/Confirm/
+/// HumanConfirm{Terminate} 桥接/AbandonHumanGate）。
+#[tokio::test]
+async fn campaign_stage3_legacy_request_change_is_rejected_at_sc_gate_wire_boundary() {
+    let harness = campaign_stage3_fixture(2, vec![]).await;
+    harness
+        .send(WsInMessage::HumanConfirm {
+            decision: HumanConfirmDecision::RequestChange,
+            payload: None,
+        })
+        .await;
+    let rejected = harness.await_gate_event("protocol_error").await;
+    let WsOutMessage::ProtocolError { code, .. } = rejected else {
+        panic!("expected protocol error, got {rejected:?}");
+    };
+    assert_eq!(
+        code, "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+        "SC 门 stage 白名单直接拒绝 legacy RequestChange"
+    );
+    assert!(harness.durable_turns().is_empty(), "零副作用");
 }
 
 /// Step 3b —— 超长反馈：反馈超长与构造 prompt 超预算各一案，

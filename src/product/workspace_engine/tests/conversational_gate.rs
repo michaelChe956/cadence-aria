@@ -199,8 +199,8 @@ async fn conversational_gate_termination_conflicts_with_inflight_turn() {
     };
 
     for decision in [
-        HumanConfirmDecision::Confirm,
-        HumanConfirmDecision::Terminate,
+        HumanGateCloseDecision::Approve,
+        HumanGateCloseDecision::Abandon,
     ] {
         assert_eq!(
             engine
@@ -221,7 +221,7 @@ async fn conversational_gate_terminate_is_durable_and_emits_one_terminal_close_e
 
     assert_eq!(
         engine
-            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
             .await
             .expect("terminate human gate"),
         HumanGateCloseOutcome::Abandoned
@@ -243,6 +243,72 @@ async fn conversational_gate_terminate_is_durable_and_emits_one_terminal_close_e
         }
     }
     assert_eq!(close_events, 1, "close event must not be duplicated");
+}
+
+/// L0 typed 重承载（REQ-RET-02/REQ-CG-04）红绿锚：SC 门关门决策脱离 legacy
+/// `HumanConfirmDecision`——`HumanGateCloseDecision::Abandon` 经关门链路的
+/// 行为与旧 Terminate 路径逐项等价（终态/durable/事件单条、in-flight Busy、
+/// 预算耗尽仍可 abandon），且类型面即证明全程不经 legacy 枚举
+/// （本函数体内不出现 `HumanConfirmDecision`）。
+#[tokio::test]
+async fn abandon_human_gate_command_closes_gate_without_legacy_enum() {
+    // 1) 开门态 typed abandon：终态 Abandoned + durable Terminated + 单条 close 事件。
+    let (_root, lifecycle, mut engine, mut event_rx) = gate_fixture_with_event_rx(2);
+    let session_id = engine.session().session_id.clone();
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
+            .await
+            .expect("typed abandon must close the gate"),
+        HumanGateCloseOutcome::Abandoned
+    );
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable terminated session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+    assert_eq!(durable.human_gate_snapshot, None);
+    assert_eq!(durable.human_gate_reservation, None);
+    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+    let mut close_events = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        if let EngineEvent::HumanGateClosed { decision, stage } = event {
+            close_events += 1;
+            assert_eq!(
+                decision, "terminate",
+                "durable 事件 payload 字面量与旧路径一致"
+            );
+            assert_eq!(stage, "completed");
+        }
+    }
+    assert_eq!(close_events, 1);
+
+    // 2) in-flight turn：typed abandon 与旧 Terminate 同样 busy。
+    let (_root, _lifecycle, mut engine) = gate_fixture(1);
+    let opened = engine
+        .handle_human_gate_feedback(feedback("cmd_typed_abandon_busy"))
+        .await
+        .expect("initial reservation");
+    let turn_id = match opened {
+        HumanGateCommandOutcome::TurnOpened { turn, .. } => turn.turn_id,
+        other => panic!("expected opened turn, got {other:?}"),
+    };
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
+            .await
+            .expect("busy result"),
+        HumanGateCloseOutcome::Busy { turn_id }
+    );
+
+    // 3) 预算耗尽：typed abandon 仍可用（不退还也不扣减预算，直接终态）。
+    let (_root, _lifecycle, mut engine) = gate_fixture(0);
+    assert_eq!(
+        engine
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
+            .await
+            .expect("typed abandon remains admissible after budget exhaustion"),
+        HumanGateCloseOutcome::Abandoned
+    );
 }
 
 #[tokio::test]
@@ -310,7 +376,7 @@ async fn conversational_gate_budget_exhausted_rejects_feedback_but_accepts_termi
 
     assert_eq!(
         engine
-            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
             .await
             .expect("termination remains admissible"),
         HumanGateCloseOutcome::Abandoned
@@ -341,7 +407,7 @@ async fn conversational_gate_closed_event_never_starts_advance() {
 
     assert_eq!(
         engine
-            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
             .await
             .expect("termination remains admissible after budget exhaustion"),
         HumanGateCloseOutcome::Abandoned

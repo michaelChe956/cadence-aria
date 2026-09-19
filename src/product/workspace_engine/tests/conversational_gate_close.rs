@@ -54,9 +54,7 @@ async fn conversational_gate_approve_does_not_confirm_before_compile_success() {
         .get_workspace_session(engine.session().session_id.as_str())
         .expect("durable session before confirm");
     let error = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect_err("incomplete fixture must fail closed before confirming");
     assert!(error.contains("compile failed"));
@@ -84,9 +82,7 @@ async fn conversational_gate_approve_fails_closed_at_compile_finalizer_failpoint
         SingleCandidateCompileCheckpoint::ProvenancePersisted,
     );
     let error = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect_err("compile failpoint must fail closed");
     assert!(error.contains("human gate remains open"), "{error}");
@@ -120,9 +116,7 @@ async fn conversational_gate_approve_confirms_only_after_durable_compile() {
     let (event_tx, mut event_rx) = mpsc::channel(32);
     engine.event_tx = event_tx;
     let result = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await;
     assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
     let durable = lifecycle
@@ -155,9 +149,7 @@ async fn conversational_gate_approve_retains_gate_snapshot_in_confirmed_terminal
     engine.event_tx = event_tx;
     let session_id = engine.session().session_id.clone();
     let result = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await;
     assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
     let durable = lifecycle
@@ -264,9 +256,7 @@ async fn conversational_gate_abandon_is_terminal_without_compile() {
     let session_id = engine.session().session_id.clone();
     assert_eq!(
         engine
-            .handle_human_gate_termination(
-                crate::web::workspace_ws_types::HumanConfirmDecision::Terminate
-            )
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
             .await
             .expect("terminate"),
         HumanGateCloseOutcome::Abandoned
@@ -299,8 +289,8 @@ async fn conversational_gate_close_is_busy_during_inflight_turn() {
         other => panic!("expected opened turn, got {other:?}"),
     };
     for decision in [
-        crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        crate::web::workspace_ws_types::HumanConfirmDecision::Terminate,
+        HumanGateCloseDecision::Approve,
+        HumanGateCloseDecision::Abandon,
     ] {
         assert_eq!(
             engine
@@ -409,7 +399,7 @@ async fn conversational_gate_approve_compile_failure_surfaces_validator_findings
     seed_failed_compile_with_findings(&lifecycle, "plan_0001");
 
     let error = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect_err("incomplete fixture must fail closed before confirming");
     assert!(error.contains("human gate remains open"), "{error}");
@@ -464,7 +454,7 @@ async fn conversational_gate_approve_success_leaves_no_compile_failure_context()
     let (event_tx, _event_rx) = mpsc::channel(32);
     engine.event_tx = event_tx;
     let result = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await;
     assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
     assert!(
@@ -511,7 +501,7 @@ async fn late_confirm_after_durable_confirmed_is_idempotent_already_closed() {
     });
 
     let outcome = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await;
     assert_eq!(
         outcome,
@@ -556,7 +546,7 @@ async fn late_confirm_after_durable_running_is_idempotent_already_closed() {
         record.status = WorkspaceSessionStatus::Running;
     });
     let outcome = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await;
     assert_eq!(
         outcome,
@@ -580,7 +570,7 @@ async fn late_confirm_after_terminate_gets_explicit_terminated_error() {
         record.status = WorkspaceSessionStatus::Terminated;
     });
     let error = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect_err("late confirm on a terminated gate must be an explicit error");
     assert!(error.contains("already terminated"), "{error}");
@@ -605,7 +595,7 @@ async fn late_terminate_after_terminate_gets_explicit_terminated_error() {
         record.status = WorkspaceSessionStatus::Terminated;
     });
     let error = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+        .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
         .await
         .expect_err("late terminate must be an explicit terminated error");
     assert!(error.contains("already terminated"), "{error}");
@@ -627,7 +617,7 @@ async fn late_confirm_with_waiting_phase_drift_keeps_conflict() {
             record.single_candidate_phase = Some(SingleCandidatePhase::Generate);
         });
         let error = engine
-            .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
             .await
             .expect_err("phase drift to a non-gate phase must stay a conflict");
         assert!(error.contains("product_store_conflict"), "{error}");
@@ -639,7 +629,7 @@ async fn late_confirm_with_waiting_phase_drift_keeps_conflict() {
             record.human_gate_snapshot = None;
         });
         let error = engine
-            .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+            .handle_human_gate_termination(HumanGateCloseDecision::Approve)
             .await
             .expect_err("snapshot-less gate drift must stay a conflict (anti-forgery)");
         assert!(error.contains("product_store_conflict"), "{error}");
@@ -732,7 +722,7 @@ async fn conversational_gate_confirm_at_evaluate_gate_completes_approval_chain()
     let session_id = engine.session().session_id.clone();
 
     let outcome = engine
-        .handle_human_gate_termination(HumanConfirmDecision::Confirm)
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect("confirm at an Evaluate gate must unlock the close deadlock");
     assert_eq!(outcome, HumanGateCloseOutcome::Confirmed);
@@ -756,7 +746,7 @@ async fn conversational_gate_terminate_at_evaluate_gate_abandons_durably() {
 
     assert_eq!(
         engine
-            .handle_human_gate_termination(HumanConfirmDecision::Terminate)
+            .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
             .await
             .expect("terminate at an Evaluate gate must close without promotion"),
         HumanGateCloseOutcome::Abandoned

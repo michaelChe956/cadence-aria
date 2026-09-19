@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::workspace_engine::HumanGateCloseOutcome;
+use crate::product::workspace_engine::{HumanGateCloseDecision, HumanGateCloseOutcome};
 
 pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
     app_state: WebAppState,
@@ -321,9 +321,9 @@ pub(crate) async fn handle_human_gate_feedback_from_handler(
 pub(crate) async fn handle_human_gate_termination_from_handler(
     run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,
-    decision: HumanConfirmDecision,
+    decision: HumanGateCloseDecision,
 ) {
-    let is_confirm = decision == HumanConfirmDecision::Confirm;
+    let is_confirm = matches!(decision, HumanGateCloseDecision::Approve);
     let outcome = {
         let mut engine = run_context.engine.lock().await;
         engine.handle_human_gate_termination(decision).await

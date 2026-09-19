@@ -128,6 +128,9 @@ pub enum WsInMessage {
     Advance {
         command_id: String,
     },
+    AbandonHumanGate {
+        command_id: String,
+    },
     Abort,
     Ping,
 }

@@ -4,7 +4,9 @@ use crate::product::workspace_engine::prompts::{
     SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES, SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES,
     ScManualRevisionPromptInput, build_sc_manual_revision_prompt,
 };
-use crate::product::workspace_engine::{HumanGateCommandOutcome, HumanGateFeedbackInput};
+use crate::product::workspace_engine::{
+    HumanGateCloseDecision, HumanGateCommandOutcome, HumanGateFeedbackInput,
+};
 
 const LANGUAGE_RULE_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -705,9 +707,7 @@ async fn conversational_gate_revision_routes_evaluate_to_approval_then_confirm_s
 
     // confirm 不再撞 human_gate_close CAS 冲突,真实批准链落地终态。
     let outcome = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect("confirm must close the gate after the Evaluate route");
     assert_eq!(
@@ -798,9 +798,7 @@ async fn conversational_gate_revision_with_reviewer_restarts_review_before_appro
     );
 
     let outcome = engine
-        .handle_human_gate_termination(
-            crate::web::workspace_ws_types::HumanConfirmDecision::Confirm,
-        )
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
         .await
         .expect("confirm must close the gate after reviewer pass");
     assert_eq!(
