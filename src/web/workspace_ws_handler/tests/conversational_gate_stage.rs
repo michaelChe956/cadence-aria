@@ -1,25 +1,21 @@
 use super::*;
 
 #[test]
-fn conversational_gate_stage_matrix_accepts_only_human_confirm_and_advance() {
+fn conversational_gate_stage_matrix_accepts_only_typed_gate_commands_and_advance() {
     let feedback = WsInMessage::HumanGateFeedback {
         command_id: "cmd-feedback".to_string(),
         feedback: "请修订候选".to_string(),
     };
     let confirm = WsInMessage::Confirm;
-    let terminate = WsInMessage::HumanConfirm {
-        decision: HumanConfirmDecision::Terminate,
-        payload: None,
-    };
-    let legacy_request_change = WsInMessage::HumanConfirm {
-        decision: HumanConfirmDecision::RequestChange,
-        payload: Some(serde_json::json!({"description": "legacy"})),
+    let abandon = WsInMessage::AbandonHumanGate {
+        command_id: "cmd-abandon".to_string(),
     };
     let advance = WsInMessage::Advance {
         command_id: "cmd-advance".to_string(),
     };
 
-    for message in [&feedback, &confirm, &terminate] {
+    // L2 重钉（T5/REQ-RET-02）：SC 门三命令面（HumanConfirm 双轨臂已删）。
+    for message in [&feedback, &confirm, &abandon] {
         assert!(is_message_valid_for_stage_with_flow(
             WorkItemPlanFlowKind::SingleCandidate,
             message,
@@ -27,14 +23,20 @@ fn conversational_gate_stage_matrix_accepts_only_human_confirm_and_advance() {
         ));
     }
     assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &legacy_request_change,
-        &WorkspaceStage::HumanConfirm,
-    ));
-    assert!(is_message_valid_for_stage_with_flow(
         WorkItemPlanFlowKind::SingleCandidate,
         &advance,
         &WorkspaceStage::Completed,
+    ));
+    // 非 SC 流的 Confirm 帧保留（approve 面）；typed abandon 对非 SC 流不放行。
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &confirm,
+        &WorkspaceStage::HumanConfirm,
+    ));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &abandon,
+        &WorkspaceStage::HumanConfirm,
     ));
 
     for stage in [

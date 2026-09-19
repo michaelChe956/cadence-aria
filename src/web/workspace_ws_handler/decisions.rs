@@ -84,158 +84,24 @@ pub(crate) async fn handle_plan_amendment_cancel_from_handler(
     }
 }
 
-pub(crate) async fn handle_review_decision_from_handler(
+/// 非 SC 流（story/design 等）的 `Confirm` 帧直连引擎确认（L2 退役收口：
+/// 原 `handle_human_confirm_from_handler(HumanConfirmDecision::Confirm)` 桥
+/// 随 `HumanConfirm` 消息族删除，approve 帧面按 T4 §4 登记形态保留）。
+pub(crate) async fn handle_confirm_from_handler(
     run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,
-    decision: String,
-    extra_context: Option<String>,
 ) {
     let outcome = {
         let mut engine = run_context.engine.lock().await;
-        engine.handle_review_decision(decision, extra_context).await
+        engine.handle_confirm().await
     };
-
-    match outcome {
-        Ok(ReviewDecisionOutcome::HumanConfirm) => {}
-        Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }) => {
-            // Review decision path never produces child sessions; defensive no-op.
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
-            let run_kind = ProviderRunKind::work_item_plan_author_for_durable_flow(
-                run_context.session_record.flow_kind,
-            );
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback }) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback }) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanDraft { feedback },
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemBatch) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanBatch,
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartRevision) => {
-            let run_kind = {
-                let engine = run_context.engine.lock().await;
-                if engine.session().workspace_type == WorkspaceType::WorkItemPlan {
-                    ProviderRunKind::WorkItemPlanRevision {
-                        feedback: engine.work_item_plan_revision_feedback(),
-                    }
-                } else {
-                    ProviderRunKind::Revision
-                }
-            };
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Err(message) => {
-            let err = WsOutMessage::Error { message };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-        }
-    }
-}
-
-pub(crate) async fn handle_author_decision_from_handler(
-    run_context: ProviderRunContext,
-    outbound_tx: mpsc::Sender<OutboundControl>,
-    decision: crate::web::workspace_ws_types::AuthorDecision,
-) {
-    let outcome = {
-        let mut engine = run_context.engine.lock().await;
-        engine.handle_author_decision(decision).await
-    };
-
-    match outcome {
-        Ok(AuthorDecisionOutcome::StartReview) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::ReviewOnly,
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(AuthorDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback }) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(AuthorDecisionOutcome::HumanConfirm) => {}
-        Ok(AuthorDecisionOutcome::PrepareContext) => {
-            let state_msg = {
-                let engine = run_context.engine.lock().await;
-                engine.build_session_state()
-            };
-            let _ = send_json_outbound(&outbound_tx, &state_msg).await;
-        }
-        Ok(AuthorDecisionOutcome::StartRevision { feedback: _ }) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::Revision,
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(AuthorDecisionOutcome::Finalized) => {}
-        Err(message) => {
-            let err = WsOutMessage::ProtocolError {
-                code: "INVALID_AUTHOR_DECISION".to_string(),
-                message,
-                context: None,
-            };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-        }
+    if let Err(message) = outcome {
+        let err = WsOutMessage::ProtocolError {
+            code: "INVALID_HUMAN_CONFIRM_ACTION".to_string(),
+            message,
+            context: None,
+        };
+        let _ = send_json_outbound(&outbound_tx, &err).await;
     }
 }
 
@@ -329,9 +195,7 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
         engine.handle_human_gate_termination(decision).await
     };
     let message = match outcome {
-        Ok(HumanGateCloseOutcome::Busy { turn_id }) => {
-            Some(WsOutMessage::HumanGateBusy { turn_id })
-        }
+        Ok(HumanGateCloseOutcome::Busy { turn_id }) => Some(WsOutMessage::HumanGateBusy { turn_id }),
         Ok(HumanGateCloseOutcome::Confirmed) => None,
         Ok(HumanGateCloseOutcome::Abandoned) => None,
         // F7 项 2：先到者已关门，迟到 confirm 幂等 no-op；可见提示事件由 engine
@@ -362,89 +226,6 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
     };
     if let Some(message) = message {
         let _ = send_json_outbound(&outbound_tx, &message).await;
-    }
-}
-pub(crate) async fn handle_human_confirm_from_handler(
-    run_context: ProviderRunContext,
-    outbound_tx: mpsc::Sender<OutboundControl>,
-    decision: HumanConfirmDecision,
-    payload: Option<serde_json::Value>,
-) {
-    let outcome = {
-        let mut engine = run_context.engine.lock().await;
-        engine.handle_human_confirm(decision, payload).await
-    };
-
-    match outcome {
-        Ok(ReviewDecisionOutcome::HumanConfirm) => {}
-        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
-            let run_kind = ProviderRunKind::work_item_plan_author_for_durable_flow(
-                run_context.session_record.flow_kind,
-            );
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback }) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback }) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanDraft { feedback },
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::StartWorkItemBatch) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::WorkItemPlanBatch,
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }) => {}
-        Ok(ReviewDecisionOutcome::StartRevision) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::Revision,
-                outbound_tx.clone(),
-            )
-            .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-        }
-        Err(message) => {
-            let err = WsOutMessage::ProtocolError {
-                code: "INVALID_HUMAN_CONFIRM_ACTION".to_string(),
-                message,
-                context: None,
-            };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-        }
     }
 }
 

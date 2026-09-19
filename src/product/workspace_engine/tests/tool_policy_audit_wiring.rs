@@ -150,38 +150,9 @@ async fn workspace_review_and_repair_policy_runs_receive_durable_audit_sink() {
     );
 }
 
-#[tokio::test]
-async fn workspace_revision_policy_run_receives_durable_audit_sink() {
-    let (_tmp, mut engine) = persistent_policy_engine("sess_revision_policy_sink").await;
-    engine.session.stage = WorkspaceStage::AuthorConfirm;
-
-    engine
-        .handle_author_decision(AuthorDecision::Revise {
-            feedback: "补充失败路径".to_string(),
-        })
-        .await
-        .expect("author feedback should enter revision");
-
-    let probe = Arc::new(PolicySinkQueuedProvider::new(Vec::new()));
-    engine
-        .drive_revision_session(probe.clone(), empty_provider_commands())
-        .await;
-
-    // artifact 提取失败会触发既有 artifact retry（第二次 start）；断言每次
-    // revision start 都携带 policy + sink。
-    assert!(
-        probe.starts.load(Ordering::SeqCst) >= 1,
-        "revision drive must start the provider"
-    );
-    assert!(
-        probe.policy_seen.lock().unwrap().iter().all(|seen| *seen),
-        "revision inputs must carry the deny policy"
-    );
-    assert!(
-        probe.sink_seen.lock().unwrap().iter().all(|seen| *seen),
-        "revision policy inputs must carry the run-bound durable audit sink"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`workspace_revision_policy_run_receives_durable_audit_sink` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 /// Task 4.1 修复轮（I2）：真实事件链 wire fixture 的路径（chmod 后便给真实
 /// CodexProvider 策略会话使用；首次 run thread/start、修复 run thread/resume）。

@@ -58,53 +58,12 @@ pub enum WsInMessage {
         #[serde(default)]
         answers: Vec<ChoiceAnswer>,
     },
-    ReviewDecisionResponse {
-        decision: String,
-        extra_context: Option<String>,
-    },
-    AuthorDecision {
-        decision: AuthorDecision,
-    },
-    SelectWorkItemGenerationMode {
-        mode: WorkItemGenerationModeDto,
-    },
-    SelectRevisionPath {
-        path: RevisionPath,
-        extra_context: Option<String>,
-    },
     RequestRevision {
         feedback: StructuredFeedback,
-    },
-    RequestOutlineRevision {
-        feedback: Option<String>,
-    },
-    WorkItemDraftDecision {
-        outline_id: String,
-        decision: WorkItemDraftDecisionDto,
-        feedback: Option<String>,
-    },
-    WorkItemBatchDecision {
-        decision: WorkItemBatchDecisionDto,
-        feedback: Option<String>,
-        first_affected_outline_id: Option<String>,
     },
     WorkItemPlanCompileRecoveryAction {
         action: WorkItemPlanCompileRecoveryActionDto,
         reason: Option<String>,
-    },
-    SaveHumanPresentationRevision {
-        source_projection_bundle_id: String,
-        scope: HumanPresentationScopeDto,
-        supersedes: Option<String>,
-        human_summary: String,
-        why_split: Option<String>,
-        dependency_explanation: Vec<String>,
-        risk_explanation: Vec<String>,
-        source_refs: Vec<String>,
-    },
-    HumanConfirm {
-        decision: HumanConfirmDecision,
-        payload: Option<serde_json::Value>,
     },
     ConfirmPlanAmendment {
         amendment_id: String,
@@ -115,11 +74,6 @@ pub enum WsInMessage {
     },
     StartLinkedWorkspaceAmendment {
         target: LinkedWorkspaceAmendmentTarget,
-    },
-    RevertWorkItem {
-        work_item_id: String,
-        feedback: Option<String>,
-        clear: bool,
     },
     HumanGateFeedback {
         command_id: String,
@@ -151,66 +105,9 @@ impl From<WsInMessage> for WorkspaceInboundEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RevisionPath {
-    Revise,
-    ReviseWithContext,
-    SkipToHuman,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum HumanConfirmDecision {
-    Confirm,
-    RequestChange,
-    Terminate,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum AuthorDecision {
-    Accept,
-    Reject,
-    Revise { feedback: String },
-    AcceptWithReview,
-    AcceptFinalize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkItemGenerationModeDto {
-    Serial,
-    Batch,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkItemDraftDecisionDto {
-    Accept,
-    Rewrite,
-    Pause,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkItemBatchDecisionDto {
-    AcceptAll,
-    RewriteBatch,
-    Pause,
-    DowngradeToSerial,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemPlanCompileRecoveryActionDto {
     Continue,
     AbortAndRollback,
     HumanTriage,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HumanPresentationScopeDto {
-    Plan,
-    WorkItem,
 }

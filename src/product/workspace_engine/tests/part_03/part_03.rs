@@ -408,84 +408,9 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
     }
 }
 
-#[tokio::test]
-async fn drive_review_session_pass_enters_author_confirm() {
-    let (_tmp, store) = setup();
-    let (tx, mut rx) = mpsc::channel(64);
-    let session = make_session("sess_review_pass");
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    engine
-        .handle_user_message(
-            "start".to_string(),
-            Arc::new(FakeStreamingProvider),
-            empty_provider_commands(),
-        )
-        .await;
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-
-    let provider_type = Arc::new(Mutex::new(None));
-    let prompt = Arc::new(Mutex::new(None));
-    engine
-        .drive_review_session(
-            Arc::new(ReviewVerdictStreamingProvider {
-                output: "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
-                provider_type: provider_type.clone(),
-                prompt: prompt.clone(),
-            }),
-            empty_provider_commands(),
-        )
-        .await;
-
-    assert_eq!(*provider_type.lock().unwrap(), Some(ProviderType::Codex));
-    assert!(
-        prompt
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .contains("# Story Spec")
-    );
-    // spec-design-dialog-revision T5：Story review pass 完成不得自动定稿，统一回 AuthorConfirm。
-    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-    match engine.build_session_state() {
-        WsOutMessage::SessionState { timeline_nodes, .. } => {
-            assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::ReviewerRun
-                    && node.status == TimelineNodeStatus::Completed
-            }));
-            // T5：回 AuthorConfirm 必须创建 AuthorConfirm 节点（报告进对话流后等待作者确认）。
-            assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::AuthorConfirm
-                    && node.status == TimelineNodeStatus::Active
-            }));
-        }
-        _ => panic!("expected SessionState"),
-    }
-
-    let mut saw_review_complete = false;
-    while let Ok(event) = rx.try_recv() {
-        if let EngineEvent::ReviewComplete {
-            verdict,
-            summary,
-            findings,
-            review_gate,
-            ..
-        } = event
-        {
-            assert_eq!(verdict, ReviewVerdictType::Pass);
-            assert_eq!(summary, "可以确认");
-            assert!(findings.is_empty());
-            assert_eq!(review_gate, ReviewGate::UserConfirmAllowed);
-            saw_review_complete = true;
-        }
-    }
-    assert!(saw_review_complete);
-}
+// 退役留档（T5/REQ-RET-02）：`drive_review_session_pass_enters_author_confirm` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn drive_review_session_strong_revise_returns_to_author_confirm() {

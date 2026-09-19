@@ -224,10 +224,10 @@ async fn campaign_stage3_budget_exhaustion_rejects_feedback_but_allows_approve_o
 
     // —— fixture C：budget=0 时 abandon 仍终止 ——
     let harness = campaign_stage3_fixture(0, vec![]).await;
+    // L2 重钉（T5/REQ-RET-02）：abandon=typed AbandonHumanGate（HumanConfirm 桥接已删）。
     harness
-        .send(WsInMessage::HumanConfirm {
-            decision: HumanConfirmDecision::Terminate,
-            payload: None,
+        .send(WsInMessage::AbandonHumanGate {
+            command_id: "cmd-campaign-abandon".to_string(),
         })
         .await;
     let record = loop {
@@ -303,25 +303,9 @@ async fn campaign_stage3_abandon_human_gate_rejects_blank_command_id_without_sid
 /// `handle_human_gate_termination` 的参数已无法表达 RequestChange——结构性
 /// 保证；此处钉 wire 面：门开启 stage 白名单只放行 HumanGateFeedback/Confirm/
 /// HumanConfirm{Terminate} 桥接/AbandonHumanGate）。
-#[tokio::test]
-async fn campaign_stage3_legacy_request_change_is_rejected_at_sc_gate_wire_boundary() {
-    let harness = campaign_stage3_fixture(2, vec![]).await;
-    harness
-        .send(WsInMessage::HumanConfirm {
-            decision: HumanConfirmDecision::RequestChange,
-            payload: None,
-        })
-        .await;
-    let rejected = harness.await_gate_event("protocol_error").await;
-    let WsOutMessage::ProtocolError { code, .. } = rejected else {
-        panic!("expected protocol error, got {rejected:?}");
-    };
-    assert_eq!(
-        code, "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
-        "SC 门 stage 白名单直接拒绝 legacy RequestChange"
-    );
-    assert!(harness.durable_turns().is_empty(), "零副作用");
-}
+// 退役留档（T5/REQ-RET-02）：`campaign_stage3_legacy_request_change_is_rejected_at_sc_gate_wire_boundary` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 /// Step 3b —— 超长反馈：反馈超长与构造 prompt 超预算各一案，
 /// turn/budget/ledger/session 全零变化；缩短后新 command 可受理。
@@ -460,9 +444,8 @@ async fn campaign_stage3_inflight_rejects_feedback_approve_and_abandon_as_busy()
     harness.send_isolated_worker(WsInMessage::Confirm).await;
     let busy_approve = harness.await_gate_event("human_gate_busy").await;
     harness
-        .send_isolated_worker(WsInMessage::HumanConfirm {
-            decision: HumanConfirmDecision::Terminate,
-            payload: None,
+        .send_isolated_worker(WsInMessage::AbandonHumanGate {
+            command_id: "cmd-campaign-inflight-abandon".to_string(),
         })
         .await;
     let busy_abandon = harness.await_gate_event("human_gate_busy").await;

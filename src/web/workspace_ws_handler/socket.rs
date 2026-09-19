@@ -293,18 +293,6 @@ pub(crate) fn planning_resume_run_kind(
 /// `WsInMessage` intentionally remains the typed business payload. The envelope records
 /// only field names (never client values) so protocol handlers can reject fields that are
 /// forbidden for a durable flow before any state mutation occurs.
-pub(crate) fn single_candidate_generation_decision_bypasses_stage_validation(
-    flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind,
-    message: &WsInMessage,
-) -> bool {
-    flow_kind == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
-        && matches!(
-            message,
-            WsInMessage::SelectWorkItemGenerationMode { .. }
-                | WsInMessage::WorkItemDraftDecision { .. }
-                | WsInMessage::WorkItemBatchDecision { .. }
-        )
-}
 
 pub(crate) fn parse_workspace_inbound_text(
     text: &str,
@@ -325,52 +313,11 @@ pub(crate) fn parse_workspace_inbound_text(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
-    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
-    use crate::web::workspace_ws_types::{
-        WorkItemBatchDecisionDto, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
-    };
-
-    #[test]
-    fn single_candidate_legacy_generation_decisions_bypass_stage_validation_only_for_precise_rejection()
-     {
-        let messages = [
-            WsInMessage::SelectWorkItemGenerationMode {
-                mode: WorkItemGenerationModeDto::Serial,
-            },
-            WsInMessage::WorkItemDraftDecision {
-                outline_id: "outline_client_supplied".to_string(),
-                decision: WorkItemDraftDecisionDto::Accept,
-                feedback: None,
-            },
-            WsInMessage::WorkItemBatchDecision {
-                decision: WorkItemBatchDecisionDto::AcceptAll,
-                feedback: None,
-                first_affected_outline_id: None,
-            },
-        ];
-
-        for message in messages {
-            assert!(requires_stage_validation(&message));
-            assert!(
-                single_candidate_generation_decision_bypasses_stage_validation(
-                    WorkItemPlanFlowKind::SingleCandidate,
-                    &message,
-                )
-            );
-            assert!(
-                !single_candidate_generation_decision_bypasses_stage_validation(
-                    WorkItemPlanFlowKind::Legacy,
-                    &message,
-                )
-            );
-        }
-        assert!(
-            !single_candidate_generation_decision_bypasses_stage_validation(
-                WorkItemPlanFlowKind::SingleCandidate,
-                &WsInMessage::RequestOutlineRevision { feedback: None },
-            )
-        );
-    }
+    // 退役留档（T5/REQ-RET-02）：原「SC 精确拒绝 legacy 逐段决策」单测与
+    // `single_candidate_generation_decision_bypasses_stage_validation` 辅助随
+    // wire 变体删除退役——逐段决策消息在 parse 面即被拒收（retired 消息
+    // protocol error 承接，见 protocol.rs tests 与 it_core part_07），不再有
+    // stage 校验旁路需求。
 
     #[tokio::test]
     async fn workspace_idle_activity_guard_covers_active_run_and_provider_drive() {
@@ -630,8 +577,20 @@ pub(crate) async fn handle_workspace_socket(
                         envelope
                     }
                     Err(e) => {
-                        let err = WsOutMessage::Error {
-                            message: format!("invalid message: {e}"),
+                        // L2 退役（REQ-WSC-08/REQ-RET-03）：已删除的 legacy 决策
+                        // 消息在 parse 面拒收（serde 未知变体）；退役 wire 名识别
+                        // 出来后返回 stage-specific protocol error（含 stage 上下
+                        // 文），其余 parse 失败维持通用 invalid message 错误。
+                        // 识别只读原始文本——零副作用（会话状态与事件流不变）。
+                        let err = if let Some(retired_name) =
+                            retired_inbound_message_type(&text)
+                        {
+                            let stage = engine.lock().await.current_stage();
+                            retired_message_protocol_error(&stage, retired_name)
+                        } else {
+                            WsOutMessage::Error {
+                                message: format!("invalid message: {e}"),
+                            }
                         };
                         let _ = send_json_outbound(&outbound_tx, &err).await;
                         continue;
@@ -689,11 +648,7 @@ pub(crate) async fn handle_workspace_socket(
                     continue;
                 }
 
-                let stage_type_and_cancel_replay = if requires_stage_validation(in_msg)
-                    && !single_candidate_generation_decision_bypasses_stage_validation(
-                        session_record.flow_kind,
-                        in_msg,
-                    ) {
+                let stage_type_and_cancel_replay = if requires_stage_validation(in_msg) {
                     Some({
                         let engine = engine.lock().await;
                         let completed_cancel_replay = matches!(

@@ -67,108 +67,9 @@ fn revise_review_verdict(summary: &str, comments: &str) -> ReviewVerdict {
     }
 }
 
-#[tokio::test]
-async fn single_repo_design_review_pass_waits_for_author_finalize_and_keeps_inputs_unstructured() {
-    let (_tmp, lifecycle_store, design_id, mut engine) =
-        persistent_single_repo_design_test_engine();
-
-    let author_input = engine
-        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
-        .expect("single-repo Design author input");
-    assert!(
-        author_input.structured_output_contract.is_none(),
-        "single-repo Design author input must not carry aggregate structured-output contract"
-    );
-    assert!(
-        !author_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"),
-        "single-repo Design author prompt must not inject aggregate output instructions"
-    );
-
-    create_reviewer_run_node(&mut engine).await;
-    let pass_verdict = ReviewVerdict {
-        verdict: ReviewVerdictType::Pass,
-        comments: "可以确认。".to_string(),
-        summary: "可以确认".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::UserConfirmAllowed,
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    };
-    engine
-        .complete_review(
-            crate::cross_cutting::streaming_provider::ProviderCompletion::plain("可以确认。", None),
-            pass_verdict,
-        )
-        .await;
-
-    assert_eq!(
-        engine.session().stage,
-        WorkspaceStage::AuthorConfirm,
-        "single-repo Design reviewer pass must wait for the author to confirm"
-    );
-    assert!(
-        !engine
-            .timeline_nodes
-            .iter()
-            .any(|node| node.node_type == TimelineNodeType::Completed),
-        "reviewer pass must not automatically create a Completed node"
-    );
-    match lifecycle_store
-        .load_existing_spec("project_0001", "issue_0001", &design_id)
-        .expect("load Design record after reviewer pass")
-    {
-        ExistingSpecRecord::Design { record, .. } => assert_eq!(
-            record.confirmation_status,
-            LifecycleConfirmationStatus::Draft,
-            "reviewer pass alone must not confirm the single-repo Design record"
-        ),
-        ExistingSpecRecord::Story { .. } => panic!("expected single-repo Design record"),
-    }
-
-    let revision_input = engine
-        .build_revision_input()
-        .expect("single-repo Design revision input after reviewer pass");
-    assert!(
-        revision_input.structured_output_contract.is_none(),
-        "single-repo Design revision input must not carry aggregate structured-output contract"
-    );
-    assert!(
-        !revision_input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"),
-        "single-repo Design revision prompt must not inject aggregate output instructions"
-    );
-
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::AcceptFinalize)
-        .await
-        .expect("author finalization");
-    assert_eq!(outcome, AuthorDecisionOutcome::Finalized);
-    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
-
-    let record = lifecycle_store
-        .load_existing_spec("project_0001", "issue_0001", &design_id)
-        .expect("load finalized Design record");
-    match record {
-        ExistingSpecRecord::Design { record, .. } => assert_eq!(
-            record.confirmation_status,
-            LifecycleConfirmationStatus::Confirmed,
-            "only AcceptFinalize may confirm the single-repo Design record"
-        ),
-        ExistingSpecRecord::Story { .. } => panic!("expected single-repo Design record"),
-    }
-    let persisted_timeline = lifecycle_store
-        .load_timeline_nodes_for_issue_session(
-            "project_0001",
-            "issue_0001",
-            &engine.session().session_id,
-        )
-        .expect("load finalized Design timeline");
-    assert!(
-        persisted_timeline
-            .iter()
-            .any(|node| node.node_type == TimelineNodeType::Completed),
-        "AcceptFinalize must persist a Completed timeline node"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`single_repo_design_review_pass_waits_for_author_finalize_and_keeps_inputs_unstructured` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn review_completion_routes_back_to_author_confirm_for_story() {
@@ -245,35 +146,9 @@ async fn review_completion_records_formatted_report_in_conversation() {
 
 // I-1：review 完成后（latest_review_verdict 存在）用户提交反馈，Revise 臂必须清空 verdict，
 // 使 T4 分流谓词（pending.is_some() && verdict.is_none()）成立 → 走 build_author_revision_prompt。
-#[tokio::test]
-async fn revise_after_review_clears_verdict_and_uses_author_prompt() {
-    let mut engine = prompt_engine_with_artifact("# Story Spec\n\n旧内容");
-    engine.latest_review_verdict = Some(revise_review_verdict("review 结论", "review 结论。"));
-
-    engine
-        .handle_author_decision(AuthorDecision::Revise {
-            feedback: "补充异常场景与回滚策略".into(),
-        })
-        .await
-        .expect("post-review feedback revision");
-
-    assert!(
-        engine.latest_review_verdict.is_none(),
-        "post-review 新反馈必须清空 latest_review_verdict（I-1）"
-    );
-    assert_eq!(
-        engine.pending_revision_context.as_deref(),
-        Some("补充异常场景与回滚策略")
-    );
-
-    let input = engine.build_revision_input().expect("revision input");
-    assert!(
-        input.prompt.contains("## 用户反馈"),
-        "review 后反馈必须走 author 增量修订 prompt（含产物全文与用户反馈）: {}",
-        input.prompt
-    );
-    assert!(input.prompt.contains("补充异常场景与回滚策略"));
-}
+// 退役留档（T5/REQ-RET-02）：`revise_after_review_clears_verdict_and_uses_author_prompt` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // M-1：author 反馈修订分流谓词提取为共享 helper，两处（prompts/revision.rs / provider_drive.rs）同语义。
 #[test]

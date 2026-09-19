@@ -4,7 +4,6 @@ use crate::product::models::{
 };
 use crate::product::work_item_plan_policy::{RunHistory, RunPolicy, WorkItemPlanFlowKind};
 use crate::web::workspace_session::ActiveRun;
-use crate::web::workspace_ws_types::{WorkItemBatchDecisionDto, WorkItemDraftDecisionDto};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -70,67 +69,13 @@ async fn single_candidate_scope_rejection_rejects_all_forbidden_markers_without_
     }
 }
 
-#[tokio::test]
-async fn single_candidate_scope_rejection_precedes_generation_decision_rejection() {
-    let (context, engine, mut outbound_rx, mut events) =
-        scope_test_context(WorkItemPlanFlowKind::SingleCandidate);
-    let envelope = parse_workspace_inbound_text(
-        r#"{"type":"select_work_item_generation_mode","mode":"batch","scope":{"client":"forbidden"}}"#,
-    )
-    .expect("raw envelope should parse");
-    let before = scope_test_snapshot(&engine).await;
+// 退役留档（T5/REQ-RET-02）：`single_candidate_scope_rejection_precedes_generation_decision_rejection` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    handle_workspace_inbound_message(context, envelope).await;
-
-    let outbound = outbound_rx.recv().await.expect("protocol error outbound");
-    let OutboundControl::Text(json) = outbound else {
-        panic!("expected protocol error text");
-    };
-    let value: serde_json::Value = serde_json::from_str(&json).expect("protocol error json");
-    assert_eq!(value["code"], "SINGLE_CANDIDATE_SCOPE_FORBIDDEN");
-    assert_eq!(scope_test_snapshot(&engine).await, before);
-    assert!(events.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn single_candidate_generation_decision_rejection_preserves_phase_history_and_events() {
-    let messages = [
-        WsInMessage::SelectWorkItemGenerationMode {
-            mode: WorkItemGenerationModeDto::Batch,
-        },
-        WsInMessage::WorkItemDraftDecision {
-            outline_id: "outline_client_supplied".to_string(),
-            decision: WorkItemDraftDecisionDto::Accept,
-            feedback: None,
-        },
-        WsInMessage::WorkItemBatchDecision {
-            decision: WorkItemBatchDecisionDto::AcceptAll,
-            feedback: None,
-            first_affected_outline_id: None,
-        },
-    ];
-
-    for message in messages {
-        let (context, engine, mut outbound_rx, mut events) =
-            scope_test_context(WorkItemPlanFlowKind::SingleCandidate);
-        let before = scope_test_snapshot(&engine).await;
-
-        handle_workspace_inbound_message(context, message).await;
-
-        let outbound = outbound_rx.recv().await.expect("protocol error outbound");
-        let OutboundControl::Text(json) = outbound else {
-            panic!("expected protocol error text");
-        };
-        let value: serde_json::Value = serde_json::from_str(&json).expect("protocol error json");
-        assert_eq!(value["type"], "protocol_error");
-        assert_eq!(
-            value["code"],
-            "SINGLE_CANDIDATE_GENERATION_DECISION_FORBIDDEN"
-        );
-        assert_eq!(scope_test_snapshot(&engine).await, before);
-        assert!(events.try_recv().is_err());
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`single_candidate_generation_decision_rejection_preserves_phase_history_and_events` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn single_candidate_scope_rejection_does_not_wait_for_provider_engine_lock() {

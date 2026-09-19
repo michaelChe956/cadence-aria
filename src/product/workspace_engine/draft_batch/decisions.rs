@@ -1,39 +1,10 @@
 use super::*;
 
 impl WorkspaceEngine {
-    pub async fn handle_work_item_batch_decision(
-        &mut self,
-        decision: WorkItemBatchDecisionDto,
-        feedback: Option<String>,
-        first_affected_outline_id: Option<String>,
-    ) -> Result<WorkItemBatchDecisionOutcome, String> {
-        if self.session.stage != WorkspaceStage::AuthorConfirm
-            || self.active_node_type() != Some(TimelineNodeType::WorkItemBatchConfirm)
-        {
-            return Err(
-                "work_item_batch_decision requires active work_item_batch_confirm node".to_string(),
-            );
-        }
-
-        match decision {
-            WorkItemBatchDecisionDto::AcceptAll => self.accept_current_work_item_batch().await,
-            WorkItemBatchDecisionDto::Pause => {
-                self.complete_active_node(Some("Work Item Batch 已暂停".to_string()))
-                    .await;
-                self.enter_human_confirm(Some("Work Item Batch 已暂停，等待人工处理".to_string()))
-                    .await;
-                Ok(WorkItemBatchDecisionOutcome::HumanConfirm)
-            }
-            WorkItemBatchDecisionDto::RewriteBatch => self.rewrite_current_work_item_batch().await,
-            WorkItemBatchDecisionDto::DowngradeToSerial => {
-                self.downgrade_current_work_item_batch_to_serial(
-                    first_affected_outline_id,
-                    feedback,
-                )
-                .await
-            }
-        }
-    }
+    // 退役留档（T5/REQ-RET-02）：handle_work_item_batch_decision（WorkItemBatch
+    // Decision 消息族唯一引擎入口）随消息族删除（wp5-attribution-table.md §1）；
+    // accept/rewrite/downgrade 内部函数保留（review routing legacy 臂仍调用，
+    // 服务在途会话读侧状态机）。
 
     pub(crate) async fn accept_current_work_item_batch(
         &mut self,
@@ -108,48 +79,8 @@ impl WorkspaceEngine {
         }
     }
 
-    pub async fn handle_work_item_draft_decision(
-        &mut self,
-        outline_id: String,
-        decision: WorkItemDraftDecisionDto,
-        feedback: Option<String>,
-    ) -> Result<WorkItemDraftDecisionOutcome, String> {
-        if self.session.stage != WorkspaceStage::AuthorConfirm
-            || self.active_node_type() != Some(TimelineNodeType::WorkItemDraftConfirm)
-        {
-            return Err(
-                "work_item_draft_decision requires active work_item_draft_confirm node".to_string(),
-            );
-        }
-
-        match decision {
-            WorkItemDraftDecisionDto::Accept => {
-                self.accept_current_work_item_draft(outline_id).await
-            }
-            WorkItemDraftDecisionDto::Rewrite => {
-                let findings = self
-                    .current_work_item_draft_candidate_payload()?
-                    .validator_findings;
-                self.remember_draft_rewrite_user_feedback(&outline_id, feedback.clone());
-                let combined_feedback =
-                    combine_draft_validation_feedback(feedback.as_deref(), &findings);
-                self.pending_revision_context =
-                    (!combined_feedback.trim().is_empty()).then_some(combined_feedback);
-                self.complete_active_node(Some("用户要求重写当前 Work Item Draft".to_string()))
-                    .await;
-                self.start_serial_work_item_draft_run_for(&outline_id)
-                    .await?;
-                Ok(WorkItemDraftDecisionOutcome::StartDraftRun)
-            }
-            WorkItemDraftDecisionDto::Pause => {
-                self.complete_active_node(Some("用户暂停逐项 Work Item 生成".to_string()))
-                    .await;
-                self.enter_human_confirm(Some("逐项 Work Item 生成已暂停".to_string()))
-                    .await;
-                Ok(WorkItemDraftDecisionOutcome::HumanConfirm)
-            }
-        }
-    }
+    // 退役留档（T5/REQ-RET-02）：handle_work_item_draft_decision（WorkItemDraft
+    // Decision 消息族唯一引擎入口）随消息族删除（wp5-attribution-table.md §1）。
 
     pub(crate) async fn accept_current_work_item_draft(
         &mut self,

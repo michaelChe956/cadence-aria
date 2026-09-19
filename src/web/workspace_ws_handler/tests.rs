@@ -6,7 +6,7 @@ use crate::cross_cutting::streaming_provider::{
 use crate::product::models::ProviderName;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::{
-    AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
+    ProviderConfigSnapshot, StructuredFeedback,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -191,105 +191,17 @@ async fn idle_timeout_waits_while_provider_run_is_active() {
 #[path = "tests/outbound_writer_liveness.rs"]
 mod outbound_writer_liveness;
 
-#[test]
-fn revision_path_messages_are_only_valid_in_review_decision() {
-    let select_path = WsInMessage::SelectRevisionPath {
-        path: RevisionPath::ReviseWithContext,
-        extra_context: Some("补充修改约束".to_string()),
-    };
-    let legacy_decision = WsInMessage::ReviewDecisionResponse {
-        decision: "continue".to_string(),
-        extra_context: None,
-    };
+// 退役留档（T5/REQ-RET-02）：`revision_path_messages_are_only_valid_in_review_decision` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &select_path,
-        &WorkspaceStage::ReviewDecision
-    ));
-    assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &legacy_decision,
-        &WorkspaceStage::ReviewDecision
-    ));
-    assert!(!is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &select_path,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(!is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &legacy_decision,
-        &WorkspaceStage::HumanConfirm
-    ));
-}
+// 退役留档（T5/REQ-RET-02）：`author_decision_is_only_valid_in_author_confirm` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[test]
-fn author_decision_is_only_valid_in_author_confirm() {
-    let msg = WsInMessage::AuthorDecision {
-        decision: AuthorDecision::Accept,
-    };
-
-    assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &msg,
-        &WorkspaceStage::AuthorConfirm
-    ));
-    assert!(!is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &msg,
-        &WorkspaceStage::PrepareContext
-    ));
-    assert!(!is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &msg,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(requires_stage_validation(&msg));
-    assert_eq!(message_type(&msg), "author_decision");
-}
-
-#[test]
-fn human_confirm_messages_are_only_valid_in_human_confirm() {
-    let human_confirm = WsInMessage::HumanConfirm {
-        decision: HumanConfirmDecision::RequestChange,
-        payload: Some(serde_json::json!({"description": "补充验收条件"})),
-    };
-    let legacy_request_revision = WsInMessage::RequestRevision {
-        feedback: StructuredFeedback {
-            feedback_types: vec!["clarity".to_string()],
-            description: "补充验收条件".to_string(),
-            target_artifact_version: Some(1),
-        },
-    };
-    let legacy_confirm = WsInMessage::Confirm;
-
-    assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &human_confirm,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &legacy_request_revision,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &legacy_confirm,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(!is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &human_confirm,
-        &WorkspaceStage::ReviewDecision
-    ));
-    assert!(!is_message_valid_for_stage_with_flow(
-        WorkItemPlanFlowKind::Legacy,
-        &legacy_request_revision,
-        &WorkspaceStage::ReviewDecision
-    ));
-}
+// 退役留档（T5/REQ-RET-02）：`human_confirm_messages_are_only_valid_in_human_confirm` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
@@ -421,27 +333,9 @@ fn missing_active_run_error_uses_protocol_error() {
     }
 }
 
-#[test]
-fn revision_path_maps_to_existing_review_decision_contract() {
-    assert_eq!(
-        map_revision_path(RevisionPath::Revise, Some("ignored".to_string())),
-        ("continue".to_string(), None)
-    );
-    assert_eq!(
-        map_revision_path(
-            RevisionPath::ReviseWithContext,
-            Some("补充约束".to_string())
-        ),
-        (
-            "continue_with_context".to_string(),
-            Some("补充约束".to_string())
-        )
-    );
-    assert_eq!(
-        map_revision_path(RevisionPath::SkipToHuman, Some("ignored".to_string())),
-        ("human_intervene".to_string(), None)
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`revision_path_maps_to_existing_review_decision_contract` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn start_generation_refreshes_stale_provider_guidance_before_prompting_author() {

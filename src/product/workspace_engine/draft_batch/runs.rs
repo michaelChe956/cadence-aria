@@ -12,48 +12,9 @@ impl WorkspaceEngine {
         }
     }
 
-    pub async fn select_work_item_generation_mode(
-        &mut self,
-        mode: WorkItemGenerationModeDto,
-    ) -> Result<(), String> {
-        if self.session.stage != WorkspaceStage::AuthorConfirm
-            || self.active_node_type() != Some(TimelineNodeType::WorkItemGenerationMode)
-        {
-            return Err(
-                "select_work_item_generation_mode requires active work_item_generation_mode node"
-                    .to_string(),
-            );
-        }
-
-        self.update_work_item_plan_outline_generation_metadata(None, Some(mode.clone()))
-            .await?;
-        self.pending_revision_context = None;
-        match mode {
-            WorkItemGenerationModeDto::Serial => {
-                self.complete_active_node(Some("已选择逐项生成 Work Item".to_string()))
-                    .await;
-                self.start_serial_work_item_draft_run().await;
-            }
-            WorkItemGenerationModeDto::Batch => {
-                self.create_current_work_item_batch_record()?;
-                self.complete_active_node(Some("已选择自动生成全部 Work Item".to_string()))
-                    .await;
-                self.transition_stage(WorkspaceStage::Running).await;
-                let _ = self
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::WorkItemBatchRun,
-                        agent: Some(self.session.author_provider.clone()),
-                        stage: WorkspaceStage::Running,
-                        round: None,
-                        title: "Work Item Batch 生成".to_string(),
-                        summary: Some("WP5 占位节点，Batch 实际生成由后续 WP 接入".to_string()),
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-            }
-        }
-        Ok(())
-    }
+    // 退役留档（T5/REQ-RET-02）：select_work_item_generation_mode（SelectWorkItem
+    // GenerationMode 消息族唯一引擎入口）随消息族删除（wp5-attribution-table.md
+    // §1）；mode 值类型迁至 artifact.rs（历史 artifact 载荷字段+SC 内部诊断）。
 
     pub(crate) async fn begin_work_item_draft_review_run(&mut self, outline_id: &str) -> String {
         self.transition_stage(WorkspaceStage::CrossReview).await;

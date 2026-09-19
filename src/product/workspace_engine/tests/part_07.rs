@@ -409,38 +409,9 @@ async fn reviewer_start_failure_error_message_carries_bounded_stderr_tail() {
     );
 }
 
-#[tokio::test]
-async fn handle_user_message_from_human_confirm_reenters_running_stage() {
-    let (_tmp, store) = setup();
-    let (tx, mut rx) = mpsc::channel(64);
-    let mut session = make_session("sess_007");
-    session.stage = WorkspaceStage::HumanConfirm;
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-    engine
-        .handle_user_message(
-            "revise".to_string(),
-            Arc::new(FakeStreamingProvider),
-            empty_provider_commands(),
-        )
-        .await;
-
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-
-    let mut saw_running = false;
-    while let Ok(event) = rx.try_recv() {
-        if matches!(event, EngineEvent::StageChange { stage } if stage == "running") {
-            saw_running = true;
-        }
-    }
-    assert!(
-        saw_running,
-        "manual intervention should restart the run stage"
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-}
+// 退役留档（T5/REQ-RET-02）：`handle_user_message_from_human_confirm_reenters_running_stage` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 struct ErrorStreamingProvider;
 

@@ -118,13 +118,8 @@ pub enum WsOutMessage {
         round: u32,
         options: Vec<String>,
     },
-    HumanPresentationRevisionSaved {
-        revision: HumanPresentationRevision,
-    },
-    HumanPresentationRevisionSaveFailed {
-        source_projection_bundle_id: String,
-        message: String,
-    },
+    // 退役留档（T5/REQ-RET-02）：HumanPresentationRevisionSaved/SaveFailed
+    // 出站变体随保存命令族删除（唯一生产点=已删 inbound 臂）。
     LinkedWorkspaceAmendmentCreated {
         snapshot: LinkedWorkspaceSessionSnapshot,
     },

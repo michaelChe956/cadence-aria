@@ -164,7 +164,17 @@ pub struct WorkItemPlanOutlineCandidateDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_generation_round_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_generation_mode: Option<super::in_::WorkItemGenerationModeDto>,
+    pub selected_generation_mode: Option<WorkItemGenerationModeDto>,
+}
+
+/// Legacy 逐段流的 generation-mode 值类型（T5 退役后仅存于历史 outline candidate
+/// artifact 载荷与 SC 内部诊断记录 `select_internal_generation_mode`——wire 消息
+/// `SelectWorkItemGenerationMode` 已删除，见 wp5-attribution-table.md §1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemGenerationModeDto {
+    Serial,
+    Batch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

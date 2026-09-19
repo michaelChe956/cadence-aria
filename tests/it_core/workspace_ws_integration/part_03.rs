@@ -1,52 +1,6 @@
-#[tokio::test]
-async fn workspace_ws_reconnect_restores_message_checkpoint_ids() {
-    let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-
-    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
-    let _initial = recv_json(&mut ws).await;
-
-    send_json(
-        &mut ws,
-        &WsInMessage::UserMessage {
-            content: "restore checkpoint ids".to_string(),
-        },
-    )
-    .await;
-    let checkpoint_id = recv_until_message_complete(&mut ws).await;
-    accept_author_output(&mut ws).await;
-    let _ = recv_until_stage(&mut ws, "human_confirm").await;
-    drop(ws);
-
-    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
-    let reloaded = recv_json(&mut reconnected).await;
-    match reloaded {
-        WsOutMessage::SessionState { messages, .. } => {
-            let assistant = messages
-                .iter()
-                .find(|message| message.role == "assistant")
-                .expect("assistant message");
-            assert_eq!(
-                assistant.checkpoint_id.as_deref(),
-                Some(checkpoint_id.as_str())
-            );
-        }
-        other => panic!("expected session_state, got {other:?}"),
-    }
-
-    drop(reconnected);
-    server.abort();
-}
+// 退役留档（T5/REQ-RET-02）：`workspace_ws_reconnect_restores_message_checkpoint_ids` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn workspace_ws_user_message_interrupts_active_stream_before_completion() {
@@ -777,129 +731,13 @@ async fn workspace_ws_test_control_drop_closes_registered_socket() {
     server.abort();
 }
 
-#[tokio::test]
-async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
-    let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
-    set_workspace_author_permission_mode_to_supervised(&root);
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
-    registry.register(
-        ProviderName::ClaudeCode,
-        Arc::new(ClaudeCodeProvider::new(executable_fixture(
-            "tests/fixtures/provider/claude_stream_json_fixture.sh",
-        ))),
-    );
+// 退役留档（T5/REQ-RET-02）：`workspace_ws_supervised_permission_allows_real_stream_to_complete` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
-    ));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-
-    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-    let (mut ws, _) = connect_async(url).await.expect("connect ws");
-    let _initial = recv_json(&mut ws).await;
-
-    send_json(
-        &mut ws,
-        &WsInMessage::UserMessage {
-            content: "run supervised provider".to_string(),
-        },
-    )
-    .await;
-
-    let permission = recv_until_permission_request(&mut ws).await;
-    assert_eq!(permission.tool_name, "Bash");
-
-    send_json(
-        &mut ws,
-        &WsInMessage::PermissionResponse {
-            id: permission.id,
-            approved: true,
-            reason: None,
-        },
-    )
-    .await;
-
-    let checkpoint = recv_until_message_complete(&mut ws).await;
-    assert!(checkpoint.starts_with("cp_"));
-    accept_author_output(&mut ws).await;
-    let stage = recv_until_stage(&mut ws, "human_confirm").await;
-    assert_eq!(stage, "human_confirm");
-
-    drop(ws);
-    server.abort();
-}
-
-#[tokio::test]
-async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_provider() {
-    let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
-    registry.register(
-        ProviderName::ClaudeCode,
-        Arc::new(ClaudeCodeProvider::new(executable_fixture(
-            "tests/fixtures/provider/claude_ask_user_question_fixture.sh",
-        ))),
-    );
-
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
-    ));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-
-    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-    let (mut ws, _) = connect_async(url).await.expect("connect ws");
-    let _initial = recv_json(&mut ws).await;
-
-    send_json(
-        &mut ws,
-        &WsInMessage::UserMessage {
-            content: "run claude ask user question provider".to_string(),
-        },
-    )
-    .await;
-
-    let choice = recv_until_choice_request(&mut ws).await;
-    assert_eq!(choice.source.as_deref(), Some("ask_user_question"));
-    assert_eq!(choice.id, "ask_req_001");
-    assert_eq!(choice.prompt, "Drink?");
-    assert_eq!(choice.options[0].id, "opt_0");
-    assert_eq!(choice.options[0].label, "Tea");
-
-    send_json(
-        &mut ws,
-        &WsInMessage::ChoiceResponse {
-            id: choice.id,
-            selected_option_ids: vec!["opt_0".to_string()],
-            free_text: None,
-            answers: vec![],
-        },
-    )
-    .await;
-
-    let checkpoint = recv_until_message_complete(&mut ws).await;
-    assert!(checkpoint.starts_with("cp_"));
-    accept_author_output(&mut ws).await;
-    let stage = recv_until_stage(&mut ws, "human_confirm").await;
-    assert_eq!(stage, "human_confirm");
-
-    drop(ws);
-    server.abort();
-}
+// 退役留档（T5/REQ-RET-02）：`workspace_ws_claude_author_ask_user_question_choice_continues_same_provider` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response() {

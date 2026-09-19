@@ -78,13 +78,6 @@ async fn handle_workspace_inbound_message_inner(
         let _ = send_json_outbound(&outbound_tx, &err).await;
         return;
     }
-    if let Some(err) = single_candidate_generation_decision_error(
-        run_context.session_record.flow_kind,
-        &envelope.message,
-    ) {
-        let _ = send_json_outbound(&outbound_tx, &err).await;
-        return;
-    }
 
     if let WsInMessage::HumanGateFeedback { command_id, .. } = &envelope.message
         && let Err(err) = validate_command_id(command_id)
@@ -202,13 +195,9 @@ async fn handle_workspace_inbound_message_inner(
                 )
                 .await;
             } else {
-                handle_human_confirm_from_handler(
-                    run_context.clone(),
-                    outbound_tx.clone(),
-                    HumanConfirmDecision::Confirm,
-                    None,
-                )
-                .await;
+                // L2 退役收口：非 SC 流的 approve 帧直连引擎确认（原
+                // HumanConfirmDecision::Confirm 桥随消息族删除）。
+                handle_confirm_from_handler(run_context.clone(), outbound_tx.clone()).await;
             }
         }
         WsInMessage::ProviderSelect { role, provider } => {
@@ -360,190 +349,11 @@ async fn handle_workspace_inbound_message_inner(
                 }
             }
         }
-        WsInMessage::ReviewDecisionResponse {
-            decision,
-            extra_context,
-        } => {
-            handle_review_decision_from_handler(
-                run_context.clone(),
-                outbound_tx.clone(),
-                decision,
-                extra_context,
-            )
-            .await;
-        }
-        WsInMessage::AuthorDecision { decision } => {
-            handle_author_decision_from_handler(run_context.clone(), outbound_tx.clone(), decision)
-                .await;
-        }
-        WsInMessage::SelectWorkItemGenerationMode { mode } => {
-            let selected_mode = mode.clone();
-            let result = {
-                let mut engine = engine.lock().await;
-                engine.select_work_item_generation_mode(mode).await
-            };
-            if let Err(message) = result {
-                let err = WsOutMessage::ProtocolError {
-                    code: "WORK_ITEM_GENERATION_MODE_NODE_REQUIRED".to_string(),
-                    message,
-                    context: None,
-                };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            } else {
-                let run_kind = match selected_mode {
-                    WorkItemGenerationModeDto::Serial => {
-                        ProviderRunKind::WorkItemPlanDraft { feedback: None }
-                    }
-                    WorkItemGenerationModeDto::Batch => ProviderRunKind::WorkItemPlanBatch,
-                };
-                if let Err(message) = spawn_provider_run_from_handler(
-                    run_context.clone(),
-                    run_kind,
-                    outbound_tx.clone(),
-                )
-                .await
-                {
-                    let err = WsOutMessage::Error { message };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
-                }
-            }
-        }
-        WsInMessage::RequestOutlineRevision { feedback } => {
-            let result = {
-                let mut engine = engine.lock().await;
-                engine
-                    .request_work_item_plan_outline_revision(feedback)
-                    .await
-            };
-            match result {
-                Ok(feedback) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Err(message) => {
-                    let err = WsOutMessage::ProtocolError {
-                        code: "WORK_ITEM_GENERATION_MODE_NODE_REQUIRED".to_string(),
-                        message,
-                        context: None,
-                    };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
-                }
-            }
-        }
-        WsInMessage::WorkItemDraftDecision {
-            outline_id,
-            decision,
-            feedback,
-        } => {
-            let result = {
-                let mut engine = engine.lock().await;
-                engine
-                    .handle_work_item_draft_decision(outline_id, decision, feedback)
-                    .await
-            };
-            match result {
-                Ok(WorkItemDraftDecisionOutcome::StartDraftRun) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::WorkItemPlanDraft { feedback: None },
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Ok(WorkItemDraftDecisionOutcome::StartReview) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::ReviewOnly,
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Ok(WorkItemDraftDecisionOutcome::HumanConfirm) => {}
-                Err(message) => {
-                    let err = WsOutMessage::ProtocolError {
-                        code: "WORK_ITEM_DRAFT_CONFIRM_REQUIRED".to_string(),
-                        message,
-                        context: None,
-                    };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
-                }
-            }
-        }
-        WsInMessage::WorkItemBatchDecision {
-            decision,
-            feedback,
-            first_affected_outline_id,
-        } => {
-            let result = {
-                let mut engine = engine.lock().await;
-                engine
-                    .handle_work_item_batch_decision(decision, feedback, first_affected_outline_id)
-                    .await
-            };
-            match result {
-                Ok(WorkItemBatchDecisionOutcome::StartBatchRun) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::WorkItemPlanBatch,
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Ok(WorkItemBatchDecisionOutcome::StartDraftRun) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::WorkItemPlanDraft { feedback: None },
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Ok(WorkItemBatchDecisionOutcome::StartReview) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::ReviewOnly,
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    }
-                }
-                Ok(WorkItemBatchDecisionOutcome::HumanConfirm) => {}
-                Err(message) => {
-                    let err = WsOutMessage::ProtocolError {
-                        code: "WORK_ITEM_BATCH_CONFIRM_REQUIRED".to_string(),
-                        message,
-                        context: None,
-                    };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
-                }
-            }
-        }
+        // 退役留档（T5/REQ-RET-02）：legacy 决策路由分支已删除——ReviewDecision
+        // Response/AuthorDecision/SelectWorkItemGenerationMode/RequestOutline
+        // Revision/WorkItemDraftDecision/WorkItemBatchDecision/SaveHumanPresentation
+        // Revision 消息族 wire 名在 parse 面即被拒收（LEGACY_MESSAGE_RETIRED），
+        // 消费链与处置见 wp5-attribution-table.md。
         WsInMessage::WorkItemPlanCompileRecoveryAction { action, reason } => {
             let result = {
                 let mut engine = engine.lock().await;
@@ -564,42 +374,9 @@ async fn handle_workspace_inbound_message_inner(
                 }
             }
         }
-        WsInMessage::SaveHumanPresentationRevision {
-            source_projection_bundle_id,
-            scope,
-            supersedes,
-            human_summary,
-            why_split,
-            dependency_explanation,
-            risk_explanation,
-            source_refs,
-        } => {
-            let source_projection_bundle_id_for_error = source_projection_bundle_id.clone();
-            let result = {
-                let engine = engine.lock().await;
-                engine.save_human_presentation_revision_command(SaveHumanPresentationRevision {
-                    source_projection_bundle_id,
-                    scope: match scope {
-                        HumanPresentationScopeDto::Plan => HumanPresentationScope::Plan,
-                        HumanPresentationScopeDto::WorkItem => HumanPresentationScope::WorkItem,
-                    },
-                    supersedes,
-                    human_summary,
-                    why_split,
-                    dependency_explanation,
-                    risk_explanation,
-                    source_refs,
-                })
-            };
-            let message = match result {
-                Ok(revision) => WsOutMessage::HumanPresentationRevisionSaved { revision },
-                Err(error) => WsOutMessage::HumanPresentationRevisionSaveFailed {
-                    source_projection_bundle_id: source_projection_bundle_id_for_error,
-                    message: error.to_string(),
-                },
-            };
-            let _ = send_json_outbound(&outbound_tx, &message).await;
-        }
+        // 退役留档（T5/REQ-RET-02）：SaveHumanPresentationRevision 消息族已
+        // 删除（SC 无消费，wp5-attribution-table.md §2）——wire 名 parse 面
+        // 拒收，路由分支随之退役。
         WsInMessage::Abort => {
             // 诊断打点：显式 Abort 消息（driver/前端）取消 active run。
             eprintln!(
@@ -744,19 +521,8 @@ async fn handle_workspace_inbound_message_inner(
                 }
             }
         }
-        WsInMessage::SelectRevisionPath {
-            path,
-            extra_context,
-        } => {
-            let (decision, extra_context) = map_revision_path(path, extra_context);
-            handle_review_decision_from_handler(
-                run_context.clone(),
-                outbound_tx.clone(),
-                decision,
-                extra_context,
-            )
-            .await;
-        }
+        // 退役留档（T5/REQ-RET-02）：SelectRevisionPath 消息族已删除（必删集，
+        // wp5-attribution-table.md §1）——wire 名 parse 面拒收，路由分支退役。
         WsInMessage::RequestRevision { feedback } => {
             let is_work_item_plan = {
                 let engine = engine.lock().await;
@@ -851,67 +617,22 @@ async fn handle_workspace_inbound_message_inner(
                     }
                 }
             } else {
-                let payload = serde_json::to_value(feedback).ok();
-                handle_human_confirm_from_handler(
-                    run_context.clone(),
-                    outbound_tx.clone(),
-                    HumanConfirmDecision::RequestChange,
-                    payload,
-                )
-                .await;
-            }
-        }
-        WsInMessage::HumanConfirm { decision, payload } => {
-            if run_context.session_record.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
-                if decision == HumanConfirmDecision::Terminate && payload.is_some() {
-                    let _ = send_json_outbound(
-                        &outbound_tx,
-                        &WsOutMessage::ProtocolError {
-                            code: "SINGLE_CANDIDATE_HUMAN_CONFIRM_PAYLOAD_FORBIDDEN".to_string(),
-                            message: "single-candidate terminate does not accept a payload"
-                                .to_string(),
-                            context: None,
-                        },
-                    )
-                    .await;
-                    return;
-                }
-                // 双轨期 legacy 桥接（REQ-RET-02 L0）：SC 流的 HumanConfirm 仍
-                // 接受，关门决策映射 typed 枚举——Confirm→Approve、Terminate→
-                // Abandon（L2 删除）；RequestChange 为 legacy-only 关门语义，SC
-                // 门从未支持，保持显式拒绝（原 engine 侧拒绝语义上收到此处）。
-                let close = match decision {
-                    HumanConfirmDecision::Confirm => Some(HumanGateCloseDecision::Approve),
-                    HumanConfirmDecision::Terminate => Some(HumanGateCloseDecision::Abandon),
-                    HumanConfirmDecision::RequestChange => None,
+                // L2 退役收口：非 WorkItemPlan 会话的 RequestChange 桥接随
+                // HumanConfirm 消息族删除（wp5-attribution-table.md §2
+                // RequestRevision 行）——保留通道仅服务 WorkItemPlan plan-repair。
+                let err = WsOutMessage::ProtocolError {
+                    code: "REQUEST_REVISION_WORKSPACE_INVALID".to_string(),
+                    message: "request_revision is only supported for work item plan workspaces"
+                        .to_string(),
+                    context: None,
                 };
-                if let Some(close) = close {
-                    handle_human_gate_termination_from_handler(
-                        run_context.clone(),
-                        outbound_tx.clone(),
-                        close,
-                    )
-                    .await;
-                } else {
-                    let _ = send_json_outbound(
-                        &outbound_tx,
-                        &WsOutMessage::Error {
-                            message: "single-candidate human gate does not support request-change; submit feedback through HumanGateFeedback"
-                                .to_string(),
-                        },
-                    )
-                    .await;
-                }
-            } else {
-                handle_human_confirm_from_handler(
-                    run_context.clone(),
-                    outbound_tx.clone(),
-                    decision,
-                    payload,
-                )
-                .await;
+                let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
+        // 退役留档（T5/REQ-RET-02 L2）：HumanConfirm 消息族已删除（必删集）——
+        // SC 门关门决策由 typed 三命令承载（Confirm/HumanGateFeedback/
+        // AbandonHumanGate，T2 重承载），双轨期 legacy 桥接臂随之退役；wire 名
+        // parse 面拒收（LEGACY_MESSAGE_RETIRED，REQ-RET-03 在途限制）。
         WsInMessage::ConfirmPlanAmendment { amendment_id } => {
             handle_plan_amendment_confirmation_from_handler(
                 app_state.clone(),
@@ -949,23 +670,9 @@ async fn handle_workspace_inbound_message_inner(
             };
             let _ = send_json_outbound(&outbound_tx, &message).await;
         }
-        WsInMessage::RevertWorkItem {
-            work_item_id,
-            feedback,
-            clear,
-        } => {
-            let result = {
-                let mut engine = engine.lock().await;
-                engine
-                    .apply_revert_mark(&work_item_id, feedback, clear)
-                    .await
-            };
-            if let Err(message) = result {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
-            }
-            // 成功时 apply_revert_mark 已发 EngineEvent::ArtifactUpdate，event forwarder 会推前端
-        }
+        // 退役留档（T5/REQ-RET-02）：RevertWorkItem 消息族已删除（SC 无 revert
+        // 消费，grep 实测裁定见 wp5-attribution-table.md §2）——wire 名 parse
+        // 面拒收，路由分支退役。
     }
 }
 

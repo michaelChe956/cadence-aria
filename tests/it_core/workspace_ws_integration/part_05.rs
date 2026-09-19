@@ -696,23 +696,9 @@ async fn send_json(
     .expect("send ws message");
 }
 
-async fn accept_author_output(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) {
-    assert_eq!(
-        recv_until_stage(ws, "author_confirm").await,
-        "author_confirm"
-    );
-    send_json(
-        ws,
-        &WsInMessage::AuthorDecision {
-            decision: AuthorDecision::Accept,
-        },
-    )
-    .await;
-}
+// 退役留档（T5/REQ-RET-02）：accept_author_output 夹具（author_decision 发送）随消息族退役，
+// 调用方测试（part_01 choice/review/reconnect 五测）同批退役——choice/reconnect 面
+// 由 campaign_stage3 恢复矩阵与 disconnect e2e 承接。
 
 async fn recv_json(
     ws: &mut tokio_tungstenite::WebSocketStream<

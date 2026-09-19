@@ -24,9 +24,9 @@ use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
 };
 use crate::product::models::{
-    AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemDependencyEdge,
+    AgentRole, ArtifactRef, IssueWorkItemDependencyEdge,
     IssueWorkItemPlan, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent,
+    PermissionEvent,
     PlanRepairSessionSnapshotDto, PlanRepairSessionStage, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
@@ -53,16 +53,15 @@ use crate::product::work_item_split_validator::{
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
-    ChoiceQuestion, HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot,
-    RecoverableInterruptedOperation, RecoverableInterruptedRun, RepositoryProfileDto,
-    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
-    StructuredOutputDiagnostic, TimelineNode, TimelineNodeRetry, TimelineNodeRetryError,
-    TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto, VerificationCommandDto,
-    VerificationManualCheckDto, VerificationPlanDto, WorkItemBatchDecisionDto,
-    WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload, WorkItemCandidateDto,
-    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload,
-    WorkItemDraftDecisionDto, WorkItemGenerationModeDto, WorkItemPlanCandidateDto,
+    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ChoiceOption, ChoiceQuestion,
+    NodeDetailSummary, ProviderConfigSnapshot, RecoverableInterruptedOperation,
+    RecoverableInterruptedRun, RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity,
+    ReviewGate, ReviewVerdict, ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode,
+    TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType,
+    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto,
+    VerificationPlanDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
+    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
+    WorkItemDraftCandidatePayload, WorkItemGenerationModeDto, WorkItemPlanCandidateDto,
     WorkItemPlanCompileRecoveryActionDto, WorkItemPlanCompileReportPayload,
     WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
     WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
@@ -120,10 +119,7 @@ pub use compile::{
     CompileStores, InitialPlanCompileDurableContext, InitialPlanCompileInput,
     PreparedInitialPlanCompile, execute_initial_plan_compile, prepare_initial_plan_compile,
 };
-pub use human_presentation::{
-    HumanPresentationScope, SaveHumanPresentationRevision, WorkItemRepositoryGroup,
-    group_work_items_by_target, save_human_presentation_revision,
-};
+pub use human_presentation::{WorkItemRepositoryGroup, group_work_items_by_target};
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
 pub use linked_workspace_amendment::restore_linked_workspace_snapshot;
 pub use plan_projection::{

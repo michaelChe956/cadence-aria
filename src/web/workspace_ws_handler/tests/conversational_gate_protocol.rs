@@ -84,9 +84,9 @@ fn conversational_gate_rejects_blank_command_id_at_handler_boundary() {
 /// L0 typed 重承载（双审修订锚）：SC HumanConfirm stage 白名单必须显式放行
 /// typed 门命令族（HumanGateFeedback/Confirm/AbandonHumanGate）与双轨期
 /// legacy Terminate 桥接——漏加 AbandonHumanGate 时 typed abandon 在真实
-/// 分发链被拒为 STAGE_INVALID（红测见 campaign_stage3_interactive cases）。
-/// legacy 决策面经 HumanConfirm 通道到达 SC 门时只放行 Terminate 桥接
-/// （approve 的承载是裸 Confirm 变体，RequestChange 为 legacy-only 关门语义）。
+/// L2 重钉（T5/REQ-RET-02）：SC 门白名单=typed 三命令——HumanConfirm 双轨
+/// 桥接臂已删（legacy 消息 parse 面拒收 LEGACY_MESSAGE_RETIRED，红测见
+/// it_core part_07），白名单结构性收窄为 feedback/confirm/abandon。
 #[test]
 fn single_candidate_human_gate_stage_whitelist_accepts_typed_close_commands() {
     use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
@@ -97,10 +97,6 @@ fn single_candidate_human_gate_stage_whitelist_accepts_typed_close_commands() {
             feedback: "反馈".to_string(),
         },
         WsInMessage::Confirm,
-        WsInMessage::HumanConfirm {
-            decision: HumanConfirmDecision::Terminate,
-            payload: None,
-        },
         WsInMessage::AbandonHumanGate {
             command_id: "cmd-abandon".to_string(),
         },
@@ -113,25 +109,6 @@ fn single_candidate_human_gate_stage_whitelist_accepts_typed_close_commands() {
                 &WorkspaceStage::HumanConfirm
             ),
             "SC human gate must accept {message:?}"
-        );
-    }
-    for message in [
-        WsInMessage::HumanConfirm {
-            decision: HumanConfirmDecision::RequestChange,
-            payload: None,
-        },
-        WsInMessage::HumanConfirm {
-            decision: HumanConfirmDecision::Confirm,
-            payload: None,
-        },
-    ] {
-        assert!(
-            !is_message_valid_for_stage_with_flow(
-                WorkItemPlanFlowKind::SingleCandidate,
-                &message,
-                &WorkspaceStage::HumanConfirm
-            ),
-            "SC human gate must reject legacy-only decision {message:?}"
         );
     }
 }

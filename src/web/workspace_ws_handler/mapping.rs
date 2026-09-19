@@ -42,17 +42,8 @@ pub(crate) fn refresh_coding_runtime_revision_history(
     Ok(projection.history)
 }
 
-pub(crate) fn map_revision_path(
-    path: RevisionPath,
-    extra_context: Option<String>,
-) -> (String, Option<String>) {
-    match path {
-        RevisionPath::Revise => ("continue".to_string(), None),
-        RevisionPath::ReviseWithContext => ("continue_with_context".to_string(), extra_context),
-        RevisionPath::SkipToHuman => ("human_intervene".to_string(), None),
-    }
-}
-
+// 退役留档（T5/REQ-RET-02）：`map_revision_path`（SelectRevisionPath→review
+// decision 映射）随 SelectRevisionPath 消息族删除（wp5-attribution-table §1）。
 pub(crate) fn ws_permission_risk_level(risk_level: RiskLevel) -> WsPermissionRiskLevel {
     match risk_level {
         RiskLevel::Low => WsPermissionRiskLevel::Low,

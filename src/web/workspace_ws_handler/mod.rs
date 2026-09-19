@@ -34,10 +34,8 @@ pub(crate) use crate::product::work_item_split_engine::{
 #[cfg(test)]
 pub(crate) use crate::product::workspace_engine::WorkspaceSession;
 pub(crate) use crate::product::workspace_engine::{
-    AuthorDecisionOutcome, EngineEvent, HumanGateCommandOutcome, HumanGateFeedbackInput,
-    HumanPresentationScope, InterruptedRunRecoveryOutcome, PendingAuthorChoiceError,
-    ProviderRunKind, ReviewDecisionOutcome, SaveHumanPresentationRevision,
-    WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome,
+    EngineEvent, HumanGateCommandOutcome, HumanGateFeedbackInput, InterruptedRunRecoveryOutcome,
+    PendingAuthorChoiceError, ProviderRunKind, ReviewDecisionOutcome, WorkItemPlanAuthorOutcome,
     WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine, WorkspaceStage,
     build_work_item_plan_revision_input,
 };
@@ -47,10 +45,9 @@ pub(crate) use crate::web::test_controls::WorkspaceSocketControl;
 pub(crate) use crate::web::types::GenerateWorkItemsRequest;
 pub(crate) use crate::web::workspace_context::ensure_workspace_context_message;
 pub(crate) use crate::web::workspace_ws_types::{
-    ChoiceOption, ChoiceQuestion, HumanConfirmDecision, HumanPresentationScopeDto, RevisionPath,
-    TimelineNodeRetryError, WorkItemGenerationModeDto, WorkspaceInboundEnvelope, WsExecutionEvent,
-    WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel,
-    WsProviderStatus,
+    ChoiceOption, ChoiceQuestion, TimelineNodeRetryError, WorkspaceInboundEnvelope,
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
+    WsPermissionRiskLevel, WsProviderStatus,
 };
 
 mod decisions;

@@ -1,4 +1,5 @@
 use chrono::Utc;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 
 use crate::product::models::{
     PlanRepairAwaitingConfirmationPackage, PlanRepairImpactScopeReview, PlanRepairPackageIdentity,
@@ -219,12 +220,24 @@ impl WorkspaceEngine {
     }
 
     pub(crate) async fn route_plan_repair_candidate_review(&mut self, verdict: ReviewVerdict) {
+        // L2 退役（T5/REQ-RET-02）：review_decision 阶段唯一消息族已删除——SC
+        // 会话全部改道 human gate（typed 三命令可应答）；非 SC（在途 legacy
+        // 会话）保留 review_decision 阶段=登记限制（REQ-RET-03）。
+        let route_to_human_gate = self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate;
         let Some(review) = verdict.work_item_plan_review.clone() else {
-            self.enter_review_decision(
-                self.active_review_round().unwrap_or(1),
-                "Plan Repair review 缺少结构化 Plan Review 结果".to_string(),
-            )
-            .await;
+            if route_to_human_gate {
+                self.enter_human_confirm(Some(
+                    "Plan Repair review 缺少结构化 Plan Review 结果".to_string(),
+                ))
+                .await;
+            } else {
+                self.enter_review_decision(
+                    self.active_review_round().unwrap_or(1),
+                    "Plan Repair review 缺少结构化 Plan Review 结果".to_string(),
+                )
+                .await;
+            }
             return;
         };
         if verdict.verdict != ReviewVerdictType::Pass
@@ -237,9 +250,10 @@ impl WorkspaceEngine {
             || review.batch_id.is_some()
         {
             let summary = verdict.summary.clone();
-            if verdict.review_gate == ReviewGate::RequiresRevision
-                || review.verdict == WorkItemPlanReviewVerdict::Revise
-                || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
+            if !route_to_human_gate
+                && (verdict.review_gate == ReviewGate::RequiresRevision
+                    || review.verdict == WorkItemPlanReviewVerdict::Revise
+                    || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired)
             {
                 self.enter_review_decision(self.active_review_round().unwrap_or(1), summary)
                     .await;

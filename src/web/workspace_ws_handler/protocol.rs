@@ -6,26 +6,46 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 const CLIENT_SUBMITTED_SCOPE_FIELDS: [&str; 3] =
     ["scope", "review_invocation_scope", "review_scope"];
 
-pub(crate) fn single_candidate_generation_decision_error(
-    flow_kind: WorkItemPlanFlowKind,
-    message: &WsInMessage,
-) -> Option<WsOutMessage> {
-    if flow_kind != WorkItemPlanFlowKind::SingleCandidate
-        || !matches!(
-            message,
-            WsInMessage::SelectWorkItemGenerationMode { .. }
-                | WsInMessage::WorkItemDraftDecision { .. }
-                | WsInMessage::WorkItemBatchDecision { .. }
-        )
-    {
-        return None;
-    }
+pub(crate) const RETIRED_INBOUND_MESSAGE_TYPES: [&str; 10] = [
+    "review_decision_response",
+    "author_decision",
+    "select_work_item_generation_mode",
+    "select_revision_path",
+    "request_outline_revision",
+    "work_item_draft_decision",
+    "work_item_batch_decision",
+    "save_human_presentation_revision",
+    "human_confirm",
+    "revert_work_item",
+];
 
-    Some(WsOutMessage::ProtocolError {
-        code: "SINGLE_CANDIDATE_GENERATION_DECISION_FORBIDDEN".to_string(),
-        message: "single-candidate generation mode is selected internally".to_string(),
-        context: Some(serde_json::json!({ "message_type": message_type(message) })),
-    })
+/// 已删除的 legacy 决策消息在 parse 面即被拒收（serde 未知变体）；本函数把
+/// 退役 wire 名从通用 parse 错误中识别出来，供 socket 层返回 stage-specific
+/// protocol error（REQ-WSC-08「已删除消息协议错误拒绝」/REQ-RET-03「在途
+/// legacy 会话决策拒绝」——零副作用：识别仅读原始文本，不触碰引擎状态）。
+pub(crate) fn retired_inbound_message_type(text: &str) -> Option<&'static str> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let name = value.get("type")?.as_str()?;
+    RETIRED_INBOUND_MESSAGE_TYPES
+        .iter()
+        .find(|retired| **retired == name)
+        .copied()
+}
+
+pub(crate) fn retired_message_protocol_error(
+    stage: &WorkspaceStage,
+    message_type: &str,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "LEGACY_MESSAGE_RETIRED".to_string(),
+        message: format!(
+            "message type {message_type} was retired with the legacy workitem decision protocol"
+        ),
+        context: Some(serde_json::json!({
+            "stage": stage.as_str(),
+            "received": message_type,
+        })),
+    }
 }
 
 pub(crate) fn single_candidate_scope_submission_error(
@@ -89,12 +109,7 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
     msg: &WsInMessage,
     stage: &WorkspaceStage,
 ) -> bool {
-    if matches!(
-        msg,
-        WsInMessage::Hello { .. }
-            | WsInMessage::Ping
-            | WsInMessage::SaveHumanPresentationRevision { .. }
-    ) {
+    if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
         return true;
     }
 
@@ -118,25 +133,17 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
                     | WsInMessage::StartLinkedWorkspaceAmendment { .. }
             )
         }
-        WorkspaceStage::AuthorConfirm => {
-            matches!(
-                msg,
-                WsInMessage::AuthorDecision { .. }
-                    | WsInMessage::SelectWorkItemGenerationMode { .. }
-                    | WsInMessage::RequestOutlineRevision { .. }
-                    | WsInMessage::WorkItemDraftDecision { .. }
-                    | WsInMessage::WorkItemBatchDecision { .. }
-                    | WsInMessage::RevertWorkItem { .. }
-                    | WsInMessage::Abort
-            )
-        }
+        // L2 退役后 author_confirm 的 legacy 逐段/author 决策消息已删除
+        //（REQ-RET-02）；RequestRevision 的 WorkItemPlan 放行特例在 socket
+        // 层（author_confirm + WorkItemPlan），此处不重复。
+        WorkspaceStage::AuthorConfirm => matches!(msg, WsInMessage::Abort),
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
-        WorkspaceStage::ReviewDecision => matches!(
-            msg,
-            WsInMessage::SelectRevisionPath { .. } | WsInMessage::ReviewDecisionResponse { .. }
-        ),
+        // review_decision 阶段的唯一消息族（ReviewDecisionResponse/
+        // SelectRevisionPath）已随 L2 删除：任何消息在该阶段均不合法（SC 会话
+        // 已由 review/routing 的 SC 守卫改道 human gate，不落入此阶段）。
+        WorkspaceStage::ReviewDecision => false,
         WorkspaceStage::Revision => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
@@ -146,11 +153,6 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
                     msg,
                     WsInMessage::HumanGateFeedback { .. }
                         | WsInMessage::Confirm
-                        | WsInMessage::HumanConfirm {
-                            decision:
-                                crate::web::workspace_ws_types::HumanConfirmDecision::Terminate,
-                            ..
-                        }
                         // L0 typed 重承载（REQ-RET-02/REQ-CG-04）：typed abandon
                         // 门命令与 HumanGateFeedback/Confirm 同族放行。
                         | WsInMessage::AbandonHumanGate { .. }
@@ -158,12 +160,12 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
             } else {
                 matches!(
                     msg,
-                    WsInMessage::HumanConfirm { .. }
-                        | WsInMessage::ConfirmPlanAmendment { .. }
+                    WsInMessage::ConfirmPlanAmendment { .. }
                         | WsInMessage::CancelPlanAmendment { .. }
                         | WsInMessage::StartLinkedWorkspaceAmendment { .. }
                         | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
-                        | WsInMessage::RequestRevision { .. }
+                        // approve（confirm 帧）legacy 分支保留：story/design 等
+                        // 非 SC 流的确认帧面（T4 §4 登记限制的既有形态）。
                         | WsInMessage::Confirm
                 )
             }
@@ -246,7 +248,6 @@ pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
-            | WsInMessage::SaveHumanPresentationRevision { .. }
             | WsInMessage::Ping
     )
 }
@@ -263,23 +264,13 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::ProviderSelect { .. } => "provider_select",
         WsInMessage::PermissionResponse { .. } => "permission_response",
         WsInMessage::ChoiceResponse { .. } => "choice_response",
-        WsInMessage::ReviewDecisionResponse { .. } => "review_decision_response",
-        WsInMessage::AuthorDecision { .. } => "author_decision",
-        WsInMessage::SelectWorkItemGenerationMode { .. } => "select_work_item_generation_mode",
-        WsInMessage::SelectRevisionPath { .. } => "select_revision_path",
         WsInMessage::RequestRevision { .. } => "request_revision",
-        WsInMessage::RequestOutlineRevision { .. } => "request_outline_revision",
-        WsInMessage::WorkItemDraftDecision { .. } => "work_item_draft_decision",
-        WsInMessage::WorkItemBatchDecision { .. } => "work_item_batch_decision",
         WsInMessage::WorkItemPlanCompileRecoveryAction { .. } => {
             "work_item_plan_compile_recovery_action"
         }
-        WsInMessage::SaveHumanPresentationRevision { .. } => "save_human_presentation_revision",
-        WsInMessage::HumanConfirm { .. } => "human_confirm",
         WsInMessage::ConfirmPlanAmendment { .. } => "confirm_plan_amendment",
         WsInMessage::CancelPlanAmendment { .. } => "cancel_plan_amendment",
         WsInMessage::StartLinkedWorkspaceAmendment { .. } => "start_linked_workspace_amendment",
-        WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::HumanGateFeedback { .. } => "human_gate_feedback",
         WsInMessage::Advance { .. } => "advance",
         WsInMessage::AbandonHumanGate { .. } => "abandon_human_gate",
@@ -292,43 +283,46 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
 mod tests {
     use super::*;
     use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
-    use crate::web::workspace_ws_types::{
-        WorkItemBatchDecisionDto, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
-    };
 
     #[test]
-    fn single_candidate_generation_decision_messages_are_forbidden_but_legacy_remains_compatible() {
-        let messages = [
-            WsInMessage::SelectWorkItemGenerationMode {
-                mode: WorkItemGenerationModeDto::Serial,
-            },
-            WsInMessage::WorkItemDraftDecision {
-                outline_id: "outline_client_supplied".to_string(),
-                decision: WorkItemDraftDecisionDto::Accept,
-                feedback: None,
-            },
-            WsInMessage::WorkItemBatchDecision {
-                decision: WorkItemBatchDecisionDto::AcceptAll,
-                feedback: None,
-                first_affected_outline_id: None,
-            },
-        ];
-
-        for message in messages {
-            let error = single_candidate_generation_decision_error(
-                WorkItemPlanFlowKind::SingleCandidate,
-                &message,
-            )
-            .expect("single-candidate must reject client generation decisions");
-            let WsOutMessage::ProtocolError { code, .. } = error else {
-                panic!("expected protocol error");
-            };
-            assert_eq!(code, "SINGLE_CANDIDATE_GENERATION_DECISION_FORBIDDEN");
-            assert!(
-                single_candidate_generation_decision_error(WorkItemPlanFlowKind::Legacy, &message)
-                    .is_none(),
-                "legacy generation decision protocol must remain compatible"
-            );
+    fn retired_legacy_decision_wire_names_are_recognized_for_stage_specific_rejection() {
+        for wire_name in RETIRED_INBOUND_MESSAGE_TYPES {
+            let raw = format!(r#"{{"type":"{wire_name}","decision":"confirm"}}"#);
+            assert_eq!(retired_inbound_message_type(&raw), Some(wire_name));
         }
+        // 现役消息名不得误判为退役（parse 成功路径）。
+        for live in ["confirm", "advance", "human_gate_feedback", "abandon_human_gate"] {
+            let raw = format!(r#"{{"type":"{live}","command_id":"cmd"}}"#);
+            assert_eq!(retired_inbound_message_type(&raw), None, "{live}");
+        }
+        assert_eq!(retired_inbound_message_type("not json"), None);
+
+        let error = retired_message_protocol_error(&WorkspaceStage::HumanConfirm, "human_confirm");
+        let WsOutMessage::ProtocolError {
+            code,
+            context,
+            ..
+        } = error
+        else {
+            panic!("expected protocol error");
+        };
+        let context = context.expect("retired error context");
+        assert_eq!(context["stage"], "human_confirm");
+        assert_eq!(context["received"], "human_confirm");
+    }
+
+    #[test]
+    fn review_decision_stage_accepts_nothing_after_legacy_retirement() {
+        let confirm = WsInMessage::Confirm;
+        assert!(!is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::Legacy,
+            &confirm,
+            &WorkspaceStage::ReviewDecision,
+        ));
+        assert!(!is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::SingleCandidate,
+            &confirm,
+            &WorkspaceStage::ReviewDecision,
+        ));
     }
 }

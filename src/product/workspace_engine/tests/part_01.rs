@@ -21,7 +21,7 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterInput, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, AuthorDecision, ProviderConfigSnapshot, ReviewFinding, ReviewFindingSeverity,
+    ArtifactPayload, ProviderConfigSnapshot, ReviewFinding, ReviewFindingSeverity,
     ReviewGate, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
     WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewComplete,

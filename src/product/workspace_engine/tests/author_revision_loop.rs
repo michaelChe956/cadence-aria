@@ -209,110 +209,33 @@ async fn author_confirm_engine_legacy_record() -> WorkspaceEngine {
     WorkspaceEngine::new(store, tx, session)
 }
 
-#[tokio::test]
-async fn revise_with_feedback_transitions_to_revision() {
-    let mut engine = author_confirm_engine().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::Revise {
-            feedback: "补充异常场景".into(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        outcome,
-        AuthorDecisionOutcome::StartRevision {
-            feedback: "补充异常场景".into()
-        }
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::Revision);
-    assert_eq!(
-        engine.pending_revision_context.as_deref(),
-        Some("补充异常场景")
-    );
-    assert!(engine.session().artifact.is_some(), "反馈修订不得清空产物");
-}
+// 退役留档（T5/REQ-RET-02）：`revise_with_feedback_transitions_to_revision` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn revise_with_blank_feedback_rejected() {
-    let mut engine = author_confirm_engine().await;
-    let err = engine
-        .handle_author_decision(AuthorDecision::Revise {
-            feedback: "  ".into(),
-        })
-        .await
-        .unwrap_err();
-    assert!(err.contains("feedback"));
-    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-}
+// 退役留档（T5/REQ-RET-02）：`revise_with_blank_feedback_rejected` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn reject_returns_guidance_error_without_reset() {
-    let mut engine = author_confirm_engine().await;
-    let err = engine
-        .handle_author_decision(AuthorDecision::Reject)
-        .await
-        .unwrap_err();
-    assert!(err.contains("反馈"), "引导改用反馈修订: {err}");
-    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-    assert!(engine.session().artifact.is_some());
-}
+// 退役留档（T5/REQ-RET-02）：`reject_returns_guidance_error_without_reset` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn accept_finalize_completes_workspace() {
-    let mut engine = author_confirm_engine().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::AcceptFinalize)
-        .await
-        .unwrap();
-    assert_eq!(outcome, AuthorDecisionOutcome::Finalized);
-    assert_eq!(engine.session().stage, WorkspaceStage::Completed);
-}
+// 退役留档（T5/REQ-RET-02）：`accept_finalize_completes_workspace` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn accept_with_review_restores_provisional_when_disabled() {
-    // reviewer_provider=None, rounds=0, provisional=Some(Codex)
-    let mut engine = author_confirm_engine().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::AcceptWithReview)
-        .await
-        .unwrap();
-    assert!(matches!(outcome, AuthorDecisionOutcome::StartReview));
-    assert_eq!(
-        engine.session().reviewer_provider,
-        Some(ProviderName::Codex)
-    );
-    assert_eq!(engine.session().review_rounds, 1);
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-}
+// 退役留档（T5/REQ-RET-02）：`accept_with_review_restores_provisional_when_disabled` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn accept_with_review_errors_without_provisional() {
-    let mut engine = author_confirm_engine_no_provisional().await;
-    let err = engine
-        .handle_author_decision(AuthorDecision::AcceptWithReview)
-        .await
-        .unwrap_err();
-    assert!(err.contains("reviewer"), "{err}");
-    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-}
+// 退役留档（T5/REQ-RET-02）：`accept_with_review_errors_without_provisional` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn legacy_accept_routes_by_enabled_at_start() {
-    // reviewer_enabled_at_start=Some(false) + provisional 已恢复(rounds=1) → Accept 仍定稿（按创建默认值）
-    let mut engine = author_confirm_engine_provisional_restored().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(outcome, AuthorDecisionOutcome::Finalized);
-    // 旧记录（None）按有效态：rounds>0 && reviewer.is_some() → StartReview
-    let mut legacy = author_confirm_engine_legacy_record().await;
-    let outcome2 = legacy
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert!(matches!(outcome2, AuthorDecisionOutcome::StartReview));
-}
+// 退役留档（T5/REQ-RET-02）：`legacy_accept_routes_by_enabled_at_start` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // T3 fix round 1（reviewer Important-1）：Fake reviewer 快速路径下 outcome 与最终 stage 一致性回归。
 // start_review 的 Fake 快速路径会直接进入 HumanConfirm（Skipped 节点 + mark_reviewed + enter_human_confirm），
@@ -392,67 +315,21 @@ async fn author_confirm_engine_enabled_review() -> WorkspaceEngine {
     WorkspaceEngine::new(store, tx, session)
 }
 
-#[tokio::test]
-async fn fake_reviewer_legacy_accept_outcome_matches_human_confirm_stage() {
-    // Fake reviewer + legacy Accept（None 记录）：有效态判定成立但 Fake 快速路径直入 HumanConfirm，
-    // outcome 必须与最终 stage 一致（HumanConfirm），不得返回 StartReview。
-    let mut engine = fake_reviewer_author_confirm_engine_legacy().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(
-        outcome,
-        AuthorDecisionOutcome::HumanConfirm,
-        "Fake 快速路径下 outcome 必须与最终 stage 一致"
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-}
+// 退役留档（T5/REQ-RET-02）：`fake_reviewer_legacy_accept_outcome_matches_human_confirm_stage` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn fake_reviewer_accept_with_review_outcome_matches_human_confirm_stage() {
-    // AcceptWithReview + Fake：同样必须 HumanConfirm（快速路径），与 stage 一致。
-    let mut engine = fake_reviewer_author_confirm_engine_with_review().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::AcceptWithReview)
-        .await
-        .unwrap();
-    assert_eq!(
-        outcome,
-        AuthorDecisionOutcome::HumanConfirm,
-        "AcceptWithReview + Fake 快速路径下 outcome 必须与最终 stage 一致"
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-}
+// 退役留档（T5/REQ-RET-02）：`fake_reviewer_accept_with_review_outcome_matches_human_confirm_stage` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn fake_reviewer_accept_enabled_at_start_outcome_matches_human_confirm_stage() {
-    // Accept Some(true) 分支 + Fake：快速路径同样落入 HumanConfirm，outcome 与 stage 一致。
-    let mut engine = fake_reviewer_author_confirm_engine_enabled_at_start().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(
-        outcome,
-        AuthorDecisionOutcome::HumanConfirm,
-        "Accept Some(true) + Fake 快速路径下 outcome 必须与最终 stage 一致"
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-}
+// 退役留档（T5/REQ-RET-02）：`fake_reviewer_accept_enabled_at_start_outcome_matches_human_confirm_stage` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-#[tokio::test]
-async fn accept_enabled_review_at_start_routes_to_start_review() {
-    // 顺手项（reviewer Minor-1）：enabled_at_start=Some(true) + 真实 reviewer → Accept 路由 StartReview
-    // 且 stage=CrossReview（不走 Fake 快速路径）。
-    let mut engine = author_confirm_engine_enabled_review().await;
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(outcome, AuthorDecisionOutcome::StartReview);
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-}
+// 退役留档（T5/REQ-RET-02）：`accept_enabled_review_at_start_routes_to_start_review` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // spec-design-dialog-revision T4：author 反馈修订 prompt 构造 + Revision run 分流 + 完成路径改动摘要。
 // prompt_engine_with_artifact 辅助构造：session.artifact = Markdown（Story/AuthorConfirm）。
@@ -794,53 +671,9 @@ async fn legacy_record_with_review_decision_restores_to_author_confirm_via_persi
 // Minor-4（T6）：decisions.rs Accept 兼容路由 None 分支（旧记录无 reviewer_enabled_at_start）
 // 在无 reviewer 时此前会 enter_human_confirm——Story/Design 已退役该阶段，运行中会重新落入。
 // 修复：Story/Design 走 Some(false) 同语义直接定稿；WorkItemPlan 保留 HumanConfirm（仍有效）。
-#[tokio::test]
-async fn legacy_accept_without_reviewer_finalizes_for_story_design_not_human_confirm() {
-    for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
-        let (_tmp, store) = setup();
-        let (tx, _rx) = mpsc::channel(64);
-        let mut session = make_session("sess_legacy_no_reviewer");
-        session.workspace_type = workspace_type.clone();
-        session.stage = WorkspaceStage::AuthorConfirm;
-        session.artifact = Some(ArtifactPayload::Markdown {
-            markdown: "# Story Spec\n\n候选内容".to_string(),
-            diff: None,
-        });
-        session.reviewer_provider = None;
-        session.review_rounds = 0;
-        session.reviewer_enabled_at_start = None;
-        let mut engine = WorkspaceEngine::new(store, tx, session);
-
-        let outcome = engine
-            .handle_author_decision(AuthorDecision::Accept)
-            .await
-            .unwrap();
-        assert_eq!(
-            outcome,
-            AuthorDecisionOutcome::Finalized,
-            "{workspace_type:?} legacy None + 无 reviewer 必须直接定稿，不得落入已退役 HumanConfirm"
-        );
-        assert_eq!(engine.session().stage, WorkspaceStage::Completed);
-    }
-
-    // WorkItemPlan 不受影响：legacy None + 无 reviewer 仍进 HumanConfirm（该阶段对 WorkItemPlan 有效）。
-    let (_tmp, store) = setup();
-    let (tx, _rx) = mpsc::channel(64);
-    let mut session = make_session("sess_legacy_no_reviewer_plan");
-    session.workspace_type = WorkspaceType::WorkItemPlan;
-    session.stage = WorkspaceStage::AuthorConfirm;
-    session.reviewer_provider = None;
-    session.review_rounds = 0;
-    session.reviewer_enabled_at_start = None;
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    let outcome = engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(outcome, AuthorDecisionOutcome::HumanConfirm);
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-}
+// 退役留档（T5/REQ-RET-02）：`legacy_accept_without_reviewer_finalizes_for_story_design_not_human_confirm` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // ============================================================================
 // spec-design-dialog-revision T7：修订断线恢复扩展（Revision 恢复臂）
@@ -1019,166 +852,6 @@ async fn completed_revision_run_reconnects_to_author_confirm_with_revised_artifa
 // 启动修订 run，第二阶段 new_persistent 从磁盘重建 engine 后 retry 并驱动 retried run 完成。
 // ============================================================================
 
-#[tokio::test]
-async fn retried_author_feedback_revision_completes_after_real_reconnect() {
-    let (_tmp, checkpoint_store) = setup();
-    let app_root = tempfile::tempdir().expect("app root");
-    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(app_root.path().join(".aria")));
-    // review_rounds=0：未启用 review 的用户反馈修订（最主流路径），重连后 verdict 恒 None，
-    // 正是 Finding-A 中 Err("review verdict is unavailable for revision") 的触发条件。
-    let record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 0,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-            work_item_plan_options: None,
-        })
-        .unwrap();
-
-    // 第一次连接：AuthorConfirm + 产物 v1（current 版本 source=AuthorRun 节点），
-    // 用户提交反馈进入修订 run（真实 Revise 臂：创建 Revision 节点并置 pending 上下文）。
-    let (tx, _) = mpsc::channel(64);
-    let mut first = WorkspaceEngine::new_persistent(
-        checkpoint_store.clone(),
-        lifecycle_store.clone(),
-        tx,
-        WorkspaceSession::from_record(lifecycle_store.get_workspace_session(&record.id).unwrap()),
-    );
-    let payload = artifact_payload("# Story Spec\n\n修订前产物");
-    first.session.artifact = Some(payload.clone());
-    first.artifact_versions = vec![ArtifactVersion {
-        version: 1,
-        payload,
-        generated_by: ProviderName::ClaudeCode,
-        reviewed_by: None,
-        review_verdict: None,
-        confirmed_by: None,
-        is_current: true,
-        created_at: "2026-08-14T17:00:00Z".to_string(),
-        source_node_id: "timeline_node_002".to_string(),
-    }];
-    first.timeline_nodes = vec![
-        interrupted_recovery_timeline_node(
-            "timeline_node_001",
-            TimelineNodeType::PrepareContext,
-            TimelineNodeStatus::Completed,
-            WsWorkspaceStage::PrepareContext,
-            Some("上下文已就绪".to_string()),
-        ),
-        interrupted_recovery_timeline_node(
-            "timeline_node_002",
-            TimelineNodeType::AuthorRun,
-            TimelineNodeStatus::Completed,
-            WsWorkspaceStage::Running,
-            Some("修订前产物生成".to_string()),
-        ),
-    ];
-    first.active_node_id = Some("timeline_node_002".to_string());
-    first.persist_timeline_nodes();
-    first.persist_artifact_versions();
-    first.session.stage = WorkspaceStage::AuthorConfirm;
-
-    let outcome = first
-        .handle_author_decision(AuthorDecision::Revise {
-            feedback: "补充异常场景".to_string(),
-        })
-        .await
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        AuthorDecisionOutcome::StartRevision { .. }
-    ));
-    assert_eq!(first.session().stage, WorkspaceStage::Revision);
-    // 修订 run 进行程中断线：socket 层丢弃 engine，内存态（pending_revision_context）随之消失。
-
-    // 真实重连：new_persistent 从磁盘重建 engine（socket.rs 每连接重建的同一路径）。
-    let (tx2, _) = mpsc::channel(8);
-    let mut reconnected = WorkspaceEngine::new_persistent(
-        checkpoint_store.clone(),
-        lifecycle_store.clone(),
-        tx2,
-        WorkspaceSession::from_record(lifecycle_store.get_workspace_session(&record.id).unwrap()),
-    );
-    assert_eq!(reconnected.session().stage, WorkspaceStage::Revision);
-    // Finding-A 根因前置：pending_revision_context 不在会话记录中，重连后必然丢失。
-    assert!(
-        reconnected.pending_revision_context.is_none(),
-        "前置：重连后 pending_revision_context 丢失（Finding-A 根因）"
-    );
-    // 重连既有前置：Revision 阶段的 stale run 归位 PrepareContext（lifecycle.rs 既有路径）。
-    reconnected
-        .recover_stale_active_run_after_disconnect()
-        .await;
-    assert_eq!(reconnected.session().stage, WorkspaceStage::PrepareContext);
-
-    let recoverable = reconnected
-        .recoverable_interrupted_run()
-        .expect("用户反馈修订 run 断线后应可恢复");
-    assert_eq!(
-        recoverable.operation,
-        RecoverableInterruptedOperation::Revision
-    );
-
-    // retry：必须重建用户反馈上下文，否则 retried run 无法走 author 反馈 prompt 分支。
-    reconnected
-        .retry_interrupted_run(&recoverable.failed_node_id)
-        .await
-        .unwrap();
-    assert!(
-        reconnected.is_author_feedback_revision(),
-        "重连后 retry 必须恢复用户反馈修订上下文（Finding-A：否则 build_revision_input 报 \
-         review verdict is unavailable for revision）"
-    );
-
-    // 端到端：驱动 retried run 完成。prompt 捕获自 fixture provider，断言走 author 反馈
-    // prompt 分支且携带断线前的用户反馈全文；产物 gate 需要完整 Story 产物小节。
-    let prompt = Arc::new(Mutex::new(None));
-    reconnected
-        .drive_revision_session(
-            Arc::new(ReviewVerdictStreamingProvider {
-                output: "# Story Spec\n\n\
-                    ## 范围\n来源 source id: Issue issue_0001；修订后产物：补充异常场景。\n\n\
-                    ## 用户故事\n作为用户，我希望异常场景有明确处理。\n\n\
-                    ## 功能需求\n- [REQ-001] 登录成功路径。\n- [REQ-002] 补充异常场景。\n\n\
-                    ## 成功标准\n- [AC-001] 覆盖异常场景。\n\n\
-                    ## 待确认项\n无。\n\n\
-                    ## 非功能需求\n无。\n\n\
-                    ## 改动摘要\n- 补充异常场景 [REQ-002]\n",
-                provider_type: Arc::new(Mutex::new(None)),
-                prompt: prompt.clone(),
-            }),
-            empty_provider_commands(),
-        )
-        .await;
-
-    let captured_prompt = prompt.lock().unwrap().clone().expect("retried run prompt");
-    assert!(
-        captured_prompt.contains("## 用户反馈"),
-        "retried run 必须走 author 反馈 prompt 分支（而非 reviewer 返修 prompt）"
-    );
-    assert!(
-        captured_prompt.contains("补充异常场景"),
-        "retried run prompt 必须携带断线前的用户反馈全文"
-    );
-    assert_eq!(
-        reconnected.session().stage,
-        WorkspaceStage::AuthorConfirm,
-        "retried 修订 run 必须完成并回 AuthorConfirm，而非 Err 后 finish_failed_run 回 PrepareContext"
-    );
-    assert!(
-        reconnected
-            .session()
-            .artifact
-            .as_ref()
-            .expect("修订产物")
-            .markdown_or_empty()
-            .contains("修订后产物"),
-        "修订版必须应用到产物"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`retried_author_feedback_revision_completes_after_real_reconnect` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

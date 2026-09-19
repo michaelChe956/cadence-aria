@@ -681,8 +681,20 @@ impl WorkspaceEngine {
                             .await;
                     }
                     ReviewGate::RequiresRevision => {
-                        self.enter_review_decision(round, verdict.summary.clone())
-                            .await;
+                        // L2 退役（T5/REQ-RET-02）：review_decision 阶段唯一消息族
+                        //（ReviewDecisionResponse/SelectRevisionPath）已删除——SC
+                        // 会话改道 human gate（typed 三命令可应答），与 F5-B
+                        // repeated_findings 出口同面；非 SC（在途 legacy 会话）保留
+                        // 原阶段=登记限制（REQ-RET-03）。
+                        if self.session.workspace_type == WorkspaceType::WorkItemPlan
+                            && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+                        {
+                            self.enter_human_confirm(Some(verdict.summary.clone()))
+                                .await;
+                        } else {
+                            self.enter_review_decision(round, verdict.summary.clone())
+                                .await;
+                        }
                     }
                 }
             }

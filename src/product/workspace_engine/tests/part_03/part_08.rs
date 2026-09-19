@@ -271,40 +271,9 @@ async fn work_item_plan_compile_canonical_validation_failure_writes_no_revision_
     );
 }
 
-#[tokio::test]
-async fn item_and_batch_review_decision_require_active_round() {
-    for scope in [WorkItemPlanReviewScope::Item, WorkItemPlanReviewScope::Batch] {
-        let (_tmp, lifecycle, source_node_id, mut engine) =
-            prepare_outline_review_decision_without_index(scope.clone()).await;
-        let original_artifact_versions = engine.artifact_versions.clone();
-        let original_timeline_nodes = engine.timeline_nodes.clone();
-
-        let error = engine
-            .handle_review_decision("continue".to_string(), None)
-            .await
-            .expect_err("item/batch plan reopen must require an active round");
-
-        assert!(error.contains("work item plan active index missing"));
-        assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
-        assert_eq!(engine.active_node_id.as_deref(), Some(source_node_id.as_str()));
-        assert_eq!(
-            serde_json::to_value(&engine.artifact_versions).expect("artifact versions json"),
-            serde_json::to_value(original_artifact_versions).expect("original artifacts json")
-        );
-        assert_eq!(
-            serde_json::to_value(&engine.timeline_nodes).expect("timeline json"),
-            serde_json::to_value(original_timeline_nodes).expect("original timeline json")
-        );
-        assert_eq!(
-            lifecycle
-                .get_workspace_session(&engine.session.session_id)
-                .expect("workspace session")
-                .status,
-            WorkspaceSessionStatus::WaitingForHuman,
-            "{scope:?} failure must not leave lifecycle status Open"
-        );
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`item_and_batch_review_decision_require_active_round` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn generation_mode_generic_request_revision_requires_active_round() {
@@ -365,22 +334,9 @@ async fn generation_mode_generic_request_revision_requires_active_round() {
     );
 }
 
-#[tokio::test]
-async fn legacy_outline_scope_review_decision_allows_missing_initial_round() {
-    let (_tmp, _lifecycle, _source_node_id, mut engine) =
-        prepare_outline_review_decision_without_index(WorkItemPlanReviewScope::Outline).await;
-
-    let outcome = engine
-        .handle_review_decision("continue".to_string(), None)
-        .await
-        .expect("legacy outline review keeps initial-round compatibility");
-
-    assert!(matches!(
-        outcome,
-        ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-    ));
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-}
+// 退役留档（T5/REQ-RET-02）：`legacy_outline_scope_review_decision_allows_missing_initial_round` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 fn outline_revision_engine_snapshot(engine: &WorkspaceEngine) -> serde_json::Value {
     serde_json::json!({

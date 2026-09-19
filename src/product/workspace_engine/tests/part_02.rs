@@ -625,64 +625,9 @@ async fn complete_review_persists_structured_output_diagnostic() {
     assert_eq!(diagnostic["repair_succeeded"], false);
 }
 
-#[tokio::test]
-async fn handle_user_message_transitions_from_prepare_to_running() {
-    let (_tmp, store) = setup();
-    let (tx, mut rx) = mpsc::channel(64);
-    let session = make_session("sess_001");
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    engine
-        .handle_user_message(
-            "hello world".to_string(),
-            Arc::new(FakeStreamingProvider),
-            empty_provider_commands(),
-        )
-        .await;
-
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-
-    let mut saw_running = false;
-    while let Ok(event) = rx.try_recv() {
-        if matches!(event, EngineEvent::StageChange { stage } if stage == "running") {
-            saw_running = true;
-        }
-    }
-    assert!(saw_running);
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-    assert_eq!(engine.session().messages.len(), 2); // user + assistant
-    assert_eq!(engine.session().messages[0].role, "user");
-    assert_eq!(engine.session().messages[1].role, "assistant");
-    assert!(engine.session().messages[1].checkpoint_id.is_some());
-
-    match engine.build_session_state() {
-        WsOutMessage::SessionState {
-            timeline_nodes,
-            active_node_id,
-            ..
-        } => {
-            assert!(
-                timeline_nodes.iter().any(|node| {
-                    node.node_type == TimelineNodeType::AuthorRun
-                        && node.status == TimelineNodeStatus::Completed
-                }),
-                "generation node should be completed"
-            );
-            let active_id = active_node_id.expect("active review node id");
-            let active = timeline_nodes
-                .iter()
-                .find(|node| node.node_id == active_id)
-                .expect("active timeline node");
-            assert_eq!(active.node_type, TimelineNodeType::ReviewerRun);
-            assert_eq!(active.agent, Some(ProviderName::Codex));
-            assert_eq!(active.status, TimelineNodeStatus::Active);
-        }
-        _ => panic!("expected SessionState"),
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`handle_user_message_transitions_from_prepare_to_running` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn empty_start_generation_records_default_prompt_for_audit() {
@@ -718,39 +663,9 @@ async fn empty_start_generation_records_default_prompt_for_audit() {
     assert!(prompt.contains(&user_message.content));
 }
 
-#[tokio::test]
-async fn fake_reviewer_creates_skipped_review_node_and_enters_human_confirm() {
-    let (_tmp, store) = setup();
-    let (tx, _) = mpsc::channel(64);
-    let mut session = make_session("sess_fake_review");
-    session.reviewer_provider = Some(ProviderName::Fake);
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    engine
-        .handle_user_message(
-            "hello world".to_string(),
-            Arc::new(FakeStreamingProvider),
-            empty_provider_commands(),
-        )
-        .await;
-
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-    match engine.build_session_state() {
-        WsOutMessage::SessionState { timeline_nodes, .. } => {
-            assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::ReviewerRun
-                    && node.status == TimelineNodeStatus::Skipped
-                    && node.summary.as_deref() == Some("未执行真实 review（Fake 快速路径）")
-            }));
-        }
-        _ => panic!("expected SessionState"),
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`fake_reviewer_creates_skipped_review_node_and_enters_human_confirm` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // ---- Task 4（方案X阶段2）：AI run 后解析 structured output 回写 involved ----
 

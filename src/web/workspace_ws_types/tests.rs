@@ -1,7 +1,7 @@
 use crate::product::models::{ProviderName, WorkspaceType};
 use crate::web::workspace_session::ConnectionRole;
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, AuthorDecision, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
+    ArtifactPayload, ArtifactVersion, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
     HelloRole, ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdict,
     ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
     VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
@@ -166,113 +166,9 @@ fn timeline_messages_include_node_identity() {
     assert_eq!(complete["node_id"], "node_review_001");
 }
 
-#[test]
-fn review_messages_and_session_state_serialize_as_contract() {
-    let verdict = ReviewVerdict {
-        verdict: ReviewVerdictType::Revise,
-        comments: "需要补充验收标准".to_string(),
-        summary: "补充验收标准后返修".to_string(),
-        findings: vec![crate::web::workspace_ws_types::ReviewFinding {
-            severity: crate::web::workspace_ws_types::ReviewFindingSeverity::MustFix,
-            message: "缺少验收标准".to_string(),
-            evidence: "Artifact 未列出验收标准".to_string(),
-            required_action: "补充验收标准".to_string(),
-            category: None,
-            class_hint: None,
-            contract_field: None,
-        }],
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    };
-
-    let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
-        node_id: "node_review_001".to_string(),
-        round: 1,
-        verdict: verdict.verdict.clone(),
-        comments: verdict.comments.clone(),
-        summary: verdict.summary.clone(),
-        findings: verdict.findings.clone(),
-        review_gate: verdict.review_gate.clone(),
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    })
-    .unwrap();
-    assert_eq!(review_complete["type"], "review_complete");
-    assert_eq!(review_complete["verdict"], "revise");
-    assert_eq!(review_complete["review_gate"], "user_triage_required");
-    assert_eq!(review_complete["findings"][0]["severity"], "must_fix");
-    assert!(review_complete.get("work_item_plan_review").is_none());
-
-    let input: WsInMessage = serde_json::from_value(serde_json::json!({
-        "type": "review_decision_response",
-        "decision": "continue_with_context",
-        "extra_context": "请补充边界条件"
-    }))
-    .unwrap();
-    assert!(matches!(
-        input,
-        WsInMessage::ReviewDecisionResponse {
-            decision,
-            extra_context: Some(_),
-        } if decision == "continue_with_context"
-    ));
-
-    let state = serde_json::to_value(WsOutMessage::SessionState {
-        connection_id: None,
-        session_id: "workspace_session_0001".to_string(),
-        workspace_type: WorkspaceType::Story,
-        stage: "review_decision".to_string(),
-        superpowers_enabled: true,
-        openspec_enabled: true,
-        messages: Vec::new(),
-        checkpoints: Vec::new(),
-        artifact: Some(ArtifactPayload::Markdown {
-            markdown: "# Story".to_string(),
-            diff: None,
-        }),
-        providers: crate::web::workspace_ws_types::WsProviderConfig {
-            author: ProviderName::ClaudeCode,
-            reviewer: Some(ProviderName::Codex),
-        },
-        timeline_nodes: Vec::new(),
-        active_node_id: Some("node_review_decision_001".to_string()),
-        artifact_versions: Vec::new(),
-        artifact_version_summaries: Vec::new(),
-        timeline_node_details: std::collections::HashMap::new(),
-        timeline_node_summaries: std::collections::HashMap::new(),
-        active_run_id: None,
-        human_presentation_revisions: Vec::new(),
-        reviewer_enabled_at_start: None,
-        recoverable_interrupted_run: None,
-        plan_repair: None,
-        session_status: crate::product::models::WorkspaceSessionStatus::Running,
-        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
-        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
-        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
-        review_invocation_scope: None,
-        human_gate_snapshot: None,
-        repair_reservation: None,
-        policy_diagnostics: Vec::new(),
-        provider_start_ledger: Vec::new(),
-        single_candidate_phase: None,
-        work_item_plan_source_revision_ref: None,
-        plan_candidate_ir_ref: None,
-        mechanical_report_ref: None,
-        publication_provenance_ref: None,
-    })
-    .unwrap();
-    assert_eq!(state["type"], "session_state");
-    assert_eq!(state["active_node_id"], "node_review_decision_001");
-    assert_eq!(state["superpowers_enabled"], true);
-    assert_eq!(state["openspec_enabled"], true);
-    assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
-    assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
-    assert_eq!(
-        state.get("provider_start_ledger"),
-        Some(&serde_json::json!([]))
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`review_messages_and_session_state_serialize_as_contract` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn work_item_plan_review_complete_roundtrips() {
@@ -420,47 +316,9 @@ fn start_generation_roundtrip() {
     assert_eq!(back, msg);
 }
 
-#[test]
-fn work_item_plan_mode_messages_roundtrip() {
-    assert_eq!(
-        serde_json::to_value(TimelineNodeType::WorkItemPlanOutlineReview).unwrap(),
-        "work_item_plan_outline_review"
-    );
-    assert_eq!(
-        serde_json::to_value(TimelineNodeType::WorkItemGenerationMode).unwrap(),
-        "work_item_generation_mode"
-    );
-
-    let select = WsInMessage::SelectWorkItemGenerationMode {
-        mode: WorkItemGenerationModeDto::Serial,
-    };
-    let json = serde_json::to_value(&select).unwrap();
-    assert_eq!(json["type"], "select_work_item_generation_mode");
-    assert_eq!(json["mode"], "serial");
-    let back: WsInMessage = serde_json::from_value(json).unwrap();
-    assert_eq!(back, select);
-
-    let batch: WsInMessage = serde_json::from_value(serde_json::json!({
-        "type": "select_work_item_generation_mode",
-        "mode": "batch"
-    }))
-    .unwrap();
-    assert_eq!(
-        batch,
-        WsInMessage::SelectWorkItemGenerationMode {
-            mode: WorkItemGenerationModeDto::Batch
-        }
-    );
-
-    let revise = WsInMessage::RequestOutlineRevision {
-        feedback: Some("拆分粒度再细一点".to_string()),
-    };
-    let json = serde_json::to_value(&revise).unwrap();
-    assert_eq!(json["type"], "request_outline_revision");
-    assert_eq!(json["feedback"], "拆分粒度再细一点");
-    let back: WsInMessage = serde_json::from_value(json).unwrap();
-    assert_eq!(back, revise);
-}
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_mode_messages_roundtrip` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn outbound_conversational_gate_event_type_is_stable() {
@@ -756,25 +614,9 @@ fn work_item_plan_candidate_dto_roundtrips_through_serde() {
     assert!(json["validator_findings"][0]["code"] == "W001");
 }
 
-#[test]
-fn revert_work_item_message_deserializes() {
-    let input: WsInMessage = serde_json::from_value(serde_json::json!({
-        "type": "revert_work_item",
-        "work_item_id": "wi_001",
-        "feedback": "需要回退",
-        "clear": false
-    }))
-    .unwrap();
-
-    assert!(matches!(
-        input,
-        WsInMessage::RevertWorkItem {
-            work_item_id,
-            feedback,
-            clear,
-        } if work_item_id == "wi_001" && feedback.as_deref() == Some("需要回退") && !clear
-    ));
-}
+// 退役留档（T5/REQ-RET-02）：`revert_work_item_message_deserializes` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn artifact_payload_markdown_variant_serializes_to_flat_json() {
@@ -955,32 +797,6 @@ fn session_state_artifact_accepts_markdown_payload() {
     assert!(json["artifact"]["diff"].is_null());
 }
 
-#[test]
-fn author_decision_new_variants_roundtrip() {
-    let revise = serde_json::json!({"revise": {"feedback": "补充异常场景"}});
-    let parsed: AuthorDecision = serde_json::from_value(revise.clone()).unwrap();
-    assert_eq!(
-        parsed,
-        AuthorDecision::Revise {
-            feedback: "补充异常场景".to_string()
-        }
-    );
-    assert_eq!(serde_json::to_value(&parsed).unwrap(), revise);
-
-    for (raw, expected) in [
-        (
-            serde_json::json!("accept_with_review"),
-            AuthorDecision::AcceptWithReview,
-        ),
-        (
-            serde_json::json!("accept_finalize"),
-            AuthorDecision::AcceptFinalize,
-        ),
-        (serde_json::json!("accept"), AuthorDecision::Accept),
-        (serde_json::json!("reject"), AuthorDecision::Reject),
-    ] {
-        let parsed: AuthorDecision = serde_json::from_value(raw.clone()).unwrap();
-        assert_eq!(parsed, expected);
-        assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`author_decision_new_variants_roundtrip` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

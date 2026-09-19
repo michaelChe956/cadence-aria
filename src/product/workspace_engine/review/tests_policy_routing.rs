@@ -650,97 +650,9 @@ fn human_gate_snapshot_manual_repair_remaining_saturates_at_zero() {
     assert_eq!(snapshot.attempts_used, 6);
 }
 
-#[tokio::test]
-async fn rep1_needs_human_replay_uses_durable_interactive_gate_and_auto_terminal() {
-    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut interactive) =
-        make_work_item_plan_engine_with_draft_candidate("rep1_interactive_needs_human");
-    interactive.session.run_policy = RunPolicy::Interactive;
-    interactive.begin_work_item_plan_outline_review_run().await;
-    interactive
-        .complete_review(
-            ProviderCompletion::plain("rep1 needs human", None),
-            review_verdict(ReviewVerdictType::NeedsHuman),
-        )
-        .await;
-
-    assert_eq!(interactive.current_stage(), WorkspaceStage::HumanConfirm);
-    assert_eq!(
-        interactive.session.session_status,
-        WorkspaceSessionStatus::WaitingForHuman
-    );
-    assert_eq!(interactive.session.run_history.initial_review_count, 1);
-    assert_eq!(interactive.session.run_history.transitions_used, 1);
-    assert!(interactive.session.human_gate_snapshot.is_some());
-    let review_nodes_before_accept = interactive
-        .timeline_nodes
-        .iter()
-        .filter(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineReview)
-        .count();
-
-    let accept = interactive
-        .handle_human_confirm(HumanConfirmDecision::Confirm, None)
-        .await
-        .expect("interactive human gate must accept without another review");
-    assert!(matches!(
-        accept,
-        ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }
-    ));
-    assert_eq!(
-        interactive
-            .timeline_nodes
-            .iter()
-            .filter(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineReview)
-            .count(),
-        review_nodes_before_accept,
-        "accepting the rep1 human gate must not silently re-review"
-    );
-    let persisted_interactive = lifecycle
-        .get_workspace_session(&interactive.session.session_id)
-        .expect("persisted interactive session");
-    assert_eq!(
-        persisted_interactive.status,
-        WorkspaceSessionStatus::Confirmed
-    );
-    assert_eq!(
-        persisted_interactive.run_history.transitions_used, 1,
-        "a successfully durable policy stage transition must increment its display counter"
-    );
-
-    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut auto) =
-        make_work_item_plan_engine_with_draft_candidate("rep1_auto_needs_human");
-    auto.session.run_policy = RunPolicy::AutoIfValid;
-    auto.begin_work_item_plan_outline_review_run().await;
-    auto.complete_review(
-        ProviderCompletion::plain("rep1 needs human", None),
-        review_verdict(ReviewVerdictType::NeedsHuman),
-    )
-    .await;
-
-    assert_eq!(auto.current_stage(), WorkspaceStage::Completed);
-    assert_eq!(
-        auto.session.session_status,
-        WorkspaceSessionStatus::StoppedNeedsHuman
-    );
-    assert_eq!(auto.session.run_history.initial_review_count, 1);
-    assert_eq!(auto.session.run_history.transitions_used, 1);
-    assert!(
-        auto.session
-            .human_gate_snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.resumable)
-    );
-    let persisted_auto = lifecycle
-        .get_workspace_session(&auto.session.session_id)
-        .expect("persisted auto session");
-    assert_eq!(
-        persisted_auto.status,
-        WorkspaceSessionStatus::StoppedNeedsHuman
-    );
-    assert_eq!(
-        persisted_auto.run_history.transitions_used, 1,
-        "the auto terminal transition must be durably counted once"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`rep1_needs_human_replay_uses_durable_interactive_gate_and_auto_terminal` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn structured_needs_human_batch_review_in_auto_mode_stops_with_durable_gate_and_counts() {
@@ -1058,70 +970,9 @@ async fn unknown_category_diagnostic_marks_work_item_plan_session_durably_failed
 /// outline revision 而不消耗 cycle 预算。rep11 的 ws.jsonl 记录了 rounds 2-8 共 7 轮
 /// 连续 revise，但 durable cycle 计数始终为 `initial=1`、`verification=1`。在服务端
 /// 将 legacy decision 路径纳入同一预算门之前，本测试必须保持 ignore。
-#[tokio::test]
-#[ignore = "known gap: legacy review_decision revise loop bypasses cycle budget, see rep11"]
-async fn legacy_review_decision_continue_with_context_bypasses_cycle_budget_reproduction() {
-    let (_tmp, _lifecycle, _source_node_id, mut engine) =
-        prepare_outline_review_decision_without_index(WorkItemPlanReviewScope::Outline).await;
-    engine.latest_review_verdict = Some(review_verdict(ReviewVerdictType::Revise));
-    // 写入 rep11 已观测到的两次 durable 计数；下方 legacy decision handler
-    // 不会更新该 cycle，正是本测试要复现的缺口。
-    engine.session.run_history.initial_review_count = 1;
-    engine.session.run_history.verification_review_count = 1;
-    engine.session.run_history.review_cycles.insert(
-        "legacy:rep11".to_string(),
-        ReviewCycleState {
-            initial_count: 1,
-            verification_count: 1,
-            ..ReviewCycleState::default()
-        },
-    );
-
-    for round in 2..=8 {
-        let outcome = engine
-            .handle_review_decision(
-                "continue_with_context".to_string(),
-                Some(format!("rep11 legacy revise round {round}")),
-            )
-            .await
-            .expect("legacy continue_with_context should start outline revision");
-        assert!(matches!(
-            outcome,
-            ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-        ));
-
-        // 模拟 outline revision provider run 完成后 WS handler 重新进入 legacy
-        // review-decision 节点的过程。刻意不调用带 policy 的 `complete_review`：
-        // rep11 的旁路正发生在新 durable review 被记录前的 inbound decision 边界。
-        engine.begin_work_item_plan_outline_review_run().await;
-        engine.session.stage = WorkspaceStage::ReviewDecision;
-        engine.latest_review_verdict = Some(review_verdict(ReviewVerdictType::Revise));
-        engine
-            .create_timeline_node(TimelineNodeDraft {
-                node_type: TimelineNodeType::ReviewDecision,
-                agent: None,
-                stage: WorkspaceStage::ReviewDecision,
-                round: Some(round),
-                title: format!("rep11 legacy Review Decision Round {round}"),
-                summary: Some("continue_with_context reproduction".to_string()),
-                status: TimelineNodeStatus::Active,
-            })
-            .await;
-    }
-
-    let cycle_counts: Vec<_> = engine
-        .session
-        .run_history
-        .review_cycles
-        .values()
-        .map(|cycle| (cycle.initial_count, cycle.verification_count))
-        .collect();
-    assert_eq!(
-        cycle_counts,
-        vec![(1, 1)],
-        "复现应证明 7 轮 legacy revise loop 期间 durable cycle 仅保留两次计数"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`legacy_review_decision_continue_with_context_bypasses_cycle_budget_reproduction` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn legacy_batch_pass_routes_through_compile_to_human_confirmation_in_interactive_mode() {
