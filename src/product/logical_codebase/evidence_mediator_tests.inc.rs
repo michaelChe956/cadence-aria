@@ -156,7 +156,7 @@ mod tests {
             version: 0,
             manual_recovery_reason: None,
             admission_ticket_consumed_at: None,
-        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
+            admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
             stage: CodingExecutionStage::Coding,
             base_branch: "main".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
@@ -695,6 +695,147 @@ mod tests {
         assert_eq!(
             read_first_audit(&fx.paths).role,
             "reviewer(role_self_reported)"
+        );
+    }
+
+    /// attempt 分区级文件（预算/审计/pin）路径：按 attempt_id 参数化。
+    fn attempt_partition_file(paths: &ProductAppPaths, attempt_id: &str, file: &str) -> PathBuf {
+        paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(attempt_id)
+            .join(file)
+    }
+
+    /// REQ-COD-05 适配核查（multi-repo-group-coding WP4）：多 target 拆分增殖
+    /// 形态下（同 issue 双 target-attempt 并存，各持不同冻结快照+独立 token），
+    /// 跨仓证据链全链按 attempt 分区独立运转——
+    /// ①令牌反查各自命中自身 attempt（快照承载 target 维度）；
+    /// ②ACL 方向由各自冻结快照决定（A=api 只见 web/、B=web 只见 api/）；
+    /// ③预算/④审计/⑤pin 每 attempt 独立分账（口径与单仓一致）。
+    #[test]
+    fn multi_target_attempts_keep_evidence_chain_partitioned_per_attempt() {
+        let fx = setup();
+
+        // 增殖第二 target-attempt（target=web）：WorkItemGroup scope+OQ2 命名
+        // branch（worktree_path_for_attempt 按该前缀推导出 per-target worktree，
+        // token 文件落各自 worktree）。
+        let web_snapshot = target_snapshot(
+            fx.web_id,
+            fx.web_checkout_id,
+            &fx.repo.join("web"),
+            "rev-web",
+            1,
+        );
+        let mut attempt_b = attempt_fixture(CodingAttemptStatus::Running, Some(web_snapshot));
+        attempt_b.id = format!("coding_attempt_{}", Uuid::new_v4().simple());
+        attempt_b.attempt_no = 2;
+        attempt_b.scope = CodingAttemptScope::WorkItemGroup;
+        attempt_b.work_item_group_id = Some("work_item_plan_0001".to_string());
+        attempt_b.branch_name = format!("aria/issues/{ISSUE_ID}/{}", fx.web_id.0);
+        write_json(
+            &fx.paths
+                .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+                .join("coding-attempts")
+                .join(format!("{}.json", attempt_b.id)),
+            &attempt_b,
+        )
+        .expect("write attempt B record");
+        let token_b = crate::product::logical_codebase::evidence_token::issue_evidence_token(
+            &fx.paths, &fx.repo, &attempt_b,
+        )
+        .expect("issue evidence token for attempt B");
+
+        // ① 令牌反查：各自命中自身 attempt，快照 target 维度互不串扰。
+        let resolved_a = resolve_attempt_by_token(&fx.paths, &fx.token).expect("resolve A");
+        let resolved_b = resolve_attempt_by_token(&fx.paths, &token_b).expect("resolve B");
+        assert_eq!(resolved_a.id, fx.attempt.id);
+        assert_eq!(resolved_b.id, attempt_b.id);
+        assert_eq!(
+            resolved_a
+                .target_snapshot
+                .as_ref()
+                .expect("A snapshot")
+                .logical_repository_id,
+            fx.api_id
+        );
+        assert_eq!(
+            resolved_b
+                .target_snapshot
+                .as_ref()
+                .expect("B snapshot")
+                .logical_repository_id,
+            fx.web_id
+        );
+
+        // ② A（target=api）查询：跨仓命中仅 web/ 保留（ACL 排除本仓 api/）。
+        let hits = serde_json::json!([
+            {"node": {"name": "crossWeb", "filePath": "web/src/app.ts", "startLine": 10}},
+            {"node": {"name": "selfApi", "filePath": "api/src/lib.rs", "startLine": 3}},
+        ]);
+        let response_a = handle_evidence_query_with_runner(
+            &fx.paths,
+            &query_input(&fx.token, EvidenceRole::Coder, "crossWeb"),
+            Arc::new(FakeCodeGraphRunner::with_stdout(&hits.to_string())),
+        )
+        .expect("A query succeeds");
+        assert_eq!(response_a.text, "web/src/app.ts:10 crossWeb\n");
+
+        // ②' B（target=web）查询：跨仓命中仅 api/ 保留（方向相反——由 B 自身
+        // 冻结快照决定，非全局状态）。
+        let hits_b = serde_json::json!([
+            {"node": {"name": "crossApi", "filePath": "api/src/lib.rs", "startLine": 7}},
+            {"node": {"name": "selfWeb", "filePath": "web/src/app.ts", "startLine": 4}},
+        ]);
+        let response_b = handle_evidence_query_with_runner(
+            &fx.paths,
+            &query_input(&token_b, EvidenceRole::Reviewer, "crossApi"),
+            Arc::new(FakeCodeGraphRunner::with_stdout(&hits_b.to_string())),
+        )
+        .expect("B query succeeds");
+        assert_eq!(response_b.text, "api/src/lib.rs:7 crossApi\n");
+
+        // ③ 预算独立：A 分区 ledger 记账、B 分区 ledger 独立——B 剩余额度 =
+        // 全额 - B 自身消费（与单仓口径一致，不受 A 消费影响）。
+        assert_eq!(
+            response_a.budget_remaining,
+            EVIDENCE_ATTEMPT_CHAR_QUOTA - response_a.text.chars().count()
+        );
+        assert_eq!(
+            response_b.budget_remaining,
+            EVIDENCE_ATTEMPT_CHAR_QUOTA - response_b.text.chars().count()
+        );
+        assert!(
+            attempt_partition_file(&fx.paths, &fx.attempt.id, "evidence-budget.json").is_file()
+        );
+        assert!(attempt_partition_file(&fx.paths, &attempt_b.id, "evidence-budget.json").is_file());
+
+        // ④ 审计独立：各自分区 jsonl 只含自身 attempt_id 的条目。
+        let audit_a = std::fs::read_to_string(attempt_partition_file(
+            &fx.paths,
+            &fx.attempt.id,
+            "evidence-audit.jsonl",
+        ))
+        .expect("A audit file");
+        assert_eq!(audit_a.lines().count(), 1);
+        assert!(audit_a.contains(&fx.attempt.id));
+        assert!(!audit_a.contains(&attempt_b.id));
+        let audit_b = std::fs::read_to_string(attempt_partition_file(
+            &fx.paths,
+            &attempt_b.id,
+            "evidence-audit.jsonl",
+        ))
+        .expect("B audit file");
+        assert_eq!(audit_b.lines().count(), 1);
+        assert!(audit_b.contains(&attempt_b.id));
+        assert!(!audit_b.contains(&fx.attempt.id));
+
+        // ⑤ pin 独立：首查各自分区写 pin（同 manifest active index，但分文件）。
+        assert!(
+            attempt_partition_file(&fx.paths, &fx.attempt.id, EVIDENCE_INDEX_PIN_FILE).is_file()
+        );
+        assert!(
+            attempt_partition_file(&fx.paths, &attempt_b.id, EVIDENCE_INDEX_PIN_FILE).is_file()
         );
     }
 }
