@@ -1,12 +1,14 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::coding_attempt_store::{
-    DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary,
+    DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary, PlanGroupOverall,
+    PlanGroupProjection, PlanTargetEntry,
 };
 use crate::product::models::WorkspaceSessionSummaryRecord;
 use crate::product::workspace_engine::WorkItemRepositoryGroup;
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
+    group_projection: Option<PlanGroupProjectionDto>,
 ) -> IssueWorkItemPlanDetailDto {
     IssueWorkItemPlanDetailDto {
         id: plan.id.clone(),
@@ -39,6 +41,7 @@ pub(crate) fn issue_work_item_plan_detail_dto(
             .collect(),
         created_at: plan.created_at.clone(),
         updated_at: plan.updated_at.clone(),
+        group_projection,
     }
 }
 
@@ -472,6 +475,47 @@ pub(crate) fn issue_delivery_summary_dto(summary: IssueDeliverySummary) -> Issue
             IssueDeliveryOverall::Partial => "partial".to_string(),
             IssueDeliveryOverall::None => "none".to_string(),
         },
+    }
+}
+
+/// REQ-MTG-04（WP3）：plan 级三值聚合终态投影 DTO 映射。`overall` 不复用
+/// issue 级 `"none"`（plan 级未启≠无条目，见 k3 §2.3 口径差异说明）。
+pub(crate) fn plan_group_projection_dto(
+    projection: PlanGroupProjection,
+) -> crate::web::types::PlanGroupProjectionDto {
+    crate::web::types::PlanGroupProjectionDto {
+        plan_id: projection.plan_id,
+        entries: projection
+            .entries
+            .into_iter()
+            .map(plan_target_entry_dto)
+            .collect(),
+        overall: match projection.overall {
+            PlanGroupOverall::AllDelivered => "all_delivered".to_string(),
+            PlanGroupOverall::Partial => "partial".to_string(),
+            PlanGroupOverall::NotStarted => "not_started".to_string(),
+        },
+    }
+}
+
+fn plan_target_entry_dto(entry: PlanTargetEntry) -> crate::web::types::PlanTargetEntryDto {
+    crate::web::types::PlanTargetEntryDto {
+        target_repository_id: entry.target_repository_id.0.to_string(),
+        repository_name: entry.repository_name,
+        attempt_id: entry.attempt_id,
+        attempt_status: entry
+            .attempt_status
+            .map(|status| coding_attempt_status_text(&status).to_string()),
+        stage: entry
+            .stage
+            .map(|stage| coding_execution_stage_text(&stage).to_string()),
+        branch_name: entry.branch_name,
+        head_commit: entry.head_commit,
+        push_status: entry
+            .push_status
+            .map(|status| push_status_text(&status).to_string()),
+        review_request_id: entry.review_request_id,
+        blocked_reason: entry.blocked_reason,
     }
 }
 

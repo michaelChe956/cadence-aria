@@ -21,6 +21,7 @@ import type {
   WorkItemKind,
   LifecycleWorkItem,
   WorkItemSplitFinding,
+  PlanGroupProjectionDto,
 } from "../../api/types";
 import {
   workItemKindLabel,
@@ -28,6 +29,7 @@ import {
 } from "../../state/lifecycle-workbench-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
+import { PlanGroupProjectionPanel } from "./PlanGroupProjectionPanel";
 import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 
 export type DrawerEntityKind =
@@ -66,6 +68,8 @@ export interface DrawerEntity {
   workItemPlanSourceDesignSpecIds?: string[];
   workItemPlanValidatorFindings?: WorkItemSplitFinding[];
   workItemPlanDependencyGraph?: IssueWorkItemPlanDependencyEdgeDto[];
+  // REQ-MTG-04（WP3）：plan 级 group 聚合只读投影（additive，缺省 undefined）。
+  groupProjection?: PlanGroupProjectionDto | null;
 }
 
 interface LifecycleCardDrawerProps {
@@ -259,6 +263,9 @@ export function LifecycleCardDrawer({
           </section>
         ) : null}
 
+        {entity.kind === "work_item_group" && entity.groupProjection ? (
+          <PlanGroupProjectionPanel projection={entity.groupProjection} />
+        ) : null}
         {entity.kind === "work_item_group" ? (
           <WorkItemGroupDetail entity={entity} />
         ) : null}

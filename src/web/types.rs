@@ -502,6 +502,37 @@ pub struct IssueDeliverySummaryDto {
     pub overall: String,
 }
 
+/// REQ-MTG-04（WP3）：plan 级 group 聚合只读投影的单 target 条目（serde
+/// snake_case）。`None` 字段表示该 target 无对应事实（无 attempt 字段值/
+/// 无 ReviewRequest）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanTargetEntryDto {
+    pub target_repository_id: String,
+    pub repository_name: String,
+    pub attempt_id: Option<String>,
+    pub attempt_status: Option<String>,
+    pub stage: Option<String>,
+    pub branch_name: Option<String>,
+    pub head_commit: Option<String>,
+    pub push_status: Option<String>,
+    pub review_request_id: Option<String>,
+    /// 失败/阻塞原因（只呈现不判定）：manual_recovery_reason → push_error →
+    /// 失败态 status 文本。
+    pub blocked_reason: Option<String>,
+}
+
+/// REQ-MTG-04（WP3）：plan 级三值聚合终态投影。`overall` 取值
+/// `"all_delivered" | "partial" | "not_started"`——不复用 issue 级 `"none"`
+/// （plan 级未启=无 target-attempt 或全部未达 provider 启动，k3 §2.3 口径差异）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanGroupProjectionDto {
+    pub plan_id: String,
+    pub entries: Vec<PlanTargetEntryDto>,
+    pub overall: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ArtifactVersionDto {
@@ -840,6 +871,10 @@ pub struct IssueWorkItemPlanDetailDto {
     pub work_item_ids: Vec<String>,
     pub verification_plan_ids: Vec<String>,
     pub dependency_graph: Vec<IssueWorkItemPlanDependencyEdgeDto>,
+    /// REQ-MTG-04（WP3，additive）：plan 级 group 聚合只读投影——旧响应/
+    /// 旧客户端缺省 None 兼容（serde default）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_projection: Option<PlanGroupProjectionDto>,
     pub repository_profile_ref: Option<String>,
     pub options: WorkItemSplitOptions,
     pub validator_findings: Vec<WorkItemSplitFinding>,

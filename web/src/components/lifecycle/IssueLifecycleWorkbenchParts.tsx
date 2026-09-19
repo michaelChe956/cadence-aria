@@ -5,6 +5,7 @@ import type {
   CodingAttemptAddress,
   IssueLifecycleResponse,
   LifecycleWorkItem,
+  PlanGroupProjectionDto,
   ProductIssue,
   WorkItemRepositoryGroup,
   WorkspaceSessionSummary,
@@ -596,8 +597,30 @@ function isIssueWorkItemPlanDetail(value: unknown) {
       value.repository_profile_ref === null) &&
     isWorkItemSplitOptions(value.options) &&
     isWorkItemSplitFindings(value.validator_findings) &&
+    (value.group_projection === undefined ||
+      value.group_projection === null ||
+      isPlanGroupProjection(value.group_projection)) &&
     typeof value.created_at === "string" &&
     typeof value.updated_at === "string"
+  );
+}
+
+// REQ-MTG-04（WP3）：group_projection 为 additive 可选字段——在场时校验
+// plan_id/overall/entries 形状；缺席（旧响应）不构成拒绝。
+function isPlanGroupProjection(value: unknown): value is PlanGroupProjectionDto {
+  return (
+    isRecord(value) &&
+    typeof value.plan_id === "string" &&
+    (value.overall === "all_delivered" ||
+      value.overall === "partial" ||
+      value.overall === "not_started") &&
+    Array.isArray(value.entries) &&
+    value.entries.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.target_repository_id === "string" &&
+        typeof entry.repository_name === "string",
+    )
   );
 }
 
@@ -744,6 +767,7 @@ export function toDrawerEntity(
       workItemPlanSourceDesignSpecIds: card.raw.source_design_spec_ids,
       workItemPlanValidatorFindings: card.raw.validator_findings,
       workItemPlanDependencyGraph: card.raw.dependency_graph,
+      groupProjection: card.raw.group_projection ?? null,
     };
   }
 

@@ -607,6 +607,33 @@ export type IssueWorkItemPlanDependencyEdgeDto = {
   to_work_item_id: string;
 };
 
+// REQ-MTG-04（WP3）：plan 级 group 聚合只读投影——后端从 target-attempt
+// durable 事实确定性派生（无第二状态机）。null 字段表示该 target 无对应事实。
+export type PlanTargetEntryDto = {
+  target_repository_id: string;
+  repository_name: string;
+  attempt_id: string | null;
+  attempt_status: string | null;
+  stage: string | null;
+  branch_name: string | null;
+  head_commit: string | null;
+  push_status: string | null;
+  review_request_id: string | null;
+  // 失败/阻塞原因（只呈现不判定）：manual_recovery_reason → push_error →
+  // 失败态 status 文本。
+  blocked_reason: string | null;
+};
+
+// plan 级三值聚合终态——"not_started" 不复用 issue 级 "none"（plan 级未启=
+// 无 target-attempt 或全部未达 provider 启动，未启优先于「部分」）。
+export type PlanGroupOverallDto = "all_delivered" | "partial" | "not_started";
+
+export type PlanGroupProjectionDto = {
+  plan_id: string;
+  entries: PlanTargetEntryDto[];
+  overall: PlanGroupOverallDto;
+};
+
 export type IssueWorkItemPlanDetailDto = {
   id: string;
   issue_id: string;
@@ -622,6 +649,9 @@ export type IssueWorkItemPlanDetailDto = {
   validator_findings: WorkItemSplitFinding[];
   created_at: string;
   updated_at: string;
+  // REQ-MTG-04（WP3，additive）：plan 级 group 聚合只读投影——旧响应缺省
+  //（undefined/null）兼容。
+  group_projection?: PlanGroupProjectionDto | null;
 };
 
 export type PrepareWorkItemPlanRequest = ProviderWorkspaceConfigInput & {

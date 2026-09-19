@@ -73,11 +73,22 @@ pub async fn issue_lifecycle(
     let work_item_plan_records = lifecycle
         .list_issue_work_item_plans(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    // REQ-MTG-04（WP3）：plan 级 group 聚合只读投影 additive 附着于 plan DTO
+    // （从 target-attempt durable 事实现算，无第二状态机；缺省 None=旧响应兼容）。
     let work_item_plans = work_item_plan_records
         .iter()
-        .map(issue_work_item_plan_detail_dto)
-        .collect::<Vec<_>>();
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
+        .map(|plan| {
+            let group_projection = coding_store
+                .compute_plan_group_projection(&project_id, &issue_id, &plan.id)
+                .map_err(product_store_api_error)
+                .map(plan_group_projection_dto)?;
+            Ok(issue_work_item_plan_detail_dto(
+                plan,
+                Some(group_projection),
+            ))
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
     let mut coding_attempts = Vec::new();
     // 方案 X 阶段1：按 RepositoryRouting 三态分流。Logical（多仓）不要求 issue.repo_id，
     // 后续经 manifest/selection 解析（聚合视野）；Legacy（单仓）保持原无条件要求 repo_id，
@@ -784,8 +795,14 @@ pub async fn prepare_work_item_plan(
         }
     };
 
+    // REQ-MTG-04（WP3）：prepare 响应同款 additive 投影——新建 plan 尚无
+    // target-attempt，投影为 NotStarted 空条目（与 issue_lifecycle 同形）。
+    let group_projection = CodingAttemptStore::new(app_paths.clone())
+        .compute_plan_group_projection(&plan.project_id, &plan.issue_id, &plan.id)
+        .map_err(product_store_api_error)
+        .map(plan_group_projection_dto)?;
     Ok(Json(PrepareWorkItemPlanResponse {
-        work_item_plan: issue_work_item_plan_detail_dto(&plan),
+        work_item_plan: issue_work_item_plan_detail_dto(&plan, Some(group_projection)),
         workspace_session: workspace_session_dto(session),
     }))
 }

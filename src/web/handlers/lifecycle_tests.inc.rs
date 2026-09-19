@@ -872,3 +872,155 @@
             "list_work_items 失败必须传播为 500，而不是静默返回空分组"
         );
     }
+
+    /// REQ-MTG-04（WP3）：issue_lifecycle 的 plan DTO additive 携带
+    /// group_projection——per-target 投影 + 三值终态（"partial" 不伪装全局成功）。
+    #[tokio::test]
+    async fn issue_lifecycle_returns_plan_group_projection_with_three_valued_overall() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "group projection test project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some(REPOSITORY_ID.to_string()),
+                logical_codebase_id: None,
+                title: "聚合投影测试".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let alpha = LogicalRepositoryId(Uuid::new_v4());
+        let beta = LogicalRepositoryId(Uuid::new_v4());
+        seed_logical_codebase(&paths, &[(alpha, "checkout-alpha"), (beta, "checkout-beta")]);
+        lifecycle
+            .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+                id: Some("plan-projection-1".to_string()),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: crate::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec!["wi-a".to_string()],
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            })
+            .unwrap();
+
+        let target_snapshot = |logical_id: LogicalRepositoryId| {
+            crate::product::coding_models::AttemptTargetSnapshot {
+                logical_repository_id: logical_id,
+                checkout_id: RepositoryCheckoutId(Uuid::new_v4()),
+                physical_repository_id: "physical-projection".to_string(),
+                canonical_path: temp.path().join("checkout-projection"),
+                git_dir_identity: "projection-git-dir".to_string(),
+                revision: Some("projection-revision".to_string()),
+                policy_digest: "projection-policy".to_string(),
+                membership_revision: 1,
+                captured_at: "2026-09-19T00:00:00Z".to_string(),
+                capture_source: "test".to_string(),
+            }
+        };
+        let group_input = |plan_id: &str,
+                           target: Option<LogicalRepositoryId>,
+                           branch_name: &str| {
+            crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                plan_id: plan_id.to_string(),
+                current_work_item_id: "wi-a".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: branch_name.to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: WorkspaceRolePermissionModes::default(),
+                },
+                target_snapshot: target.map(target_snapshot),
+                max_auto_rework: 2,
+            }
+        };
+
+        let coding_store = CodingAttemptStore::new(paths.clone());
+        let delivered = coding_store
+            .create_group_attempt(group_input(
+                "plan-projection-1",
+                Some(alpha),
+                "aria/issues/issue_0001/checkout-alpha",
+            ))
+            .unwrap();
+        let delivered = CodingExecutionAttempt {
+            status: CodingAttemptStatus::Completed,
+            head_commit: Some("sha111".to_string()),
+            ..delivered
+        };
+        coding_store
+            .write_coding_attempt_for_test(&delivered)
+            .unwrap();
+        seed_review_request(&coding_store, &delivered, PushStatus::Pushed, None);
+        // beta target 停留初始二元组 (Created, PrepareContext)——部分交付+部分未启 → Partial。
+        coding_store
+            .create_group_attempt(group_input(
+                "plan-projection-1",
+                Some(beta),
+                "aria/issues/issue_0001/checkout-beta",
+            ))
+            .unwrap();
+
+        let app = build_test_router(temp.path());
+        let response = get_issue_lifecycle(&app).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let plans = value["work_item_plans"].as_array().expect("work_item_plans");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0]["id"].as_str(), Some("plan-projection-1"));
+        let projection = &plans[0]["group_projection"];
+        assert_eq!(projection["plan_id"].as_str(), Some("plan-projection-1"));
+        assert_eq!(projection["overall"].as_str(), Some("partial"));
+
+        let entries = projection["entries"].as_array().expect("projection entries");
+        assert_eq!(entries.len(), 2);
+        let entry = |name: &str| -> &serde_json::Value {
+            entries
+                .iter()
+                .find(|entry| entry["repository_name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing projection entry for {name}"))
+        };
+        let delivered_entry = entry("checkout-alpha");
+        assert_eq!(delivered_entry["attempt_status"].as_str(), Some("completed"));
+        assert_eq!(delivered_entry["push_status"].as_str(), Some("pushed"));
+        assert_eq!(
+            delivered_entry["branch_name"].as_str(),
+            Some("aria/issues/issue_0001/checkout-alpha")
+        );
+        assert_eq!(delivered_entry["head_commit"].as_str(), Some("sha111"));
+        assert!(delivered_entry["review_request_id"].is_string());
+        assert!(delivered_entry["blocked_reason"].is_null());
+
+        let unstarted_entry = entry("checkout-beta");
+        assert_eq!(unstarted_entry["attempt_status"].as_str(), Some("created"));
+        assert_eq!(unstarted_entry["stage"].as_str(), Some("prepare_context"));
+        assert!(unstarted_entry["push_status"].is_null());
+        assert!(unstarted_entry["blocked_reason"].is_null());
+    }

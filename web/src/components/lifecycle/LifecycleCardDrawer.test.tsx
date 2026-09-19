@@ -272,4 +272,79 @@ describe("LifecycleCardDrawer", () => {
     expect(screen.getByTestId("version-diff-original")).toHaveTextContent("# v1");
     expect(screen.getByTestId("version-diff-modified")).toHaveTextContent("# v2");
   });
+
+  it("renders plan group projection panel for work_item_group and hides it when absent", () => {
+    // REQ-MTG-04（WP3）：plan 卡片区（work_item_group 抽屉）呈现聚合只读投影；
+    // 旧响应无 group_projection（缺省）时不渲染——additive 兼容。
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "plan-1",
+          kind: "work_item_group",
+          title: "Work Item Group",
+          status: "confirmed",
+          version: null,
+          groupProjection: {
+            plan_id: "plan-1",
+            overall: "partial",
+            entries: [
+              {
+                target_repository_id: "11111111-1111-1111-1111-111111111111",
+                repository_name: "checkout-alpha",
+                attempt_id: "coding_attempt_0001",
+                attempt_status: "completed",
+                stage: "final_confirm",
+                branch_name: "aria/issues/issue_0001/checkout-alpha",
+                head_commit: "sha1111",
+                push_status: "pushed",
+                review_request_id: "review_request_0001",
+                blocked_reason: null,
+              },
+              {
+                target_repository_id: "22222222-2222-2222-2222-222222222222",
+                repository_name: "checkout-beta",
+                attempt_id: "coding_attempt_0002",
+                attempt_status: "failed",
+                stage: "coding",
+                branch_name: "aria/issues/issue_0001/checkout-beta",
+                head_commit: null,
+                push_status: null,
+                review_request_id: null,
+                blocked_reason: "coder crashed",
+              },
+            ],
+          },
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("plan-group-projection-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("plan-group-overall-badge")).toHaveAttribute(
+      "data-status",
+      "partial",
+    );
+    expect(screen.getByText("checkout-alpha")).toBeInTheDocument();
+    expect(screen.getByText(/coder crashed/)).toBeInTheDocument();
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "plan-1",
+          kind: "work_item_group",
+          title: "Work Item Group",
+          status: "confirmed",
+          version: null,
+          groupProjection: null,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("plan-group-projection-panel"),
+    ).not.toBeInTheDocument();
+  });
 });

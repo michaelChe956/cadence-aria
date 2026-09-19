@@ -23,6 +23,7 @@ pub(crate) mod locking;
 mod paths;
 mod plan_amendment_context;
 mod plan_binding;
+mod plan_group_projection;
 pub(crate) mod plan_repair_reconcile;
 mod recovery;
 mod report;
@@ -48,6 +49,7 @@ pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
 pub use issue_delivery::{DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary};
+pub use plan_group_projection::{PlanGroupOverall, PlanGroupProjection, PlanTargetEntry};
 pub(crate) use recovery::{
     FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
 };
