@@ -72,6 +72,7 @@ use crate::web::workspace_ws_types::{
 };
 
 mod advance;
+mod advance_split;
 #[cfg(test)]
 pub(crate) use advance::{
     AdvanceInitializationFailpoint, AdvanceInitializationFailpointMode,

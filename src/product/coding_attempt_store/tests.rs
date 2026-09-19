@@ -26,6 +26,7 @@ mod git_operation_pointer;
 mod group_final_readiness;
 mod group_split_target;
 mod group_uniqueness;
+mod issue_delivery;
 mod plan_repair;
 mod pointer_review_request;
 mod provider_stream_log_root;
