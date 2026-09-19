@@ -671,7 +671,7 @@ mod tests {
                 });
             }
             let stdout = match request.argv.as_slice() {
-                [version] if version == "--version" => "1.5.0\n".to_string(),
+                [version] if version == "--version" => "1.6.0\n".to_string(),
                 [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
                     match request
                         .working_dir

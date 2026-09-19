@@ -29,7 +29,7 @@ const BUILTIN_EXCLUDES: [&str; 11] = [
 
 /// The CodeGraph configuration written at a logical-codebase aggregate root.
 ///
-/// CodeGraph v1.5.0 has no allowlist option.  The denylist is consequently the
+/// CodeGraph v1.6.0 has no allowlist option.  The denylist is consequently the
 /// range contract: every direct child which is not a manifest member is excluded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeGraphConfig {

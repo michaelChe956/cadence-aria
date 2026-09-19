@@ -147,7 +147,7 @@ impl BoundedCommandRunner for FakeCodeGraphCli {
             duration_ms: 0,
         };
         match command {
-            "--version" => Ok(ok("1.5.0\n".to_string())),
+            "--version" => Ok(ok("1.6.0\n".to_string())),
             "init" | "sync" => Ok(ok(String::new())),
             "files" => {
                 let files = self

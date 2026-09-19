@@ -335,7 +335,7 @@ pub(crate) fn index_record(
             ),
         ],
         observed_after_member_snapshots: Vec::new(),
-        codegraph_version: "1.5.0".to_string(),
+        codegraph_version: "1.6.0".to_string(),
         codegraph_root: codegraph_root.to_path_buf(),
         config_digest: String::new(),
         created_at: NOW.to_string(),

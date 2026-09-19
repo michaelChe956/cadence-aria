@@ -82,7 +82,7 @@ impl AggregateIndexRecord {
             status: AggregateIndexStatus::Building,
             member_snapshots,
             observed_after_member_snapshots: Vec::new(),
-            codegraph_version: "1.5.0".into(),
+            codegraph_version: "1.6.0".into(),
             codegraph_root: PathBuf::new(),
             config_digest: String::new(),
             updated_at: created_at.clone(),

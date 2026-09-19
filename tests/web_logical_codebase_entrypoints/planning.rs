@@ -169,7 +169,7 @@ impl BoundedCommandRunner for BlockingIndexCli {
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
         let command = request.argv.first().map(String::as_str).unwrap_or_default();
         match command {
-            "--version" => Ok(Self::success("1.5.0\n")),
+            "--version" => Ok(Self::success("1.6.0\n")),
             "init" | "sync" => {
                 let (state, wake) = &*self.gate;
                 let mut state = state.lock().expect("blocking CLI gate");

@@ -61,7 +61,7 @@ impl BoundedCommandRunner for P0CommandRunner {
         }
         if request.executable == "codegraph" {
             let stdout = match request.argv.first().map(String::as_str).unwrap_or_default() {
-                "--version" => "1.5.0\n",
+                "--version" => "1.6.0\n",
                 "init" | "sync" => "",
                 "files" => r#"[{"path":"api/lib.rs"},{"path":"web/lib.rs"}]"#,
                 "query"

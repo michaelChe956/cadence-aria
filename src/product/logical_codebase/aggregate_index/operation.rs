@@ -307,7 +307,7 @@ impl AggregateIndexOperation {
         let index_id = building.aggregate_index_id.clone();
 
         let command_result = (|| {
-            self.cli.verify_v1_5_0()?;
+            self.cli.verify_version()?;
             let config = self.excludes.generate(manifest, &members, &checkouts)?;
             let config_digest = self
                 .excludes

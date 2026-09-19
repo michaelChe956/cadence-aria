@@ -13,7 +13,7 @@ use crate::cross_cutting::bounded_command_runner::{
 use super::AggregateIndexBudget;
 use crate::product::json_store::ProductStoreError;
 
-pub const CODEGRAPH_EXACT_VERSION: &str = "1.5.0";
+pub const CODEGRAPH_EXACT_VERSION: &str = "1.6.0";
 const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -77,7 +77,7 @@ impl CodeGraphCli {
         Self { runner, executable }
     }
 
-    pub fn verify_v1_5_0(&self) -> Result<(), AggregateIndexError> {
+    pub fn verify_version(&self) -> Result<(), AggregateIndexError> {
         let output = self.run_checked(
             &["--version"],
             Path::new("."),
@@ -374,11 +374,11 @@ mod tests {
     #[test]
     fn exact_version_is_required_and_missing_binary_becomes_degraded_error() {
         let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
-            CommandCapture::success("1.5.0\n"),
+            CommandCapture::success("1.6.0\n"),
             CommandCapture::success("Indexed 6 files\n"),
         ]));
         let cli = CodeGraphCli::new(runner.clone(), "codegraph".into());
-        cli.verify_v1_5_0().unwrap();
+        cli.verify_version().unwrap();
         cli.init(Path::new("/aggregate")).unwrap();
 
         let requests = runner.requests();
@@ -402,18 +402,18 @@ mod tests {
             "codegraph".into(),
         );
         assert!(matches!(
-            missing.verify_v1_5_0(),
+            missing.verify_version(),
             Err(AggregateIndexError::Degraded { code, .. }) if code == "codegraph_missing"
         ));
 
         let mismatched = CodeGraphCli::new(
             Arc::new(ScriptedCodeGraphRunner::from_results(vec![
-                CommandCapture::success("1.5.1\\n"),
+                CommandCapture::success("1.6.1\\n"),
             ])),
             "codegraph".into(),
         );
         assert!(matches!(
-            mismatched.verify_v1_5_0(),
+            mismatched.verify_version(),
             Err(AggregateIndexError::Degraded { code, .. }) if code == "codegraph_version_mismatch"
         ));
     }
@@ -435,7 +435,7 @@ mod tests {
             CommandCapture::success(r#"[{"path":"api/src/lib.rs"},{"path":"web/src/app.ts"}]"#),
             CommandCapture::success(r#"[{"name":"crossRepoGreeting"}]"#),
             CommandCapture::success(
-                r#"{"initialized":true,"version":"1.5.0","projectPath":"/aggregate","indexPath":"/aggregate/.codegraph","lastIndexed":"2026-08-09T00:00:00Z","fileCount":2,"nodeCount":3,"edgeCount":4,"dbSizeBytes":5}"#,
+                r#"{"initialized":true,"version":"1.6.0","projectPath":"/aggregate","indexPath":"/aggregate/.codegraph","lastIndexed":"2026-08-09T00:00:00Z","fileCount":2,"nodeCount":3,"edgeCount":4,"dbSizeBytes":5}"#,
             ),
         ]));
         let cli = CodeGraphCli::new(runner.clone(), "codegraph".into());
