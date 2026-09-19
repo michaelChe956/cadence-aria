@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::dto::*;
 use super::super::support::*;
@@ -472,6 +472,171 @@ fn resolve_group_repository(
     }
 }
 
+/// REQ-COD-04（WP1 分流化，REQ-MTG-01）：split 解析面的公共前置——routing 三态
+/// 判定 + fail-closed 校验（source_draft_error/selection）+ units target 收敛 +
+/// 0-target focus 唯一回落（与单值面同语义）。多 target 不再构成拒绝理由，
+/// 而是逐 target 进入分流解析。
+enum SplitGroupTargets {
+    Legacy,
+    Logical {
+        lc_id: Option<String>,
+        selected_ids: BTreeSet<LogicalRepositoryId>,
+        target_ids: Vec<LogicalRepositoryId>,
+    },
+}
+
+fn split_group_targets(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    authoritative: &AuthoritativeGroupPlanBinding,
+) -> ApiResult<SplitGroupTargets> {
+    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths, project_id, issue_id,
+    )
+    .map_err(product_store_api_error)?;
+    match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(product_store_api_error)?
+    {
+        RepositoryRouting::Legacy { .. } => Ok(SplitGroupTargets::Legacy),
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            if let Some(reason) = authoritative
+                .units
+                .iter()
+                .find_map(|unit| unit.source_draft_error.as_deref())
+            {
+                return Err(routing_api_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    reason,
+                ));
+            }
+            let selected_ids = validate_logical_group_selection(
+                app_paths,
+                lc_id.as_deref(),
+                project_id,
+                &manifest,
+                &selection,
+            )?;
+            let target_ids: BTreeSet<LogicalRepositoryId> = authoritative
+                .units
+                .iter()
+                .filter_map(|unit| unit.target_repository_id)
+                .collect();
+            let target_ids = if target_ids.is_empty() {
+                // 0-target focus 唯一回落语义原样保留（「单 target 路径」的一部分，
+                // 与单值面一致）；focus 不唯一 → TargetMissing fail-closed。
+                let [focus_repository_id] = selection.focus_repository_ids.as_slice() else {
+                    return Err(routing_api_error(
+                        RepositoryRoutingErrorCode::TargetMissing,
+                        "group has no unique target repository and selection focus is not unique",
+                    ));
+                };
+                vec![*focus_repository_id]
+            } else {
+                target_ids.into_iter().collect()
+            };
+            Ok(SplitGroupTargets::Logical {
+                lc_id,
+                selected_ids,
+                target_ids,
+            })
+        }
+        RepositoryRouting::FailClosed { code, reason } => Err(routing_api_error(code, &reason)),
+    }
+}
+
+/// REQ-COD-04（WP1 分流化）：mixed-target group 的多值快照解析面（T2 分流创建
+/// 消费）。与 `group_target_snapshot` 共享前置与单值语义（含 0-target focus 唯一
+/// 回落、TargetUnknown/Inconsistent fail-closed）；差异仅在 `target_ids.len() >= 2`
+/// 不再拒绝——按 unit target 逐仓产出冻结快照。单 target 退化为单条目（语义与
+/// 单值面零变化）。Legacy 路由 → `None`（无逻辑仓可分流，走单值面既有语义）。
+#[allow(dead_code)] // T2（WP2 分流创建循环）消费；WP1 只落解析面。
+fn group_target_snapshots(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    authoritative: &AuthoritativeGroupPlanBinding,
+) -> ApiResult<Option<BTreeMap<LogicalRepositoryId, AttemptTargetSnapshot>>> {
+    let SplitGroupTargets::Logical {
+        lc_id,
+        selected_ids,
+        target_ids,
+    } = split_group_targets(app_paths, project_id, issue_id, authoritative)?
+    else {
+        return Ok(None);
+    };
+    let mut snapshots = BTreeMap::new();
+    for logical_repository_id in target_ids {
+        if !selected_ids.contains(&logical_repository_id) {
+            return Err(routing_api_error(
+                RepositoryRoutingErrorCode::TargetUnknown,
+                "group target repository is not in the effective selection",
+            ));
+        }
+        let snapshot = build_attempt_target_snapshot(
+            app_paths,
+            project_id,
+            logical_repository_id,
+            lc_id.as_deref(),
+        )
+        .map_err(target_snapshot_api_error)?;
+        snapshots.insert(logical_repository_id, snapshot);
+    }
+    Ok(Some(snapshots))
+}
+
+/// REQ-COD-04（WP1 分流化）：`resolve_group_repository` 的多值同构变体（T2 分流
+/// 创建消费）——按 unit target 逐仓解析 RepositoryRecord；前置/错误码语义与
+/// `group_target_snapshots` 一致。Legacy 路由 → `None`。
+#[allow(dead_code)] // T2（WP2 分流创建循环）消费；WP1 只落解析面。
+fn resolve_group_repositories(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    authoritative: &AuthoritativeGroupPlanBinding,
+) -> ApiResult<Option<BTreeMap<LogicalRepositoryId, RepositoryRecord>>> {
+    let SplitGroupTargets::Logical {
+        lc_id,
+        selected_ids,
+        target_ids,
+    } = split_group_targets(app_paths, project_id, issue_id, authoritative)?
+    else {
+        return Ok(None);
+    };
+    let store = match lc_id.as_deref() {
+        Some(_) => RepositoryStore::new(app_paths.clone()),
+        None => {
+            let project = ProjectStore::new(app_paths.clone())
+                .get(project_id)
+                .map_err(product_store_api_error)?;
+            RepositoryStore::for_project(app_paths.clone(), &project)
+        }
+    };
+    let mut repositories = BTreeMap::new();
+    for logical_repository_id in target_ids {
+        if !selected_ids.contains(&logical_repository_id) {
+            return Err(routing_api_error(
+                RepositoryRoutingErrorCode::TargetUnknown,
+                "group target repository is not in the effective selection",
+            ));
+        }
+        let repository = store
+            .resolve_logical_repository_for_issue_codebase(
+                project_id,
+                lc_id.as_deref(),
+                logical_repository_id,
+            )
+            .map(|(_, _, repository)| repository)
+            .map_err(product_store_api_error)?;
+        repositories.insert(logical_repository_id, repository);
+    }
+    Ok(Some(repositories))
+}
+
 fn resolve_legacy_group_repository(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -637,5 +802,309 @@ fn coding_group_attempt_incomplete_api_error(error: ProductStoreError) -> ApiErr
         )
     } else {
         product_store_api_error(error)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::process::Command;
+
+    use super::*;
+    use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
+    use crate::product::issue_store::CreateProductIssueInput;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, IssueCodebaseSelection, IssueCodebaseSelectionStore,
+        LogicalCodebaseFeature, LogicalCodebaseStore,
+    };
+    use crate::product::project_store::CreateProjectInput;
+    use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+
+    struct SplitResolutionFixture {
+        _root: tempfile::TempDir,
+        paths: ProductAppPaths,
+        project_id: String,
+        issue_id: String,
+        targets: Vec<LogicalRepositoryId>,
+    }
+
+    impl SplitResolutionFixture {
+        /// 重写 issue selection（focus 形态由用例自定）。
+        fn save_selection(
+            &self,
+            included: Vec<LogicalRepositoryId>,
+            focus: Vec<LogicalRepositoryId>,
+        ) {
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&IssueCodebaseSelection::explicit(
+                    &self.project_id,
+                    &self.issue_id,
+                    included,
+                    Vec::new(),
+                    focus,
+                    None,
+                ))
+                .unwrap();
+        }
+    }
+
+    fn split_resolution_fixture() -> SplitResolutionFixture {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "split resolution".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let mut targets = Vec::new();
+        for name in ["api", "web"] {
+            let canonical_path = root.path().join(name);
+            fs::create_dir_all(&canonical_path).unwrap();
+            run_git(&canonical_path, &["init", "--quiet"]);
+            run_git(
+                &canonical_path,
+                &["config", "user.email", "split@example.test"],
+            );
+            run_git(
+                &canonical_path,
+                &["config", "user.name", "Split Resolution"],
+            );
+            fs::write(canonical_path.join("README.md"), format!("# {name}\n")).unwrap();
+            run_git(&canonical_path, &["add", "README.md"]);
+            run_git(
+                &canonical_path,
+                &["commit", "--quiet", "-m", "initial commit"],
+            );
+            let repository = RepositoryStore::with_logical_codebase_feature(
+                paths.clone(),
+                LogicalCodebaseFeature::enabled(),
+            )
+            .create(CreateRepositoryInput {
+                project_id: project.id.clone(),
+                name: name.to_string(),
+                path: canonical_path,
+                default_policy_preset: None,
+                default_provider_mode: None,
+                idempotency_key: format!("split-resolution-{name}"),
+            })
+            .unwrap();
+            targets.push(
+                repository
+                    .logical_repository_id
+                    .expect("logical repository ID"),
+            );
+        }
+        let manifest = LogicalCodebaseStore::new(paths.clone())
+            .load_manifest(&project.id)
+            .unwrap()
+            .expect("manifest");
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .unwrap();
+        let issue = IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: project.id.clone(),
+                repo_id: None,
+                logical_codebase_id: None,
+                title: "mixed-target group".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let fixture = SplitResolutionFixture {
+            _root: root,
+            paths,
+            project_id: project.id,
+            issue_id: issue.id,
+            targets,
+        };
+        fixture.save_selection(fixture.targets.clone(), vec![fixture.targets[0]]);
+        fixture
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("start git");
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+
+    fn unit_binding(target: Option<LogicalRepositoryId>) -> AuthoritativeCodingUnitBinding {
+        AuthoritativeCodingUnitBinding {
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "revision_0001".to_string(),
+            verification_plan_revision_id: "verification_0001".to_string(),
+            projection_bundle_id: "projection_0001".to_string(),
+            target_repository_id: target,
+            source_draft_error: None,
+            dependency_logical_work_item_ids: Vec::new(),
+        }
+    }
+
+    fn authoritative(units: Vec<AuthoritativeCodingUnitBinding>) -> AuthoritativeGroupPlanBinding {
+        AuthoritativeGroupPlanBinding {
+            plan_revision_id: "plan_revision_0001".to_string(),
+            dependency_graph_revision_id: "dependency_graph_0001".to_string(),
+            plan_projection_bundle_id: "plan_projection_0001".to_string(),
+            units,
+        }
+    }
+
+    #[test]
+    fn group_target_snapshots_resolves_mixed_targets_per_target() {
+        // REQ-COD-04（WP1 分流化）：mixed-target 不再构成拒绝理由——按 unit target
+        // 分组逐仓产出冻结快照（REQ-MTG-01 scenario「尝试 mixed-target group」解析面）。
+        let fixture = split_resolution_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let binding = authoritative(vec![unit_binding(Some(*api)), unit_binding(Some(*web))]);
+
+        let snapshots: BTreeMap<LogicalRepositoryId, AttemptTargetSnapshot> =
+            group_target_snapshots(
+                &fixture.paths,
+                &fixture.project_id,
+                &fixture.issue_id,
+                &binding,
+            )
+            .expect("mixed-target split resolution must succeed")
+            .expect("logical routing must yield a target map");
+
+        assert_eq!(snapshots.len(), 2, "one snapshot per target");
+        assert_eq!(snapshots[api].logical_repository_id, *api);
+        assert_eq!(snapshots[web].logical_repository_id, *web);
+        assert!(snapshots[api].revision.is_some(), "git HEAD captured");
+        assert!(snapshots[web].revision.is_some(), "git HEAD captured");
+    }
+
+    #[test]
+    fn resolve_group_repositories_resolves_mixed_targets_per_target() {
+        let fixture = split_resolution_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let binding = authoritative(vec![unit_binding(Some(*api)), unit_binding(Some(*web))]);
+
+        let repositories = resolve_group_repositories(
+            &fixture.paths,
+            &fixture.project_id,
+            &fixture.issue_id,
+            &binding,
+        )
+        .expect("mixed-target split resolution must succeed")
+        .expect("logical routing must yield a repository map");
+
+        assert_eq!(repositories.len(), 2, "one repository per target");
+        assert_eq!(repositories[api].logical_repository_id, Some(*api));
+        assert_eq!(repositories[web].logical_repository_id, Some(*web));
+    }
+
+    #[test]
+    fn group_target_snapshots_single_target_keeps_single_entry() {
+        // 单 target 语义零变化：多值面退化为单条目，与现行单值面一致。
+        let fixture = split_resolution_fixture();
+        let [api, _] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let binding = authoritative(vec![unit_binding(Some(*api)), unit_binding(Some(*api))]);
+
+        let snapshots = group_target_snapshots(
+            &fixture.paths,
+            &fixture.project_id,
+            &fixture.issue_id,
+            &binding,
+        )
+        .unwrap()
+        .expect("logical routing");
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots.contains_key(api));
+    }
+
+    #[test]
+    fn group_target_snapshots_zero_target_unique_focus_falls_back_to_focus() {
+        // 0-target focus 唯一回落语义原样保留（「单 target 路径」的一部分）。
+        let fixture = split_resolution_fixture();
+        let [api, _] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let binding = authoritative(vec![unit_binding(None), unit_binding(None)]);
+
+        let snapshots = group_target_snapshots(
+            &fixture.paths,
+            &fixture.project_id,
+            &fixture.issue_id,
+            &binding,
+        )
+        .unwrap()
+        .expect("logical routing");
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots.contains_key(api));
+    }
+
+    #[test]
+    fn group_target_snapshots_zero_target_without_unique_focus_fails_closed() {
+        // REQ-COD-04 scenario「无唯一 target 归属仍 fail-closed」：units 均无
+        // target 且 focus 多点 → TargetMissing 稳定码，不静默选 target。
+        let fixture = split_resolution_fixture();
+        fixture.save_selection(fixture.targets.clone(), fixture.targets.clone());
+        let binding = authoritative(vec![unit_binding(None), unit_binding(None)]);
+
+        let error = group_target_snapshots(
+            &fixture.paths,
+            &fixture.project_id,
+            &fixture.issue_id,
+            &binding,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "repository_routing_target_missing");
+    }
+
+    #[test]
+    fn group_target_snapshots_target_outside_selection_fails_closed() {
+        // 有效 selection 之外的 target 保持 TargetUnknown fail-closed。
+        let fixture = split_resolution_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        fixture.save_selection(vec![*api], vec![*api]);
+        let binding = authoritative(vec![unit_binding(Some(*api)), unit_binding(Some(*web))]);
+
+        let error = group_target_snapshots(
+            &fixture.paths,
+            &fixture.project_id,
+            &fixture.issue_id,
+            &binding,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "repository_routing_target_unknown");
+    }
+
+    #[test]
+    fn group_target_snapshots_source_draft_error_stays_inconsistent() {
+        // source_draft_error fail-closed 前置保留（溯源断链不进分流解析）。
+        let fixture = split_resolution_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        let mut broken = unit_binding(Some(*api));
+        broken.source_draft_error = Some("source draft missing".to_string());
+        let binding = authoritative(vec![broken, unit_binding(Some(*web))]);
+
+        let error = group_target_snapshots(
+            &fixture.paths,
+            &fixture.project_id,
+            &fixture.issue_id,
+            &binding,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "repository_routing_inconsistent");
     }
 }

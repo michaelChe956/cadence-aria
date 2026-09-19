@@ -506,6 +506,33 @@ pub(crate) fn mixed_target_group_rejected() -> ProductStoreError {
     ProductStoreError::Io(MIXED_TARGET_GROUP_REJECTED.to_string())
 }
 
+/// REQ-MTG-01（WP1 分流化）：authoritative units 按 target 分组的结果。
+/// 无归属（`target_repository_id == None`）的 unit 不入任何 target 桶，交由
+/// 调用方按 0-target/selection focus 规则处置（与创建面 focus 回落语义对齐）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnitsByTarget {
+    pub by_target: BTreeMap<LogicalRepositoryId, Vec<AuthoritativeCodingUnitBinding>>,
+    pub unattributed: Vec<AuthoritativeCodingUnitBinding>,
+}
+
+/// REQ-MTG-01（WP1 分流化）：units 按 target 分组的分流解析辅助（T2 分流创建
+/// 消费）。纯分组不判定：`source_draft_error` fail-closed 前置校验仍由调用方在
+/// 进入本函数前完成（语义不变），focus 回落与 selection 有效性亦由调用面处置。
+pub fn units_by_target(authoritative: &AuthoritativeGroupPlanBinding) -> UnitsByTarget {
+    let mut grouped = UnitsByTarget::default();
+    for unit in &authoritative.units {
+        match unit.target_repository_id {
+            Some(target_repository_id) => grouped
+                .by_target
+                .entry(target_repository_id)
+                .or_default()
+                .push(unit.clone()),
+            None => grouped.unattributed.push(unit.clone()),
+        }
+    }
+    grouped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,5 +731,67 @@ mod tests {
             ),
             Err(StableCode::MixedTargetGroupRejected)
         );
+    }
+
+    #[test]
+    fn units_by_target_groups_units_per_target_and_tracks_unattributed() {
+        // REQ-MTG-01（WP1 分流化）：units 按 target 分组——每个有归属 unit 恰入
+        // 一桶；无归属 unit 不入任何桶、交由调用方按 0-target/focus 规则处置。
+        let api = logical_id(0x0001);
+        let web = logical_id(0x0002);
+        let binding = AuthoritativeGroupPlanBinding {
+            plan_revision_id: "plan_revision_0001".to_string(),
+            dependency_graph_revision_id: "dependency_graph_0001".to_string(),
+            plan_projection_bundle_id: "plan_projection_0001".to_string(),
+            units: vec![
+                unit("work_item_0001", Some(api)),
+                unit("work_item_0002", Some(web)),
+                unit("work_item_0003", None),
+                unit("work_item_0004", Some(api)),
+            ],
+        };
+
+        let grouped = units_by_target(&binding);
+
+        assert_eq!(grouped.by_target.len(), 2);
+        assert_eq!(
+            grouped.by_target.get(&api).map(|units| units
+                .iter()
+                .map(|unit| unit.logical_work_item_id.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["work_item_0001", "work_item_0004"])
+        );
+        assert_eq!(
+            grouped.by_target.get(&web).map(|units| units
+                .iter()
+                .map(|unit| unit.logical_work_item_id.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["work_item_0002"])
+        );
+        assert_eq!(
+            grouped
+                .unattributed
+                .iter()
+                .map(|unit| unit.logical_work_item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work_item_0003"]
+        );
+    }
+
+    #[test]
+    fn units_by_target_all_unattributed_yields_empty_map() {
+        // 0-target 形态：全部无归属 → 空桶+全集 unattributed（focus 回落判定
+        // 交由调用方，与创建面 0-target focus 语义对齐）。
+        let binding = AuthoritativeGroupPlanBinding {
+            plan_revision_id: "plan_revision_0001".to_string(),
+            dependency_graph_revision_id: "dependency_graph_0001".to_string(),
+            plan_projection_bundle_id: "plan_projection_0001".to_string(),
+            units: vec![unit("work_item_0001", None), unit("work_item_0002", None)],
+        };
+
+        let grouped = units_by_target(&binding);
+
+        assert!(grouped.by_target.is_empty());
+        assert_eq!(grouped.unattributed.len(), 2);
     }
 }

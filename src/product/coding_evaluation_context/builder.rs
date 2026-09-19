@@ -201,11 +201,8 @@ fn build_schema_v2_evaluation_context_pack(
     let mut context_warnings = Vec::new();
     let _issue = IssueStore::new(lifecycle.app_paths().clone())
         .get(&attempt.project_id, &attempt.issue_id)?;
-    let repository_id = schema_v2_evaluation_context_repository_id(
-        &lifecycle.app_paths(),
-        &attempt.project_id,
-        &attempt.issue_id,
-    )?;
+    let repository_id =
+        schema_v2_evaluation_context_repository_id(&lifecycle.app_paths(), attempt)?;
     let stories = lifecycle.list_story_specs(&attempt.project_id, &attempt.issue_id)?;
     let designs = lifecycle.list_design_specs(&attempt.project_id, &attempt.issue_id)?;
     let story_specs = contexts_for_story_specs(
@@ -292,22 +289,23 @@ fn build_schema_v2_evaluation_context_pack(
 
 fn schema_v2_evaluation_context_repository_id(
     paths: &ProductAppPaths,
-    project_id: &str,
-    issue_id: &str,
+    attempt: &CodingExecutionAttempt,
 ) -> Result<String, ProductStoreError> {
-    let project = ProjectStore::new(paths.clone()).get(project_id)?;
+    let project = ProjectStore::new(paths.clone()).get(&attempt.project_id)?;
     let store = RepositoryStore::for_project(paths.clone(), &project);
-    match RepositoryRouting::load_for_issue(paths, project_id, issue_id)? {
+    match RepositoryRouting::load_for_issue(paths, &attempt.project_id, &attempt.issue_id)? {
         RepositoryRouting::Legacy { .. } => {
-            let issue = IssueStore::new(paths.clone()).get(project_id, issue_id)?;
+            let issue =
+                IssueStore::new(paths.clone()).get(&attempt.project_id, &attempt.issue_id)?;
             let physical_repository_id =
                 issue.repo_id.ok_or_else(|| ProductStoreError::NotFound {
                     kind: "repository",
-                    id: format!("issue:{issue_id}:repo_id"),
+                    id: format!("issue:{}:repo_id", attempt.issue_id),
                 })?;
-            match store
-                .resolve_legacy_physical_repository_if_dual(project_id, &physical_repository_id)
-            {
+            match store.resolve_legacy_physical_repository_if_dual(
+                &attempt.project_id,
+                &physical_repository_id,
+            ) {
                 Ok((_, _, repository)) => Ok(repository.id),
                 Err(_) => Ok(physical_repository_id),
             }
@@ -316,7 +314,41 @@ fn schema_v2_evaluation_context_repository_id(
             manifest,
             selection,
         } => {
-            validate_logical_evaluation_selection(paths, project_id, &manifest, &selection)?;
+            validate_logical_evaluation_selection(
+                paths,
+                &attempt.project_id,
+                &manifest,
+                &selection,
+            )?;
+            // D1 路由权威转移（REQ-MTG-01/REQ-COD-04 分流化）：per-attempt 冻结
+            // 快照优先——有快照不再经 selection focus 收敛（多 focus 不阻断
+            // target-attempt 评估）；快照 target 仍受有效 selection 成员约束
+            // （fail-closed 保留，与恢复面 resolve_coding_attempt_repository 同款）。
+            if let Some(snapshot) = attempt.target_snapshot.as_ref() {
+                let selected_ids: std::collections::BTreeSet<
+                    crate::product::logical_codebase::LogicalRepositoryId,
+                > = match selection.selection_policy {
+                    crate::product::logical_codebase::SelectionPolicy::AllMembers => {
+                        manifest.member_ids.iter().copied().collect()
+                    }
+                    crate::product::logical_codebase::SelectionPolicy::Explicit => {
+                        selection.resolve_effective_members().into_iter().collect()
+                    }
+                };
+                if !selected_ids.contains(&snapshot.logical_repository_id) {
+                    return Err(routing_error(
+                        RepositoryRoutingErrorCode::TargetUnknown,
+                        "target snapshot repository is not in the effective selection",
+                    ));
+                }
+                return store
+                    .resolve_logical_repository_strict(
+                        &attempt.project_id,
+                        snapshot.logical_repository_id,
+                    )
+                    .map(|(_, _, repository)| repository.id);
+            }
+            // selection focus 面（保留）：无快照 attempt 的现行 focus 收敛。
             let logical_repository_id = match selection.focus_repository_ids.as_slice() {
                 [] => {
                     return Err(routing_error(
@@ -333,7 +365,7 @@ fn schema_v2_evaluation_context_repository_id(
                 }
             };
             store
-                .resolve_logical_repository_strict(project_id, logical_repository_id)
+                .resolve_logical_repository_strict(&attempt.project_id, logical_repository_id)
                 .map(|(_, _, repository)| repository.id)
         }
         RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
@@ -702,11 +734,209 @@ mod tests {
             .save(&selection)
             .unwrap();
         write_physical_repository_fixture(&paths, root.path());
+        let attempt = schema_v2_attempt_fixture(None);
 
-        let result =
-            schema_v2_evaluation_context_repository_id(&paths, "project_0001", "issue_0001");
+        let result = schema_v2_evaluation_context_repository_id(&paths, &attempt);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_v2_repository_id_without_snapshot_multi_focus_stays_ambiguous() {
+        // selection focus 面（保留，REQ-COD-04 RENAMED 边界）：无快照 attempt +
+        // selection 多 focus → TargetAmbiguous 稳定码——focus 面不随分流退役。
+        let fixture = schema_v2_routing_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![*api, *web],
+                Vec::new(),
+                vec![*api, *web],
+                None,
+            ))
+            .unwrap();
+        let attempt = schema_v2_attempt_fixture(None);
+
+        let error =
+            schema_v2_evaluation_context_repository_id(&fixture.paths, &attempt).unwrap_err();
+
+        let ProductStoreError::InvalidRecord { reason, .. } = &error else {
+            panic!("expected repository_routing InvalidRecord, got {error:?}");
+        };
+        assert!(
+            reason.starts_with("repository_routing_ambiguous"),
+            "focus face must keep TargetAmbiguous, got {reason}"
+        );
+    }
+
+    #[test]
+    fn schema_v2_repository_id_routes_by_frozen_snapshot_over_multi_focus() {
+        // D1 路由权威转移（REQ-MTG-01/REQ-COD-04 分流化）：评估上下文面——
+        // attempt 冻结快照优先，多 focus 不再阻断 target-attempt 评估。
+        let fixture = schema_v2_routing_fixture();
+        let [api, web] = fixture.targets.as_slice() else {
+            panic!("fixture must register two targets");
+        };
+        IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![*api, *web],
+                Vec::new(),
+                vec![*api, *web],
+                None,
+            ))
+            .unwrap();
+        let snapshot = crate::product::coding_models::AttemptTargetSnapshot {
+            logical_repository_id: *api,
+            checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
+                uuid::Uuid::new_v4(),
+            ),
+            physical_repository_id: "repository_snapshot".to_string(),
+            canonical_path: std::path::PathBuf::from("/tmp/snapshot"),
+            git_dir_identity: "sha256:snapshot".to_string(),
+            revision: None,
+            policy_digest: "sha256:policy".to_string(),
+            membership_revision: 1,
+            captured_at: "2026-09-19T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        };
+        let attempt = schema_v2_attempt_fixture(Some(snapshot));
+
+        let repository_id =
+            schema_v2_evaluation_context_repository_id(&fixture.paths, &attempt).unwrap();
+
+        assert_eq!(
+            repository_id, fixture.api_physical_id,
+            "snapshot target must win over multi-focus selection"
+        );
+    }
+
+    struct SchemaV2RoutingFixture {
+        _root: tempfile::TempDir,
+        paths: ProductAppPaths,
+        targets: Vec<LogicalRepositoryId>,
+        api_physical_id: String,
+    }
+
+    fn schema_v2_routing_fixture() -> SchemaV2RoutingFixture {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "schema-v2 routing".to_string(),
+                description: None,
+            })
+            .unwrap();
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: None,
+                logical_codebase_id: None,
+                title: "schema-v2 routing".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let mut targets = Vec::new();
+        let mut api_physical_id = String::new();
+        for name in ["api", "web"] {
+            let canonical_path = root.path().join(name);
+            std::fs::create_dir_all(&canonical_path).unwrap();
+            let git = |args: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&canonical_path)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?} failed");
+            };
+            git(&["init", "--quiet"]);
+            git(&["config", "user.email", "builder@example.test"]);
+            git(&["config", "user.name", "Builder"]);
+            std::fs::write(canonical_path.join("README.md"), format!("# {name}\n")).unwrap();
+            git(&["add", "README.md"]);
+            git(&["commit", "--quiet", "-m", "initial commit"]);
+            let repository =
+                crate::product::repository_store::RepositoryStore::with_logical_codebase_feature(
+                    paths.clone(),
+                    crate::product::logical_codebase::LogicalCodebaseFeature::enabled(),
+                )
+                .create(crate::product::repository_store::CreateRepositoryInput {
+                    project_id: "project_0001".to_string(),
+                    name: name.to_string(),
+                    path: canonical_path,
+                    default_policy_preset: None,
+                    default_provider_mode: None,
+                    idempotency_key: format!("schema-v2-routing-{name}"),
+                })
+                .unwrap();
+            if name == "api" {
+                api_physical_id = repository.id.clone();
+            }
+            targets.push(
+                repository
+                    .logical_repository_id
+                    .expect("logical repository ID"),
+            );
+        }
+        SchemaV2RoutingFixture {
+            _root: root,
+            paths,
+            targets,
+            api_physical_id,
+        }
+    }
+
+    fn schema_v2_attempt_fixture(
+        target_snapshot: Option<crate::product::coding_models::AttemptTargetSnapshot>,
+    ) -> CodingExecutionAttempt {
+        use crate::product::coding_models::{
+            CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+        };
+        use crate::product::models::ProviderName;
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+        CodingExecutionAttempt {
+            id: "coding_attempt_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            attempt_no: 1,
+            scope: CodingAttemptScope::WorkItemGroup,
+            status: CodingAttemptStatus::Running,
+            version: 0,
+            manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
+            admission_kind: CodingAdmissionKind::LegacyGroup,
+            stage: CodingExecutionStage::WorktreePrepare,
+            base_branch: "main".to_string(),
+            branch_name: "aria/attempt".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: None,
+                review_rounds: 0,
+                permission_modes: Default::default(),
+            },
+            rework_count: 0,
+            max_auto_rework: 0,
+            work_item_group_id: Some("work_item_plan_0001".to_string()),
+            current_work_item_id: Some("work_item_0001".to_string()),
+            active_unit_id: None,
+            head_commit: None,
+            pushed_remote: None,
+            review_request_id: None,
+            provider_conversations: Vec::new(),
+            created_at: "2026-09-19T00:00:00Z".to_string(),
+            updated_at: "2026-09-19T00:00:00Z".to_string(),
+            target_snapshot,
+            completed_at: None,
+        }
     }
 
     fn write_physical_repository_fixture(paths: &ProductAppPaths, root: &Path) {

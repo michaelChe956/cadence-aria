@@ -109,7 +109,8 @@ fn workspace_repository(
                         resolve_logical_work_item_plan_repository_targets(lifecycle, &plan)
                             .map_err(|reason| routing_error_for_target_error(&reason))?;
                     let target_ids = targets.unwrap_or_default().keys().copied().collect();
-                    let logical_id = unique_target(target_ids, &plan.id)?;
+                    let logical_id =
+                        plan_session_repository_target(target_ids, &plan.id, &selection)?;
                     resolve_selected_logical_repository(
                         app_paths,
                         &session.project_id,
@@ -270,6 +271,26 @@ fn unique_target(
     }
 }
 
+/// REQ-COD-04（WP1 分流化）：plan 会话路由面的 target 解析。
+///
+/// - 0 target → TargetMissing fail-closed（保持现行，即使 focus 唯一也不回落）；
+/// - 1 target → 唯一 target（现行语义零变化）；
+/// - ≥2 target → 回落 selection focus 唯一解析（与创建面 0-target focus 语义
+///   对称）；focus 不唯一保持 TargetAmbiguous（focus 面保留，不新造 plan 级
+///   聚合根路由）。
+fn plan_session_repository_target(
+    target_ids: BTreeSet<LogicalRepositoryId>,
+    entity_id: &str,
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<LogicalRepositoryId, ProductStoreError> {
+    if target_ids.len() >= 2
+        && let [focus_repository_id] = selection.focus_repository_ids.as_slice()
+    {
+        return Ok(*focus_repository_id);
+    }
+    unique_target(target_ids, entity_id)
+}
+
 fn routing_error_for_target_error(reason: &str) -> ProductStoreError {
     let code = if reason.contains("target_member_removed") || reason.contains("invalid members") {
         RepositoryRoutingErrorCode::Inconsistent
@@ -292,7 +313,9 @@ fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::product::logical_codebase::{LogicalCodebaseManifest, LogicalCodebaseStore};
+    use crate::product::logical_codebase::{
+        IssueCodebaseSelection, LogicalCodebaseManifest, LogicalCodebaseStore,
+    };
 
     fn write_manifest_fixture(paths: &ProductAppPaths, project_id: &str) {
         LogicalCodebaseStore::new(paths.clone())
@@ -324,5 +347,119 @@ mod tests {
         let routing =
             RepositoryRouting::load_for_issue(&paths, "project_0001", "issue_0001").unwrap();
         assert!(matches!(routing, RepositoryRouting::FailClosed { .. }));
+    }
+
+    #[test]
+    fn plan_session_target_zero_targets_stays_target_missing_even_with_unique_focus() {
+        // 双审定案：WorkItemPlan 面 0-target 保持 TargetMissing fail-closed 红线，
+        // 即使 focus 唯一也不回落（与创建面 0-target focus 语义不对称是定案）。
+        let focus = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![focus],
+            Vec::new(),
+            vec![focus],
+            None,
+        );
+
+        let error =
+            plan_session_repository_target(BTreeSet::new(), "work_item_plan_0001", &selection)
+                .unwrap_err();
+
+        assert_eq!(
+            stable_routing_code(&error),
+            "repository_routing_target_missing"
+        );
+    }
+
+    #[test]
+    fn plan_session_target_single_target_resolution_unchanged() {
+        let target = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![target],
+            Vec::new(),
+            vec![target],
+            None,
+        );
+        let targets = BTreeSet::from([target]);
+
+        let resolved =
+            plan_session_repository_target(targets, "work_item_plan_0001", &selection).unwrap();
+
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
+    fn plan_session_target_multi_target_falls_back_to_unique_focus() {
+        // REQ-COD-04（WP1 分流化）：plan 会话路由面——多 target 回落 selection
+        // focus 唯一解析（与创建面 0-target focus 语义对称），不再一律 TargetAmbiguous。
+        let api = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let web = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![api, web],
+            Vec::new(),
+            vec![api],
+            None,
+        );
+        let targets = BTreeSet::from([api, web]);
+
+        let resolved =
+            plan_session_repository_target(targets, "work_item_plan_0001", &selection).unwrap();
+
+        assert_eq!(resolved, api);
+    }
+
+    #[test]
+    fn plan_session_target_multi_target_with_multi_focus_stays_ambiguous() {
+        // focus 面保留：多 target + 多 focus → TargetAmbiguous（不新造 plan 级
+        // 聚合根路由，不静默聚合）。
+        let api = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let web = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![api, web],
+            Vec::new(),
+            vec![api, web],
+            None,
+        );
+        let targets = BTreeSet::from([api, web]);
+
+        let error =
+            plan_session_repository_target(targets, "work_item_plan_0001", &selection).unwrap_err();
+
+        assert_eq!(stable_routing_code(&error), "repository_routing_ambiguous");
+    }
+
+    #[test]
+    fn plan_session_target_multi_target_without_focus_stays_ambiguous() {
+        let api = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let web = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![api, web],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let targets = BTreeSet::from([api, web]);
+
+        let error =
+            plan_session_repository_target(targets, "work_item_plan_0001", &selection).unwrap_err();
+
+        assert_eq!(stable_routing_code(&error), "repository_routing_ambiguous");
+    }
+
+    fn stable_routing_code(error: &ProductStoreError) -> &str {
+        let ProductStoreError::InvalidRecord { reason, .. } = error else {
+            panic!("expected repository_routing InvalidRecord, got {error:?}");
+        };
+        reason.split(':').next().unwrap_or_default()
     }
 }
