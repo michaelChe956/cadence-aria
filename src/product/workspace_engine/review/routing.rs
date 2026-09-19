@@ -63,11 +63,9 @@ impl WorkspaceEngine {
         let reviewer = self
             .active_node_agent()
             .or_else(|| self.session.reviewer_provider.clone());
+        let verdict_value = serde_json::to_value(&verdict).unwrap_or(serde_json::Value::Null);
         let _ = self
-            .persist_review_verdict(
-                &node_id,
-                serde_json::to_value(&verdict).unwrap_or(serde_json::Value::Null),
-            )
+            .persist_review_verdict(&node_id, verdict_value)
             .await;
         let _ = self
             .event_tx
@@ -626,6 +624,11 @@ impl WorkspaceEngine {
         self.refresh_policy_state(&saved);
         Ok(())
     }
+    fn is_single_candidate_plan(&self) -> bool {
+        self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+    }
+
     async fn route_legacy_review(
         &mut self,
         verdict: ReviewVerdict,
@@ -660,9 +663,8 @@ impl WorkspaceEngine {
                 self.route_review_report_to_author_confirm(&verdict).await;
             }
             _ => {
-                // F5-B：SC legacy 修订循环防打转闸门——run1d 形态（policy 旁路臂落到
-                // 此处）下，连续 2 轮非 advisory findings 指纹集合相同即强制
-                // human_confirm（reason=repeated_findings），不再进入下一轮 revise。
+                // F5-B 防打转闸门：run1d（policy 旁路臂）连续 2 轮同指纹非 advisory
+                // findings 即强制 human_confirm，不再进入下一轮 revise。
                 if self.session.workspace_type == WorkspaceType::WorkItemPlan
                     && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
                     && matches!(verdict.review_gate, ReviewGate::RequiresRevision)
@@ -680,30 +682,21 @@ impl WorkspaceEngine {
                         self.enter_human_confirm(Some(verdict.summary.clone()))
                             .await;
                     }
+                    // L2 退役（T5/REQ-RET-02）：SC 改道 human gate（review_decision
+                    // 消息族已删）；非 SC 保留原阶段=在途限制（REQ-RET-03）。
+                    ReviewGate::RequiresRevision if self.is_single_candidate_plan() => {
+                        self.enter_human_confirm(Some(verdict.summary.clone())).await;
+                    }
                     ReviewGate::RequiresRevision => {
-                        // L2 退役（T5/REQ-RET-02）：review_decision 阶段唯一消息族
-                        //（ReviewDecisionResponse/SelectRevisionPath）已删除——SC
-                        // 会话改道 human gate（typed 三命令可应答），与 F5-B
-                        // repeated_findings 出口同面；非 SC（在途 legacy 会话）保留
-                        // 原阶段=登记限制（REQ-RET-03）。
-                        if self.session.workspace_type == WorkspaceType::WorkItemPlan
-                            && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
-                        {
-                            self.enter_human_confirm(Some(verdict.summary.clone()))
-                                .await;
-                        } else {
-                            self.enter_review_decision(round, verdict.summary.clone())
-                                .await;
-                        }
+                        self.enter_review_decision(round, verdict.summary.clone()).await;
                     }
                 }
             }
         }
     }
 
-    /// Story/Design：review 报告进对话流，回到 AuthorConfirm（spec「review 结果回对话流」2 场景）。
-    /// 无论 pass/revise 统一回 AuthorConfirm，reviewer 结论不自动定稿；
-    /// WorkItem/WorkItemPlan 维持既有 HumanConfirm/ReviewDecision 路由（design.md「WorkItem 不受影响」）。
+    /// Story/Design：review 报告进对话流回 AuthorConfirm（pass/revise 统一，reviewer
+    /// 结论不自动定稿）；WorkItem/WorkItemPlan 维持既有路由（design.md「WorkItem 不受影响」）。
     async fn route_review_report_to_author_confirm(&mut self, verdict: &ReviewVerdict) {
         let report = format_review_feedback(verdict);
         self.record_review_message(report);
