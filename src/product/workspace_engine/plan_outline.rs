@@ -233,17 +233,6 @@ pub(crate) fn work_item_draft_status_label(status: &WorkItemDraftStatus) -> &'st
 }
 
 impl WorkspaceEngine {
-    pub(crate) fn current_work_item_plan_outline_candidate(
-        &self,
-    ) -> Result<&WorkItemPlanOutlineCandidateDto, String> {
-        match self.session.artifact.as_ref() {
-            Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) => {
-                Ok(outline_candidate)
-            }
-            _ => Err("current WorkItemPlan Outline artifact is unavailable".to_string()),
-        }
-    }
-
     pub(crate) fn latest_work_item_plan_outline_candidate(
         &self,
     ) -> Result<WorkItemPlanOutlineCandidateDto, String> {
@@ -284,38 +273,6 @@ impl WorkspaceEngine {
             .as_ref()
             .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
         Ok(WorkItemPlanStore::new(lifecycle.app_paths()))
-    }
-
-    pub(crate) fn save_confirmed_work_item_plan_outline_index(&self) -> Result<String, String> {
-        self.current_work_item_plan_outline_candidate()?;
-        let store = self.work_item_plan_store()?;
-        let project_id = self.session.project_id.clone();
-        let issue_id = self.session.issue_id.clone();
-        let plan_id = self.session.entity_id.clone();
-        let current = store
-            .load_active_index(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?;
-        let generation_round_id = current
-            .as_ref()
-            .map(next_generation_round_id)
-            .unwrap_or_else(|| "round_001".to_string());
-        let now = chrono::Utc::now().to_rfc3339();
-        let index = WorkItemPlanDraftActiveIndex {
-            project_id,
-            issue_id,
-            plan_id,
-            current_generation_round_id: generation_round_id.clone(),
-            outline_state: "confirmed".to_string(),
-            active_outline_id: None,
-            outline_to_current_draft_id: BTreeMap::new(),
-            draft_statuses: BTreeMap::new(),
-            batches: Vec::new(),
-            updated_at: now,
-        };
-        store
-            .save_active_index(&index)
-            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
-        Ok(generation_round_id)
     }
 
     pub(crate) fn mark_work_item_plan_outline_revising(&self) -> Result<(), String> {
@@ -426,27 +383,5 @@ impl WorkspaceEngine {
         store
             .save_active_index(&index)
             .map_err(|error| format!("save work item plan active index failed: {error}"))
-    }
-
-    pub(crate) async fn update_work_item_plan_outline_generation_metadata(
-        &mut self,
-        generation_round_id: Option<String>,
-        selected_mode: Option<WorkItemGenerationModeDto>,
-    ) -> Result<(), String> {
-        let Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) =
-            self.session.artifact.clone()
-        else {
-            return Err("current WorkItemPlan Outline artifact is unavailable".to_string());
-        };
-        let mut outline_candidate = *outline_candidate;
-        if generation_round_id.is_some() {
-            outline_candidate.current_generation_round_id = generation_round_id;
-        }
-        outline_candidate.selected_generation_mode = selected_mode;
-        self.replace_current_artifact_payload(ArtifactPayload::WorkItemPlanOutlineCandidate {
-            outline_candidate: Box::new(outline_candidate),
-        })
-        .await?;
-        Ok(())
     }
 }

@@ -579,10 +579,14 @@ pub async fn generate_design_specs(
 /// invalidation，因此不能置于创建 SingleCandidate session 前的只读分流边界。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SingleCandidatePreflightDecision {
-    Eligible { repository_id: String },
+    Eligible {
+        repository_id: String,
+    },
     /// L2 退役（T5/REQ-WSC-08/D3）：legacy fallback 路径已删除——preflight 失败
     /// 一律收敛新路径 durable 终态（含原因），无 flow_kind 切换目标。
-    Ineligible { reason: String },
+    Ineligible {
+        reason: String,
+    },
 }
 
 pub(crate) fn preflight_single_repository_candidate(
@@ -708,7 +712,6 @@ pub async fn prepare_work_item_plan(
     };
     let flow_kind = WorkItemPlanFlowKind::SingleCandidate;
 
-
     let plan = lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
             id: None,
@@ -786,9 +789,13 @@ pub async fn prepare_work_item_plan(
     }))
 }
 
-fn mark_single_candidate_prepare_failure(lifecycle: &LifecycleStore, session_id: &str, message: &str) {
-    let _ = lifecycle
-        .append_workspace_message(session_id, "system".to_string(), message.to_string());
+fn mark_single_candidate_prepare_failure(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    message: &str,
+) {
+    let _ =
+        lifecycle.append_workspace_message(session_id, "system".to_string(), message.to_string());
     let _ = lifecycle.update_workspace_session_status(session_id, WorkspaceSessionStatus::Failed);
 }
 

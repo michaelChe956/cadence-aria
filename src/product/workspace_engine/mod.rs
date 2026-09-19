@@ -24,9 +24,8 @@ use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
 };
 use crate::product::models::{
-    AgentRole, ArtifactRef, IssueWorkItemDependencyEdge,
-    IssueWorkItemPlan, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    PermissionEvent,
+    AgentRole, ArtifactRef, IssueWorkItemDependencyEdge, IssueWorkItemPlan,
+    LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail, PermissionEvent,
     PlanRepairSessionSnapshotDto, PlanRepairSessionStage, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
@@ -39,8 +38,8 @@ use crate::product::models::{
     WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_store::{
-    WorkItemPlanStore, copy_draft_for_current_round, mark_draft_active,
-    mark_draft_record_superseded, next_batch_id, next_draft_id, next_generation_round_id,
+    WorkItemPlanStore, mark_draft_active, mark_draft_record_superseded, next_batch_id,
+    next_draft_id,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_split_engine::{
@@ -52,22 +51,24 @@ use crate::product::work_item_split_validator::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::types::GenerateWorkItemsRequest;
+#[cfg(test)]
+use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ChoiceOption, ChoiceQuestion,
     NodeDetailSummary, ProviderConfigSnapshot, RecoverableInterruptedOperation,
     RecoverableInterruptedRun, RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity,
     ReviewGate, ReviewVerdict, ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode,
     TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType,
-    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto,
-    VerificationPlanDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
-    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
-    WorkItemDraftCandidatePayload, WorkItemGenerationModeDto, WorkItemPlanCandidateDto,
-    WorkItemPlanCompileRecoveryActionDto, WorkItemPlanCompileReportPayload,
-    WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
-    WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
-    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
-    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
-    WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
+    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
+    WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload, WorkItemCandidateDto,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload,
+    WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
+    WorkItemPlanCompileReportPayload, WorkItemPlanContextBlockerDto,
+    WorkItemPlanContextBlockerPayload, WorkItemPlanDto, WorkItemPlanOutlineCandidateDto,
+    WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
+    WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
+    WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
+    WsOutMessage, WsProviderConfig,
 };
 
 mod advance;
@@ -131,7 +132,7 @@ pub use review::policy_routing::{
     GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,
 };
 pub use types::{
-    ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, LinkedWorkspaceAmendmentTarget,
+    ArtifactUpdateEvent, EngineEvent, LinkedWorkspaceAmendmentTarget,
     LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
     SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
     WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceConfirmOutcome,

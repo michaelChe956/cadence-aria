@@ -6,55 +6,6 @@
 use super::author_revision_loop::prompt_engine_with_artifact;
 use super::*;
 
-/// 真实 LifecycleStore 的单仓 Design fixture：Design record 不含 aggregate scope，确保
-/// Author/Revision 输入走单仓分支；session 同样经持久化路径恢复。
-fn persistent_single_repo_design_test_engine() -> (TempDir, LifecycleStore, String, WorkspaceEngine)
-{
-    let (tmp, checkpoint_store) = setup();
-    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
-    let story = lifecycle_store
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            title: "单仓 Story".to_string(),
-            aggregate_codebase: None,
-        })
-        .expect("seed single-repo Story record");
-    let design = lifecycle_store
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id],
-            title: "单仓 Design".to_string(),
-            aggregate_codebase: None,
-        })
-        .expect("seed single-repo Design record");
-    let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: design.id.clone(),
-            workspace_type: WorkspaceType::Design,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-            work_item_plan_options: None,
-        })
-        .expect("seed Design workspace session");
-    let (tx, _rx) = mpsc::channel(64);
-    let engine = WorkspaceEngine::new_persistent(
-        checkpoint_store,
-        lifecycle_store.clone(),
-        tx,
-        WorkspaceSession::from_record(session_record),
-    );
-
-    (tmp, lifecycle_store, design.id, engine)
-}
-
 fn revise_review_verdict(summary: &str, comments: &str) -> ReviewVerdict {
     ReviewVerdict {
         verdict: ReviewVerdictType::Revise,

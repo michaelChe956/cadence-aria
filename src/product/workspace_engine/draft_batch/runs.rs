@@ -36,96 +36,6 @@ impl WorkspaceEngine {
         .await
     }
 
-    pub(crate) async fn begin_work_item_batch_review_run(&mut self) -> String {
-        self.transition_stage(WorkspaceStage::CrossReview).await;
-        let round = self.next_review_round();
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
-        self.create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::WorkItemBatchReview,
-            agent: Some(reviewer),
-            stage: WorkspaceStage::CrossReview,
-            round: Some(round),
-            title: format!("Work Item Batch Review Round {round}"),
-            summary: Some("审核整组 Work Item Draft".to_string()),
-            status: TimelineNodeStatus::Active,
-        })
-        .await
-    }
-
-    pub(crate) fn create_current_work_item_batch_record(
-        &self,
-    ) -> Result<WorkItemBatchRecord, String> {
-        let store = self.work_item_plan_store()?;
-        let project_id = self.session.project_id.clone();
-        let issue_id = self.session.issue_id.clone();
-        let plan_id = self.session.entity_id.clone();
-        let mut index = store
-            .load_active_index(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?
-            .ok_or_else(|| "work item plan active index is missing".to_string())?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let batch = WorkItemBatchRecord {
-            batch_id: next_batch_id(&index, &now),
-            generation_round_id: index.current_generation_round_id.clone(),
-            mode: WorkItemGenerationMode::Batch,
-            item_draft_ids: Vec::new(),
-            status: WorkItemBatchStatus::Generating,
-            validation_failed_ids: Vec::new(),
-            created_at: now.clone(),
-        };
-        let outline_candidate = self.current_work_item_plan_outline_candidate()?;
-        let first_outline_id =
-            work_item_plan_outline_topological_order(&outline_candidate.outline)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "WorkItemPlan Outline has no work item outlines".to_string())?;
-        index.active_outline_id = Some(first_outline_id);
-        index.batches.push(batch.clone());
-        index.updated_at = now;
-        store
-            .save_active_index(&index)
-            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
-        Ok(batch)
-    }
-
-    pub(crate) async fn start_serial_work_item_draft_run(&mut self) {
-        let first_outline_id =
-            match self
-                .current_work_item_plan_outline_candidate()
-                .and_then(|outline_candidate| {
-                    work_item_plan_outline_topological_order(&outline_candidate.outline).and_then(
-                        |order| {
-                            order.into_iter().next().ok_or_else(|| {
-                                "WorkItemPlan Outline has no work item outlines".to_string()
-                            })
-                        },
-                    )
-                }) {
-                Ok(outline_id) => outline_id,
-                Err(message) => {
-                    self.enter_human_confirm(Some(format!(
-                        "无法开始逐项生成 Work Item：{message}"
-                    )))
-                    .await;
-                    return;
-                }
-            };
-
-        if let Err(message) = self.set_active_work_item_plan_outline(&first_outline_id) {
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.enter_human_confirm(Some("保存当前 Work Item 游标失败".to_string()))
-                .await;
-            return;
-        }
-
-        self.create_serial_work_item_draft_run_node(&first_outline_id)
-            .await;
-    }
-
     pub(crate) async fn start_serial_work_item_draft_run_for(
         &mut self,
         outline_id: &str,
@@ -383,5 +293,28 @@ impl WorkspaceEngine {
             batch_status: batch.status.clone(),
             failure_summary,
         })
+    }
+
+    // L2 退役（T5/REQ-RET-02）：wire 入口已删；保留供 policy routing 测试构造
+    // batch review 场景（cfg(test)）。
+    #[cfg(test)]
+    pub(crate) async fn begin_work_item_batch_review_run(&mut self) -> String {
+        self.transition_stage(WorkspaceStage::CrossReview).await;
+        let round = self.next_review_round();
+        let reviewer = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::WorkItemBatchReview,
+            agent: Some(reviewer),
+            stage: WorkspaceStage::CrossReview,
+            round: Some(round),
+            title: format!("Work Item Batch Review Round {round}"),
+            summary: Some("审核整组 Work Item Draft".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await
     }
 }

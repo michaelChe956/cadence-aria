@@ -124,61 +124,6 @@ pub(crate) fn build_work_item_plan_revision_input(
 }
 
 impl WorkspaceEngine {
-    pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {
-        self.session.workspace_type == WorkspaceType::WorkItemPlan
-            && self
-                .latest_review_verdict
-                .as_ref()
-                .and_then(|verdict| verdict.work_item_plan_review.as_ref())
-                .is_some_and(|review| {
-                    review.review_action == WorkItemPlanReviewAction::ReviseOutline
-                        || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
-                        || review
-                            .gates
-                            .contains(&WorkItemPlanReviewGate::RequiresPlanReopen)
-                })
-    }
-
-    pub(crate) fn human_confirm_should_revise_work_item_plan_outline(&self) -> bool {
-        if self.session.workspace_type != WorkspaceType::WorkItemPlan
-            || !self.current_artifact_is_work_item_plan_outline_candidate()
-        {
-            return false;
-        }
-
-        self.timeline_nodes
-            .iter()
-            .rev()
-            .find(|node| {
-                node.status == TimelineNodeStatus::Completed
-                    && matches!(
-                        &node.node_type,
-                        TimelineNodeType::WorkItemPlanOutlineReview
-                            | TimelineNodeType::WorkItemDraftReview
-                            | TimelineNodeType::WorkItemBatchReview
-                    )
-            })
-            .is_some_and(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineReview)
-    }
-
-    pub(crate) fn review_decision_outline_revision_persistence_policy(
-        &self,
-    ) -> OutlineRevisionPersistencePolicy {
-        match self
-            .latest_review_verdict
-            .as_ref()
-            .and_then(|verdict| verdict.work_item_plan_review.as_ref())
-            .map(|review| &review.review_scope)
-        {
-            Some(WorkItemPlanReviewScope::Item | WorkItemPlanReviewScope::Batch) => {
-                OutlineRevisionPersistencePolicy::RequireActiveRound
-            }
-            Some(WorkItemPlanReviewScope::Outline) | None => {
-                OutlineRevisionPersistencePolicy::AllowMissingInitialRound
-            }
-        }
-    }
-
     fn outline_revision_persistence_snapshot(
         &self,
         lifecycle: &LifecycleStore,
@@ -207,9 +152,6 @@ impl WorkspaceEngine {
             }
             WorkItemPlanOutlineRevisionSource::ReviewDecision => {
                 "Review Decision 已请求返修 WorkItemPlan Outline"
-            }
-            WorkItemPlanOutlineRevisionSource::HumanConfirm => {
-                "Human Confirm 已请求返修 WorkItemPlan Outline"
             }
         }
         .to_string();

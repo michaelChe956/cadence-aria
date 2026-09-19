@@ -1,44 +1,20 @@
 use super::*;
 
-
 // 退役留档（T5/REQ-RET-02）：context blocker resolution 三 helper
 //（empty_design_context_capabilities/estimate_context_resolution_tokens/
 // format_context_blocker_resolution_markdown）随 ContextBlocker 处理器删除
 //（wp5-attribution-table.md §3）。
 
 impl WorkspaceEngine {
-// 退役留档（T5/REQ-RET-02）：handle_author_decision（legacy author 逐段决策）
-// 随 AuthorDecision 消息族删除——SC 无消费（wp5-attribution-table.md §2）；
-// story/design 会话经 cockpit 的 author 决策面=T4 §4 登记的「T5 后 legacy
-// 决策通道整体终止」限制（产物确认走 HTTP confirm 端点）。
+    // 退役留档（T5/REQ-RET-02）：handle_author_decision（legacy author 逐段决策）
+    // 随 AuthorDecision 消息族删除——SC 无消费（wp5-attribution-table.md §2）；
+    // story/design 会话经 cockpit 的 author 决策面=T4 §4 登记的「T5 后 legacy
+    // 决策通道整体终止」限制（产物确认走 HTTP confirm 端点）。
 
     /// spec-design-dialog-revision T5/M-1：author 反馈修订分流谓词（pending 存在且无 review verdict）。
     /// prompts/revision.rs 与 provider_drive.rs 两处共用，避免重复实现漂移。
     pub(crate) fn is_author_feedback_revision(&self) -> bool {
         self.pending_revision_context.is_some() && self.latest_review_verdict.is_none()
-    }
-
-    /// AcceptWithReview 的 reviewer 就绪检查：判定依据是落盘的 reviewer_enabled_at_start，
-    /// 不可用 reviewer_provider.is_none()（from_record 恒 Some + fallback author，重连后失真）。
-    fn ensure_reviewer_available_for_review_request(&mut self) -> Result<(), String> {
-        let review_disabled_at_start = self.session.reviewer_enabled_at_start == Some(false);
-        let review_active =
-            self.session.review_rounds > 0 && self.session.reviewer_provider.is_some();
-        if review_active {
-            return Ok(());
-        }
-        if review_disabled_at_start {
-            if let Some(provisional) = self.session.provisional_reviewer_provider.clone() {
-                self.session.reviewer_provider = Some(provisional);
-                self.session.review_rounds = 1;
-                return Ok(());
-            }
-            return Err(
-                "创建时未启用 review 且未保留 reviewer 选择：请确认定稿，或重新开始并启用 review"
-                    .to_string(),
-            );
-        }
-        Err("当前会话无可用 reviewer：请确认定稿，或重新开始并启用 review".to_string())
     }
 
     /// 兼容旧测试的评审启动：未启用 review 时进入人工确认；已启用时复用当前
@@ -85,18 +61,6 @@ impl WorkspaceEngine {
             self.mark_latest_artifact_reviewed(Some(ProviderName::Fake), None);
             self.enter_human_confirm(Some("等待人工确认".to_string()))
                 .await;
-        }
-    }
-
-    /// start_review 后按实际 stage 判定 outcome：Fake 快速路径会直接进入 HumanConfirm，
-    /// 此时必须返回 HumanConfirm（避免 handler 向已处 HumanConfirm 的会话 spawn ReviewOnly run）。
-    /// Accept Some(true)/Accept None 有效态/AcceptWithReview 三处共用，保持单点判定。
-    async fn start_review_and_outcome(&mut self) -> AuthorDecisionOutcome {
-        self.start_review().await;
-        if self.session.stage == WorkspaceStage::CrossReview {
-            AuthorDecisionOutcome::StartReview
-        } else {
-            AuthorDecisionOutcome::HumanConfirm
         }
     }
 

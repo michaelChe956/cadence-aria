@@ -1,6 +1,4 @@
-use crate::product::models::HumanPresentationRevision;
 #[cfg(unix)]
-use std::sync::Barrier;
 
 #[test]
 fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
@@ -120,47 +118,3 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // 退役留档（T5/REQ-RET-02）：save_presentation_command 夹具随保存命令族退役（唯一调用方测试已退役）。
-
-fn assert_non_plan_restart_has_no_human_presentations(
-    checkpoint_root: &std::path::Path,
-    lifecycle: &LifecycleStore,
-    workspace_type: WorkspaceType,
-    entity_id: &str,
-) {
-    let session_record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: entity_id.to_string(),
-        workspace_type,
-        author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: ProviderName::Codex,
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
-        .unwrap();
-    let session_id = session_record.id.clone();
-    let (initial_tx, _initial_rx) = mpsc::channel(8);
-    let initial = WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(checkpoint_root.to_path_buf())),
-        lifecycle.clone(),
-        initial_tx,
-        WorkspaceSession::from_record(session_record),
-    );
-    drop(initial);
-
-    let persisted = lifecycle.get_workspace_session(&session_id).unwrap();
-    let (restart_tx, _restart_rx) = mpsc::channel(8);
-    let restarted = WorkspaceEngine::new_persistent(
-        Arc::new(CheckpointStore::new(checkpoint_root.to_path_buf())),
-        lifecycle.clone(),
-        restart_tx,
-        WorkspaceSession::from_record(persisted),
-    );
-    let WsOutMessage::SessionState {
-        human_presentation_revisions,
-        ..
-    } = restarted.build_session_state()
-    else {
-        panic!("expected session state");
-    };
-    assert!(human_presentation_revisions.is_empty());
-}

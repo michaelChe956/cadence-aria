@@ -291,22 +291,23 @@ mod tests {
             assert_eq!(retired_inbound_message_type(&raw), Some(wire_name));
         }
         // 现役消息名不得误判为退役（parse 成功路径）。
-        for live in ["confirm", "advance", "human_gate_feedback", "abandon_human_gate"] {
+        for live in [
+            "confirm",
+            "advance",
+            "human_gate_feedback",
+            "abandon_human_gate",
+        ] {
             let raw = format!(r#"{{"type":"{live}","command_id":"cmd"}}"#);
             assert_eq!(retired_inbound_message_type(&raw), None, "{live}");
         }
         assert_eq!(retired_inbound_message_type("not json"), None);
 
         let error = retired_message_protocol_error(&WorkspaceStage::HumanConfirm, "human_confirm");
-        let WsOutMessage::ProtocolError {
-            code,
-            context,
-            ..
-        } = error
-        else {
+        let WsOutMessage::ProtocolError { code, context, .. } = error else {
             panic!("expected protocol error");
         };
         let context = context.expect("retired error context");
+        assert_eq!(code, "LEGACY_MESSAGE_RETIRED");
         assert_eq!(context["stage"], "human_confirm");
         assert_eq!(context["received"], "human_confirm");
     }

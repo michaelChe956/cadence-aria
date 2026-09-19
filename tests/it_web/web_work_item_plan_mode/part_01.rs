@@ -9,10 +9,10 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
-    CountedReviewerStreamingProvider, QueuedSplitOutput,
+    QueuedSplitOutput,
     app_with_confirmed_story_and_design_and_streaming_outputs,
     app_with_confirmed_story_and_design_and_streaming_raw_outputs,
-    app_for_existing_root_with_streaming_raw_outputs, malformed_outline_structured_stdout,
+    malformed_outline_structured_stdout,
     request_json, valid_outline_output,
 };
 

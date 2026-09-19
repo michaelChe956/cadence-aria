@@ -555,7 +555,7 @@
         );
         let app = build_web_router(state);
 
-        let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
+        let _response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
 
         // L2 重钉（T5/REQ-WSC-08）：rollout flag 不再把新会话切到 legacy——
         // flow_kind 恒 SingleCandidate（该测试原断言 Legacy 随 legacy flow 删除退役）。
@@ -583,6 +583,7 @@
 
             let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
             assert!(response.status().is_server_error());
+            drop(response);
             // L2 重钉（T5/REQ-WSC-08）：preflight 失败=新路径 durable Failed 终态
             //（含原因），无 legacy 回落、无 flow_kind 切换。
             let sessions = lifecycle

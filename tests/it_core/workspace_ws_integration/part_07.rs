@@ -3,7 +3,6 @@
 // protocol error（LEGACY_MESSAGE_RETIRED，含 stage 上下文）且零副作用（会话
 // 状态与事件流不变）。红测先行：本文件先于 in_.rs 删除落地（彼时消息仍被接受，
 // 断言失败=红）；变体删除后 parse 面自然拒收 → 绿。
-use super::*;
 
 #[tokio::test]
 async fn retired_legacy_decision_messages_receive_stage_specific_protocol_error_without_side_effects(

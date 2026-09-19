@@ -392,7 +392,6 @@ pub enum ReviewDecisionOutcome {
 pub(crate) enum WorkItemPlanOutlineRevisionSource {
     AuthorConfirm,
     ReviewDecision,
-    HumanConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,15 +429,8 @@ pub enum WorkspaceConfirmOutcome {
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthorDecisionOutcome {
-    StartReview,
-    StartRevision { feedback: String },
-    Finalized,
-    StartWorkItemPlanOutlineRevision { feedback: Option<String> },
-    HumanConfirm,
-    PrepareContext,
-}
+// 退役留档（T5/REQ-RET-02）：AuthorDecisionOutcome 随 handle_author_decision/
+// handle_work_item_plan_outline_decision 删除（wire 唯一入口已退役）。
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkItemPlanAuthorOutcome {

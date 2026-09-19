@@ -64,9 +64,7 @@ impl WorkspaceEngine {
             .active_node_agent()
             .or_else(|| self.session.reviewer_provider.clone());
         let verdict_value = serde_json::to_value(&verdict).unwrap_or(serde_json::Value::Null);
-        let _ = self
-            .persist_review_verdict(&node_id, verdict_value)
-            .await;
+        let _ = self.persist_review_verdict(&node_id, verdict_value).await;
         let _ = self
             .event_tx
             .send(review_complete_event_from_verdict(
@@ -566,19 +564,6 @@ impl WorkspaceEngine {
         }
     }
 
-    pub(crate) fn record_manual_policy_repair(&mut self) -> Result<(), String> {
-        if self.session.run_history.manual_repairs_used >= RunBudgets::default().max_manual_repairs
-        {
-            return Err("manual repair budget is exhausted".to_string());
-        }
-        self.update_policy_history(|history| {
-            history.manual_repairs_used = history
-                .manual_repairs_used
-                .checked_add(1)
-                .ok_or_else(|| "manual repair counter overflow".to_string())?;
-            Ok(())
-        })
-    }
     fn record_policy_transition(&mut self) -> Result<(), String> {
         if self.session.run_history.transitions_used >= RunBudgets::default().max_transitions {
             return Err("stage transition budget is exhausted".to_string());
@@ -685,10 +670,12 @@ impl WorkspaceEngine {
                     // L2 退役（T5/REQ-RET-02）：SC 改道 human gate（review_decision
                     // 消息族已删）；非 SC 保留原阶段=在途限制（REQ-RET-03）。
                     ReviewGate::RequiresRevision if self.is_single_candidate_plan() => {
-                        self.enter_human_confirm(Some(verdict.summary.clone())).await;
+                        self.enter_human_confirm(Some(verdict.summary.clone()))
+                            .await;
                     }
                     ReviewGate::RequiresRevision => {
-                        self.enter_review_decision(round, verdict.summary.clone()).await;
+                        self.enter_review_decision(round, verdict.summary.clone())
+                            .await;
                     }
                 }
             }
@@ -975,14 +962,6 @@ impl WorkspaceEngine {
             .save_active_index(&index)
             .map_err(|error| format!("save work item plan active index failed: {error}"))?;
         Ok(())
-    }
-
-    pub(crate) async fn continue_after_work_item_draft_review_pass(
-        &mut self,
-        outline_id: &str,
-    ) -> Result<(), String> {
-        self.continue_after_work_item_draft_review_pass_with_policy_valid(outline_id, false)
-            .await
     }
 
     async fn continue_after_work_item_draft_review_pass_with_policy_valid(

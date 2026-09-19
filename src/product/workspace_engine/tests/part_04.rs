@@ -333,9 +333,3 @@ struct RevisionInputRecordingProvider {
     input: Arc<Mutex<Option<StreamingProviderInput>>>,
     output: &'static str,
 }
-
-struct RevisionResumeStallThenSuccessProvider {
-    inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
-    calls: Arc<Mutex<u32>>,
-    output: &'static str,
-}

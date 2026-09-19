@@ -1,5 +1,5 @@
-/// T3：run 在最后一个 attachment 断开后完成时，manager 必须从 registry 回收；再次
-/// attach 必须从 durable 重建，且不得新增断连终态审计节点。
+// T3：run 在最后一个 attachment 断开后完成时，manager 必须从 registry 回收；再次
+// attach 必须从 durable 重建，且不得新增断连终态审计节点。
 #[tokio::test]
 async fn workspace_session_manager_recycled_after_terminal_without_subscribers() {
     let root = tempdir().expect("root");
@@ -77,8 +77,8 @@ async fn workspace_session_manager_recycled_after_terminal_without_subscribers()
     server.abort();
 }
 
-/// REQ-WCR-02：第二个 legacy driver 接管会话 lease；被接管的旧连接迟到写必须
-/// 以可诊断的协议错误拒绝，而当前 holder 仍可中止同一活动 run。
+// REQ-WCR-02：第二个 legacy driver 接管会话 lease；被接管的旧连接迟到写必须
+// 以可诊断的协议错误拒绝，而当前 holder 仍可中止同一活动 run。
 #[tokio::test]
 async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
     let root = tempdir().expect("root");
@@ -141,8 +141,8 @@ async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
     server.abort();
 }
 
-/// REQ-WCR-02：driver close 只撤销连接持有型 lease，不取消正在运行的 provider，
-/// 后续真实完成仍写入业务终态且不产生断连中止 marker。
+// REQ-WCR-02：driver close 只撤销连接持有型 lease，不取消正在运行的 provider，
+// 后续真实完成仍写入业务终态且不产生断连中止 marker。
 #[tokio::test]
 async fn workspace_ws_driver_close_revokes_lease_run_completes() {
     let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
@@ -212,8 +212,8 @@ async fn workspace_ws_driver_close_revokes_lease_run_completes() {
     server.abort();
 }
 
-/// REQ-WCR-02/F1：显式 observer 的 Hello 不得接管 driver lease；读面的 initial
-/// snapshot 仍可用，而现任 driver 必须继续能够中止 run。
+// REQ-WCR-02/F1：显式 observer 的 Hello 不得接管 driver lease；读面的 initial
+// snapshot 仍可用，而现任 driver 必须继续能够中止 run。
 #[tokio::test]
 async fn workspace_ws_observer_connection_does_not_take_over_lease() {
     let root = tempdir().expect("root");
@@ -275,8 +275,8 @@ async fn workspace_ws_observer_connection_does_not_take_over_lease() {
     server.abort();
 }
 
-/// REQ-WCR-04/T9：manager 只分配一次序号；attach 基线和所有在线 attachment 的直播
-/// 事件必须携带同一递增 `event_seq`，而非 socket-local 序号。
+// REQ-WCR-04/T9：manager 只分配一次序号；attach 基线和所有在线 attachment 的直播
+// 事件必须携带同一递增 `event_seq`，而非 socket-local 序号。
 #[tokio::test]
 async fn workspace_ws_fanout_events_have_shared_monotonic_event_seq() {
     let root = tempdir().expect("root");
@@ -352,7 +352,7 @@ async fn workspace_ws_fanout_events_have_shared_monotonic_event_seq() {
     server.abort();
 }
 
-/// REQ-WCR-04：一个不消费的 observer 不得反压 provider，快 observer 保持精确直播流。
+// REQ-WCR-04：一个不消费的 observer 不得反压 provider，快 observer 保持精确直播流。
 #[tokio::test]
 async fn workspace_ws_slow_subscriber_degrades_without_backpressure() {
     let root = tempdir().expect("root");
@@ -474,7 +474,7 @@ async fn workspace_ws_slow_subscriber_degrades_without_backpressure() {
     server.abort();
 }
 
-/// REQ-WCR-04：关闭单一 attachment 只摘除该连接，其他连接的事件流和 run 不受影响。
+// REQ-WCR-04：关闭单一 attachment 只摘除该连接，其他连接的事件流和 run 不受影响。
 #[tokio::test]
 async fn matrix4_observer_close_zero_impact_on_driver_run() {
     let root = tempdir().expect("root");
@@ -611,150 +611,15 @@ async fn recv_until_stream_chunk_value(
     panic!("stream_chunk not received");
 }
 
-async fn recv_until_close_frame(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    context: &str,
-) {
-    for _ in 0..20 {
-        match timeout(Duration::from_secs(7), ws.next())
-            .await
-            .unwrap_or_else(|_| panic!("{context} timeout"))
-        {
-            Some(Ok(Message::Close(_))) => return,
-            Some(Err(error))
-                if error
-                    .to_string()
-                    .contains("reset without closing handshake") =>
-            {
-                // 当前 axum socket 关闭会先记录 server_idle 并发送 Close；对端在 close
-                // 握手完成前复位时，tungstenite 会报告此错误而不是可见 Close frame。
-                // 诊断断言随后仍验证服务端实际按 idle 关闭。
-                return;
-            }
-            Some(Ok(Message::Text(text))) => {
-                let json: Value = serde_json::from_str(&text).expect("ws json before close");
-                assert_ne!(
-                    json["type"], "error",
-                    "{context} received protocol error before idle close: {json}"
-                );
-            }
-            Some(Ok(_)) => {}
-            Some(Err(error)) => panic!("{context} websocket error: {error}"),
-            None => panic!("{context} websocket ended before close frame"),
-        }
-    }
-    panic!("{context} did not receive close frame or reset");
-}
+// RCA §6 矩阵②服务端半面：human_confirm 静默超过 idle 阈值后，服务器可以回收
+// 连接，但不能写入任何终态；重连仍必须投影原来的门等待。
+// 退役留档（T5/REQ-RET-02）：`matrix2_gate_silence_idle_close_writes_no_terminal` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-/// RCA §6 矩阵②服务端半面：human_confirm 静默超过 idle 阈值后，服务器可以回收
-/// 连接，但不能写入任何终态；重连仍必须投影原来的门等待。
-#[tokio::test]
-async fn matrix2_gate_silence_idle_close_writes_no_terminal() {
-    let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
-    let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
-    let state = WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    );
-    let controls = state.test_controls.clone();
-    controls
-        .set_server_idle_timeout(Duration::from_millis(30))
-        .await;
-    let app = build_web_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-
-    let (mut ws, _) = connect_async(url.clone()).await.expect("ws");
-    let _initial = recv_json(&mut ws).await;
-    send_json(
-        &mut ws,
-        &WsInMessage::UserMessage {
-            content: long_message("matrix2_gate_silence"),
-        },
-    )
-    .await;
-    let _checkpoint = recv_until_message_complete(&mut ws).await;
-    accept_author_output(&mut ws).await;
-    assert_eq!(
-        recv_until_stage(&mut ws, "human_confirm").await,
-        "human_confirm"
-    );
-
-    let durable_before_idle_close = durable_tree_snapshot(root.path());
-    recv_until_close_frame(&mut ws, "human gate idle close").await;
-    let diagnostic = wait_for_connection_diagnostic(&controls, "server_idle").await;
-    assert_eq!(diagnostic["idle_timeout_triggered"], true);
-    assert!(
-        diagnostic["current_run_token"].is_null(),
-        "human_confirm 窗口不能保留 active run"
-    );
-
-    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let session = lifecycle
-        .get_workspace_session("workspace_session_0001")
-        .expect("workspace session");
-    assert_eq!(
-        session.status,
-        cadence_aria::product::models::WorkspaceSessionStatus::WaitingForHuman
-    );
-    let nodes = lifecycle
-        .load_timeline_nodes("workspace_session_0001")
-        .expect("timeline nodes");
-    assert!(
-        nodes
-            .iter()
-            .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect),
-        "idle 回收 human_confirm 连接不得写入断连伪终态"
-    );
-    assert_ne!(
-        nodes.last().expect("human gate timeline node").status,
-        TimelineNodeStatus::Failed,
-        "idle 回收不得将等待门覆盖为 Failed"
-    );
-    assert_eq!(
-        durable_tree_snapshot(root.path()),
-        durable_before_idle_close,
-        "idle close 不得产生任何 durable 终态写入"
-    );
-
-    let (mut probe, _) = connect_async(url).await.expect("reconnect probe");
-    match recv_json(&mut probe).await {
-        WsOutMessage::SessionState {
-            stage,
-            session_status,
-            timeline_nodes,
-            ..
-        } => {
-            assert_eq!(
-                session_status,
-                cadence_aria::product::models::WorkspaceSessionStatus::WaitingForHuman
-            );
-            assert!(
-                matches!(stage.as_str(), "author_confirm" | "human_confirm"),
-                "重连必须恢复一个待人工处理的 gate，而非由 idle close 改写为终态：{stage}"
-            );
-            assert!(
-                timeline_nodes
-                    .iter()
-                    .all(|node| node.node_type != TimelineNodeType::AbortedByDisconnect)
-            );
-        }
-        other => panic!("expected session_state after idle reconnect, got {other:?}"),
-    }
-
-    drop(probe);
-    drop(ws);
-    server.abort();
-}
-
-/// RCA §6 矩阵③：所有可在 active run 期间由客户端触发的关闭形态都必须留下唯一的
-/// 中性诊断，并让 provider 自然写入业务终态；server-idle 在 active run 中由矩阵①
-/// 的 guard 禁止触发，空闲 gate 的 server-idle 回收由矩阵②覆盖。
+// RCA §6 矩阵③：所有可在 active run 期间由客户端触发的关闭形态都必须留下唯一的
+// 中性诊断，并让 provider 自然写入业务终态；server-idle 在 active run 中由矩阵①
+// 的 guard 禁止触发，空闲 gate 的 server-idle 回收由矩阵②覆盖。
 #[tokio::test]
 async fn matrix3_non_idle_closes_during_run_keep_business_terminal() {
     let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;

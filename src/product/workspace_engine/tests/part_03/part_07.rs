@@ -280,42 +280,6 @@ async fn outline_revision_active_index_load_failure_rolls_back_session_and_engin
     assert_outline_revision_failure_keeps_engine_state(&engine, &source_node_id);
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn outline_revision_active_index_save_failure_rolls_back_session_and_engine_state() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let (_tmp, lifecycle, plan_id, source_node_id, mut engine) =
-        make_atomic_outline_revision_engine("sess_outline_atomic_save_failure", true).await;
-    let session_id = engine.session.session_id.clone();
-    let index_path = active_index_path(&lifecycle, &plan_id);
-    let index_parent = index_path.parent().expect("active index parent");
-    let original_permissions = std::fs::metadata(index_parent)
-        .expect("active index parent metadata")
-        .permissions();
-    let mut readonly_permissions = original_permissions.clone();
-    readonly_permissions.set_mode(0o555);
-    std::fs::set_permissions(index_parent, readonly_permissions)
-        .expect("make active index parent readonly");
-
-    let result = engine
-        .prepare_work_item_plan_outline_revision(
-            Some("新返修上下文".to_string()),
-            WorkItemPlanOutlineRevisionSource::HumanConfirm,
-            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
-        )
-        .await;
-    std::fs::set_permissions(index_parent, original_permissions)
-        .expect("restore active index parent permissions");
-    let error = result.expect_err("active index save failure must fail");
-
-    assert!(error.contains("save work item plan active index failed"));
-    assert_eq!(
-        lifecycle
-            .get_workspace_session(&session_id)
-            .expect("persisted session")
-            .status,
-        WorkspaceSessionStatus::WaitingForHuman
-    );
-    assert_outline_revision_failure_keeps_engine_state(&engine, &source_node_id);
-}
+// 退役留档（T5/REQ-RET-02）：`outline_revision_active_index_save_failure_rolls_back_session_and_engine_state` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

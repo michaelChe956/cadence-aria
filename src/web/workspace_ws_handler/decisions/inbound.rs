@@ -669,10 +669,9 @@ async fn handle_workspace_inbound_message_inner(
                 },
             };
             let _ = send_json_outbound(&outbound_tx, &message).await;
-        }
-        // 退役留档（T5/REQ-RET-02）：RevertWorkItem 消息族已删除（SC 无 revert
-        // 消费，grep 实测裁定见 wp5-attribution-table.md §2）——wire 名 parse
-        // 面拒收，路由分支退役。
+        } // 退役留档（T5/REQ-RET-02）：RevertWorkItem 消息族已删除（SC 无 revert
+          // 消费，grep 实测裁定见 wp5-attribution-table.md §2）——wire 名 parse
+          // 面拒收，路由分支退役。
     }
 }
 

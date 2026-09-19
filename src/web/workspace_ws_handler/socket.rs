@@ -293,7 +293,6 @@ pub(crate) fn planning_resume_run_kind(
 /// `WsInMessage` intentionally remains the typed business payload. The envelope records
 /// only field names (never client values) so protocol handlers can reject fields that are
 /// forbidden for a durable flow before any state mutation occurs.
-
 pub(crate) fn parse_workspace_inbound_text(
     text: &str,
 ) -> Result<WorkspaceInboundEnvelope, serde_json::Error> {

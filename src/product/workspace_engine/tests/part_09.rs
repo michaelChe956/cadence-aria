@@ -663,7 +663,16 @@ fn make_work_item_plan_engine_with_draft_candidate(
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: ProviderName::Codex,
         review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, },
+        superpowers_enabled: false, openspec_enabled: false,
+        // L2 退役（T5）：staged 夹具显式钉 Legacy flow（历史在途会话形态——
+        // options 缺省值已随单路径收敛翻为 SingleCandidate）。
+        work_item_plan_options: Some(
+            crate::product::lifecycle_store::WorkItemPlanSessionOptions {
+                flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+                run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                rollout_snapshot: false,
+            },
+        ), },
             format!("workspace_session_{session_sequence:06}"),
         )
         .unwrap();

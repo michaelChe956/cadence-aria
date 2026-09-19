@@ -488,45 +488,6 @@ async fn work_item_plan_confirm_rejects_confirmed_plan_without_compiled_work_ite
     assert!(error.contains("compiled WorkItem"));
 }
 
-#[tokio::test]
-async fn outline_generation_metadata_updates_current_artifact_without_new_version() {
-    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_metadata_no_version");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    let version_count_before = engine.artifact_versions.len();
-    let current_version_before = engine
-        .artifact_versions
-        .iter()
-        .find(|version| version.is_current)
-        .map(|version| version.version)
-        .expect("current outline version");
-
-    engine
-        .update_work_item_plan_outline_generation_metadata(
-            Some("round_0002".to_string()),
-            Some(WorkItemGenerationModeDto::Serial),
-        )
-        .await
-        .expect("update outline metadata");
-
-    assert_eq!(engine.artifact_versions.len(), version_count_before);
-    let current_version = engine
-        .artifact_versions
-        .iter()
-        .find(|version| version.is_current)
-        .expect("current outline version after metadata update");
-    assert_eq!(current_version.version, current_version_before);
-    let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } =
-        &current_version.payload
-    else {
-        panic!("expected outline artifact");
-    };
-    assert_eq!(
-        outline_candidate.current_generation_round_id.as_deref(),
-        Some("round_0002")
-    );
-    assert_eq!(
-        outline_candidate.selected_generation_mode,
-        Some(WorkItemGenerationModeDto::Serial)
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`outline_generation_metadata_updates_current_artifact_without_new_version` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

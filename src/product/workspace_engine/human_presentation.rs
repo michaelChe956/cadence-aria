@@ -20,7 +20,6 @@ impl WorkspaceEngine {
     // 前端发送器 T4 已删、SC 无消费（wp5-attribution-table.md §2）；
     // latest_human_presentation_revisions（读侧呈现）保留。
 
-
     pub(crate) fn latest_human_presentation_revisions(&self) -> Vec<HumanPresentationRevision> {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan {
             return Vec::new();

@@ -179,72 +179,6 @@ impl StreamingProviderAdapter for PiHangingStreamingProvider {
     }
 }
 
-struct ChoiceThenHangingStreamingProvider;
-
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
-    async fn start(
-        &self,
-        _input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        let (event_tx, event_rx) = mpsc::channel(8);
-        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
-        tokio::spawn(async move {
-            let _ = event_tx
-                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
-                    id: "choice_hanging_001".to_string(),
-                    prompt: "继续方式？".to_string(),
-                    options: vec![ChoiceOptionData {
-                        id: "opt_0".to_string(),
-                        label: "继续 author".to_string(),
-                        description: None,
-                    }],
-                    allow_multiple: false,
-                    allow_free_text: false,
-                    questions: vec![],
-                    source: ChoiceRequestSource::ProviderChoice,
-                }))
-                .await;
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    command = command_rx.recv() => {
-                        match command {
-                            Some(ProviderCommand::Abort) | None => return,
-                            Some(ProviderCommand::ChoiceResponse { .. }) => {
-                                let _ = event_tx
-                                    .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
-                                    .await;
-                            }
-                            Some(ProviderCommand::PermissionResponse { .. })
-                            | Some(ProviderCommand::ToolResult(_)) => {}
-                        }
-                    }
-                }
-            }
-        });
-        Ok(ProviderSession {
-            native_session_id: None,
-            events: event_rx,
-            commands: command_tx,
-        })
-    }
-
-    async fn run_streaming(
-        &self,
-        _input: &AdapterInput,
-        _cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "run_streaming is not used by workspace websocket",
-            0,
-        ))
-    }
-}
-
 struct ChoiceThenCompletingStreamingProvider;
 
 #[async_trait::async_trait]
@@ -618,10 +552,6 @@ async fn create_workspace_session_fixture_with_providers(
     repo
 }
 
-fn clear_workspace_session_messages(root: &std::path::Path) {
-    replace_workspace_session_messages(root, json!([]));
-}
-
 fn replace_workspace_session_messages(root: &std::path::Path, messages: Value) {
     let session_path = root.join(
         ".aria/projects/project_0001/issues/issue_0001/workspace-sessions/workspace_session_0001.json",
@@ -656,22 +586,6 @@ async fn request_json(
         .expect("body");
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, value)
-}
-
-async fn lifecycle_json(root: &std::path::Path) -> Value {
-    let app = build_web_router(WebAppState::new(
-        root.to_path_buf(),
-        WebRuntime::new_fake(root.to_path_buf()),
-    ));
-    let (status, lifecycle) = request_json(
-        app,
-        Method::GET,
-        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    lifecycle
 }
 
 fn persisted_workspace_messages(
@@ -811,6 +725,9 @@ async fn recv_until_permission_request(
 }
 
 #[derive(Debug)]
+// L2 退役（T5/REQ-RET-02）：choice 接收 helper 的 prompt/options/source 字段
+// 原服务已退役的 choice 断言族，现仅 id 被消费。
+#[allow(dead_code)]
 struct ChoiceRequestSeen {
     id: String,
     prompt: String,
@@ -898,4 +815,70 @@ fn git_repo() -> TempDir {
         .expect("git init");
     assert!(status.success());
     dir
+}
+
+struct ChoiceThenHangingStreamingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                    id: "choice_hanging_001".to_string(),
+                    prompt: "继续方式？".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "opt_0".to_string(),
+                        label: "继续 author".to_string(),
+                        description: None,
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                    questions: vec![],
+                    source: ChoiceRequestSource::ProviderChoice,
+                }))
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    command = command_rx.recv() => {
+                        match command {
+                            Some(ProviderCommand::Abort) | None => return,
+                            Some(ProviderCommand::ChoiceResponse { .. }) => {
+                                let _ = event_tx
+                                    .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                                    .await;
+                            }
+                            Some(ProviderCommand::PermissionResponse { .. })
+                            | Some(ProviderCommand::ToolResult(_)) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
 }

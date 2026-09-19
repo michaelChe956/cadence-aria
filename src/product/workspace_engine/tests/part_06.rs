@@ -431,59 +431,6 @@ async fn handle_user_message_retries_once_when_design_author_completes_without_a
     );
 }
 
-struct StreamedArtifactSummaryProvider;
-
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
-    async fn start(
-        &self,
-        _input: StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        let (event_tx, event_rx) = mpsc::channel(8);
-        let (command_tx, _command_rx) = mpsc::channel(8);
-        tokio::spawn(async move {
-            let streamed = format!(
-                "```artifact\n{}```",
-                complete_story_artifact(
-                    "使用流式正文中的候选产物。",
-                    "Completed 摘要不含 artifact 时仍能进入审核。",
-                )
-                .replacen("# Story Spec", "# Streamed Story Spec", 1)
-            );
-            let _ = event_tx
-                .send(ProviderEvent::TextDelta { content: streamed })
-                .await;
-            let _ = event_tx
-                .send(ProviderEvent::Completed(
-                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
-                        "Story Spec 候选已输出。等待 daemon 处理。".to_string(),
-                        None,
-                    ),
-                ))
-                .await;
-        });
-        Ok(ProviderSession {
-            native_session_id: None,
-            events: event_rx,
-            commands: command_tx,
-        })
-    }
-
-    async fn run_streaming(
-        &self,
-        _input: &AdapterInput,
-        _cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "run_streaming is not used by WorkspaceEngine",
-            0,
-        ))
-    }
-}
-
 #[derive(Default)]
 struct DesignArtifactRetryProvider {
     inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,

@@ -5,9 +5,7 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::product::models::ProviderName;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
-use crate::web::workspace_ws_types::{
-    ProviderConfigSnapshot, StructuredFeedback,
-};
+use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod campaign_stage3_advance;

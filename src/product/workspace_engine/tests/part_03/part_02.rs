@@ -386,39 +386,3 @@ fn test_work_item_draft_record(
         updated_at: now,
     }
 }
-
-fn optional_work_item_plan_pass_review(
-    review_scope: WorkItemPlanReviewScope,
-    target_outline_id: Option<&str>,
-    draft_id: Option<&str>,
-    batch_id: Option<&str>,
-) -> ReviewVerdict {
-    ReviewVerdict {
-        verdict: ReviewVerdictType::Pass,
-        comments: "当前版本可以继续，但有可选建议".to_string(),
-        summary: "仅有可选建议".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Suggestion,
-            message: "补充说明\n影响：不影响继续".to_string(),
-            evidence: "主路径完整".to_string(),
-            required_action: "可补充说明".to_string(),
-            category: None,
-            class_hint: None,
-            contract_field: None,
-        }],
-        review_gate: ReviewGate::UserConfirmAllowed,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::Pass,
-            review_scope,
-            target_outline_id: target_outline_id.map(str::to_string),
-            generation_round_id: "round_0001".to_string(),
-            draft_id: draft_id.map(str::to_string),
-            batch_id: batch_id.map(str::to_string),
-            review_action: WorkItemPlanReviewAction::Continue,
-            gates: vec![],
-            affects_items: vec![],
-            warnings: vec![],
-        }),
-        structured_output_diagnostic: None,
-    }
-}

@@ -195,7 +195,9 @@ pub(crate) async fn handle_human_gate_termination_from_handler(
         engine.handle_human_gate_termination(decision).await
     };
     let message = match outcome {
-        Ok(HumanGateCloseOutcome::Busy { turn_id }) => Some(WsOutMessage::HumanGateBusy { turn_id }),
+        Ok(HumanGateCloseOutcome::Busy { turn_id }) => {
+            Some(WsOutMessage::HumanGateBusy { turn_id })
+        }
         Ok(HumanGateCloseOutcome::Confirmed) => None,
         Ok(HumanGateCloseOutcome::Abandoned) => None,
         // F7 项 2：先到者已关门，迟到 confirm 幂等 no-op；可见提示事件由 engine

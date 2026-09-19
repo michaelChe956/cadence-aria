@@ -1,6 +1,6 @@
-/// Step 1 —— 总路径：人为注入 human_required 后，
-/// `request-change:A;request-change:B;confirm` 两个 typed turn 各经完整
-/// revision/compiler/validator，approve→compile→durable Confirmed。
+// Step 1 —— 总路径：人为注入 human_required 后，
+// `request-change:A;request-change:B;confirm` 两个 typed turn 各经完整
+// revision/compiler/validator，approve→compile→durable Confirmed。
 #[tokio::test]
 async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_plan() {
     let harness = campaign_stage3_fixture(
@@ -183,7 +183,7 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
     //（stage 白名单直接拒为 STAGE_INVALID）。
 }
 
-/// Step 3a —— 预算耗尽：feedback 明确 reason 拒绝且零副作用；approve/abandon 仍可用。
+// Step 3a —— 预算耗尽：feedback 明确 reason 拒绝且零副作用；approve/abandon 仍可用。
 #[tokio::test]
 async fn campaign_stage3_budget_exhaustion_rejects_feedback_but_allows_approve_or_abandon() {
     // —— fixture A：budget=0 时 feedback 拒绝 ——
@@ -241,12 +241,12 @@ async fn campaign_stage3_budget_exhaustion_rejects_feedback_but_allows_approve_o
     assert!(harness.durable_turns().is_empty());
 }
 
-/// Step 3a-L0 —— typed abandon 命令（REQ-RET-02 L0/REQ-CG-04，双审修订红测）：
-/// `AbandonHumanGate{command_id}` 必须走真实 ws inbound 分发链（stage 白名单 →
-/// dispatch → handler → engine close）关门。白名单（protocol.rs
-/// is_message_valid_for_stage_with_flow SC HumanConfirm 分支）漏加该变体时，
-/// 本用例以 WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID protocol error 形态复现
-/// （真实链路红，非仅编译红）。
+// Step 3a-L0 —— typed abandon 命令（REQ-RET-02 L0/REQ-CG-04，双审修订红测）：
+// `AbandonHumanGate{command_id}` 必须走真实 ws inbound 分发链（stage 白名单 →
+// dispatch → handler → engine close）关门。白名单（protocol.rs
+// is_message_valid_for_stage_with_flow SC HumanConfirm 分支）漏加该变体时，
+// 本用例以 WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID protocol error 形态复现
+// （真实链路红，非仅编译红）。
 #[tokio::test]
 async fn campaign_stage3_abandon_human_gate_typed_command_closes_gate_through_socket_dispatch() {
     let harness = campaign_stage3_fixture(2, vec![]).await;
@@ -278,8 +278,8 @@ async fn campaign_stage3_abandon_human_gate_typed_command_closes_gate_through_so
     );
 }
 
-/// Step 3a-L0 —— typed abandon 命令 command_id 边界：空白 command_id 在
-/// handler 边界拒绝（与 HumanGateFeedback/Advance 同族），零 durable 副作用。
+// Step 3a-L0 —— typed abandon 命令 command_id 边界：空白 command_id 在
+// handler 边界拒绝（与 HumanGateFeedback/Advance 同族），零 durable 副作用。
 #[tokio::test]
 async fn campaign_stage3_abandon_human_gate_rejects_blank_command_id_without_side_effects() {
     let harness = campaign_stage3_fixture(2, vec![]).await;
@@ -298,17 +298,17 @@ async fn campaign_stage3_abandon_human_gate_rejects_blank_command_id_without_sid
     assert!(harness.durable_turns().is_empty(), "不创建 turn");
 }
 
-/// Step 3a-L0 —— legacy RequestChange 在 SC 门 wire 面直接拒绝（原 multi-turn
-/// 用例内直呼 engine 的防回归锁迁移至此：L0 typed 重承载后
-/// `handle_human_gate_termination` 的参数已无法表达 RequestChange——结构性
-/// 保证；此处钉 wire 面：门开启 stage 白名单只放行 HumanGateFeedback/Confirm/
-/// HumanConfirm{Terminate} 桥接/AbandonHumanGate）。
+// Step 3a-L0 —— legacy RequestChange 在 SC 门 wire 面直接拒绝（原 multi-turn
+// 用例内直呼 engine 的防回归锁迁移至此：L0 typed 重承载后
+// `handle_human_gate_termination` 的参数已无法表达 RequestChange——结构性
+// 保证；此处钉 wire 面：门开启 stage 白名单只放行 HumanGateFeedback/Confirm/
+// HumanConfirm{Terminate} 桥接/AbandonHumanGate）。
 // 退役留档（T5/REQ-RET-02）：`campaign_stage3_legacy_request_change_is_rejected_at_sc_gate_wire_boundary` 直接驱动已删除的 legacy 决策面，
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-/// Step 3b —— 超长反馈：反馈超长与构造 prompt 超预算各一案，
-/// turn/budget/ledger/session 全零变化；缩短后新 command 可受理。
+// Step 3b —— 超长反馈：反馈超长与构造 prompt 超预算各一案，
+// turn/budget/ledger/session 全零变化；缩短后新 command 可受理。
 #[tokio::test]
 async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
     let harness = campaign_stage3_fixture(2, vec![]).await;
@@ -401,8 +401,8 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
     let _ = harness.await_gate_event("human_gate_turn_completed").await;
 }
 
-/// Step 4a —— 单飞：首 turn 阻塞期间 feedback/approve/abandon 全部 gate_busy，
-/// 无排队/关门/预算/ledger 增量；释放后才允许下一决定。
+// Step 4a —— 单飞：首 turn 阻塞期间 feedback/approve/abandon 全部 gate_busy，
+// 无排队/关门/预算/ledger 增量；释放后才允许下一决定。
 #[tokio::test]
 async fn campaign_stage3_inflight_rejects_feedback_approve_and_abandon_as_busy() {
     let harness = campaign_stage3_fixture(
@@ -495,10 +495,10 @@ async fn campaign_stage3_inflight_rejects_feedback_approve_and_abandon_as_busy()
     );
 }
 
-/// Step 4b —— reservation crash 恰好恢复一次：
-/// CAS durable 后/启动前、启动 ledger 后/完成前两个 fault point 重启并同
-/// command resend；同 turn_id、预算恰减一次、provider alive 等待 / dead 同
-/// turn attempt_no++、不超过上限、事件前缀不改。
+// Step 4b —— reservation crash 恰好恢复一次：
+// CAS durable 后/启动前、启动 ledger 后/完成前两个 fault point 重启并同
+// command resend；同 turn_id、预算恰减一次、provider alive 等待 / dead 同
+// turn attempt_no++、不超过上限、事件前缀不改。
 #[tokio::test]
 async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     // —— fault point A：CAS durable 后 / 启动前 ——
@@ -736,9 +736,9 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     }
 }
 
-/// Step 2 —— 8.2a takeover：stopped_needs_human auto parent 两次 takeover 幂等，
-/// child interactive + 门可接 typed feedback，继承 snapshot/candidate/diagnostic
-/// refs/预算，parent bytes/event prefix 完全不变；不满足前提时拒绝且无 child。
+// Step 2 —— 8.2a takeover：stopped_needs_human auto parent 两次 takeover 幂等，
+// child interactive + 门可接 typed feedback，继承 snapshot/candidate/diagnostic
+// refs/预算，parent bytes/event prefix 完全不变；不满足前提时拒绝且无 child。
 #[tokio::test]
 async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candidate() {
     use axum::extract::{Path, State};

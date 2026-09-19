@@ -1,6 +1,6 @@
 use crate::product::work_item_plan_policy::{
     ClassifiedFinding, FatalReason, FindingClass, FindingFingerprint, HumanReason, PlanOutcome,
-    PolicyDiagnostic, ReviewCycleState, ReviewFindingCategory, ReviewInvocationScope, RunBudgets,
+    PolicyDiagnostic, ReviewFindingCategory, ReviewInvocationScope, RunBudgets,
     RunHistory, RunPolicy,
 };
 use crate::product::workspace_engine::review::policy_routing::{
@@ -361,74 +361,9 @@ fn work_item_policy_counts_review_budget_per_cycle_and_stops_only_the_third_same
     );
 }
 
-#[test]
-fn policy_route_counts_automatic_and_manual_repairs_in_durable_history() {
-    let (_temporary_directory, _checkpoint_store, lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("policy_route_repair_counters");
-    let repairable = ReviewVerdict {
-        verdict: ReviewVerdictType::Revise,
-        comments: "repairable contract gap".to_string(),
-        summary: "repair outline".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::MustFix,
-            message: "repairable contract gap".to_string(),
-            evidence: "evidence".to_string(),
-            required_action: "repair".to_string(),
-            category: Some(ReviewFindingCategory::ContractGap),
-            class_hint: None,
-            contract_field: Some("contract.field".to_string()),
-        }],
-        review_gate: ReviewGate::RequiresRevision,
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    };
-
-    let action = engine
-        .work_item_policy_action("outline_review", &repairable)
-        .expect("repairable review must be evaluated");
-    assert!(matches!(
-        action,
-        RoutingAction::TriggerAggregateRepair { .. }
-    ));
-    assert_eq!(engine.session.run_history.repairs_used, 1);
-    assert_eq!(engine.session.run_history.review_cycles.len(), 1);
-    assert_eq!(
-        engine
-            .session
-            .run_history
-            .review_cycles
-            .values()
-            .next()
-            .expect("the review must create an artifact cycle")
-            .repairs_used,
-        1,
-        "the automatic repair must be accounted to its artifact review cycle"
-    );
-
-    let needs_human = review_verdict(ReviewVerdictType::NeedsHuman);
-    let _ = engine
-        .work_item_policy_action("manual_repair_gate", &needs_human)
-        .expect("native human requirement must enter a gate");
-    engine
-        .record_manual_policy_repair()
-        .expect("human-authorized repair must be durably counted");
-    assert_eq!(engine.session.run_history.manual_repairs_used, 1);
-
-    let persisted = lifecycle
-        .get_workspace_session(&engine.session.session_id)
-        .expect("repair counters must be persisted");
-    assert_eq!(persisted.run_history.repairs_used, 1);
-    assert_eq!(persisted.run_history.review_cycles.len(), 2);
-    assert!(
-        persisted
-            .run_history
-            .review_cycles
-            .values()
-            .any(|cycle| cycle.repairs_used == 1),
-        "the persisted artifact cycle must retain automatic repair consumption"
-    );
-    assert_eq!(persisted.run_history.manual_repairs_used, 1);
-}
+// 退役留档（T5/REQ-RET-02）：`policy_route_counts_automatic_and_manual_repairs_in_durable_history` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn policy_route_reloads_and_reevaluates_once_after_a_cas_conflict() {
