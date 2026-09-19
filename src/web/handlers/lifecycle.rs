@@ -580,7 +580,9 @@ pub async fn generate_design_specs(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SingleCandidatePreflightDecision {
     Eligible { repository_id: String },
-    LegacyFallback { reason: String },
+    /// L2 退役（T5/REQ-WSC-08/D3）：legacy fallback 路径已删除——preflight 失败
+    /// 一律收敛新路径 durable 终态（含原因），无 flow_kind 切换目标。
+    Ineligible { reason: String },
 }
 
 pub(crate) fn preflight_single_repository_candidate(
@@ -590,7 +592,7 @@ pub(crate) fn preflight_single_repository_candidate(
         [repository_id] => SingleCandidatePreflightDecision::Eligible {
             repository_id: repository_id.clone(),
         },
-        _ => SingleCandidatePreflightDecision::LegacyFallback {
+        _ => SingleCandidatePreflightDecision::Ineligible {
             reason: format!(
                 "single-candidate preflight requires exactly one logical repository; found {}",
                 repository_ids.len()
@@ -642,9 +644,12 @@ pub async fn prepare_work_item_plan(
 
     // 在任何 plan/session/source/IR/run-history/transaction/provider 副作用之前确定 flow。
     // Logical 路径只读 manifest + selection；不得在此调用会写 invalidation 的 resolver。
+    // L2 退役（T5/REQ-WSC-08/D3）：新会话一律 SingleCandidate——legacy fallback
+    // 分支已删除；preflight 失败不再切 flow，而是收敛为新路径 durable Failed
+    // 终态（含原因，落盘于会话创建之后处理）。
     let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    let flow_kind = match routing {
+    let preflight_failure_reason = match routing {
         RepositoryRouting::Legacy { .. } => {
             let repository_id = issue.repo_id.clone().ok_or_else(|| {
                 ApiError::validation("repository_required", "repository_id is required")
@@ -652,16 +657,11 @@ pub async fn prepare_work_item_plan(
             let repository = find_repository(&app_paths, &project_id, &repository_id)?;
             if rollout_snapshot {
                 match preflight_single_repository_candidate(&[repository.id]) {
-                    SingleCandidatePreflightDecision::Eligible { .. } => {
-                        WorkItemPlanFlowKind::SingleCandidate
-                    }
-                    SingleCandidatePreflightDecision::LegacyFallback { reason } => {
-                        tracing::info!(%reason, "single-candidate preflight selected legacy flow");
-                        WorkItemPlanFlowKind::Legacy
-                    }
+                    SingleCandidatePreflightDecision::Eligible { .. } => None,
+                    SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
                 }
             } else {
-                WorkItemPlanFlowKind::Legacy
+                None
             }
         }
         RepositoryRouting::Logical {
@@ -695,22 +695,19 @@ pub async fn prepare_work_item_plan(
             let repository_ids = selected_ids.into_iter().cloned().collect::<Vec<_>>();
             if rollout_snapshot {
                 match preflight_single_repository_candidate(&repository_ids) {
-                    SingleCandidatePreflightDecision::Eligible { .. } => {
-                        WorkItemPlanFlowKind::SingleCandidate
-                    }
-                    SingleCandidatePreflightDecision::LegacyFallback { reason } => {
-                        tracing::info!(%reason, "single-candidate preflight selected legacy flow");
-                        WorkItemPlanFlowKind::Legacy
-                    }
+                    SingleCandidatePreflightDecision::Eligible { .. } => None,
+                    SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
                 }
             } else {
-                WorkItemPlanFlowKind::Legacy
+                None
             }
         }
         RepositoryRouting::FailClosed { code, reason } => {
             return Err(routing_api_error(code, &reason));
         }
     };
+    let flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+
 
     let plan = lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
@@ -756,14 +753,29 @@ pub async fn prepare_work_item_plan(
         })
         .map_err(product_store_api_error)?;
     let session_id = session.id.clone();
+    // L2 退役（T5/REQ-WSC-08）：确定性 preflight 失败收敛新路径 durable Failed
+    // 终态（含原因）——无 legacy 回落、无 flow_kind 切换。
+    if let Some(reason) = preflight_failure_reason {
+        mark_single_candidate_prepare_failure(
+            &lifecycle,
+            &session_id,
+            &format!("single-candidate preflight failed before session side effects: {reason}"),
+        );
+        return Err(ApiError::validation(
+            "SINGLE_CANDIDATE_PREFLIGHT_FAILED",
+            reason,
+        ));
+    }
     let session = match ensure_workspace_context_message(&app_paths, &lifecycle, session).await {
         Ok(session) => session,
         Err(error) => {
             // Session 已落盘即跨过 fallback 屏障；永不重试 legacy prepare。尽力把错误写成
             // durable terminal + diagnostic，保留原始 HTTP 错误给调用方。
-            if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
-                mark_single_candidate_prepare_failure(&lifecycle, &session_id, &error);
-            }
+            mark_single_candidate_prepare_failure(
+                &lifecycle,
+                &session_id,
+                &format!("single-candidate prepare failed after session persistence: {error}"),
+            );
             return Err(product_store_api_error(error));
         }
     };
@@ -774,16 +786,9 @@ pub async fn prepare_work_item_plan(
     }))
 }
 
-fn mark_single_candidate_prepare_failure(
-    lifecycle: &LifecycleStore,
-    session_id: &str,
-    error: &ProductStoreError,
-) {
-    let _ = lifecycle.append_workspace_message(
-        session_id,
-        "system".to_string(),
-        format!("single-candidate prepare failed after session persistence: {error}"),
-    );
+fn mark_single_candidate_prepare_failure(lifecycle: &LifecycleStore, session_id: &str, message: &str) {
+    let _ = lifecycle
+        .append_workspace_message(session_id, "system".to_string(), message.to_string());
     let _ = lifecycle.update_workspace_session_status(session_id, WorkspaceSessionStatus::Failed);
 }
 

@@ -229,6 +229,9 @@ pub struct WorkItemPlanSessionOptions {
 impl Default for WorkItemPlanSessionOptions {
     fn default() -> Self {
         Self {
+            // L2 退役（T5/REQ-WSC-08）：Default 保持 Legacy——该值仅服务存量夹具
+            // 与缺字段读侧；生产创建路径唯一（prepare_work_item_plan）已显式
+            // 恒 SingleCandidate，新会话不存在 legacy 选项。
             flow_kind: WorkItemPlanFlowKind::Legacy,
             run_policy: RunPolicy::Interactive,
             rollout_snapshot: false,

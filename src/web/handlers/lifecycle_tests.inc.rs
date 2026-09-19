@@ -286,9 +286,11 @@
                 "logical-repository-2".to_string(),
             ],
         ] {
+            // L2 重钉（T5/REQ-WSC-08）：legacy fallback 变体已删除——preflight 失败
+            // 输出新路径终态原因（Ineligible），无回落语义。
             assert_eq!(
                 preflight_single_repository_candidate(&repository_ids),
-                SingleCandidatePreflightDecision::LegacyFallback {
+                SingleCandidatePreflightDecision::Ineligible {
                     reason: format!(
                         "single-candidate preflight requires exactly one logical repository; found {}",
                         repository_ids.len()
@@ -512,10 +514,10 @@
 
     #[tokio::test]
     async fn prepare_single_physical_repository_uses_rollout_flow_snapshot_without_logical_manifest() {
-        for (rollout_enabled, expected_flow_kind) in [
-            (true, WorkItemPlanFlowKind::SingleCandidate),
-            (false, WorkItemPlanFlowKind::Legacy),
-        ] {
+        // L2 重钉（T5/REQ-WSC-08）：新会话一律 SingleCandidate——rollout 快照
+        // 不再切换 flow（flag 仅随会话持久化作历史记录）。
+        for rollout_enabled in [true, false] {
+            let expected_flow_kind = WorkItemPlanFlowKind::SingleCandidate;
             let root = TempDir::new().unwrap();
             let paths = ProductAppPaths::new(root.path().join(".aria"));
             let (lifecycle, story_spec_id, design_spec_id) =
@@ -542,7 +544,7 @@
     }
 
     #[tokio::test]
-    async fn prepare_defaults_to_legacy_when_single_candidate_rollout_is_not_enabled_at_startup() {
+    async fn prepare_is_single_candidate_even_when_rollout_flag_is_disabled() {
         let root = TempDir::new().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let (lifecycle, story_spec_id, design_spec_id) =
@@ -555,16 +557,17 @@
 
         let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
 
-        assert!(response.status().is_server_error());
+        // L2 重钉（T5/REQ-WSC-08）：rollout flag 不再把新会话切到 legacy——
+        // flow_kind 恒 SingleCandidate（该测试原断言 Legacy 随 legacy flow 删除退役）。
         let sessions = lifecycle
             .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
             .unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::Legacy);
+        assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::SingleCandidate);
     }
 
     #[tokio::test]
-    async fn prepare_preflight_falls_back_only_before_session_and_never_afterwards() {
+    async fn prepare_preflight_failure_converges_to_new_path_terminal_without_legacy_fallback() {
         for repository_count in [0, 2] {
             let root = TempDir::new().unwrap();
             let paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -580,11 +583,20 @@
 
             let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
             assert!(response.status().is_server_error());
+            // L2 重钉（T5/REQ-WSC-08）：preflight 失败=新路径 durable Failed 终态
+            //（含原因），无 legacy 回落、无 flow_kind 切换。
             let sessions = lifecycle
                 .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
                 .unwrap();
             assert_eq!(sessions.len(), 1);
-            assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::Legacy);
+            assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::SingleCandidate);
+            assert_eq!(sessions[0].status, WorkspaceSessionStatus::Failed);
+            assert!(sessions[0]
+                .messages
+                .iter()
+                .any(|message| message
+                    .content
+                    .contains("single-candidate preflight requires exactly one logical repository")));
             assert!(sessions[0].provider_start_ledger.is_empty());
             assert!(sessions[0].work_item_plan_source_revision_ref.is_none());
             assert!(sessions[0].plan_candidate_ir_ref.is_none());
