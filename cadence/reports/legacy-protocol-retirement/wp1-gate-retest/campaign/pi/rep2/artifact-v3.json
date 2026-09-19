@@ -1,0 +1,355 @@
+{
+  "event_seq": 5107,
+  "type": "artifact_update",
+  "version": 3,
+  "work_item_projection": {
+    "canonical_contract_hash": "d4bf9a4635dd9d5970e0542a4e344344e22716baca0cb1995d62085720a2325e",
+    "coder_projection": {
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 测试以 port 0 启动服务并请求 GET /api/levels THE SYSTEM SHALL 返回 200 且 Content-Type 为 application/json; charset=utf-8 且体为长度 5 的顶层数组，元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单, 普通, 困难}、unlocked 为布尔值。"
+        },
+        {
+          "criterion_id": "AC-002",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 测试将 dataPath 指向 tests/backend/fixtures 中文件缺失、JSON 解析失败与结构校验失败三类夹具 THE SYSTEM SHALL 各返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与可读 message 且全程不修改 data/levels.json。"
+        },
+        {
+          "criterion_id": "AC-003",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 测试对 /api/levels 使用不支持方法或请求未知 API 路径 THE SYSTEM SHALL 分别返回 405 与 404，错误响应 Content-Type 为 application/json; charset=utf-8 且体为 API-002 结构。"
+        },
+        {
+          "criterion_id": "AC-004",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 测试将 staticRoot 指向 tests/backend/fixtures 夹具目录并请求入口、正常资源与越界路径 THE SYSTEM SHALL 返回入口内容、拒绝静态根目录外路径且静态资源缺失返回 404 文本响应且不读取 web/**。"
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "provided_contract_refs": [
+          "CT-001",
+          "CT-002",
+          "CT-003",
+          "CT-004",
+          "CT-005"
+        ],
+        "required_fields": [
+          "服务入口 server/server.js、createServer({ dataPath",
+          "staticRoot }) 与 start({ port }) 签名、api_path=/api/levels、错误响应 API-002 结构、default_port=3000、port_env=PORT"
+        ],
+        "reviewer_check_refs": [
+          "AC-001",
+          "AC-002",
+          "AC-003",
+          "AC-004"
+        ]
+      },
+      "objective": "WHEN 服务收到关卡列表或静态页面请求 THE SYSTEM SHALL 以 Node 内置模块提供 GET /api/levels 数据契约、统一错误语义与限定在静态根目录内的托管能力。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002",
+        "TASK-003",
+        "TASK-004"
+      ],
+      "tasks": [
+        {
+          "done_when_refs": [
+            "AC-004"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "statement": "WHEN 编写后端契约测试 THE SYSTEM SHALL 在 tests/backend 下以 node --test 先产出覆盖成功契约、三类数据错误、404 与 405 语义及静态托管的失败测试。",
+          "task_id": "TASK-001"
+        },
+        {
+          "done_when_refs": [
+            "AC-004"
+          ],
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "statement": "WHEN 创建 tests/backend/fixtures 夹具 THE SYSTEM SHALL 提供文件缺失、JSON 解析失败、结构校验失败三类数据触发夹具与静态托管夹具目录且不修改 data/levels.json。",
+          "task_id": "TASK-002"
+        },
+        {
+          "done_when_refs": [
+            "AC-002"
+          ],
+          "requirement_refs": [
+            "REQ-003"
+          ],
+          "statement": "WHEN 编写 data/levels.json 与数据读取校验 THE SYSTEM SHALL 提供恰好 5 项且 id 唯一、difficulty 属于 {简单, 普通, 困难} 的静态数据及读取校验逻辑并在失败时返回标准化数据错误。",
+          "task_id": "TASK-003"
+        },
+        {
+          "done_when_refs": [
+            "AC-004"
+          ],
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "statement": "WHEN 实现 server/server.js 服务入口 THE SYSTEM SHALL 以 node:http、node:fs、node:path 导出 createServer({ dataPath, staticRoot }) 与 start({ port })（默认端口 3000 且可被 PORT 覆盖），路由 /api/levels、静态资源、未知 API 路径 404 与不支持方法 405。",
+          "task_id": "TASK-004"
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test 'tests/backend/**/*.test.js'",
+          "manual_instruction": "在仓库根目录执行命令并确认 tests/backend 范围内用例数量非零且全部通过",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_5fa5ada1ba9735ac57ddc156",
+      "write_policy": {
+        "exclusive_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      }
+    },
+    "coder_projection_hash": "8bf417177c725bebc7a7382193cb4ee61e8169cf0edb192225bd7cb063f9af59",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-19T02:04:44.103308053+00:00",
+    "human_projection": {
+      "completion_summary": [
+        "WHEN 测试以 port 0 启动服务并请求 GET /api/levels THE SYSTEM SHALL 返回 200 且 Content-Type 为 application/json; charset=utf-8 且体为长度 5 的顶层数组，元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单, 普通, 困难}、unlocked 为布尔值。",
+        "WHEN 测试将 dataPath 指向 tests/backend/fixtures 中文件缺失、JSON 解析失败与结构校验失败三类夹具 THE SYSTEM SHALL 各返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与可读 message 且全程不修改 data/levels.json。",
+        "WHEN 测试对 /api/levels 使用不支持方法或请求未知 API 路径 THE SYSTEM SHALL 分别返回 405 与 404，错误响应 Content-Type 为 application/json; charset=utf-8 且体为 API-002 结构。",
+        "WHEN 测试将 staticRoot 指向 tests/backend/fixtures 夹具目录并请求入口、正常资源与越界路径 THE SYSTEM SHALL 返回入口内容、拒绝静态根目录外路径且静态资源缺失返回 404 文本响应且不读取 web/**。"
+      ],
+      "dependencies": [],
+      "goal": "WHEN 服务收到关卡列表或静态页面请求 THE SYSTEM SHALL 以 Node 内置模块提供 GET /api/levels 数据契约、统一错误语义与限定在静态根目录内的托管能力。",
+      "inputs": [],
+      "logical_work_item_id": "WI-001",
+      "non_goals": [
+        "不实现关卡玩法、认证、数据库或任何外部服务",
+        "不引入任何 npm 依赖，仅使用 node:http、node:fs、node:path",
+        "不读取且不依赖 web/**，静态托管验收仅使用 tests/backend/fixtures 自有夹具"
+      ],
+      "normative": false,
+      "outputs": [
+        {
+          "capabilities": [
+            "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+            "普通",
+            "困难}、unlocked 为布尔值"
+          ],
+          "contract_id": "CT-001",
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或结构校验失败时 GET /api/levels 返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与不含堆栈或绝对路径的可读 message"
+          ],
+          "contract_id": "CT-002",
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "capabilities": [
+            "API 错误响应（未知 API 路径 404、对 /api/levels 不支持方法 405）Content-Type 为 application/json; charset=utf-8 且体为 error.code 与 message 的 API-002 结构"
+          ],
+          "contract_id": "CT-003",
+          "source_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "capabilities": [
+            "server/server.js 导出 createServer({ dataPath",
+            "staticRoot }) 且 dataPath 默认 data/levels.json、staticRoot 默认 web/，并导出 start({ port })，resolve 为 { origin",
+            "port",
+            "stop } 且 origin 为 http://127.0.0.1:<实际端口>、stop() 返回 Promise、port 为 0 时分配临时端口"
+          ],
+          "contract_id": "CT-004",
+          "source_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "capabilities": [
+            "GET / 返回 staticRoot 下 index.html 且静态资源路径以 node:path 的 normalize/resolve 限制在 staticRoot 内且静态资源缺失时返回 404 文本响应"
+          ],
+          "contract_id": "CT-005",
+          "source_refs": [
+            "CT-005"
+          ]
+        }
+      ],
+      "scope_summary": {
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**",
+          "package.json"
+        ],
+        "owned_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ]
+      },
+      "source_refs": [
+        "AC-001",
+        "AC-002",
+        "AC-003",
+        "AC-004",
+        "CHECK-001",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "CT-005",
+        "NFR-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "TASK-001",
+        "TASK-002",
+        "TASK-003",
+        "TASK-004"
+      ],
+      "title": "后端关卡列表服务与静态托管",
+      "used_by_provider": false
+    },
+    "human_projection_hash": "e5883400b6a80f05e7857abda7631dff1ed9fa585df4e4bac56ec7eec4d0274f",
+    "id": "work_item_projection_bundle_5fa5ada1ba9735ac57ddc156",
+    "projection_schema_version": 1,
+    "reviewer_projection": {
+      "blocker_routing": [],
+      "criterion_refs": [
+        "AC-001",
+        "AC-002",
+        "AC-003",
+        "AC-004"
+      ],
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "capabilities": [
+            "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+            "普通",
+            "困难}、unlocked 为布尔值"
+          ],
+          "contract_id": "CT-001"
+        },
+        {
+          "capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或结构校验失败时 GET /api/levels 返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与不含堆栈或绝对路径的可读 message"
+          ],
+          "contract_id": "CT-002"
+        },
+        {
+          "capabilities": [
+            "API 错误响应（未知 API 路径 404、对 /api/levels 不支持方法 405）Content-Type 为 application/json; charset=utf-8 且体为 error.code 与 message 的 API-002 结构"
+          ],
+          "contract_id": "CT-003"
+        },
+        {
+          "capabilities": [
+            "server/server.js 导出 createServer({ dataPath",
+            "staticRoot }) 且 dataPath 默认 data/levels.json、staticRoot 默认 web/，并导出 start({ port })，resolve 为 { origin",
+            "port",
+            "stop } 且 origin 为 http://127.0.0.1:<实际端口>、stop() 返回 Promise、port 为 0 时分配临时端口"
+          ],
+          "contract_id": "CT-004"
+        },
+        {
+          "capabilities": [
+            "GET / 返回 staticRoot 下 index.html 且静态资源路径以 node:path 的 normalize/resolve 限制在 staticRoot 内且静态资源缺失时返回 404 文本响应"
+          ],
+          "contract_id": "CT-005"
+        }
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": []
+        },
+        {
+          "criterion_id": "AC-002",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-003"
+          ]
+        },
+        {
+          "criterion_id": "AC-003",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": []
+        },
+        {
+          "criterion_id": "AC-004",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-004"
+          ]
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**",
+          "package.json"
+        ]
+      },
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test 'tests/backend/**/*.test.js'",
+          "manual_instruction": "在仓库根目录执行命令并确认 tests/backend 范围内用例数量非零且全部通过",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_5fa5ada1ba9735ac57ddc156"
+    },
+    "reviewer_projection_hash": "f448589c5762d3298a83f3945901bced31def377473f7ef55b807685ad0d8b4a",
+    "work_item_revision_id": "work_item_revision_5fa5ada1ba9735ac57ddc156"
+  }
+}

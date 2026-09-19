@@ -1,0 +1,258 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/legacy-protocol-retirement/wp1-gate-retest/campaign/codex/rep1",
+  "startedAt": "2026-09-19T01:37:30.241Z",
+  "finishedAt": "2026-09-19T01:40:31.069Z",
+  "elapsedSec": 180.827,
+  "issue_id": "issue_0280",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0450",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.892,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.962,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 106.213,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 180.826,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 106.214,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+          "message": "required_capability_missing: provider WI-002 contract CT-002 lacks capability web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API required by WI-003",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003",
+          "evidence": "work_item=WI-003 contract=CT-003",
+          "message": "unconsumed_required_handoff: handoff contract CT-003 from WI-003 is not referenced by a consumer input contract",
+          "required_action": "终端 work item 的 handoff 契约 CT-003 无消费方：从 provided_contract_refs 移除该引用，或补齐下游消费方",
+          "severity": "must_fix"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 180.825,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+          "message": "required_capability_missing: provider WI-002 contract CT-002 lacks capability web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API required by WI-003",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+          "severity": "must_fix"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+      "message": "required_capability_missing: provider WI-002 contract CT-002 lacks capability web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API required by WI-003",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003",
+      "evidence": "work_item=WI-003 contract=CT-003",
+      "message": "unconsumed_required_handoff: handoff contract CT-003 from WI-003 is not referenced by a consumer input contract",
+      "required_action": "终端 work item 的 handoff 契约 CT-003 无消费方：从 provided_contract_refs 移除该引用，或补齐下游消费方",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+      "message": "required_capability_missing: provider WI-002 contract CT-002 lacks capability web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API required by WI-003",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+      "severity": "must_fix"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "stopped_needs_human",
+  "error": null,
+  "completed": false,
+  "session_status": "stopped_needs_human",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 1,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [
+      {
+        "class": "repairable",
+        "fingerprint": "ca03b37721592637968f2841d32911761b386cf0916038757c0c924fa69b63c0",
+        "category": "contract_gap",
+        "severity": "must_fix",
+        "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串 required by WI-002",
+        "evidence": "work_item=WI-002 contract=CT-001 capability=错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+        "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- 错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串",
+        "contract_field": "CT-001::错误响应体结构为 error 对象内的 code 字符串与不含内部细节的 message 字符串"
+      },
+      {
+        "class": "repairable",
+        "fingerprint": "fcbab30a8ae7a0d134a7be2b948588d3e699b86399ee896adc49167694e0e7e0",
+        "category": "contract_gap",
+        "severity": "must_fix",
+        "message": "required_capability_missing: provider WI-002 contract CT-002 lacks capability web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API required by WI-003",
+        "evidence": "work_item=WI-003 contract=CT-002 capability=web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+        "required_action": "在 WI-002 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API",
+        "contract_field": "CT-002::web/index.html 引用 web/level-select.js 并通过相对路径 /api/levels 消费 API"
+      }
+    ],
+    "repeated_fingerprints": [
+      "ca03b37721592637968f2841d32911761b386cf0916038757c0c924fa69b63c0",
+      "fcbab30a8ae7a0d134a7be2b948588d3e699b86399ee896adc49167694e0e7e0"
+    ],
+    "attempts_used": 1,
+    "manual_repairs_remaining": 3,
+    "trigger": "repeated_fingerprint",
+    "resumable": true
+  },
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0450:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0450:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 180827,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.07,
+    "1:running": 104.251,
+    "2:cross_review": 74.613,
+    "3:completed": 0.001
+  }
+}
