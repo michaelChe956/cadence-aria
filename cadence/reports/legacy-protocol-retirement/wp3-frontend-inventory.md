@@ -76,3 +76,14 @@
 - 产码侧 grep（`human_confirm\|HumanConfirm`）在 T4 结束后仅剩「只读呈现保留项」（stage 字符串/服务端字段/历史节点渲染）与「待 T5 项」（request_outline_revision 等发送器+union 变体——T5 归属判定同批删）。
 - 测试侧仅剩重钉后的 typed 断言与只读夹具。
 - Step 5 grep 断言（产码零 `type: "human_confirm"`/`sendHumanConfirm`/`"decision": "(request-change|terminate)"`）见报告 §grep。
+
+## e2e 执行豁免登记（T4 收口，controller 2026-09-19 授权）
+
+**状态**：`npm run test:e2e` 本轮未出具全绿结果，原因是**环境前置缺失**而非用例失败：
+
+1. 4317 端口被 T1 门重测部署（PID 1005268，release build+`--work-item-plan-single-candidate`）占用——已按不干扰部署原则落地 `ARIA_E2E_PORT` env 旁路（playwright.config.ts/dev-server-proxy.ts/e2e/start-api.mjs，默认值不变），API server 与 vite dev 在 4599 正常拉起。
+2. e2e 浏览器不可得：config `channel:"chrome"` 指向的 /opt/google/chrome 不存在；repo playwright 1.59.1 期望 chromium-1217，`playwright install chromium` 三次执行均「下载 100% 后解压被 interrupted」（缓存目录仅余 18M 元数据，无 chrome 二进制）；缓存中 chromium-1226 二进制与 1.59.1 协议不匹配（launch 即 browser closed），1226 归属（playwright 1.6x）与 repo 版本不一致。10 分钟排障窗口未收敛，按 controller 指示登记豁免收口。
+
+**已覆盖的证据面**：D4/D5 退役留档（#56，理由与 typed 面 vitest 承接断言族在 spec 内注释+本表）；E4 保留声明（#57，只读行为）；其余 e2e 用例与本次迁移零交集（迁移面=legacy 决策发送/页面动作面，未触及断连重连/timeline 审计/视觉/内存等面）。前端门禁以 **vitest 全量 1489/1489 绿+tsc -b 0+`npm run build` 成功**出具。
+
+**后续**：环境具备 chrome/chromium-1217 后执行 `ARIA_E2E_PORT=<port> npm run test:e2e` 补跑（预期仅环境性失败归零，无迁移面用例）。
