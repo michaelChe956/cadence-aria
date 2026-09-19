@@ -3,9 +3,13 @@
 //! 三值终态判据（约束 9 定案，k3 F4 可测化）：
 //! - **已达 provider 启动** = attempt 离开初始二元组 `!(status == Created
 //!   && stage == PrepareContext)`（`StartCoding` 是唯一入口，离开必经
-//!   `admit_and_transition_attempt_to_executable`）；
+//!   `admit_and_transition_attempt_to_executable`）；**pre-start abort 除外**
+//!   （k3 fix round 1）：PrepareContext 期 AbortAttempt 合法落盘
+//!   `(Aborted, PrepareContext)`（Created→Aborted 白名单转换、abort 不改
+//!   stage）——未达 provider 启动，不算离开初始二元组；
 //! - **未启**（判定优先于「部分」）：无 target-attempt，或全部 target-attempt
-//!   均满足 `status == Created && stage == PrepareContext`；
+//!   均未离开初始二元组（`(Created, PrepareContext)` 或 pre-start abort 形态
+//!   `(Aborted, PrepareContext)`）；
 //! - **全部交付**：存在 target-attempt 且每 target 最新 attempt
 //!   `Completed` 且最新 ReviewRequest `Pushed`——对齐
 //!   `compute_issue_delivery_summary` 口径（issue_delivery.rs:110-113）；
@@ -136,10 +140,18 @@ impl super::CodingAttemptStore {
                 .last()
                 .expect("target bucket is never empty");
             // 已达 provider 启动 = 该 target 任一 attempt 离开初始二元组
-            // (Created, PrepareContext)（历史事实口径：任一 attempt 曾离开即算）。
+            // （历史事实口径：任一 attempt 曾离开即算）。pre-start abort 排除
+            // （k3 fix round 1）：PrepareContext 期 AbortAttempt 合法落盘
+            // (Aborted, PrepareContext)（Created→Aborted 为状态白名单转换，
+            // abort 不改 stage）——未达 provider 启动，不算离开初始二元组；
+            // 启动后 abort（stage 已离开 PrepareContext）仍算已达。
             let target_started = target_attempts.iter().any(|attempt| {
-                !(attempt.status == CodingAttemptStatus::Created
-                    && attempt.stage == CodingExecutionStage::PrepareContext)
+                let never_reached_provider = attempt.stage == CodingExecutionStage::PrepareContext
+                    && matches!(
+                        attempt.status,
+                        CodingAttemptStatus::Created | CodingAttemptStatus::Aborted
+                    );
+                !never_reached_provider
             });
             let latest_review = self
                 .list_review_requests(project_id, issue_id, &latest.id)?
@@ -805,6 +817,76 @@ mod tests {
             projection.overall,
             PlanGroupOverall::Partial,
             "部分启动+部分未启 → Partial（未启优先只适用于全部未启）"
+        );
+    }
+
+    /// k3 fix round 1：PrepareContext 期 AbortAttempt 合法落盘
+    /// (Aborted, PrepareContext)（Created→Aborted 为 attempt.rs 状态白名单转换，
+    /// abort 不改 stage）——未达 provider 启动，不算离开初始二元组。
+    #[test]
+    fn not_started_when_pre_start_abort_never_reached_provider() {
+        let (tmp, store) = setup_store();
+        let (alpha, beta) = seed_two_targets(tmp.path(), &store);
+        let attempt_a = seed_group_attempt(&store, Some(alpha), "aria/issues/i/api");
+        let _attempt_b = seed_group_attempt(&store, Some(beta), "aria/issues/i/web");
+        let _attempt_a = force_attempt_state(
+            &store,
+            &attempt_a,
+            CodingAttemptStatus::Aborted,
+            CodingExecutionStage::PrepareContext,
+            None,
+        );
+
+        let projection = store
+            .compute_plan_group_projection(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert_eq!(
+            projection.overall,
+            PlanGroupOverall::NotStarted,
+            "pre-start abort（(Aborted, PrepareContext)）不算已达 provider 启动——另一 target 未动时整体未启（未启优先于部分）"
+        );
+        assert_eq!(projection.entries.len(), 2, "条目仍显式呈现");
+        let aborted_entry = entry_for(&projection, alpha);
+        assert_eq!(
+            aborted_entry.attempt_status,
+            Some(CodingAttemptStatus::Aborted)
+        );
+        assert_eq!(
+            aborted_entry.stage,
+            Some(CodingExecutionStage::PrepareContext)
+        );
+        assert_eq!(aborted_entry.blocked_reason.as_deref(), Some("aborted"));
+    }
+
+    /// k3 fix round 1 对偶：pre-start abort 与真正启动并存 → Partial 语义不变。
+    #[test]
+    fn partial_when_pre_start_abort_alongside_real_start() {
+        let (tmp, store) = setup_store();
+        let (alpha, beta) = seed_two_targets(tmp.path(), &store);
+        let attempt_a = seed_group_attempt(&store, Some(alpha), "aria/issues/i/api");
+        let attempt_b = seed_group_attempt(&store, Some(beta), "aria/issues/i/web");
+        let _attempt_a = force_attempt_state(
+            &store,
+            &attempt_a,
+            CodingAttemptStatus::Aborted,
+            CodingExecutionStage::PrepareContext,
+            None,
+        );
+        let _attempt_b = force_attempt_state(
+            &store,
+            &attempt_b,
+            CodingAttemptStatus::Running,
+            CodingExecutionStage::Coding,
+            None,
+        );
+
+        let projection = store
+            .compute_plan_group_projection(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert_eq!(
+            projection.overall,
+            PlanGroupOverall::Partial,
+            "pre-start abort 不拉低已启动 target——任一 target 真正启动即 Partial"
         );
     }
 

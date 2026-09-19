@@ -100,3 +100,18 @@
 
 - 与 T4（核查型）：本 Task 未动 `issue_delivery.rs`/`git_operation.rs`/`evidence_*`/`advance.rs`/`group_initialization.rs`（T5 审计接线独占面）；T4 对 `issue_delivery.rs` 的覆盖关系改造与本 Task 的 `plan_group_projection.rs` 并存（判定一致性由 T4 Step 2 以本函数为锚复验）。
 - 共享文件 `src/web/handlers/lifecycle.rs`：本 Task 改 plan DTO 组装区（:73 起+prepare 响应），与 C3 计划的 legacy fallback 删除区（:647-708 前版本）按落地序 ③→② 串行无冲突（锚点均在删除区前）。
+
+## 八、Fix round 1（k3 审 P2：pre-start abort 误判「已达 provider 启动」，2026-09-19）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | `target_started` 判据 `!(status==Created && stage==PrepareContext)` 把 **pre-start abort** 形态 `(Aborted, PrepareContext)` 误判为「已达 provider 启动」——`Created→Aborted` 是合法状态转换（WS 白名单在 PrepareContext 放行 AbortAttempt，attempt.rs:783），且 abort 路径不改 stage，落盘即 `(Aborted, PrepareContext)`。后果：两 target 其一 pre-start abort、另一未动时 overall 误报 `partial`，而 spec（约束 9+REQ-MTG-04）要求该形态=未启。 |
+| 修法 | `target_started` 排除 pre-start abort：`never_reached_provider = stage==PrepareContext && status∈{Created, Aborted}`——`stage==PrepareContext` 且状态仍属「未进入执行」族（Created 未触碰/Aborted 启动前中止）均不算离开初始二元组；启动后 abort（stage 已离开 PrepareContext）仍算已达（该 attempt 确实经 StartCoding 进入过执行）。模块文档同步改写。 |
+| blocked_reason 语义 | `(Aborted, PrepareContext)` 条目 `blocked_reason="aborted"`（失败态文本回落，既有行为）——abort 事实仍显式呈现，仅不参与启动判定。 |
+
+**TDD（红→绿）**：
+
+- 新增 `not_started_when_pre_start_abort_never_reached_provider`——修前红（`left: Partial, right: NotStarted`，与 k3 诊断逐字吻合）+条目断言（Aborted/PrepareContext/blocked_reason="aborted" 显式）；修后绿。
+- 新增对偶 `partial_when_pre_start_abort_alongside_real_start`——pre-start abort+另一 target Running/Coding → Partial 语义不变（修前修后均绿，防修过窄/过宽双向钉死）。
+
+**定向复跑**：`plan_group_projection` 全族 **15/15**（13 原有+2 新增）；`web::handlers::lifecycle` 9/9；`split_advance` 8/8（无自动编排测试直读 attempt 状态，与投影判据正交）；前端 Panel+Drawer 13/13（前端零改动——not_started+aborted 行经 `plan-target-blocked-reason` 既有分支显式呈现）；`rustfmt` 幂等+clippy `--lib --tests` 本文件 0 warning。

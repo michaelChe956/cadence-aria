@@ -35,3 +35,11 @@
 
 - 浏览器级走查归 T6 关闸统一冒烟（组件面断言已覆盖计划 Step 3 四要素：per-target 状态/终态/partial failure 可见性/无操作入口）。
 - 与 T4 面不相交确认：未动 issue_delivery.rs/evidence_*/git_operation/advance.rs/group_initialization.rs（T5 独占面）。
+
+## Fix round 1（k3 审 1×P2，Main 转交）
+
+- **缺陷**：`target_started=!(Created&&PrepareContext)` 把 pre-start abort 落盘形态 `(Aborted, PrepareContext)`（Created→Aborted 为 attempt.rs:783 白名单转换、abort 不改 stage）误判「已达 provider 启动」→整体误报 `partial`（spec 要求=未启）。
+- **修法**：排除 pre-start abort——`never_reached_provider = stage==PrepareContext && status∈{Created,Aborted}`；启动后 abort（stage 已离开 PrepareContext）仍算已达。模块文档同步改写。
+- **TDD**：`not_started_when_pre_start_abort_never_reached_provider` 修前红（`left: Partial, right: NotStarted`——与 k3 诊断吻合）+对偶 `partial_when_pre_start_abort_alongside_real_start`（双向钉死）；修后全绿。
+- **复跑**：plan_group_projection 15/15、web::handlers::lifecycle 9/9、split_advance 8/8、前端 Panel+Drawer 13/13（前端零改动）；rustfmt 幂等+clippy 0 warning。
+- **commit**：本 fix 提交（`fix(coding-ws): WP3 fix round 1 (k3 P2) — pre-start abort excluded from provider-started judgment (multi-repo-group-coding)`，紧随 `093fa312`）
