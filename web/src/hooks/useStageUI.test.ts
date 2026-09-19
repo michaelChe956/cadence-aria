@@ -22,7 +22,7 @@ describe("useStageUI", () => {
   it("returns human confirm config", () => {
     const { result } = renderHook(() => useStageUI("human_confirm"));
 
-    expect(result.current.actions).toEqual(["confirm", "request_change", "terminate"]);
+    expect(result.current.actions).toEqual([]);
     expect(result.current.headerBadge).toBe("等待确认");
   });
 
@@ -41,9 +41,9 @@ describe("useStageUI", () => {
       ["running", ["abort"]],
       ["author_confirm", ["accept_author", "reject_author"]],
       ["cross_review", ["abort"]],
-      ["review_decision", ["select_revision_path", "abort"]],
+      ["review_decision", []],
       ["revision", ["abort"]],
-      ["human_confirm", ["confirm", "request_change", "terminate"]],
+      ["human_confirm", []],
       ["completed", []],
     ] as const;
 

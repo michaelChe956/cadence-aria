@@ -201,24 +201,62 @@ describe("useWorkspaceWs outgoing actions", () => {
     ]);
   });
 
-  it("sends typed revision decisions but a bare confirm frame", () => {
+  it("sends a typed abandon_human_gate frame and resolves the open gate entry", () => {
     const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-09-19T10:00:00Z",
+    });
 
+    let sent = false;
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      harness.api.sendHumanConfirm("request-change", { reason: "需要补充" });
-      harness.api.sendHumanConfirm("confirm");
+      sent = harness.api.sendAbandonGate("cmd_abandon_1");
     });
 
+    expect(sent).toBe(true);
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
-        type: "human_confirm",
-        decision: "request-change",
-        payload: { reason: "需要补充" },
+        type: "abandon_human_gate",
+        command_id: "cmd_abandon_1",
       }),
-      JSON.stringify({ type: "confirm" }),
     ]);
+    // 终止动作乐观收敛门卡（与服务端 human_gate_closed 事件前一致呈现「已终止」）。
+    expect(useWorkspaceStore.getState().chatEntries[0]).toMatchObject({
+      id: "gate-1",
+      resolved: true,
+      resolution: "terminate",
+    });
+  });
+
+  it("sends a bare confirm frame for gate approve without resolving the gate entry", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-09-19T10:00:00Z",
+    });
+
+    let sent = false;
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      sent = harness.api.sendConfirmGate();
+    });
+
+    expect(sent).toBe(true);
+    expect(harness.ws.sent).toEqual([JSON.stringify({ type: "confirm" })]);
+    // approve 不乐观收敛门卡：等引擎关门事件（human_gate_closed）再落 resolved。
+    const gateEntry = useWorkspaceStore.getState().chatEntries[0];
+    expect(gateEntry).toMatchObject({ id: "gate-1" });
+    expect(gateEntry).not.toHaveProperty("resolved");
+    expect(gateEntry).not.toHaveProperty("resolution");
   });
 
   it("sends author decisions", () => {
@@ -271,7 +309,7 @@ describe("useWorkspaceWs outgoing actions", () => {
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      harness.api.sendHumanConfirm("confirm");
+      harness.api.sendConfirmGate();
     });
 
     const gateEntry = useWorkspaceStore.getState().chatEntries[0];
@@ -805,31 +843,8 @@ describe("useWorkspaceWs outgoing actions", () => {
     expect(useWorkspaceStore.getState().chatEntries.at(-1)?.content).not.toContain("-> v4");
   });
 
-  it("sends revert_work_item messages", () => {
-    const harness = renderWorkspaceHook();
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.sendRevertWorkItem("wi_001", " 范围过大 ", false);
-      harness.api.sendRevertWorkItem("wi_001", undefined, true);
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "revert_work_item",
-        work_item_id: "wi_001",
-        feedback: "范围过大",
-        clear: false,
-      }),
-      JSON.stringify({
-        type: "revert_work_item",
-        work_item_id: "wi_001",
-        feedback: null,
-        clear: true,
-      }),
-    ]);
-  });
+  // 「sends revert_work_item messages」随死发送面删除（L1：Legacy 页剥离后
+  // sendRevertWorkItem 零消费；union 变体留待 T5 归属判定同批删）。
 
   it("sends request_revision messages", () => {
     const harness = renderWorkspaceHook();

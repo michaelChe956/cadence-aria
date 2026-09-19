@@ -45,9 +45,9 @@ describe("confirmGateOnSession", () => {
     expect(JSON.parse(socket.sent[0])).toEqual(
       { type: "hello", session_id: "s2", last_seen_node_id: null, role: "driver" });
     socket.handlers.onMessage(JSON.stringify({ type: "session_state", session_id: "s2" }));
-    expect(socket.sent.filter((d) => JSON.parse(d).type === "human_confirm")).toHaveLength(1);
+    expect(socket.sent.filter((d) => JSON.parse(d).type === "confirm")).toHaveLength(1);
     expect(JSON.parse(socket.sent[1])).toEqual(
-      { type: "human_confirm", decision: "confirm", payload: null });
+      { type: "confirm" });
     const records = useOperationAuditStore.getState().records;
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ sessionId: "s2", gateId: "g2", operation: "confirm", outcome: "sent", detail: "bulk" });
@@ -107,7 +107,7 @@ describe("runBulkConfirm", () => {
         if (frame.type === "hello") {
           queueMicrotask(() => socket.handlers.onMessage(JSON.stringify({ type: "session_state" })));
         }
-        if (frame.type === "human_confirm") {
+        if (frame.type === "confirm") {
           queueMicrotask(() => socket.handlers.onMessage(JSON.stringify({ type: "human_gate_closed", decision: "confirm" })));
         }
       };
@@ -129,7 +129,7 @@ describe("runBulkConfirm", () => {
     // s3 第二目标被去重不建第二条连接。
     expect(factory).toHaveBeenCalledTimes(2);
     for (const socket of sockets) {
-      expect(socket.sent.filter((data) => JSON.parse(data).type === "human_confirm")).toHaveLength(1);
+      expect(socket.sent.filter((data) => JSON.parse(data).type === "confirm")).toHaveLength(1);
     }
   });
 
@@ -145,7 +145,7 @@ describe("runBulkConfirm", () => {
             JSON.stringify({ type: "session_state", session_id: sessionId }),
           ));
         }
-        if (frame.type === "human_confirm") {
+        if (frame.type === "confirm") {
           confirmsBySession.set(sessionId, (confirmsBySession.get(sessionId) ?? 0) + 1);
           queueMicrotask(() => socket.handlers.onMessage(
             JSON.stringify({ type: "human_gate_closed", decision: "confirm" }),

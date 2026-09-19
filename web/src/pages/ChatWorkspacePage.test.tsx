@@ -567,37 +567,10 @@ describe("ChatWorkspacePage shell and content loading", () => {
       await screen.findByText("mcp__codegraph__codegraph_explore"),
     ).toBeInTheDocument();
   });
-  it("uses the stable typed gate command after a session snapshot arrives", async () => {
-    const feedback = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanGateFeedback: feedback });
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />);
-
-    act(() => {
-      useWorkspaceStore.getState().setSessionState({
-        session_id: "workspace_session_0001",
-        workspace_type: "work_item_plan",
-        stage: "human_confirm",
-        session_status: "waiting_for_human",
-        flow_kind: "single_candidate",
-        single_candidate_phase: "approval",
-        run_policy: "interactive",
-        run_history: {
-          seen_fingerprints: [], repairs_used: 0, manual_repairs_used: 0,
-          transitions_used: 0, initial_review_count: 0, verification_review_count: 0,
-        },
-        messages: [], checkpoints: [], artifact: null,
-        providers: { author: "claude_code", reviewer: null },
-      });
-      useWorkspaceStore.getState().applyHumanGateTurnOpen("turn_001", "stable_command_001", 1);
-      useWorkspaceStore.getState().rebuildChatEntries();
-    });
-
-    const submit = screen.getByRole("button", { name: "提交反馈" });
-    expect(submit).toBeDisabled();
-    await userEvent.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
-    await userEvent.click(submit);
-    expect(feedback).toHaveBeenCalledWith("请补齐边界", "stable_command_001");
-  });
+  // 「uses the stable typed gate command after a session snapshot arrives」随 OQ2
+  // 只读化退役：Legacy 页门卡不再装配动作面（typed 反馈编辑器随之不渲染）；
+  // stable command 语义由 cockpit-action-routing.test.ts
+  // 「reuses the live turn command id instead of regenerating one」承接。
 
 });
 

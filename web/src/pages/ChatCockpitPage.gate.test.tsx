@@ -133,7 +133,8 @@ describe("ChatCockpitPage", () => {
   it("跨会话批量：当前会话条目走既有 actions.confirm；其他会话条目进短命连接通道且不混入当前会话", async () => {
     const user = userEvent.setup();
     const sendHumanConfirm = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm });
+    const sendAbandonGate = vi.fn(() => true);
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
     const store = useWorkspaceStore.getState();
     store.applyHumanGateTurnOpen("g1", "confirm-g1", 1);
     store.rebuildChatEntries();
@@ -148,7 +149,7 @@ describe("ChatCockpitPage", () => {
     await user.click(screen.getByRole("button", { name: /批量确认/ }));
 
     expect(sendHumanConfirm).toHaveBeenCalledTimes(1);
-    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(sendHumanConfirm).toHaveBeenCalledWith();
     expect(bulkConfirmStart).toHaveBeenCalledTimes(1);
     expect(bulkConfirmStart).toHaveBeenCalledWith([
       {
@@ -163,7 +164,8 @@ describe("ChatCockpitPage", () => {
 
   it("confirms only while a current gate is open and does nothing without a gate", () => {
     const sendHumanConfirm = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm });
+    const sendAbandonGate = vi.fn(() => true);
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
     renderCockpit("session_001", false);
     const store = useWorkspaceStore.getState();
 
@@ -181,7 +183,7 @@ describe("ChatCockpitPage", () => {
     store.setStage("human_confirm");
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
 
-    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(sendHumanConfirm).toHaveBeenCalledWith();
 
     store.applyHumanGateClosed("confirm", "human_confirm");
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
@@ -190,7 +192,8 @@ describe("ChatCockpitPage", () => {
 
   it("does not dispatch cockpit hotkeys from gate feedback editors", () => {
     const sendHumanConfirm = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm });
+    const sendAbandonGate = vi.fn(() => true);
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
     const store = useWorkspaceStore.getState();
     useWorkspaceStore.setState({ flowKind: "single_candidate" });
     store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
@@ -234,9 +237,10 @@ describe("ChatCockpitPage", () => {
 
   it("blocks stale non-gate snapshots across card, hotkeys, bulk, and advance", () => {
     const sendHumanConfirm = vi.fn(() => true);
+    const sendAbandonGate = vi.fn(() => true);
     const sendHumanGateFeedback = vi.fn(() => true);
     const sendAdvance = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm, sendHumanGateFeedback, sendAdvance });
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate, sendHumanGateFeedback, sendAdvance });
     useWorkspaceStore.setState({
       stage: "running",
       flowKind: "single_candidate",
@@ -262,9 +266,10 @@ describe("ChatCockpitPage", () => {
 
   it("blocks phase-mismatched gate actions from hotkeys", () => {
     const sendHumanConfirm = vi.fn(() => true);
+    const sendAbandonGate = vi.fn(() => true);
     const sendHumanGateFeedback = vi.fn(() => true);
     const sendAdvance = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm, sendHumanGateFeedback, sendAdvance });
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate, sendHumanGateFeedback, sendAdvance });
     useWorkspaceStore.setState({
       stage: "human_confirm",
       flowKind: "single_candidate",
@@ -294,7 +299,8 @@ describe("ChatCockpitPage", () => {
     ["completed", "completed"],
   ] as const)("allows typed confirm for %s gate shape", (singleCandidatePhase, stage) => {
     const sendHumanConfirm = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm });
+    const sendAbandonGate = vi.fn(() => true);
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
     useWorkspaceStore.setState({
       stage,
       flowKind: "single_candidate",
@@ -312,6 +318,6 @@ describe("ChatCockpitPage", () => {
 
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
 
-    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(sendHumanConfirm).toHaveBeenCalledWith();
   });
 });

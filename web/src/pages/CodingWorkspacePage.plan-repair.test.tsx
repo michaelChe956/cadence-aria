@@ -98,14 +98,10 @@ describe("CodingWorkspacePage plan repair", () => {
         "用户取消修订",
       );
     } else {
-      expect(repairApi.sendHumanConfirm).toHaveBeenCalledWith(
-        "request-change",
-        {
-          description:
-            action === "regenerate"
-              ? "要求重新生成 Plan Repair 修订"
-              : "调整 Plan Repair 修订范围",
-        },
+      expect(repairApi.sendRequestRevision).toHaveBeenCalledWith(
+        action === "regenerate"
+          ? "要求重新生成 Plan Repair 修订"
+          : "调整 Plan Repair 修订范围",
       );
     }
   });
@@ -141,7 +137,7 @@ describe("CodingWorkspacePage plan repair", () => {
       workspace_type: "design",
       relation: "design_amendment",
     });
-    expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
+    expect(repairApi.sendRequestRevision).not.toHaveBeenCalled();
     expect(window.location.pathname).toContain("/coding/coding_attempt_0001");
   });
 
@@ -231,7 +227,7 @@ describe("CodingWorkspacePage plan repair", () => {
 
     expect(repairApi.confirmPlanAmendment).toHaveBeenCalledTimes(1);
     expect(repairApi.cancelPlanAmendment).not.toHaveBeenCalled();
-    expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
+    expect(repairApi.sendRequestRevision).not.toHaveBeenCalled();
     expect(screen.getByText("正在提交 Repair 操作，等待 Child Workspace 响应。"))
       .toBeInTheDocument();
 

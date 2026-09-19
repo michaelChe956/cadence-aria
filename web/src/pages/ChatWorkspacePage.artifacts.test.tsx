@@ -114,12 +114,10 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     expect(
       screen.getByTestId("work-item-plan-artifact-panel"),
     ).toHaveTextContent("validation_failed");
-    await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
-    expect(api.sendWorkItemBatchDecision).toHaveBeenCalledWith(
-      "downgrade_to_serial",
-      undefined,
-      "outline_backend",
-    );
+    // L1/OQ2：Legacy 页 batch 决策按钮（降级串行等）不渲染——发送面剥离。
+    expect(
+      screen.queryByRole("button", { name: "降级串行" }),
+    ).not.toBeInTheDocument();
   });
 
   it("batch confirm shows accept all rewrite pause and downgrade actions", async () => {
@@ -150,26 +148,20 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    await userEvent.click(screen.getByRole("button", { name: "接受全部" }));
-    await userEvent.click(screen.getByRole("button", { name: "整组重写" }));
-    await userEvent.click(screen.getByRole("button", { name: "暂停" }));
-    await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
-
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
-      1,
-      "accept_all",
-    );
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
-      2,
-      "rewrite_batch",
-    );
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(3, "pause");
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
-      4,
-      "downgrade_to_serial",
-      undefined,
-      "outline_backend",
-    );
+    // L1/OQ2：原「batch confirm shows accept all rewrite pause and downgrade
+    // actions」随 Legacy 页 batch 决策面剥离退役——重钉为按钮缺失。
+    expect(
+      screen.queryByRole("button", { name: "接受全部" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "整组重写" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "暂停" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "降级串行" }),
+    ).not.toBeInTheDocument();
   });
 
   it("compile recovery hides abort rollback after committed marker", async () => {

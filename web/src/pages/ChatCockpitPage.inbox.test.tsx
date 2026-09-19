@@ -155,7 +155,8 @@ describe("ChatCockpitPage", () => {
   });
   it("sends plan gate confirmation from the 确认产物 button", async () => {
     const sendHumanConfirm = vi.fn(() => true);
-    mockWorkspaceWs({ sendHumanConfirm });
+    const sendAbandonGate = vi.fn(() => true);
+    mockWorkspaceWs({ sendConfirmGate: sendHumanConfirm, sendAbandonGate });
     const store = useWorkspaceStore.getState();
     store.setStage("human_confirm");
     useWorkspaceStore.setState({
@@ -170,7 +171,7 @@ describe("ChatCockpitPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "确认产物" }));
 
     expect(sendHumanConfirm).toHaveBeenCalledOnce();
-    expect(sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(sendHumanConfirm).toHaveBeenCalledWith();
   });
 
   it("dispatches typed gate feedback through the typed websocket helper", async () => {

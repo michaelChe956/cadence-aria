@@ -33,7 +33,6 @@ function gateEntry(
 function actions(): CockpitActionFacade {
   return {
     confirm: vi.fn(() => true),
-    requestChange: vi.fn(() => true),
     feedback: vi.fn(() => true),
     terminate: vi.fn(() => true),
     advance: vi.fn(() => true),
@@ -62,7 +61,7 @@ describe("GatePromptEntry actionability", () => {
 
     render(
       <GatePromptEntry
-        entry={gateEntry(null, "legacy:human_confirm")}
+        entry={gateEntry(null, "stage:human_confirm")}
         actions={gateActions}
       />,
     );

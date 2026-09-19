@@ -99,7 +99,8 @@ describe("cockpit gate action facade", () => {
       getState: useWorkspaceStore.getState,
       flowKind: "single_candidate",
       commandId: null,
-      sendHumanConfirm: vi.fn(() => true),
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
     });
@@ -123,7 +124,8 @@ describe("cockpit gate action facade", () => {
       flowKind: "single_candidate",
       getState: useWorkspaceStore.getState,
       commandId: "cmd_1",
-      sendHumanConfirm: vi.fn(() => true),
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
     });
@@ -140,7 +142,8 @@ describe("cockpit gate action facade", () => {
       flowKind: "legacy",
       commandId: "cmd_1",
       getState: useWorkspaceStore.getState,
-      sendHumanConfirm: vi.fn(() => true),
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
     });
@@ -159,7 +162,8 @@ describe("cockpit gate action facade", () => {
       flowKind: "legacy",
       commandId: null,
       getState: useWorkspaceStore.getState,
-      sendHumanConfirm: vi.fn(() => true),
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance,
     }).advance();
@@ -182,7 +186,8 @@ describe("cockpit gate action facade", () => {
         flowKind: "single_candidate",
         commandId: null,
         getState: useWorkspaceStore.getState,
-        sendHumanConfirm: vi.fn(() => true),
+        sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
         sendHumanGateFeedback: vi.fn(() => true),
         sendAdvance,
       }).advance(),
@@ -192,15 +197,17 @@ describe("cockpit gate action facade", () => {
   });
 
   it("re-reads actionability before every action so a stale snapshot cannot send", () => {
-    const sendHumanConfirm = vi.fn(() => true);
+    const sendConfirm = vi.fn(() => true);
+    const sendAbandonGate = vi.fn(() => true);
     const sendHumanGateFeedback = vi.fn(() => true);
     const sendAdvance = vi.fn(() => true);
     const actions = createCockpitActionFacade({
       flowKind: "single_candidate",
       commandId: "cmd_1",
       getState: useWorkspaceStore.getState,
-      sendHumanConfirm,
+      sendConfirm,
       sendHumanGateFeedback,
+      sendAbandonGate,
       sendAdvance,
     });
     useWorkspaceStore.setState({
@@ -221,7 +228,8 @@ describe("cockpit gate action facade", () => {
     expect(actions.feedback("请补齐边界")).toBe(false);
     expect(actions.terminate()).toBe(false);
     expect(actions.advance()).toBe(false);
-    expect(sendHumanConfirm).not.toHaveBeenCalled();
+    expect(sendConfirm).not.toHaveBeenCalled();
+    expect(sendAbandonGate).not.toHaveBeenCalled();
     expect(sendHumanGateFeedback).not.toHaveBeenCalled();
     expect(sendAdvance).not.toHaveBeenCalled();
   });

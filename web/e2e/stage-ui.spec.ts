@@ -58,36 +58,17 @@ test.describe("D. 阶段化 UI + chat 交互", () => {
     await waitForTimelineNode(page, "revision");
   });
 
-  test("D4. HumanConfirm 允许通过输入框发送修改意见", async ({ page }) => {
-    const seeded = await seedStoryWorkspace(page, { projectName: "Aria E2E D4" });
-
-    await openWorkspaceSession(page, seeded.sessionId);
-    await clickStartGeneration(page);
-    await waitForStage(page, "等待确认", 60_000);
-    const gatePrompt = page.getByTestId("gate-prompt-entry");
-    await expect(gatePrompt).toBeVisible();
-    await page.getByTestId("context-note-input").fill("补充异常路径和边界场景");
-    await page.getByTestId("send-human-decision").click();
-    await waitForTimelineNode(page, "revision");
-    await waitForStage(page, "等待确认", 60_000);
-
-    await expect(page.getByTestId("chat-entry-list")).toContainText("补充异常路径和边界场景");
-  });
-
-  test("D5. HumanConfirm 的确认和终止按钮可用", async ({ page }) => {
-    const seeded = await seedStoryWorkspace(page, { projectName: "Aria E2E D5" });
-
-    await openWorkspaceSession(page, seeded.sessionId);
-    await clickStartGeneration(page);
-    await waitForStage(page, "等待确认", 60_000);
-    const gatePrompt = page.getByTestId("gate-prompt-entry");
-    await expect(gatePrompt).toBeVisible();
-    await expect(gatePrompt.getByRole("button", { name: "确认" })).toBeVisible();
-    await expect(gatePrompt.getByRole("button", { name: "终止" })).toBeVisible();
-    await gatePrompt.getByRole("button", { name: "终止" }).click();
-
-    await waitForStage(page, "已完成", 60_000);
-    await expect(page.getByTestId("context-note-input")).toBeDisabled();
-    await expect(page.getByTestId("context-note-input")).toHaveAttribute("placeholder", "流程已完成");
-  });
+  // T4/REQ-RET-02 L1 退役留档（v1.1 修订：「stage-ui.spec.ts D4/D5 重钉为 typed 动作面
+  // 或退役留档」）：
+  // - D4（HumanConfirm 输入框发送修改意见）锚 legacy request-change 发送面——随
+  //   前端 legacy 决策发送删除退役（human_confirm 阶段输入只读）。
+  // - D5（HumanConfirm 确认/终止钮）锚 story legacy 流 terminate=human_confirm 帧——
+  //   前端已切 abandon_human_gate（SC 门命令族，legacy 流白名单不放行→双轨期
+  //   protocol error，REQ-RET-03 已登记迁移限制），story 流终止路径随退役不可达。
+  // typed 动作面（approve=confirm 帧/abandon=abandon_human_gate 帧/feedback=
+  // human_gate_feedback 帧）e2e 需 SC 会话夹具（WorkItemPlan+provider run 至人工
+  // 门），现无该夹具且建夹具超出本 WP 范围——typed 面由 vitest 断言族覆盖：
+  // useWorkspaceWs.actions.test.tsx（abandon/confirm wire 形状）、
+  // cockpit-action-routing.test.ts（facade 路由+幂等 command_id）、
+  // plan-repair-actions.test.tsx（typed 通道审计）。
 });

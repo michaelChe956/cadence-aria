@@ -95,11 +95,11 @@ describe("workspace cockpit gate projection", () => {
     expect(selectGateProjection(useWorkspaceStore.getState())).toBeNull();
   });
 
-  it("projects the legacy human_confirm stage gate", () => {
+  it("projects the stage-only human_confirm gate under a stage-prefixed key", () => {
     useWorkspaceStore.getState().setStage("human_confirm");
 
     expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
-      key: "legacy:human_confirm",
+      key: "stage:human_confirm",
       turn_id: null,
       status: "open",
       remaining_budget: null,

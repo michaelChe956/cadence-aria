@@ -15,7 +15,7 @@ export function WorkItemPlanOverview({
   presentations = {},
   presentationSaveStates = {},
   editable = false,
-  onSavePresentation = () => undefined,
+  onSavePresentation,
 }: {
   projection: HumanGroupProjection;
   presentation: HumanPresentationRevision | null;
@@ -57,7 +57,7 @@ export function WorkItemPlanOverview({
         ) : null}
       </header>
 
-      {editable && planProjectionBundleId ? (
+      {editable && onSavePresentation && planProjectionBundleId ? (
         <HumanPresentationEditor
           base={{
             scope: "plan",
@@ -114,7 +114,7 @@ export function WorkItemPlanOverview({
                 label="来源引用"
                 values={workItemPresentation?.source_refs ?? []}
               />
-              {editable && bundle ? (
+              {editable && onSavePresentation && bundle ? (
                 <HumanPresentationEditor
                   base={{
                     scope: "work_item",

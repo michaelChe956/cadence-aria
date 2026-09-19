@@ -86,10 +86,9 @@ describe("workspace websocket protocol types", () => {
       provider_config: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
       reviewer_enabled: true,
     };
-    const human: WsInMessage = {
-      type: "human_confirm",
-      decision: "request-change",
-      payload: { description: "补充验收标准" },
+    const abandonGate: WsInMessage = {
+      type: "abandon_human_gate",
+      command_id: "cmd_abandon_0001",
     };
     const hello: WsInMessage = {
       type: "hello",
@@ -100,8 +99,7 @@ describe("workspace websocket protocol types", () => {
 
     expect(note.type).toBe("context_note");
     expect(start.type).toBe("start_generation");
-    expect(human.decision).toBe("request-change");
-    expect(hello.after_event_seq).toBe(42);
+    expect(abandonGate.type).toBe("abandon_human_gate");
   });
 
   it("accepts protocol v2 outbound messages", () => {

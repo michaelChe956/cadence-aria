@@ -77,8 +77,12 @@ describe("ChatWorkspacePage review decisions", () => {
     window.localStorage.setItem("aria.chat.cockpit", "legacy");
   });
 
-  it("renders suggestion review decision actions from pending decision options", async () => {
-    const api = mockWorkspaceWs();
+  // L1/OQ2（REQ-RET-02）：Legacy 页 review_decision 决策面（ReviewDecisionActionBar
+  // 的 修复这些建议/不修复，继续生成 按钮与 review_decision 发送）剥离——
+  // 原「renders suggestion review decision actions from pending decision options」
+  // 「infers suggestion review decision actions…」两测退役，重钉为只读呈现。
+  it("renders the review decision stage read-only on the legacy page", async () => {
+    mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       workspaceType: "work_item_plan",
@@ -99,27 +103,7 @@ describe("ChatWorkspacePage review decisions", () => {
           summary: "仅有可选建议",
         }),
       ],
-      chatEntries: [
-        chatEntry({
-          type: "review_verdict",
-          role: "reviewer",
-          content: "仅有可选建议",
-          metadata: {
-            verdict: "pass",
-            comments: "当前 outline 可继续，但建议补充 handoff。",
-            summary: "仅有可选建议",
-            review_gate: "user_confirm_allowed",
-            findings: [
-              {
-                severity: "suggestion",
-                message: "handoff 描述可以更明确",
-                evidence: "handoff_strategy 只有简短描述",
-                required_action: "补充上下游交接说明",
-              },
-            ],
-          },
-        }),
-      ],
+      chatEntries: [],
     });
 
     render(
@@ -127,94 +111,17 @@ describe("ChatWorkspacePage review decisions", () => {
     );
 
     expect(
-      screen.getByRole("button", { name: "修复这些建议" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "不修复，继续生成" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "跳过，人工处理" }),
+      screen.queryByRole("button", { name: "修复这些建议" }),
     ).not.toBeInTheDocument();
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "不修复，继续生成" }),
-    );
-    await userEvent.click(screen.getByRole("button", { name: "修复这些建议" }));
-
-    expect(api.sendReviewDecision).toHaveBeenNthCalledWith(
-      1,
-      "skip_optional_findings",
-    );
-    expect(api.sendReviewDecision).toHaveBeenNthCalledWith(
-      2,
-      "apply_optional_findings",
-    );
-    expect(api.sendSelectRevisionPath).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "不修复，继续生成" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("infers suggestion review decision actions from the latest work item plan verdict", async () => {
-    const api = mockWorkspaceWs();
-    useWorkspaceStore.setState({
-      sessionId: "workspace_session_0001",
-      workspaceType: "work_item_plan",
-      stage: "review_decision",
-      providers: { author: "claude_code", reviewer: "codex" },
-      pendingDecision: null,
-      timelineNodes: [
-        timelineNode({
-          node_id: "timeline_node_decision",
-          node_type: "review_decision",
-          stage: "review_decision",
-          status: "paused",
-          title: "Review Decision Round 1",
-          summary: "仅有可选建议",
-        }),
-      ],
-      chatEntries: [
-        chatEntry({
-          type: "review_verdict",
-          role: "reviewer",
-          content: "仅有可选建议",
-          metadata: {
-            verdict: "pass",
-            comments: "当前 outline 可继续，但建议补充 handoff。",
-            summary: "仅有可选建议",
-            review_gate: "user_confirm_allowed",
-            findings: [
-              {
-                severity: "suggestion",
-                message: "handoff 描述可以更明确",
-                evidence: "handoff_strategy 只有简短描述",
-                required_action: "补充上下游交接说明",
-              },
-            ],
-          },
-        }),
-      ],
-    });
+  // 「infers suggestion review decision actions…」同上退役（只读重钉见上测）。
 
-    render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
-    );
-
-    expect(
-      screen.getByRole("button", { name: "修复这些建议" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "不修复，继续生成" }),
-    ).toBeInTheDocument();
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "不修复，继续生成" }),
-    );
-
-    expect(api.sendReviewDecision).toHaveBeenCalledWith(
-      "skip_optional_findings",
-    );
-  });
-
-  it("allows confirming the current version from human confirm after suggestion review findings", async () => {
-    const api = mockWorkspaceWs();
+  it("renders the human confirm gate read-only on the legacy page", async () => {
+    mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       workspaceType: "design",
@@ -268,97 +175,22 @@ describe("ChatWorkspacePage review decisions", () => {
       <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "确认使用当前版本" }),
-    );
-
-    expect(api.sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    // OQ2：Legacy 页门卡只读呈现——typed 动作钮（确认/终止）不装配；
+    // typed 动作面由 cockpit 页测试覆盖（ChatCockpitPage.gate）。
+    expect(screen.getByTestId("gate-prompt-entry")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认使用当前版本" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "终止" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("sends request-change payload when adopting suggestion review findings", async () => {
-    const api = mockWorkspaceWs();
-    useWorkspaceStore.setState({
-      sessionId: "workspace_session_0001",
-      workspaceType: "work_item",
-      stage: "human_confirm",
-      providers: { author: "claude_code", reviewer: "codex" },
-      timelineNodes: [
-        timelineNode({
-          node_id: "timeline_node_human",
-          node_type: "human_confirm",
-          stage: "human_confirm",
-          status: "paused",
-          title: "人工确认",
-          summary: "仅有可选建议",
-        }),
-      ],
-      chatEntries: [
-        chatEntry({
-          type: "review_verdict",
-          role: "reviewer",
-          content: "仅有可选建议",
-          metadata: {
-            verdict: "needs_human",
-            comments: "当前版本可用，但建议补充说明。",
-            summary: "仅有可选建议",
-            review_gate: "user_confirm_allowed",
-            findings: [
-              {
-                severity: "suggestion",
-                message: "建议补充说明",
-                evidence: "当前版本可用",
-                required_action: "补充说明段落",
-              },
-            ],
-          },
-        }),
-        chatEntry({
-          id: "timeline_node_human:gate-prompt",
-          type: "gate_prompt",
-          role: "system",
-          content: "等待人工确认",
-          node_id: "timeline_node_human",
-          metadata: {
-            verdict: "needs_human",
-            comments: "当前版本可用，但建议补充说明。",
-            summary: "仅有可选建议",
-            review_gate: "user_confirm_allowed",
-            findings: [
-              {
-                severity: "suggestion",
-                message: "建议补充说明",
-                evidence: "当前版本可用",
-                required_action: "补充说明段落",
-              },
-            ],
-          },
-        }),
-      ],
-    });
-
-    render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
-    );
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "采纳建议并返修" }),
-    );
-
-    expect(api.sendHumanConfirm).toHaveBeenCalledWith(
-      "request-change",
-      expect.objectContaining({
-        description: expect.stringContaining("建议补充说明"),
-        source: "review_findings",
-      }),
-    );
-    const payload = vi.mocked(api.sendHumanConfirm).mock.calls[0][1] as {
-      description: string;
-    };
-    expect(payload.description).toContain("补充说明段落");
-  });
+  // 「sends request-change payload when adopting suggestion review findings」随
+  // request-change 按钮删除退役（L1/REQ-RET-02：前端不再发 legacy request-change）。
 
   it("renders work item plan candidate panel for work_item_plan workspaces", async () => {
-    const api = mockWorkspaceWs();
+    mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       workspaceType: "work_item_plan",
@@ -377,8 +209,10 @@ describe("ChatWorkspacePage review decisions", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Work Item Plan 候选")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByTestId("accept-plan-button"));
-    expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
+    // OQ2：candidate panel 在 Legacy 页只读——accept-plan-button 不渲染。
+    expect(
+      screen.queryByTestId("accept-plan-button"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders work item plan generation progress as a provider stream bubble", () => {
@@ -424,91 +258,7 @@ describe("ChatWorkspacePage review decisions", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("work_item_plan candidate panel supports revert, request revision and accept", async () => {
-    const api = mockWorkspaceWs();
-    useWorkspaceStore.setState({
-      sessionId: "workspace_session_0001",
-      workspaceType: "work_item_plan",
-      stage: "author_confirm",
-      providers: { author: "claude_code", reviewer: "codex" },
-      workItemPlanCandidate: workItemPlanCandidate({
-        work_items: [
-          {
-            candidate_id: "wi_001",
-            title: "Frontend Auth",
-            kind: "frontend",
-            exclusive_write_scopes: ["src/auth"],
-            depends_on: [],
-            verification_plan_ref: null,
-            meta: { summary: "前端登录" },
-          },
-          {
-            candidate_id: "wi_002",
-            title: "Backend API",
-            kind: "backend",
-            exclusive_write_scopes: ["src/api"],
-            depends_on: ["wi_001"],
-            verification_plan_ref: null,
-            meta: { summary: "后端接口" },
-          },
-        ],
-      }),
-    });
-
-    render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
-
-    await userEvent.click(screen.getByTestId("start-revert-wi_001"));
-    await userEvent.type(
-      screen.getByTestId("revert-feedback-input-wi_001"),
-      "拆得太粗",
-    );
-    await userEvent.click(screen.getByTestId("submit-revert-wi_001"));
-    expect(api.sendRevertWorkItem).toHaveBeenCalledWith(
-      "wi_001",
-      "拆得太粗",
-      false,
-    );
-
-    useWorkspaceStore.getState().setWorkItemPlanCandidate(
-      workItemPlanCandidate({
-        work_items: [
-          {
-            candidate_id: "wi_001",
-            title: "Frontend Auth",
-            kind: "frontend",
-            exclusive_write_scopes: ["src/auth"],
-            depends_on: [],
-            verification_plan_ref: null,
-            meta: { summary: "前端登录" },
-            reverted: true,
-            revert_feedback: "拆得太粗",
-          },
-          {
-            candidate_id: "wi_002",
-            title: "Backend API",
-            kind: "backend",
-            exclusive_write_scopes: ["src/api"],
-            depends_on: ["wi_001"],
-            verification_plan_ref: null,
-            meta: { summary: "后端接口" },
-          },
-        ],
-      }),
-    );
-
-    await waitFor(() =>
-      expect(screen.getByText(/已标记撤销/)).toBeInTheDocument(),
-    );
-    const requestRevisionButton = screen.getByTestId("request-revision-button");
-    await waitFor(() => expect(requestRevisionButton).not.toBeDisabled());
-    expect(requestRevisionButton).toHaveTextContent("重新生成被标记的 1 项");
-    await userEvent.click(requestRevisionButton);
-    expect(api.sendRequestRevision).toHaveBeenCalled();
-
-    await userEvent.click(screen.getByTestId("accept-plan-button"));
-    expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
-  });
+  // 「work_item_plan candidate panel supports revert, request revision and accept」
+  // 随 OQ2 只读化退役（Legacy 页不再向 candidate panel 提供决策回调；只读呈现断言
+  // 由 work_item_plan 面板渲染测试覆盖）。
 });

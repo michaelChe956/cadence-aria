@@ -7,7 +7,6 @@ import { CockpitInbox } from "./CockpitInbox";
 
 const actions: CockpitActionFacade = {
   confirm: vi.fn(),
-  requestChange: vi.fn(),
   feedback: vi.fn(),
   terminate: vi.fn(),
   advance: vi.fn(),

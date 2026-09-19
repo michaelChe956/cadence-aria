@@ -49,7 +49,7 @@ export function WorkItemPlanArtifactPanel({
   missingWorkItemProjectionRefs = [],
   humanPresentationRevisions = {},
   humanPresentationSaveStates = {},
-  onSaveHumanPresentation = () => undefined,
+  onSaveHumanPresentation,
   className = "",
 }: WorkItemPlanArtifactPanelProps) {
   const [activeTab, setActiveTab] = useState<WorkItemPlanArtifactTab>(() =>

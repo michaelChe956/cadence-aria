@@ -44,7 +44,7 @@ const child = spawn(
     "--host",
     "127.0.0.1",
     "--port",
-    "4317",
+    process.env.ARIA_E2E_PORT ?? "4317",
   ],
   {
     cwd: new URL("..", import.meta.url),

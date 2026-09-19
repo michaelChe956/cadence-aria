@@ -61,7 +61,7 @@ export function mockPlanRepairWs(
   const api = {
     confirmPlanAmendment: vi.fn(() => true),
     cancelPlanAmendment: vi.fn(() => true),
-    sendHumanConfirm: vi.fn(() => true),
+    sendRequestRevision: vi.fn(() => true),
     startLinkedWorkspaceAmendment: vi.fn(() => true),
     connectionStatus: "connected",
     sessionSnapshotGeneration: 1,

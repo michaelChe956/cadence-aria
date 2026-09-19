@@ -30,7 +30,7 @@ export function WorkItemProjectionTabs({
   presentations = {},
   presentationSaveStates = {},
   editable = false,
-  onSavePresentation = () => undefined,
+  onSavePresentation,
 }: {
   planProjection: PlanProjectionBundle;
   workItemProjections: WorkItemProjectionBundle[];

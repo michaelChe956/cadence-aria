@@ -46,7 +46,7 @@ describe("useWorkspaceWs plan repair actions", () => {
     expect(useOperationAuditStore.getState().records).toEqual([
       expect.objectContaining({
         sessionId: "workspace_session_repair_0001",
-        gateId: "legacy:human_confirm",
+        gateId: "stage:human_confirm",
         operation: "confirm_plan_amendment",
         outcome: "sent",
         detail: "plan_amendment_0001",
@@ -65,19 +65,21 @@ describe("useWorkspaceWs plan repair actions", () => {
     expect(useOperationAuditStore.getState().records).toEqual([]);
   });
 
-  it("records a successful human confirmation with its projected gate id", () => {
+  it("records a typed gate approve with its projected gate id", () => {
     const harness = renderWorkspaceHook("workspace_session_repair_0001");
     act(() => {
       harness.ws.open();
       harness.ws.receive(sessionState("workspace_session_repair_0001"));
       useWorkspaceStore.getState().setStage("human_confirm");
-      harness.api.sendHumanConfirm("confirm");
+      harness.api.sendConfirmGate();
     });
 
+    // L1 重承载：stage-only 门的审计 gateId=投影 key（`stage:` 前缀派生，
+    // 不再是 legacy:human_confirm）。
     expect(useOperationAuditStore.getState().records).toEqual([
       expect.objectContaining({
         sessionId: "workspace_session_repair_0001",
-        gateId: "legacy:human_confirm",
+        gateId: "stage:human_confirm",
         operation: "confirm",
         outcome: "sent",
         detail: "confirm",
@@ -85,7 +87,7 @@ describe("useWorkspaceWs plan repair actions", () => {
     ]);
   });
 
-  it("sends cancellation and revision requests through existing workspace messages", () => {
+  it("sends cancellation and typed revision requests through existing workspace messages", () => {
     const harness = renderWorkspaceHook("workspace_session_repair_0001");
     let cancelled = false;
     let requested = false;
@@ -97,9 +99,7 @@ describe("useWorkspaceWs plan repair actions", () => {
         "plan_amendment_0001",
         " 用户取消修订 ",
       );
-      requested = harness.api.sendHumanConfirm("request-change", {
-        description: "调整 Plan Repair 修订范围",
-      });
+      requested = harness.api.sendRequestRevision("调整 Plan Repair 修订范围");
     });
 
     expect(cancelled).toBe(true);
@@ -111,9 +111,11 @@ describe("useWorkspaceWs plan repair actions", () => {
         reason: "用户取消修订",
       }),
       JSON.stringify({
-        type: "human_confirm",
-        decision: "request-change",
-        payload: { description: "调整 Plan Repair 修订范围" },
+        type: "request_revision",
+        feedback: {
+          feedback_types: ["revision"],
+          description: "调整 Plan Repair 修订范围",
+        },
       }),
     ]);
   });
