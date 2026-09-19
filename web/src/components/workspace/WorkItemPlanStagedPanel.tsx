@@ -12,11 +12,13 @@ import { DraftValidationFailureNotice } from "./DraftValidationFailureNotice";
 export interface WorkItemPlanStagedPanelProps {
   activeNodeType: string | null;
   artifact: WorkItemPlanArtifactPayload | null;
-  onAcceptOutline: () => void;
-  onSelectMode: (mode: WorkItemGenerationMode) => void;
-  onRequestOutlineRevision: () => void;
-  onDraftDecision: (outlineId: string, decision: WorkItemDraftDecision) => void;
-  onBatchDecision: (
+  // L1（REQ-RET-02）：legacy 逐段决策回调可选——只读宿主（如 Legacy 页）不提供即
+  // 不渲染对应分支；compile recovery 为 SC compile 链保留面，回调保持必选。
+  onAcceptOutline?: () => void;
+  onSelectMode?: (mode: WorkItemGenerationMode) => void;
+  onRequestOutlineRevision?: () => void;
+  onDraftDecision?: (outlineId: string, decision: WorkItemDraftDecision) => void;
+  onBatchDecision?: (
     decision: WorkItemBatchDecision,
     feedback?: string,
     firstAffectedOutlineId?: string,
@@ -38,7 +40,11 @@ export function WorkItemPlanStagedPanel({
     return null;
   }
 
-  if (activeNodeType === "work_item_plan_outline_confirm") {
+  if (
+    activeNodeType === "work_item_plan_outline_confirm" &&
+    onAcceptOutline &&
+    onRequestOutlineRevision
+  ) {
     return (
       <PanelShell title="Outline 确认" testId="work-item-plan-staged-panel">
         <ActionButton icon={<Check />} onClick={onAcceptOutline}>
@@ -51,7 +57,11 @@ export function WorkItemPlanStagedPanel({
     );
   }
 
-  if (activeNodeType === "work_item_generation_mode") {
+  if (
+    activeNodeType === "work_item_generation_mode" &&
+    onSelectMode &&
+    onRequestOutlineRevision
+  ) {
     return (
       <PanelShell title="生成模式" testId="work-item-plan-staged-panel">
         <ActionButton icon={<GitBranch />} onClick={() => onSelectMode("serial")}>
@@ -67,7 +77,7 @@ export function WorkItemPlanStagedPanel({
     );
   }
 
-  if (activeNodeType === "work_item_draft_confirm") {
+  if (activeNodeType === "work_item_draft_confirm" && onDraftDecision) {
     const draftPayload = artifact?.type === "draft_candidate" ? artifact.payload : null;
     const outlineId = draftPayload?.draft_record.outline_id ?? "";
     return (
@@ -90,7 +100,7 @@ export function WorkItemPlanStagedPanel({
     );
   }
 
-  if (activeNodeType === "work_item_batch_confirm") {
+  if (activeNodeType === "work_item_batch_confirm" && onBatchDecision) {
     const batchPayload = artifact?.type === "batch_state" ? artifact.payload : null;
     const firstAffectedOutlineId = batchPayload?.failure_summary[0]?.outline_id;
     return (

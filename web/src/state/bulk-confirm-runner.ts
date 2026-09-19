@@ -64,7 +64,7 @@ interface ParsedFrame {
  * 单目标会话确认协议（每会话恰好一条连接、恰好一次发送、零重试）：
  * 1. open 后发 hello（role:"driver"→服务端 bind_role 显式接管会话 lease，epoch+1）；
  * 2. 等首帧 session_state（attach 就绪）；等不到即 failed 且零发送；
- * 3. 发 human_confirm{decision:"confirm"} 并记审计 sent 行（detail:"bulk"）；
+ * 3. 发 typed `{type:"confirm"}` 并记审计 sent 行（detail:"bulk"）；
  * 4. human_gate_closed→confirmed+markCompleted（前置：auditRecordId !== null，即本连接
  *    confirm 已发出；早到关门帧=他方并发关门，按 failed(gate_closed_before_confirm) 如实呈现）；
  *    protocol_error|error→rejected+markRejected(code)；关闭/错误/超时→failed（detail 如实）；
@@ -124,7 +124,7 @@ export function confirmGateOnSession(
         }
         if (frame.type === "session_state" && !sawSessionState) {
           sawSessionState = true;
-          socket?.send(JSON.stringify({ type: "human_confirm", decision: "confirm", payload: null }));
+          socket?.send(JSON.stringify({ type: "confirm" }));
           auditRecordId = useOperationAuditStore.getState().record({
             sessionId: target.sessionId,
             gateId: target.gateKey,

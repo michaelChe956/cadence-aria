@@ -1,4 +1,4 @@
-import { Check, RotateCcw } from "lucide-react";
+import { Check } from "lucide-react";
 import { useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import {
@@ -10,11 +10,7 @@ import {
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
-import type {
-  CockpitActionFacade,
-  CockpitRequestChangePayload,
-} from "../../../state/cockpit-action-routing";
-import { trustedReviewComments } from "../../../state/workspace-review-trust";
+import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import { ConfirmTwiceButton } from "../cockpit/ConfirmTwiceButton";
 import { GateFeedbackEditor } from "../cockpit/GateFeedbackEditor";
 import { ChatEntryContainer } from "../ChatEntryContainer";
@@ -34,7 +30,6 @@ export function GatePromptEntry({
   const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
   const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
-  const canAdoptSuggestions = findings.length > 0;
   const confirmLabel =
     requiresTriage
       ? "确认当前版本"
@@ -43,7 +38,7 @@ export function GatePromptEntry({
       : needsHuman
         ? "提交人工确认"
         : "确认产物";
-  const requestChangeLabel = canAdoptSuggestions ? "采纳建议并返修" : null;
+  // L1（REQ-RET-02）：request-change 按钮随 legacy 决策发送面删除；findings 仅作呈现。
   const isResolved = entry.resolved === true;
   const gateTrigger = gateTriggerFromEntry(entry);
   const remainingBudget = remainingBudgetFromEntry(entry);
@@ -68,7 +63,7 @@ export function GatePromptEntry({
         ? "terminal_stage"
         : projection.action_block_reason ?? null;
     }
-    return gateIdentity === "legacy:human_confirm" && state.stage !== "human_confirm"
+    return gateIdentity === "stage:human_confirm" && state.stage !== "human_confirm"
       ? "terminal_stage"
       : persistedActionBlockReason;
   });
@@ -168,16 +163,6 @@ export function GatePromptEntry({
                   {confirmLabel}
                 </button>
               )}
-              {actionFacade !== "typed" && requestChangeLabel ? (
-                <button
-                  type="button"
-                  onClick={() => actions.requestChange(requestChangePayload(entry))}
-                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                  {requestChangeLabel}
-                </button>
-              ) : null}
               <ConfirmTwiceButton
                 label="终止"
                 confirmLabel="确认终止"
@@ -286,59 +271,6 @@ type ReviewFinding = {
   evidence?: string;
   required_action?: string;
 };
-
-function requestChangePayload(entry: ChatEntry): CockpitRequestChangePayload {
-  return { description: requestChangeDescription(entry), source: "review_findings" };
-}
-
-function requestChangeDescription(entry: ChatEntry) {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  const summary = summaryFromEntry(entry);
-  const comments = trustedReviewComments(metadata);
-  const findings = findingsFromEntry(entry);
-  const reviewGate = reviewGateFromEntry(entry);
-  if (findings.length > 0) {
-    return formatFindingsForRevision(findings);
-  }
-
-  const sections: string[] = [];
-
-  if (summary) {
-    sections.push(`Review 摘要：${summary}`);
-  }
-  if (comments) {
-    sections.push(`Review 意见：${comments}`);
-  }
-  if (findings.length > 0) {
-    sections.push(
-      [
-        "Review findings：",
-        ...findings.map((finding) => {
-          const details = [
-            finding.message,
-            finding.required_action ? `处理建议：${finding.required_action}` : "",
-          ].filter(Boolean);
-          return `- ${details.join("；")}`;
-        }),
-      ].join("\n"),
-    );
-  }
-
-  return sections.join("\n\n").trim() || entry.content;
-}
-
-function formatFindingsForRevision(findings: ReviewFinding[]) {
-  return [
-    "Review findings：",
-    ...findings.map((finding) => {
-      const details = [
-        finding.message,
-        finding.required_action ? `处理建议：${finding.required_action}` : "",
-      ].filter(Boolean);
-      return `- ${details.join("；")}`;
-    }),
-  ].join("\n");
-}
 
 function findingsFromEntry(entry: ChatEntry): ReviewFinding[] {
   const metadata = entry.metadata as Record<string, unknown> | undefined;

@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AuthorDecision,
-  HumanConfirmDecision,
   LinkedWorkspaceAmendmentTarget,
   ProviderConfigSnapshot,
   RevisionPath,
-  SaveHumanPresentationRevisionMessage,
   WorkspaceProviderName,
   WorkItemBatchDecision,
   WorkItemDraftDecision,
@@ -459,7 +457,12 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   const recordSentOperation = useCallback(
     (
-      operation: "confirm" | "request_change" | "terminate" | "feedback" | "advance" | "confirm_plan_amendment",
+      operation:
+        | "confirm"
+        | "abandon_gate"
+        | "feedback"
+        | "advance"
+        | "confirm_plan_amendment",
       detail: string | null,
     ) => {
       if (!sessionId) {
@@ -478,27 +481,29 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sessionId],
   );
 
-  const sendHumanConfirm = useCallback(
-    (decision: HumanConfirmDecision, payload?: unknown) => {
-      // Confirm 是无 payload 的 unit WS variant；反馈只能走 typed human_confirm。
-      const sent =
-        decision === "confirm"
-          ? sendJson({ type: "confirm" })
-          : sendJson({ type: "human_confirm", decision, payload: payload ?? null });
+  // L1 typed 重承载（REQ-RET-02）：SC 门 approve=既有 `confirm` unit 变体（REQ-CG-02
+  // 接受面不动）；abandon=显式 `abandon_human_gate` 命令（T2 落地）。legacy
+  // `human_confirm` 决策帧（request-change/terminate）不再由前端发送。
+  const sendConfirmGate = useCallback(() => {
+    const sent = sendJson({ type: "confirm" });
+    if (sent) {
+      recordSentOperation("confirm", "confirm");
+    }
+    return sent;
+  }, [recordSentOperation, sendJson]);
+
+  const sendAbandonGate = useCallback(
+    (commandId: string) => {
+      const sent = sendJson({ type: "abandon_human_gate", command_id: commandId });
       if (sent) {
-        recordSentOperation(
-          decision === "request-change" ? "request_change" : decision,
-          decision,
-        );
-        if (decision !== "confirm") {
-          useWorkspaceStore.getState().resolveGateEntry(decision);
-        }
+        recordSentOperation("abandon_gate", commandId);
+        // 乐观收敛门卡呈现；权威关门以服务端 human_gate_closed 事件为准。
+        useWorkspaceStore.getState().resolveGateEntry("terminate");
       }
       return sent;
     },
     [recordSentOperation, sendJson],
   );
-
   const sendHumanGateFeedback = useCallback(
     (feedback: string, commandId?: string) => {
       const trimmed = feedback.trim();
@@ -608,26 +613,14 @@ export function useWorkspaceWs(sessionId: string | null) {
   );
 
   const sendRequestRevision = useCallback(
-    (feedback?: string) => {
+    (feedback?: string): boolean => {
       const trimmedFeedback = feedback?.trim();
-      sendJson({
+      return sendJson({
         type: "request_revision",
         feedback: {
           feedback_types: ["revision"],
           description: trimmedFeedback ?? "",
         },
-      });
-    },
-    [sendJson],
-  );
-
-  const sendRevertWorkItem = useCallback(
-    (workItemId: string, feedback?: string, clear = false) => {
-      sendJson({
-        type: "revert_work_item",
-        work_item_id: workItemId,
-        feedback: feedback?.trim() ?? null,
-        clear,
       });
     },
     [sendJson],
@@ -694,21 +687,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendHumanPresentationRevision = useCallback(
-    (message: SaveHumanPresentationRevisionMessage) => {
-      const store = useWorkspaceStore.getState();
-      store.beginHumanPresentationSave(message.source_projection_bundle_id);
-      const sent = sendJson(message);
-      if (!sent) {
-        store.failHumanPresentationSave(
-          message.source_projection_bundle_id,
-          "WebSocket 未连接，请重连后重试",
-        );
-      }
-      return sent;
-    },
-    [sendJson],
-  );
+
 
   const sendMessage = useCallback(
     (content: string) => {
@@ -829,14 +808,13 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendSelectRevisionPath,
     sendAuthorDecision,
     sendRequestRevision,
-    sendRevertWorkItem,
     sendSelectWorkItemGenerationMode,
     sendRequestOutlineRevision,
     sendWorkItemDraftDecision,
     sendWorkItemBatchDecision,
     sendWorkItemPlanCompileRecoveryAction,
-    sendHumanPresentationRevision,
-    sendHumanConfirm,
+    sendConfirmGate,
+    sendAbandonGate,
     sendHumanGateFeedback,
     sendAdvance,
     confirmPlanAmendment,

@@ -4,16 +4,11 @@ import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export type CockpitActionFacade = {
   confirm(): boolean | void;
-  requestChange(payload: CockpitRequestChangePayload): boolean | void;
   feedback(feedback: string): boolean | void;
   terminate(): boolean | void;
   advance(): boolean | void;
 };
 
-export type CockpitRequestChangePayload = {
-  description: string;
-  source: "human" | "review_findings";
-};
 
 export function actionFacadeForFlowKind(
   flowKind: WorkspaceWsState["flowKind"],
@@ -25,10 +20,8 @@ export function createCockpitActionFacade(input: {
   flowKind: WorkspaceWsState["flowKind"];
   commandId: string | null;
   getState: () => WorkspaceWsState;
-  sendHumanConfirm: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => boolean;
+  sendConfirm: () => boolean;
+  sendAbandonGate: (commandId: string) => boolean;
   sendHumanGateFeedback: (feedback: string, commandId?: string) => boolean;
   sendAdvance: (commandId?: string) => boolean;
 }): CockpitActionFacade {
@@ -37,16 +30,7 @@ export function createCockpitActionFacade(input: {
       if (gateActionBlockReason(input.getState()) !== null) {
         return false;
       }
-      return input.sendHumanConfirm("confirm");
-    },
-    requestChange(payload) {
-      if (gateActionBlockReason(input.getState()) !== null) {
-        return false;
-      }
-      if (actionFacadeForFlowKind(input.flowKind) === "legacy") {
-        return input.sendHumanConfirm("request-change", payload);
-      }
-      return false;
+      return input.sendConfirm();
     },
     feedback(feedback) {
       if (gateActionBlockReason(input.getState()) !== null) {
@@ -67,7 +51,9 @@ export function createCockpitActionFacade(input: {
       if (gateActionBlockReason(input.getState()) !== null) {
         return false;
       }
-      return input.sendHumanConfirm("terminate");
+      // L1 typed 重承载（REQ-RET-02）：终止=显式 abandon_human_gate 命令；
+      // 重连/刷新后无活 turn command_id 时凭新 id 提交（与 feedback 同款纪律）。
+      return input.sendAbandonGate(input.commandId ?? newCommandId());
     },
     advance() {
       const reason = gateActionBlockReason(input.getState());
@@ -136,7 +122,10 @@ export function gateIdentityFromState(
   if (state.humanGateSnapshot) {
     return `snapshot:${state.stage}`;
   }
-  return state.stage === "human_confirm" ? `legacy:${state.stage}` : null;
+  // L1 重承载（REQ-RET-02）：gateId 派生收敛为 humanGateTurn/humanGateSnapshot 两路；
+  // stage-only legacy 门不再派生 `legacy:` 前缀 id（投影 key 由 selectGateProjection
+  // 以 `stage:` 前缀兜底）。
+  return null;
 }
 
 export function snapshotGateFingerprint(

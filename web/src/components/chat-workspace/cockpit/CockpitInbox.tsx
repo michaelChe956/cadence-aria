@@ -353,21 +353,8 @@ function GateInboxActions({
               onSubmit={actions.feedback}
             />
           </>
-        ) : (
-          <button
-            type="button"
-            onClick={() =>
-              actions.requestChange({
-                description: "采用 findings",
-                source: "review_findings",
-              })
-            }
-            className="inline-flex min-h-11 items-center gap-1 rounded-md border border-amber-200 bg-white px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-          >
-            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-            采纳建议并返修
-          </button>
-        )}
+        ) : null}
+        {/* L1（REQ-RET-02）：legacy 门「采纳建议并返修」（request-change）发送面删除。 */}
         <button
           type="button"
           onClick={actions.confirm}

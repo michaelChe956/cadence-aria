@@ -166,7 +166,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   }
 
   return {
-    key: gateIdentityFromState(state) ?? `legacy:${state.stage}`,
+    key: gateIdentityFromState(state) ?? `stage:${state.stage}`,
     turn_id: null,
     stage: state.stage,
     flow_kind: state.flowKind,

@@ -358,9 +358,9 @@ export function CodingWorkspacePage({
         sent = planRepairApi.confirmPlanAmendment(amendmentId);
         break;
       case "regenerate":
-        sent = planRepairApi.sendHumanConfirm("request-change", {
-          description: "要求重新生成 Plan Repair 修订",
-        });
+        // L1 typed 重承载（REQ-RET-02）：regenerate 走 request_revision——WorkItemPlan
+        // 子会话入站即 request_work_item_plan_revision（SC plan-repair 消费通道）。
+        sent = planRepairApi.sendRequestRevision("要求重新生成 Plan Repair 修订");
         break;
       case "cancel":
         sent = planRepairApi.cancelPlanAmendment(amendmentId, "用户取消修订");

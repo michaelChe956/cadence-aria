@@ -2,11 +2,7 @@ export type StageAction =
   | "start_generation"
   | "abort"
   | "accept_author"
-  | "reject_author"
-  | "confirm"
-  | "request_change"
-  | "terminate"
-  | "select_revision_path";
+  | "reject_author";
 
 export type GateActionFacade = "typed" | "legacy";
 export interface StageUIConfig {
@@ -41,8 +37,11 @@ const STAGE_CONFIG_MAP: Record<string, StageUIConfig> = {
     showContextInput: false,
     providerEditable: false,
   },
+  // L1 重承载（REQ-RET-02）：legacy 决策动作面（select_revision_path/confirm/
+  // request_change/terminate）随旧协议退役收敛为只读呈现；headerBadge 保留——
+  // 历史会话 stage 值仍在服务端快照内。
   review_decision: {
-    actions: ["select_revision_path", "abort"],
+    actions: [],
     headerBadge: "审核结论待处理",
     showContextInput: false,
     providerEditable: false,
@@ -54,7 +53,7 @@ const STAGE_CONFIG_MAP: Record<string, StageUIConfig> = {
     providerEditable: false,
   },
   human_confirm: {
-    actions: ["confirm", "request_change", "terminate"],
+    actions: [],
     headerBadge: "等待确认",
     showContextInput: false,
     providerEditable: false,

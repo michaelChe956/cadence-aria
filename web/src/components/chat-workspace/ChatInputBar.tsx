@@ -30,7 +30,8 @@ interface ChatInputBarProps {
   workItemPlanArtifact?: WorkItemPlanArtifactPayload | null;
   onSendContextNote: (content: string) => void;
   onStartGeneration: () => void;
-  onSendHumanDecision: (payload: { description: string; source: "human" }) => void;
+  // L1 重承载（REQ-RET-02）：legacy 决策回调全部可选——未提供即不渲染对应按钮
+  // （只读宿主）；human_confirm 决策输入发送面（onSendHumanDecision）随旧协议退役删除。
   onAuthorDecision?: (decision: AuthorDecisionChoice, feedback?: string) => void;
   onSelectWorkItemGenerationMode?: (mode: WorkItemGenerationMode) => void;
   onRequestOutlineRevision?: () => void;
@@ -42,8 +43,6 @@ interface ChatInputBarProps {
   ) => void;
   onAbort: () => void;
   disabled?: boolean;
-  /** Host-provided guard for human-confirm actions that are not currently actionable. */
-  humanConfirmDisabled?: boolean;
   hideStartGeneration?: boolean;
   /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
   onInputFocus?: () => void;
@@ -66,16 +65,14 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   workItemPlanArtifact = null,
   onSendContextNote,
   onStartGeneration,
-  onSendHumanDecision,
-  onAuthorDecision = () => undefined,
-  onSelectWorkItemGenerationMode = () => undefined,
-  onRequestOutlineRevision = () => undefined,
-  onWorkItemDraftDecision = () => undefined,
-  onWorkItemBatchDecision = () => undefined,
+  onAuthorDecision,
+  onSelectWorkItemGenerationMode,
+  onRequestOutlineRevision,
+  onWorkItemDraftDecision,
+  onWorkItemBatchDecision,
   onAbort,
   disabled = false,
   hideStartGeneration = false,
-  humanConfirmDisabled = false,
   onInputFocus,
 }, ref) {
   const [input, setInput] = useState("");
@@ -86,14 +83,16 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   const isWorkItemGenerationMode = activeNodeType === "work_item_generation_mode";
   const isWorkItemDraftConfirm = activeNodeType === "work_item_draft_confirm";
   const isWorkItemBatchConfirm = activeNodeType === "work_item_batch_confirm";
+  // L1 重承载（REQ-RET-02）：human_confirm 决策输入发送面随旧协议退役删除——
+  // 该阶段无发送通道，输入只读呈现（决策走 typed 门动作面）。
   const isHumanConfirm = stage === "human_confirm";
   const isBusy = BUSY_STAGES.has(stage);
   // spec-design-dialog-revision T8：author_confirm 反馈输入开放（原为禁用）；
   // 发送仍走「发送反馈」按钮而非表单提交。
   const inputDisabled =
-    disabled || (isHumanConfirm && humanConfirmDisabled) || isBusy || stage === "completed";
-  const canSend = !inputDisabled && (isPrepareContext || isHumanConfirm) && trimmedInput.length > 0;
-  const showSend = isPrepareContext || isHumanConfirm;
+    disabled || isHumanConfirm || isBusy || stage === "completed";
+  const canSend = !inputDisabled && isPrepareContext && trimmedInput.length > 0;
+  const showSend = isPrepareContext;
   const draftPayload =
     workItemPlanArtifact?.type === "draft_candidate" ? workItemPlanArtifact.payload : null;
   const batchPayload =
@@ -114,15 +113,8 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     if (!canSend) {
       return;
     }
-
-    if (isHumanConfirm) {
-      useWorkspaceStore.getState().resolveGateEntry("request-change");
-      appendOptimisticEntry("human_decision", trimmedInput);
-      onSendHumanDecision({ description: trimmedInput, source: "human" });
-    } else {
-      appendOptimisticEntry("context_note", trimmedInput);
-      onSendContextNote(trimmedInput);
-    }
+    appendOptimisticEntry("context_note", trimmedInput);
+    onSendContextNote(trimmedInput);
     setInput("");
   }
 
@@ -135,7 +127,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   }
 
   function handleSendAuthorFeedback() {
-    if (disabled || trimmedInput.length === 0) {
+    if (disabled || trimmedInput.length === 0 || !onAuthorDecision) {
       return;
     }
     onAuthorDecision("revise", trimmedInput);
@@ -173,16 +165,16 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           ) : null}
           {showSend ? (
             <button
-              data-testid={isHumanConfirm ? "send-human-decision" : "send-context-note"}
+              data-testid="send-context-note"
               type="submit"
               disabled={!canSend}
               className="btn-secondary h-9 disabled:opacity-50"
             >
               <Send className="h-4 w-4" />
-              {isHumanConfirm ? "发送修改意见" : "发送"}
+              发送
             </button>
           ) : null}
-          {isWorkItemOutlineConfirm ? (
+          {isWorkItemOutlineConfirm && onRequestOutlineRevision && onAuthorDecision ? (
             <>
               <button
                 type="button"
@@ -203,7 +195,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
                 接受 Outline
               </button>
             </>
-          ) : isWorkItemGenerationMode ? (
+          ) : isWorkItemGenerationMode && onSelectWorkItemGenerationMode && onRequestOutlineRevision ? (
             <>
               <button
                 type="button"
@@ -233,7 +225,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
                 返回 Outline 返修
               </button>
             </>
-          ) : isWorkItemDraftConfirm ? (
+          ) : isWorkItemDraftConfirm && onWorkItemDraftDecision ? (
             <>
               {!draftPayload?.can_accept ? (
                 <DraftValidationFailureNotice findings={draftPayload?.validator_findings} />
@@ -278,7 +270,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
                 </>
               ) : null}
             </>
-          ) : isWorkItemBatchConfirm ? (
+          ) : isWorkItemBatchConfirm && onWorkItemBatchDecision ? (
             <>
               <button
                 type="button"
@@ -325,7 +317,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
                 </button>
               ) : null}
             </>
-          ) : isAuthorConfirm ? (
+          ) : isAuthorConfirm && onAuthorDecision ? (
             <button
               type="button"
               onClick={handleSendAuthorFeedback}
@@ -368,7 +360,7 @@ function placeholderForStage(stage: string, activeNodeType?: string | null) {
     return "请确认整组 Work Item Draft";
   }
   if (stage === "human_confirm") {
-    return "输入修改意见...";
+    return "人工确认阶段（决策走门禁操作）";
   }
   if (stage === "author_confirm") {
     // spec-design-dialog-revision T8：推倒重来出口移除，反馈修订成为主路径。

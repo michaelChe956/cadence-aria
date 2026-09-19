@@ -36,7 +36,6 @@ import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   cockpitInboxItemSessionId,
-  gateActionBlockReason as gateActionBlockReasonForState,
   selectCockpitFlow,
   selectGateProjection,
   STALE_DRIVER_LEASE_CODE,
@@ -258,11 +257,6 @@ export function ChatCockpitPage({
   onOpenSession: (sessionId: string) => void;
   workspaceWs: WorkspaceWsApi;
 }) {
-  const gateActionBlockReason = useWorkspaceStore((workspaceState) =>
-    workspaceState.stage === "human_confirm"
-      ? gateActionBlockReasonForState(workspaceState)
-      : null,
-  );
   const state = useWorkspaceStore();
   const now = useNowTicker(1000);
   const cockpitSettings = useCockpitSettings();
@@ -489,10 +483,8 @@ export function ChatCockpitPage({
             ? state.humanGateTurn.command_id
             : null,
         getState: useWorkspaceStore.getState,
-        sendHumanConfirm: (decision, payload) =>
-          payload === undefined
-            ? workspaceWs.sendHumanConfirm(decision)
-            : workspaceWs.sendHumanConfirm(decision, payload),
+        sendConfirm: workspaceWs.sendConfirmGate,
+        sendAbandonGate: workspaceWs.sendAbandonGate,
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
         sendAdvance: workspaceWs.sendAdvance,
       }),
@@ -504,7 +496,8 @@ export function ChatCockpitPage({
       state.sessionStatus,
       state.stage,
       workspaceWs.sendAdvance,
-      workspaceWs.sendHumanConfirm,
+      workspaceWs.sendAbandonGate,
+      workspaceWs.sendConfirmGate,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
@@ -626,7 +619,8 @@ export function ChatCockpitPage({
               ? current.humanGateTurn.command_id
               : null,
           getState: useWorkspaceStore.getState,
-          sendHumanConfirm: workspaceWs.sendHumanConfirm,
+          sendConfirm: workspaceWs.sendConfirmGate,
+          sendAbandonGate: workspaceWs.sendAbandonGate,
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
         }).confirm();
@@ -652,7 +646,8 @@ export function ChatCockpitPage({
               ? current.humanGateTurn.command_id
               : null,
           getState: useWorkspaceStore.getState,
-          sendHumanConfirm: workspaceWs.sendHumanConfirm,
+          sendConfirm: workspaceWs.sendConfirmGate,
+          sendAbandonGate: workspaceWs.sendAbandonGate,
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
         }).advance();
@@ -661,7 +656,8 @@ export function ChatCockpitPage({
     [
       takeoverTargetSessionId,
       workspaceWs.sendAdvance,
-      workspaceWs.sendHumanConfirm,
+      workspaceWs.sendAbandonGate,
+      workspaceWs.sendConfirmGate,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
@@ -1072,11 +1068,9 @@ export function ChatCockpitPage({
                 activeNodeType={activeNode?.node_type ?? null}
                 workItemPlanArtifact={state.workItemPlanArtifact}
                 disabled={workspaceWs.connectionStatus !== "connected"}
-                humanConfirmDisabled={gateActionBlockReason !== null}
                 hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
                 onSendContextNote={workspaceWs.sendContextNote}
                 onStartGeneration={handleStartGeneration}
-                onSendHumanDecision={actions.requestChange}
                 onAuthorDecision={handleAuthorDecision}
                 onSelectWorkItemGenerationMode={workspaceWs.sendSelectWorkItemGenerationMode}
                 onRequestOutlineRevision={() => workspaceWs.sendRequestOutlineRevision()}

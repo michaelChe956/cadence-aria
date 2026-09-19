@@ -4,9 +4,10 @@ import type { WorkItemPlanCandidateDto, WorkItemCandidateDto } from "../../api/t
 export interface WorkItemPlanCandidatePanelProps {
   candidate: WorkItemPlanCandidateDto;
   stage: string;
-  onRevert: (workItemId: string, feedback: string, clear: boolean) => void;
-  onRequestRevision: (feedback?: string) => void;
-  onAccept: () => void;
+  // L1（REQ-RET-02）：决策回调可选——只读宿主（Legacy 页）不提供即隐藏动作区。
+  onRevert?: (workItemId: string, feedback: string, clear: boolean) => void;
+  onRequestRevision?: (feedback?: string) => void;
+  onAccept?: () => void;
   className?: string;
 }
 
@@ -34,13 +35,17 @@ export function WorkItemPlanCandidatePanel({
   }
 
   function submitRevert(itemId: string) {
-    onRevert(itemId, revertFeedback, false);
+    if (onRevert) {
+      onRevert(itemId, revertFeedback, false);
+    }
     setRevertingId(null);
     setRevertFeedback("");
   }
 
   function clearRevert(itemId: string) {
-    onRevert(itemId, "", true);
+    if (onRevert) {
+      onRevert(itemId, "", true);
+    }
   }
 
   function cancelRevert() {
@@ -80,7 +85,7 @@ export function WorkItemPlanCandidatePanel({
             <WorkItemCard
               key={item.candidate_id}
               item={item}
-              isAuthorConfirm={isAuthorConfirm}
+              isAuthorConfirm={isAuthorConfirm && onRevert !== undefined}
               isReverting={revertingId === item.candidate_id}
               revertFeedback={revertFeedback}
               onRevertFeedbackChange={setRevertFeedback}
@@ -150,7 +155,7 @@ export function WorkItemPlanCandidatePanel({
         </section>
       ) : null}
 
-      {isAuthorConfirm ? (
+      {isAuthorConfirm && onRevert && onRequestRevision && onAccept ? (
         <div className="mt-auto flex items-center gap-3 border-t border-[var(--aria-line)] pt-4">
           <button
             type="button"

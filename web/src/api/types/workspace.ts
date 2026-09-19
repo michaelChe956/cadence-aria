@@ -1,6 +1,5 @@
 import type {
   AuthorDecision,
-  HumanConfirmDecision,
   ProviderConfigSnapshot,
   ProviderPermissionMode,
   ProviderWorkspaceConfigInput,
@@ -263,7 +262,7 @@ export type WsInMessage =
       reason?: string | null;
     }
   | SaveHumanPresentationRevisionMessage
-  | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
+  | { type: "abandon_human_gate"; command_id: string }
   | { type: "human_gate_feedback"; command_id: string; feedback: string }
   | { type: "advance"; command_id: string }
   | { type: "confirm_plan_amendment"; amendment_id: string }

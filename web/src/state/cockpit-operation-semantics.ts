@@ -15,6 +15,8 @@ export function codingStartupRejectionCopy(code: string | null): string | null {
 export type CockpitOperation =
   | "confirm"
   | "feedback"
+  | "abandon_gate"
+  // request_change/terminate：legacy 决策审计历史值（读侧容忍，T5 随退役面收敛）。
   | "request_change"
   | "terminate"
   | "takeover"

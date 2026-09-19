@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ClipboardCopy, GitBranch, PanelRightOpen, TriangleAlert, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, PanelRightOpen, TriangleAlert, Wifi, WifiOff } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -10,10 +10,6 @@ import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
-import type {
-  AuthorDecisionChoice,
-  RevisionPath,
-} from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
 import { ArtifactReviewPanel } from "../components/chat-workspace/ArtifactReviewPanel";
 import {
@@ -37,11 +33,7 @@ import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
-import { createCockpitActionFacade } from "../state/cockpit-action-routing";
-import {
-  gateActionBlockReason as gateActionBlockReasonForState,
-  selectGateProjection,
-} from "../state/workspace-cockpit-projection";
+import { gateActionBlockReason as gateActionBlockReasonForState } from "../state/workspace-cockpit-projection";
 import type {
   ChatEntry,
   ChoiceResponsePayload,
@@ -84,22 +76,15 @@ export function LegacyChatWorkspacePage({
     sendContextNote,
     sendStartGeneration,
     retryInterruptedRun,
-    sendSelectRevisionPath,
-    sendAuthorDecision,
-    sendRequestRevision,
-    sendRevertWorkItem,
-    sendSelectWorkItemGenerationMode,
-    sendRequestOutlineRevision,
-    sendWorkItemDraftDecision,
-    sendWorkItemBatchDecision,
+    // OQ2 定案（REQ-RET-02/03）：本页保留骨架与常规交互，workitem legacy 决策面
+    // 全剥离——决策发送（human_confirm/review_decision/author/逐段）不再由本页发起，
+    // WorkItem 历史会话只读呈现；compile recovery 为 SC compile 链保留面，随 staged
+    // 面板保留。
     sendWorkItemPlanCompileRecoveryAction,
-    sendHumanPresentationRevision,
-    sendHumanConfirm,
     abort,
     selectProvider,
     respondPermission,
     sendChoiceResponse,
-    sendReviewDecision,
     connectionStatus,
     isReconnecting,
     reconnectAttemptCount,
@@ -108,10 +93,6 @@ export function LegacyChatWorkspacePage({
   const storeSessionId = useWorkspaceStore((state) => state.sessionId);
   const workspaceType = useWorkspaceStore((state) => state.workspaceType);
   const stage = useWorkspaceStore((state) => state.stage);
-  const flowKind = useWorkspaceStore((state) => state.flowKind);
-  const humanGateCommandId = useWorkspaceStore(
-    (state) => state.humanGateTurn?.command_id ?? null,
-  );
   const gateActionBlockReason = useWorkspaceStore((state) =>
     state.stage === "human_confirm"
       ? gateActionBlockReasonForState(state)
@@ -119,6 +100,7 @@ export function LegacyChatWorkspacePage({
   );
   const providers = useWorkspaceStore((state) => state.providers);
   const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
+  const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
   const permissionModes = useWorkspaceStore((state) => state.permissionModes);
   const providerLocked = useWorkspaceStore((state) => state.providerLocked);
   const providerLockedAt = useWorkspaceStore((state) => state.providerLockedAt);
@@ -127,7 +109,6 @@ export function LegacyChatWorkspacePage({
   );
   const openSpecEnabled = useWorkspaceStore((state) => state.openSpecEnabled);
   const chatEntries = useWorkspaceStore((state) => state.chatEntries);
-  const pendingDecision = useWorkspaceStore((state) => state.pendingDecision);
   const contentCache = useWorkspaceStore((state) => state.contentCache);
   const selectedNodeId = useWorkspaceStore((state) => state.selectedNodeId);
   const timelineNodes = useWorkspaceStore((state) => state.timelineNodes);
@@ -163,8 +144,7 @@ export function LegacyChatWorkspacePage({
   const recoverableInterruptedRun = useWorkspaceStore(
     (state) => state.recoverableInterruptedRun,
   );
-  const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
-  const latestReviewReport = useWorkspaceStore(selectLatestReviewReport);
+
   const stageConfig = useStageUI(stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
@@ -201,33 +181,6 @@ export function LegacyChatWorkspacePage({
     const summary = lastCompletedRevision?.summary?.trim();
     return summary ? summary : undefined;
   }, [timelineNodes]);
-  const reviewDecisionOptions = useMemo(
-    () =>
-      pendingDecision?.options ??
-      optionalWorkItemPlanReviewDecisionOptions(workspaceType, chatEntries),
-    [chatEntries, pendingDecision?.options, workspaceType],
-  );
-  const gateActions = useMemo(
-    () =>
-      createCockpitActionFacade({
-        flowKind,
-        commandId: humanGateCommandId,
-        getState: useWorkspaceStore.getState,
-        sendHumanConfirm: (decision, payload) =>
-          payload === undefined
-            ? sendHumanConfirm(decision)
-            : sendHumanConfirm(decision, payload),
-        sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
-        sendAdvance: workspaceWs.sendAdvance,
-      }),
-    [
-      flowKind,
-      humanGateCommandId,
-      sendHumanConfirm,
-      workspaceWs.sendAdvance,
-      workspaceWs.sendHumanGateFeedback,
-    ],
-  );
   const selectedEntryId = useMemo(
     () =>
       selectedNodeId
@@ -464,20 +417,7 @@ export function LegacyChatWorkspacePage({
     useWorkspaceStore.getState().setSelectedNode(nodeId);
   }
 
-  function handleSelectRevisionPath(path: RevisionPath, extraContext?: string) {
-    sendSelectRevisionPath(path, extraContext);
-  }
 
-
-  function handleAuthorDecision(decision: AuthorDecisionChoice, feedback?: string) {
-    // spec-design-dialog-revision T8："revise" 携带反馈，由 useWorkspaceWs 构造
-    // `{revise: {feedback}}` 线格式；其余变体（含 WorkItemPlan outline 的兼容 "accept"）原样透传。
-    if (decision === "revise") {
-      sendAuthorDecision("revise", feedback);
-      return;
-    }
-    sendAuthorDecision(decision);
-  }
 
   const handleLoadArtifactVersion = useCallback(
     async (version: number) => {
@@ -646,7 +586,6 @@ export function LegacyChatWorkspacePage({
                   entries={chatEntries}
                   onPermissionResponse={handlePermissionResponse}
                   onChoiceResponse={handleChoiceResponse}
-                  actions={gateActions}
                   sessionId={sessionReady ? sessionId : null}
                   contentCache={contentCacheValues}
                   loadContent={handleLoadContent}
@@ -669,14 +608,6 @@ export function LegacyChatWorkspacePage({
                   onSendContextNote={sendContextNote}
                   onStartGeneration={handleStartGeneration}
                   hideStartGeneration={Boolean(recoverableInterruptedRun)}
-                  onSendHumanDecision={gateActions.requestChange}
-                  onAuthorDecision={handleAuthorDecision}
-                  onSelectWorkItemGenerationMode={
-                    sendSelectWorkItemGenerationMode
-                  }
-                  onRequestOutlineRevision={() => sendRequestOutlineRevision()}
-                  onWorkItemDraftDecision={sendWorkItemDraftDecision}
-                  onWorkItemBatchDecision={sendWorkItemBatchDecision}
                   onAbort={abort}
                 />
                 {reviewPanelVisible ? null : (
@@ -706,52 +637,8 @@ export function LegacyChatWorkspacePage({
                     onCacheArtifactContent={handleCacheArtifactContent}
                     changelogSummary={changelogSummary}
                     onClose={() => setReviewPanelDismissed(true)}
-                    actions={
-                      // spec-workbench-canvas-experience T4：三动作自 ChatInputBar
-                      // 迁移至面板 actions 插槽（决策 payload 不变）。
-                      <>
-                        {latestReviewReport ? (
-                          <button
-                            type="button"
-                            className="btn-secondary h-9"
-                            onClick={() => {
-                              // 复用 ChatInputBar 预填逻辑（覆盖式，不自动发送）+ 收起面板。
-                              chatInputRef.current?.prefill(
-                                `按以下 review 意见修订：\n\n${latestReviewReport}`,
-                              );
-                              setReviewPanelDismissed(true);
-                            }}
-                          >
-                            <ClipboardCopy className="h-4 w-4" />
-                            采纳 Review 意见
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          className={
-                            reviewerEnabled
-                              ? "btn-primary h-9"
-                              : "btn-secondary h-9"
-                          }
-                          onClick={() => sendAuthorDecision("accept_with_review")}
-                        >
-                          <GitBranch className="h-4 w-4" />
-                          确认并送审
-                        </button>
-                        <button
-                          type="button"
-                          className={
-                            reviewerEnabled
-                              ? "btn-secondary h-9"
-                              : "btn-primary h-9"
-                          }
-                          onClick={() => sendAuthorDecision("accept_finalize")}
-                        >
-                          <Check className="h-4 w-4" />
-                          确认定稿
-                        </button>
-                      </>
-                    }
+                    // OQ2 定案：author 决策按钮（确认并送审/确认定稿）与预填动作
+                    // 随 legacy 决策面剥离——面板仅呈现。
                     className="h-full min-h-0"
                   />
                 </div>
@@ -773,16 +660,7 @@ export function LegacyChatWorkspacePage({
                     <WorkItemPlanStagedPanel
                       activeNodeType={activeNode?.node_type ?? null}
                       artifact={displayedWorkItemPlanArtifact}
-                      onAcceptOutline={() => sendAuthorDecision("accept")}
-                      onSelectMode={sendSelectWorkItemGenerationMode}
-                      onRequestOutlineRevision={() =>
-                        sendRequestOutlineRevision()
-                      }
-                      onDraftDecision={sendWorkItemDraftDecision}
-                      onBatchDecision={sendWorkItemBatchDecision}
-                      onCompileRecoveryAction={
-                        sendWorkItemPlanCompileRecoveryAction
-                      }
+                      onCompileRecoveryAction={sendWorkItemPlanCompileRecoveryAction}
                     />
                   )}
                   <WorkItemPlanArtifactPanel
@@ -814,7 +692,6 @@ export function LegacyChatWorkspacePage({
                     }
                     humanPresentationRevisions={humanPresentationRevisions}
                     humanPresentationSaveStates={humanPresentationSaveStates}
-                    onSaveHumanPresentation={sendHumanPresentationRevision}
                     className="min-h-0"
                   />
                 </div>
@@ -824,9 +701,6 @@ export function LegacyChatWorkspacePage({
                     <WorkItemPlanCandidatePanel
                       candidate={workItemPlanCandidate}
                       stage={stage}
-                      onRevert={sendRevertWorkItem}
-                      onRequestRevision={sendRequestRevision}
-                      onAccept={() => sendAuthorDecision("accept")}
                       className="min-h-0"
                     />
                   ) : (
@@ -854,19 +728,11 @@ export function LegacyChatWorkspacePage({
                 entries={chatEntries}
                 onPermissionResponse={handlePermissionResponse}
                 onChoiceResponse={handleChoiceResponse}
-                actions={gateActions}
                 sessionId={sessionReady ? sessionId : null}
                 contentCache={contentCacheValues}
                 loadContent={handleLoadContent}
                 onCacheContent={handleCacheContent}
               />
-              {stage === "review_decision" ? (
-                <ReviewDecisionActionBar
-                  options={reviewDecisionOptions}
-                  onSelectDecision={sendReviewDecision}
-                  onSelectRevisionPath={handleSelectRevisionPath}
-                />
-              ) : null}
               <ChatInputBar
                 stage={stage}
                 activeNodeType={activeNode?.node_type ?? null}
@@ -875,14 +741,6 @@ export function LegacyChatWorkspacePage({
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
-                onSendHumanDecision={gateActions.requestChange}
-                onAuthorDecision={handleAuthorDecision}
-                onSelectWorkItemGenerationMode={
-                  sendSelectWorkItemGenerationMode
-                }
-                onRequestOutlineRevision={() => sendRequestOutlineRevision()}
-                onWorkItemDraftDecision={sendWorkItemDraftDecision}
-                onWorkItemBatchDecision={sendWorkItemBatchDecision}
                 onAbort={abort}
               />
             </div>
