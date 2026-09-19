@@ -125,7 +125,8 @@ impl super::CodingAttemptStore {
         })
     }
 
-    /// 列出覆盖指定 Work Item 的全部 attempt（按 `(attempt_no, id)` 升序）。
+    /// 列出覆盖指定 Work Item 的全部 attempt（按 `created_at` 升序，同刻以
+    /// `(attempt_no, id)` tie-break）。
     ///
     /// 覆盖关系（REQ-COD-06 适配，multi-repo-group-coding WP4）：
     /// - `attempt.work_item_id` 直接绑定（WorkItem scope 既有语义零变化）；
@@ -160,9 +161,15 @@ impl super::CodingAttemptStore {
                 attempts.push(attempt);
             }
         }
+        // 排序主键=created_at（Utc::now().to_rfc3339() 同格式字典序=时间序）：
+        // per-WI 与 group attempt 的 attempt_no 来自不同计数空间（group 锚桶
+        // 内首个 WI），跨空间混排不可比——陈旧 per-WI 可凭编号压过新 group
+        // （完成门永不触发）或反向（k3 fix round 1，P2）；(attempt_no, id)
+        // 仅作同刻 tie-break（同计数空间内保持既有确定性顺序）。
         attempts.sort_by(|left, right| {
-            left.attempt_no
-                .cmp(&right.attempt_no)
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.attempt_no.cmp(&right.attempt_no))
                 .then_with(|| left.id.cmp(&right.id))
         });
         Ok(attempts)
@@ -842,6 +849,118 @@ mod tests {
         assert_eq!(web_entry.push_status, Some(PushStatus::Pushed));
         let web_summary_entry = entry_for(&summary, "work_item_0003");
         assert_eq!(web_summary_entry.push_status, Some(PushStatus::Pushed));
+    }
+
+    /// 直改 attempt 的 attempt_no/created_at 落盘（构造跨计数空间的账簿形态；
+    /// k3 fix round 1 夹具——per-WI 与 group attempt 的 attempt_no 来自不同
+    /// 计数空间，group 锚桶内首个 WI，混排不可比）。
+    fn force_attempt_bookkeeping(
+        store: &CodingAttemptStore,
+        attempt: &CodingExecutionAttempt,
+        attempt_no: u32,
+        created_at: &str,
+    ) -> CodingExecutionAttempt {
+        let mut shaped = attempt.clone();
+        shaped.attempt_no = attempt_no;
+        shaped.created_at = created_at.to_string();
+        shaped.updated_at = created_at.to_string();
+        store
+            .write_coding_attempt_for_test(&shaped)
+            .expect("shape attempt bookkeeping");
+        shaped
+    }
+
+    /// k3 fix round 1（P2）用例①：非桶首 WI 持 2 个陈旧 per-WI attempt
+    /// （w2 计数空间编号 1/2、created_at 更早、交付失败）+ 新 group attempt
+    /// （锚 w1、w1 计数空间编号 1、created_at 更新、交付成功）——「最新」须以
+    /// created_at 判：取 group（修前按 (attempt_no,id) 混排被陈旧编号 2 压过，
+    /// w2 条目永远失败态、完成门永不触发）。
+    #[test]
+    fn latest_covering_prefers_newer_group_over_stale_per_wi_attempts() {
+        let (_tmp, store) = setup_store();
+        seed_work_item(&store, "work_item_0001", "repo_api");
+        seed_work_item(&store, "work_item_0002", "repo_api");
+
+        let stale1 = seed_completed_attempt(&store, "work_item_0002", "aria/w2/a1", "sha-old1");
+        let stale1 = force_attempt_bookkeeping(&store, &stale1, 1, "2026-09-18T00:00:00Z");
+        seed_review_request(
+            &store,
+            &stale1,
+            PushStatus::Failed,
+            Some("stale push 1".to_string()),
+        );
+        let stale2 = seed_completed_attempt(&store, "work_item_0002", "aria/w2/a2", "sha-old2");
+        let stale2 = force_attempt_bookkeeping(&store, &stale2, 2, "2026-09-18T01:00:00Z");
+        seed_review_request(
+            &store,
+            &stale2,
+            PushStatus::Failed,
+            Some("stale push 2".to_string()),
+        );
+
+        let group = seed_group_attempt_with_units(
+            &store,
+            "api",
+            "work_item_0001",
+            &["work_item_0001", "work_item_0002"],
+        );
+        let group = force_attempt_bookkeeping(&store, &group, 1, "2026-09-19T00:00:00Z");
+        seed_review_request(&store, &group, PushStatus::Pushed, None);
+
+        let summary = store
+            .compute_issue_delivery_summary(PROJECT_ID, ISSUE_ID)
+            .unwrap();
+
+        // 陈旧 per-WI 失败不得压过更新的 group 交付（否则 issue 永远 Partial）。
+        assert_eq!(summary.overall, IssueDeliveryOverall::AllPushed);
+        for work_item_id in ["work_item_0001", "work_item_0002"] {
+            assert_eq!(
+                entry_for(&summary, work_item_id).branch_name.as_deref(),
+                Some(group.branch_name.as_str())
+            );
+        }
+    }
+
+    /// k3 fix round 1（P2）用例②（反向）：旧 group attempt（编号 2、created_at
+    /// 更早、交付失败）+ 新 per-WI attempt（w2 计数空间编号 1、created_at 更新、
+    /// 交付成功）——取新 per-WI（修前编号 2 的 group 压过编号 1，误持旧失败态）。
+    #[test]
+    fn latest_covering_prefers_newer_per_wi_over_stale_group_attempt() {
+        let (_tmp, store) = setup_store();
+        seed_work_item(&store, "work_item_0001", "repo_api");
+        seed_work_item(&store, "work_item_0002", "repo_api");
+
+        let group = seed_group_attempt_with_units(
+            &store,
+            "api",
+            "work_item_0001",
+            &["work_item_0001", "work_item_0002"],
+        );
+        let group = force_attempt_bookkeeping(&store, &group, 2, "2026-09-18T00:00:00Z");
+        seed_review_request(
+            &store,
+            &group,
+            PushStatus::Failed,
+            Some("group push failed".to_string()),
+        );
+
+        let fresh = seed_completed_attempt(&store, "work_item_0002", "aria/w2/fresh", "sha-new");
+        let fresh = force_attempt_bookkeeping(&store, &fresh, 1, "2026-09-19T00:00:00Z");
+        seed_review_request(&store, &fresh, PushStatus::Pushed, None);
+
+        let summary = store
+            .compute_issue_delivery_summary(PROJECT_ID, ISSUE_ID)
+            .unwrap();
+
+        let entry = entry_for(&summary, "work_item_0002");
+        assert_eq!(
+            entry.branch_name.as_deref(),
+            Some(fresh.branch_name.as_str())
+        );
+        assert_eq!(entry.push_status, Some(PushStatus::Pushed));
+        assert_eq!(entry.push_error, None);
+        // w1 仍由 group 承载（失败态）——整体显式 Partial。
+        assert_eq!(summary.overall, IssueDeliveryOverall::Partial);
     }
 
     /// 播种 logical codebase 权威记录 + 兼容投影，使
