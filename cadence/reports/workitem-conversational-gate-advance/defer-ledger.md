@@ -29,4 +29,4 @@
 
 ## 台账反查入口
 
-验收产物全部可从台账与测试名反查：任务/修复轮/Ruling 账见 `.superpowers/sdd/2026-08-31_计划文档_阶段3对话式人工门与advance_v1.0/progress.md`（gitignored，会话内在盘）；scenario 行的 `rust:`/`node:` 引用由 [build_acceptance_report.mjs](build_acceptance_report.mjs) 对仓库源码 rg 解析复核；脱敏 durable 证据见 [evidence/](evidence)。
+验收产物全部可从台账与测试名反查：任务/修复轮/Ruling 账见 `.superpowers/sdd/2026-08-31_计划文档_阶段3对话式人工门与advance_v1.0/progress.md`（gitignored，会话内在盘）；scenario 行的 `rust:`/`node:` 引用由 [build_acceptance_report.mjs](build_acceptance_report.mjs) 对仓库源码 rg 解析复核；脱敏 durable 证据见 [evidence/](evidence)。| DEF-PVR-ALL | 全 provider 最终验证：codex/claude_code/kimi_code 全部测试通过（pi 已达标；2026-09-19 用户裁决 B 附带义务） | 阶段 4 门重测终裁 | 弱模型加固专项+全 provider 验证轮；完成前 provider 面不视为收官 |

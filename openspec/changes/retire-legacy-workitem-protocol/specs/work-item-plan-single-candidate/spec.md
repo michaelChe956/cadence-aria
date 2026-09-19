@@ -8,7 +8,7 @@
 
 ### Requirement: 旧协议退役与单路径收敛（REQ-WSC-08）
 
-REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测全绿解锁后，旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO）SHALL 删除。删除后：新会话 SHALL 一律走单候选流，不存在 legacy 入口；收到已删除消息类型系统 SHALL 返回 stage-specific protocol error 且零副作用；多仓 Issue 的确定性 preflight 失败 SHALL 收敛为新路径 durable fatal/recoverable 终态（含失败原因），系统 MUST NOT 存在 legacy fallback 路径，MUST NOT 静默切换 `flow_kind`（本句修订并取代 REQ-WSC-07 原「legacy fallback 只允许在确定性 preflight 失败且新路径尚未产生副作用时发生」条款）；历史 legacy session 的 durable 记录与事件前缀 SHALL 只读保留（处置细则以 `legacy-protocol-retirement` REQ-RET-03 为唯一来源）；SC 门消息面（`human_gate_feedback`/approve/abandon）以 `work-item-plan-conversational-gate` 为唯一来源。
+REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测解锁后（2026-09-19 用户终裁 B：pi 全子项达标=协议质量实证；codex Confirmed 子项登记已知例外——系统性 provider 内容缺陷与协议无关，门文本据此显式修订，属 1c 裁决预留的「后续专项裁决」路径显式行使；**后续义务：codex/claude_code/kimi_code 全部 provider 最终 SHALL 全测通过（defer-ledger DEF-PVR-ALL），在义前不得视为 provider 面收官**），旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO）SHALL 删除。删除后：新会话 SHALL 一律走单候选流，不存在 legacy 入口；收到已删除消息类型系统 SHALL 返回 stage-specific protocol error 且零副作用；多仓 Issue 的确定性 preflight 失败 SHALL 收敛为新路径 durable fatal/recoverable 终态（含失败原因），系统 MUST NOT 存在 legacy fallback 路径，MUST NOT 静默切换 `flow_kind`（本句修订并取代 REQ-WSC-07 原「legacy fallback 只允许在确定性 preflight 失败且新路径尚未产生副作用时发生」条款）；历史 legacy session 的 durable 记录与事件前缀 SHALL 只读保留（处置细则以 `legacy-protocol-retirement` REQ-RET-03 为唯一来源）；SC 门消息面（`human_gate_feedback`/approve/abandon）以 `work-item-plan-conversational-gate` 为唯一来源。
 
 #### Scenario: 已删除消息协议错误拒绝
 

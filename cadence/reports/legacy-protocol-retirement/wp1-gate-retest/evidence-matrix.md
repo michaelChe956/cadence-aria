@@ -78,3 +78,10 @@
 | single_candidate_preflight_is_deterministic | 1 passed/0 failed | 0 |
 | preflight_fails_closed_when_legacy_shared_worktree_present | 1 passed/0 failed | 0 |
 | （全量）cargo test --locked | 10 结果块 4334 passed/2 failed/16 ignored（红项 §2.3） | 非 0（红项登记呈报） |
+
+## 终裁登记（2026-09-19，用户裁决 B）
+
+- 三选问法呈报后用户选 **B：登记例外+修订 REQ-WSC-07 门文本放行删除**——pi 全子项达标（424.5s/初评1/复评0/返修0）=协议质量实证；codex Confirmed 子项（0/2，contract_gap 系统性内容缺陷）登记已知例外，与协议无关。
+- 门文本修订随本 change REQ-WSC-08 delta 落笔（属 08-31 1c 裁决预留「后续专项裁决」路径的显式行使，非静默放宽）。
+- **用户同裁后续任务（DEF-PVR-ALL）：codex、claude_code、kimi_code 最终全部 SHALL 测试通过**（弱模型加固+全 provider 验证轮，未完成前 provider 面不视为收官；pi 已达标）。
+- T2/T4/T5/T6 据此解冻。
