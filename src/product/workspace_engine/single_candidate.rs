@@ -3,8 +3,7 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::product::models::ProviderName;
 use crate::product::work_item_plan_compiler::{
-    PlanCandidateValidationContext, WorkItemPlanSourceContext, compile_work_item_plan,
-    validate_plan_candidate_ir,
+    PlanCandidateValidationContext, WorkItemPlanSourceContext, validate_plan_candidate_ir,
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::product::work_item_plan_source_store::{
@@ -172,6 +171,20 @@ impl WorkspaceEngine {
             })
             .transpose()?;
 
+        // DEF-PVR-ALL 确定性契约补齐（3.6 全量收敛轮）：author 落盘前对两类
+        // 机械契约缺口（required_capability_missing / unconsumed_required_handoff）
+        // 先行确定性修复（markdown source 级逐字补丁，见 contract_autorepair.rs），
+        // 残余 Error 才产生机械 verdict 走 F5-A 模型返修（该通道语义零变化）。
+        // 补齐后的 source/IR/report 同源生成，publish freshness 链路零变化。
+        let (ir, source, autorepair_log) = contract_autorepair::converge_work_item_plan_source(
+            &source,
+            WorkItemPlanSourceContext {
+                target_repository_id,
+            },
+        )
+        .map_err(|diagnostics| {
+            format_compiler_diagnostics("compile markdown source", &diagnostics)
+        })?;
         let source_hash = hex::encode(Sha256::digest(source.as_bytes()));
         let source_id = format!("source-{}", &source_hash[..16]);
         let mut source_revision = SourceRevisionRecord {
@@ -193,15 +206,6 @@ impl WorkspaceEngine {
                 )
             })?;
 
-        let ir = compile_work_item_plan(
-            &source,
-            &WorkItemPlanSourceContext {
-                target_repository_id,
-            },
-        )
-        .map_err(|diagnostics| {
-            format_compiler_diagnostics("compile markdown source", &diagnostics)
-        })?;
         let ir_id = format!("ir-{}", &source_revision.source_revision_hash[..16]);
         let mut ir_record = PlanCandidateIrRecord {
             id: ir_id.clone(),
@@ -290,10 +294,16 @@ impl WorkspaceEngine {
             diff: None,
         })
         .await;
-        self.complete_active_node(Some(
-            "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string(),
-        ))
-        .await;
+        let completion_message = if autorepair_log.is_empty() {
+            "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string()
+        } else {
+            format!(
+                "SingleCandidate markdown source 已编译并持久化（确定性契约补齐 {} 项：{}），等待 Evaluate",
+                autorepair_log.len(),
+                autorepair_log.join("；")
+            )
+        };
+        self.complete_active_node(Some(completion_message)).await;
         if let Some(verdict) = contract_prerevision_verdict {
             self.route_single_candidate_contract_prerevision(verdict)
                 .await;

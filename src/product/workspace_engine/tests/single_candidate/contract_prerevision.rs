@@ -10,26 +10,29 @@ mod contract_prerevision {
     use crate::product::workspace_engine::WorkspaceStage;
     use crate::web::workspace_ws_types::TimelineNodeType;
 
-    const REP4_FIXTURE: &str = include_str!(concat!(
+    pub(super) const REP4_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
     ));
 
     /// campaign 同口径：终端 WI-003 handoff 提供行清空（否则 rep4 自带
     /// unconsumed_required_handoff Error，无法充当「干净」基线）。
-    fn clean_candidate() -> String {
+    pub(super) fn clean_candidate() -> String {
         REP4_FIXTURE.replace(
             "- provided_contract_refs: contract.levels-integration",
             "- provided_contract_refs: []",
         )
     }
 
-    /// 干净基线 + WI-002 require_all 塞入 WI-001 未提供的 capability。
-    fn capability_gap_candidate(round: usize) -> String {
+    /// 干净基线 + WI-001 反向消费 WI-002（contract.level-selector）制造依赖环
+    /// ——非机械可修缺口（DEF-PVR-ALL 补齐器边界外），驱动机械 verdict 走
+    /// 模型返修；capability 类缺口已由 contract_autorepair 确定性补齐，
+    /// 不再抵达本通道。
+    fn cycle_gap_candidate(round: usize) -> String {
         clean_candidate()
             .replace(
-                "- required_capabilities: api.levels.read\n",
-                "- required_capabilities: api.levels.read, api.levels.write\n",
+                "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
+                "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
             )
             .replace(
                 "Backend levels API",
@@ -40,7 +43,7 @@ mod contract_prerevision {
     /// 驱动 complete_single_candidate_work_item_plan_author 需要的 durable 形态：
     /// Generate 相位、无候选 refs（首轮流）；single_candidate_record 的 Evaluate
     /// 形态供 review 完成路径，不适合 author 落盘 CAS。
-    fn author_round_record(lifecycle: &LifecycleStore, engine: &mut WorkspaceEngine) {
+    pub(super) fn author_round_record(lifecycle: &LifecycleStore, engine: &mut WorkspaceEngine) {
         let mut record = lifecycle
             .get_workspace_session(&engine.session().session_id)
             .expect("load session");
@@ -75,7 +78,7 @@ mod contract_prerevision {
 
         let item_count = engine
             .complete_single_candidate_work_item_plan_author(
-                capability_gap_candidate(1),
+                cycle_gap_candidate(1),
                 "repo_fixture".to_string(),
             )
             .await
@@ -92,13 +95,11 @@ mod contract_prerevision {
         let gap_finding = pending
             .findings
             .iter()
-            .find(|finding| finding.message.contains("required_capability_missing"))
-            .expect("capability gap finding must ride the verdict");
+            .find(|finding| finding.message.contains("dependency_cycle"))
+            .expect("cycle gap finding must ride the verdict");
         assert!(
-            gap_finding.required_action.contains(
-                "在 WI-001 的 Outputs 契约 contract.levels-api 的 capabilities 列表追加一行（逐字复制）：- api.levels.write"
-            ),
-            "required_action must carry the verbatim patch line: {}",
+            gap_finding.required_action.contains("拆除依赖环"),
+            "required_action must name the cycle teardown: {}",
             gap_finding.required_action
         );
 
@@ -208,7 +209,7 @@ mod contract_prerevision {
 
         engine
             .complete_single_candidate_work_item_plan_author(
-                capability_gap_candidate(1),
+                cycle_gap_candidate(1),
                 "repo_fixture".to_string(),
             )
             .await
@@ -223,7 +224,7 @@ mod contract_prerevision {
         // 同指纹——fingerprint 基于 category+contract_field，与措辞无关）。
         engine
             .complete_single_candidate_work_item_plan_author(
-                capability_gap_candidate(2),
+                cycle_gap_candidate(2),
                 "repo_fixture".to_string(),
             )
             .await

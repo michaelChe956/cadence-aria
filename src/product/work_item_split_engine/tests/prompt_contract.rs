@@ -931,7 +931,9 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     for example in [
         format!("`- {dependency_key}: []`"),
         format!("`- {dependency_key}: {item_id_prefix}001`"),
-        format!("`- {dependency_key}: {item_id_prefix}001`\n`- {dependency_key}: {item_id_prefix}002`"),
+        format!(
+            "`- {dependency_key}: {item_id_prefix}001`\n`- {dependency_key}: {item_id_prefix}002`"
+        ),
     ] {
         assert!(
             prompt.contains(&example),
@@ -948,9 +950,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
     )))
     .expect("golden findings JSON");
-    let expected_few_shot_ids = crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_FEW_SHOT_IDS
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
+    let expected_few_shot_ids =
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_FEW_SHOT_IDS
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
     let selected_few_shot_ids = golden
         .as_array()
         .expect("golden findings array")
@@ -1013,7 +1016,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        21_000
+        21_500
     );
     assert!(
         prompt.len()
@@ -1064,7 +1067,10 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
         "`require_all` 按字符串逐字精确匹配",
         "假性 `required_capability_missing`",
     ] {
-        assert!(prompt.contains(teaching), "missing capability teaching: {teaching}");
+        assert!(
+            prompt.contains(teaching),
+            "missing capability teaching: {teaching}"
+        );
     }
     assert!(prompt.contains("该字段的值写 []"));
     assert!(prompt.contains("不表示其他 section 可以为空"));
@@ -1160,7 +1166,7 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
 
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        21_000,
+        21_500,
         "第 9 次提额：codex×重 输出契约 capabilities 逐字覆盖教学要求预算上调至整百级 20,500"
     );
     assert!(

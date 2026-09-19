@@ -960,3 +960,5 @@ async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition
 
 // F5 契约机械校验前移（contract_prerevision）用例按大文件守卫(>1200 行)拆分至子文件内联。
 include!("single_candidate/contract_prerevision.rs");
+// DEF-PVR-ALL 确定性 capability 补齐器（contract_autorepair）用例拆分至子文件内联。
+include!("single_candidate/contract_autorepair.rs");

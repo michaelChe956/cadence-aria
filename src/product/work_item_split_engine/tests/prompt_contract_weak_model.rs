@@ -69,7 +69,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "增补教学后仍必须低于质量预算红线（第 9 次提额后 21,000），实测 {} bytes",
+        "增补教学后仍必须低于质量预算红线（第 10 次提额后 21,500），实测 {} bytes",
         prompt.len()
     );
 }
@@ -142,7 +142,7 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
     // 行为级对齐：教学正反例对应的 markdown 变体必须触发教学点名的错误码与消息。
     let minimum_source = prompt
         .split_once("[minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n")
-        .and_then(|( _, rest)| rest.split_once("[real_finding_few_shot]"))
+        .and_then(|(_, rest)| rest.split_once("[real_finding_few_shot]"))
         .map(|(source, _)| source.to_string())
         .expect("prompt must inline a minimum legal source");
     // 反例变体 1：task 引用 Traceability 未登记的 REQ-002（教学反例本体）；
@@ -157,7 +157,11 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
     // 反例变体 2：AC-001 失去配对的 reviewer_check_refs 行。
     let missing_reviewer_check_source = minimum_source
         .replace("design_requirement_placeholder", "REQ-001")
-        .replacen("reviewer_check_refs: AC-001", "reviewer_check_refs: AC-002", 1);
+        .replacen(
+            "reviewer_check_refs: AC-001",
+            "reviewer_check_refs: AC-002",
+            1,
+        );
 
     let compile = |source: String| {
         crate::product::work_item_plan_compiler::compile_work_item_plan(
@@ -194,26 +198,29 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
 
     let unknown_ir = compile(unknown_requirement_source)
         .expect("unknown requirement variant must still compile (error is IR-level)");
-    let unknown_diagnostics = validate(&unknown_ir)
-        .expect_err("引用不存在的 REQ-002 必须被 IR 校验拒绝");
+    let unknown_diagnostics =
+        validate(&unknown_ir).expect_err("引用不存在的 REQ-002 必须被 IR 校验拒绝");
     assert!(
         unknown_diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "unknown_requirement_ref"
-                && diagnostic.message.contains("references unknown design requirement REQ-002")),
+                && diagnostic
+                    .message
+                    .contains("references unknown design requirement REQ-002")),
         "教学反例必须与校验器实际判定逐字一致：{:?}",
         unknown_diagnostics
     );
 
     let reviewer_ir = compile(missing_reviewer_check_source)
         .expect("missing reviewer check variant must still compile");
-    let reviewer_diagnostics = validate(&reviewer_ir)
-        .expect_err("失去 reviewer check 的 AC 必须被 IR 校验拒绝");
+    let reviewer_diagnostics =
+        validate(&reviewer_ir).expect_err("失去 reviewer check 的 AC 必须被 IR 校验拒绝");
     assert!(
-        reviewer_diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "acceptance_criterion_without_reviewer_check"
-                && diagnostic.message.contains("AC-001 has no handoff reviewer check")),
+        reviewer_diagnostics.iter().any(|diagnostic| diagnostic.code
+            == "acceptance_criterion_without_reviewer_check"
+            && diagnostic
+                .message
+                .contains("AC-001 has no handoff reviewer check")),
         "教学 AC 纪律必须与校验器实际判定逐字一致：{:?}",
         reviewer_diagnostics
     );
@@ -277,6 +284,67 @@ fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_co
     );
     eprintln!(
         "codex×重 SC author prompt bytes={} margin={}",
+        prompt.len(),
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+            - prompt.len()
+    );
+}
+
+/// DEF-PVR-ALL 方案 a（2026-09-19 门重测 codex rep1/rep2 根因：只写消费侧
+/// 忘写提供侧）：输出契约纪律之后追加「成对书写纪律」——跨 WI 依赖两侧
+/// 成对书写的完整正例（下游 Inputs 三行 ↔ 上游 Outputs 一行逐字同串）与
+/// 反例；错误码与 dependency 校验器口径逐字一致；预算红线第 10 次提额后
+/// （21,500）仍必须守住，段序不破。
+#[test]
+fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let design_requirement_ids = vec!["REQ-001".to_string()];
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &design_requirement_ids,
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: WEAK_MODEL_TEST_LANGUAGE_RULES,
+                routing_context: &RoutingReferenceContext::Legacy,
+            },
+        )
+        .expect("markdown author prompt");
+
+    for required in [
+        "成对书写纪律（DEF-PVR-ALL）：跨 WI 依赖必须两侧成对书写",
+        "两侧能力串逐字相同才算写完这一对",
+        "正例：WI-002 Inputs 写 `- provider_logical_work_item_id: WI-001` + `- contract_id: CT-001` + `- required_capabilities: [GET /api/levels 返回 200]`，WI-001 Outputs 的 CT-001 就有 `- capabilities: GET /api/levels 返回 200`",
+        "反例：只写消费侧忘写提供侧 → required_capability_missing 拒绝",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "成对书写教学必须包含 {required}: {prompt}"
+        );
+    }
+    let contract_discipline_pos = prompt
+        .find("输出契约纪律：SC 计划由你在同一文档先后写出")
+        .expect("output contract discipline");
+    let paired_pos = prompt
+        .find("成对书写纪律（DEF-PVR-ALL）")
+        .expect("paired writing discipline");
+    let grammar_pos = prompt.find("[markdown_grammar]").expect("grammar block");
+    assert!(
+        contract_discipline_pos < paired_pos && paired_pos < grammar_pos,
+        "成对书写教学必须紧随输出契约纪律之后、grammar 之前"
+    );
+    assert!(
+        prompt.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "成对书写教学追加后仍必须低于质量预算红线（第 10 次提额后 21,500），实测 {} bytes",
+        prompt.len()
+    );
+    eprintln!(
+        "DEF-PVR-ALL SC author prompt bytes={} margin={}",
         prompt.len(),
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
             - prompt.len()
@@ -367,21 +435,18 @@ fn output_contract_capability_teaching_matches_dependency_validator_judgement() 
     let capability = "数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE";
     let second_capability = "GET /api/levels 返回 200 与五条关卡记录";
     let provider_with = |capabilities: &[&str]| {
-        let mut provider =
-            crate::product::work_item_contract::canonical_contract_fixture("WI-001");
+        let mut provider = crate::product::work_item_contract::canonical_contract_fixture("WI-001");
         provider.input_contracts.clear();
         provider.output_contracts =
             vec![crate::product::work_item_contract::PromisedOutputContract {
                 contract_id: "CT-LEVELS-API-V1".to_string(),
                 capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
             }];
-        provider.handoff_contract.provided_contract_refs =
-            vec!["CT-LEVELS-API-V1".to_string()];
+        provider.handoff_contract.provided_contract_refs = vec!["CT-LEVELS-API-V1".to_string()];
         provider
     };
     let consumer_with = |required: &[&str]| {
-        let mut consumer =
-            crate::product::work_item_contract::canonical_contract_fixture("WI-002");
+        let mut consumer = crate::product::work_item_contract::canonical_contract_fixture("WI-002");
         consumer.input_contracts =
             vec![crate::product::work_item_contract::RequiredInputContract {
                 contract_id: "CT-LEVELS-API-V1".to_string(),

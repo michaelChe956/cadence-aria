@@ -80,6 +80,7 @@ fn render_review_revision_block(review: &ReviewVerdict) -> String {
     }
     block.push_str(
         "\n[revision_directives]\n\
+         - 返修=逐字应用：每条 required_action 给出的补丁行/删除操作逐字应用到上一版 source 的对应位置；除该行外，已通过部分逐字节保持不变，禁止重写、重排或润色未涉及的 section。\n\
          - 必须在本轮内逐条修复全部 must_fix/blocking findings，逐条对齐其 required_action；不得只修复其中部分。\n\
          - 不得新增与上述 findings 无关的其他变更；未涉及的 section 保持与上一版一致。\n\
          - 若某条 finding 无法在本轮内修复，不要静默跳过：在对应 Work Item 的 Blockers 中如实登记 blocker 及原因。\n\n",

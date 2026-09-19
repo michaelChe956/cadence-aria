@@ -128,6 +128,8 @@ fn sc_revision_prompt_injects_findings_and_directives_on_top_of_byte_identical_b
     // 硬性修复指令。
     for required in [
         "[revision_directives]",
+        "返修=逐字应用：每条 required_action 给出的补丁行/删除操作逐字应用到上一版 source 的对应位置",
+        "已通过部分逐字节保持不变，禁止重写、重排或润色未涉及的 section",
         "必须在本轮内逐条修复全部 must_fix/blocking findings",
         "逐条对齐其 required_action",
         "不得只修复其中部分",
