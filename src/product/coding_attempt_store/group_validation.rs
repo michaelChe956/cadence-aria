@@ -305,38 +305,38 @@ impl super::CodingAttemptStore {
             )
             .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
         // REQ-MTG-02（WP2 分流消费面，D2.1）：带冻结快照的 group attempt 以其
-        // target 桶为权威 unit 集与根 unit——无快照保持 whole-plan 投影序零变化
-        // （A3：不猜测归属）；单 target 全集同桶，两种序一致零变化；多 target
-        // 拆分 attempt 各自对桶内集校验。ScAdvance 建组按桶内拓扑序物化（与
+        // target 桶为权威 unit 集与根 unit。**桶收窄仅作用于权威 plan 自身 ≥2
+        // 桶（镜像 advance 分流门 `units_by_target` ≥2）**——单 target plan（含
+        // 权威 units 漂移成 Some+None 混合的退化态）保持 whole-plan 语义，让
+        // `validate_group_attempt_integrity` 的 `validate_group_single_target`
+        // 继续以 `mixed_target_group_rejected` 稳定码拒绝（k3 fix round 1，
+        // it_web mixed_target_group_recovery_rejects_drifted_some_none 契约）。
+        // 无快照保持 whole-plan 投影序零变化（A3：不猜测归属）；多 target 拆分
+        // attempt 各自对桶内集校验。ScAdvance 建组按桶内拓扑序物化（与
         // prepare_group_initialization_with_admission_for_target 一致），
         // LegacyGroup 保持投影序。空桶（快照 target 不覆盖任何 unit）fail-closed。
-        match stored.target_snapshot.as_ref() {
-            None => {}
-            Some(snapshot) => {
-                let bucket = authoritative
-                    .units
-                    .iter()
-                    .filter(|unit| {
-                        unit.target_repository_id == Some(snapshot.logical_repository_id)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if bucket.is_empty() {
-                    return Err(incomplete_group_attempt(
-                        &stored.id,
-                        "attempt target snapshot does not cover any authoritative unit",
-                    ));
-                }
-                authoritative.units = match stored.admission_kind {
-                    crate::product::coding_models::CodingAdmissionKind::ScAdvance => {
-                        super::group_initialization::topologically_order_unit_bindings(&bucket)
-                            .map_err(|error| {
-                                map_group_integrity_dependency_error(&stored.id, error)
-                            })?
-                    }
-                    _ => bucket,
-                };
+        if units_by_target(&authoritative).by_target.len() >= 2
+            && let Some(snapshot) = stored.target_snapshot.as_ref()
+        {
+            let bucket = authoritative
+                .units
+                .iter()
+                .filter(|unit| unit.target_repository_id == Some(snapshot.logical_repository_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if bucket.is_empty() {
+                return Err(incomplete_group_attempt(
+                    &stored.id,
+                    "attempt target snapshot does not cover any authoritative unit",
+                ));
             }
+            authoritative.units = match stored.admission_kind {
+                crate::product::coding_models::CodingAdmissionKind::ScAdvance => {
+                    super::group_initialization::topologically_order_unit_bindings(&bucket)
+                        .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?
+                }
+                _ => bucket,
+            };
         }
         if stored.work_item_id
             != authoritative
