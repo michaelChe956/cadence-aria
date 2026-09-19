@@ -190,6 +190,7 @@ async fn run_coding_runner_task_body(
                 coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
                 && latest.status == CodingAttemptStatus::Running
             {
+                const MANUAL_RECOVERY_REASON: &str = "coding_runner_failed_while_running";
                 // 死因可考（KimiUpgrade §3#5）：runner pre-provider 死亡此前只发
                 // WS 瞬时帧（连接不在即丢）+ 服务 tty 无落盘，durable 层零痕迹。
                 // 双通道：aria-cancellation 同款 eprintln 直写 stdout（生产可见，
@@ -197,22 +198,18 @@ async fn run_coding_runner_task_body(
                 #[cfg(not(test))]
                 eprintln!(
                     "[aria-runner-death] coding runner failed while running trigger=pre_provider_failure project_id={} issue_id={} attempt_id={} reason={} error={}",
-                    attempt.project_id,
-                    attempt.issue_id,
-                    attempt.id,
-                    "coding_runner_failed_while_running",
-                    error
+                    attempt.project_id, attempt.issue_id, attempt.id, MANUAL_RECOVERY_REASON, error
                 );
                 #[cfg(test)]
                 tracing::warn!(
                     attempt_id = attempt.id.as_str(),
-                    reason = "coding_runner_failed_while_running",
+                    reason = MANUAL_RECOVERY_REASON,
                     error = %error,
                     "coding runner failed while running (pre-provider death)"
                 );
                 if let Err(diagnostic_error) = coding_store.append_manual_recovery_diagnostic(
                     &latest,
-                    "coding_runner_failed_while_running",
+                    MANUAL_RECOVERY_REASON,
                     &error.to_string(),
                 ) {
                     tracing::warn!(
@@ -221,10 +218,9 @@ async fn run_coding_runner_task_body(
                         "failed to persist manual-recovery diagnostic chat entry"
                     );
                 }
-                match coding_store.transition_to_awaiting_manual_recovery(
-                    &attempt.id,
-                    "coding_runner_failed_while_running",
-                ) {
+                match coding_store
+                    .transition_to_awaiting_manual_recovery(&attempt.id, MANUAL_RECOVERY_REASON)
+                {
                     Ok(()) => {
                         match coding_store.get_attempt(
                             &attempt.project_id,

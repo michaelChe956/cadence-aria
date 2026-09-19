@@ -864,7 +864,7 @@
         // 死因可考（§3#5）：人工恢复转换同步落 System/SystemEvent 尾帧
         // （稳定 reason 码 + 原始错误串），durable 层不再零痕迹。
         let fixture = legacy_fixture();
-        fixture
+        let diagnostic = fixture
             .store
             .append_manual_recovery_diagnostic(
                 &fixture.attempt,
@@ -872,6 +872,10 @@
                 "provider spawn failed: exit 127",
             )
             .expect("diagnostic entry");
+        assert_eq!(
+            diagnostic.id, "coding_manual_recovery_diagnostic_0001",
+            "诊断尾帧必须用独立号段前缀（k3 P2），不得占用 coding_chat_entry 号段"
+        );
         let entries = fixture
             .store
             .list_chat_entries(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
@@ -892,8 +896,73 @@
                     "coding_runner_failed_while_running: provider spawn failed: exit 127"
                 );
             }
+
             other => panic!("unexpected entry type: {other:?}"),
         }
+    }
+
+    #[test]
+    fn manual_recovery_diagnostic_and_context_note_chat_entries_coexist() {
+        // k3 P2 回归钉：诊断尾帧用独立号段（coding_manual_recovery_diagnostic_NNNN），
+        // 后到的同号备注（chat entry id 由备注序号派生为同号 coding_chat_entry_NNNN，
+        // chat_entry_id_for_context_note）不得 write_json 静默覆盖死因证据——两者共存。
+        let fixture = legacy_fixture();
+        let diagnostic = fixture
+            .store
+            .append_manual_recovery_diagnostic(
+                &fixture.attempt,
+                "coding_runner_failed_while_running",
+                "provider spawn failed: exit 127",
+            )
+            .expect("diagnostic entry");
+        assert_eq!(diagnostic.id, "coding_manual_recovery_diagnostic_0001");
+
+        // 备注路径同款形态：首个备注 coding_context_note_0001 → 派生 chat entry
+        // coding_chat_entry_0001（同号不同前缀）→ save_chat_entry 落盘。
+        let note = fixture
+            .store
+            .create_context_note(&fixture.attempt, "manual fix".to_string())
+            .expect("context note");
+        assert_eq!(note.id, "coding_context_note_0001");
+        let note_entry_id = note.id.replacen("coding_context_note", "coding_chat_entry", 1);
+        assert_eq!(note_entry_id, "coding_chat_entry_0001");
+        fixture
+            .store
+            .save_chat_entry(
+                &fixture.attempt,
+                &crate::product::coding_models::CodingChatEntry {
+                    id: note_entry_id,
+                    attempt_id: fixture.attempt.id.clone(),
+                    node_id: None,
+                    role: CodingAgentRole::Author,
+                    entry_type: CodingEntryType::UserMessage,
+                    content: Some(note.content.clone()),
+                    metadata: Some(serde_json::json!({
+                        "context_note_id": note.id,
+                    })),
+                    created_at: note.created_at,
+                },
+            )
+            .expect("note chat entry");
+
+        let entries = fixture
+            .store
+            .list_chat_entries(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("entries");
+        assert_eq!(entries.len(), 2, "诊断尾帧与备注 entry 必须共存：{entries:#?}");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.id == "coding_manual_recovery_diagnostic_0001"),
+            "死因尾帧不得被同号备注覆盖"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.id == "coding_chat_entry_0001"
+                    && entry.entry_type == CodingEntryType::UserMessage),
+            "备注 entry 必须正常落盘"
+        );
     }
 
     fn legacy_fixture() -> Fixture {

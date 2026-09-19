@@ -120,3 +120,29 @@ wire）。spawn 被注册表拒（已有活 runner）时回 `coding_runner_alrea
 - `tests/it_web/web_coding_ws_handler/part_02.rs`：wire 契约测试
 - `web/src/api/types/coding.ts`：TS 协议 parity
 - `cadence/reports/f16-recovery-channel-fix-report.md`：本报告
+
+## 9. fix round 1（k3 审 1×P2）：诊断尾帧独立号段，防同号备注覆盖
+
+finding：诊断尾帧初版用 `next_sequential_id_in_directory("coding_chat_entry", ...)` 与
+备注侧共用 `coding_chat_entry_NNNN` 号段，而备注 chat entry id 由备注序号派生同号
+（`chat_entry_id_for_context_note`：`coding_context_note_0002` → `coding_chat_entry_0002`），
+后到同号备注 `write_json`（rename 语义）会静默覆盖死因尾帧文件。
+
+修复：id 改独立号段 `coding_manual_recovery_diagnostic_NNNN`
+（`next_sequential_id_in_directory("coding_manual_recovery_diagnostic", chat-entries/)`），
+与备注号段物理不交；死因证据永不被备注覆盖。消费侧（list_chat_entries 按前缀无关的
+json 扫描 + 测试断言按 entry_type/id）同步无感。
+
+验证：`--lib manual_recovery` 18 绿（+1 新用例
+`manual_recovery_diagnostic_and_context_note_chat_entries_coexist`：尾帧写入 → 同号备注
+（coding_context_note_0001 → 派生 coding_chat_entry_0001 同号不同前缀）→ 两者共存断言）；
+`--lib coding_attempt_store::admission` 28 绿（尾帧测试补 id 前缀钉）；`--lib resumption`
+3 绿；`--lib coding_ws` 111 绿；clippy 本文件面零 findings（task.rs 顺带提取
+`MANUAL_RECOVERY_REASON` 常量消 literal-in-format 告警）；fmt 过（残留 diff 仅并行线
+在途文件 contract_autorepair.rs）。
+
+round 1 commit 文件（显式）：
+- `src/product/coding_attempt_store/context.rs`：独立号段
+- `src/product/coding_attempt_store/admission_tests.rs`：id 前缀钉 + 共存新测
+- `src/web/coding_ws_handler/runner/task.rs`：reason 常量提取（clippy）
+- `cadence/reports/f16-recovery-channel-fix-report.md`：本节

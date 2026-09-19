@@ -129,6 +129,11 @@ impl super::CodingAttemptStore {
     /// F-16/§3#5 死因可考：runner 死亡转人工恢复时，把稳定 reason 码与原始
     /// 错误串作为 System/SystemEvent 尾帧落入 attempt chat-entries——WS 瞬时帧
     /// 与服务 tty 均不可回收，durable 层此前零痕迹。
+    ///
+    /// id 用独立 `coding_manual_recovery_diagnostic_NNNN` 号段，不占
+    /// `coding_chat_entry_NNNN`：备注侧 chat entry id 由备注序号派生同号
+    /// （`chat_entry_id_for_context_note`），共用号段会被后到的同号备注
+    /// write_json 静默覆盖——死因证据必须永不被备注覆盖（k3 P2）。
     pub fn append_manual_recovery_diagnostic(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -138,9 +143,11 @@ impl super::CodingAttemptStore {
         let entries_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("chat-entries");
-        let id = next_sequential_id_in_directory("coding_chat_entry", &entries_root).map_err(
-            |error| ProductStoreError::Io(format!("read {}: {error}", entries_root.display())),
-        )?;
+        let id =
+            next_sequential_id_in_directory("coding_manual_recovery_diagnostic", &entries_root)
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("read {}: {error}", entries_root.display()))
+                })?;
         let entry = CodingChatEntry {
             id,
             attempt_id: attempt.id.clone(),
