@@ -515,7 +515,8 @@
     #[tokio::test]
     async fn prepare_single_physical_repository_uses_rollout_flow_snapshot_without_logical_manifest() {
         // L2 重钉（T5/REQ-WSC-08）：新会话一律 SingleCandidate——rollout 快照
-        // 不再切换 flow（flag 仅随会话持久化作历史记录）。
+        // 不再切换 flow，也不门控 preflight（fix round 1 后 flag 仅随会话
+        // 持久化作历史记录，无行为分支）。
         for rollout_enabled in [true, false] {
             let expected_flow_kind = WorkItemPlanFlowKind::SingleCandidate;
             let root = TempDir::new().unwrap();
@@ -649,6 +650,39 @@
         assert!(sessions[0].work_item_plan_source_revision_ref.is_none());
         assert!(sessions[0].plan_candidate_ir_ref.is_none());
         assert!(sessions[0].mechanical_report_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn prepare_preflight_failure_converges_to_new_path_terminal_even_when_rollout_flag_is_disabled() {
+        // fix round 1（k3 F1/REQ-WSC-08）：preflight 恒评估——flag off（CLI
+        // 默认态）下多仓 logical Issue 同样在 prepare 期收敛 durable Failed
+        // 终态（含原因），而非生成期 TargetAmbiguous/TargetMissing。
+        let root = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let (lifecycle, story_spec_id, design_spec_id) =
+            seed_prepare_work_item_plan_fixture(&paths, 2);
+        // 默认 WebAppState：work_item_plan_single_candidate=false（flag off）。
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        let app = build_web_router(state);
+
+        let response = post_prepare_work_item_plan(&app, story_spec_id, design_spec_id).await;
+        assert!(response.status().is_server_error());
+        drop(response);
+        let sessions = lifecycle
+            .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].flow_kind, WorkItemPlanFlowKind::SingleCandidate);
+        assert_eq!(sessions[0].status, WorkspaceSessionStatus::Failed);
+        assert!(sessions[0]
+            .messages
+            .iter()
+            .any(|message| message
+                .content
+                .contains("single-candidate preflight requires exactly one logical repository")));
     }
 
     #[tokio::test]

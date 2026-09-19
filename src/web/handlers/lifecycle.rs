@@ -659,13 +659,11 @@ pub async fn prepare_work_item_plan(
                 ApiError::validation("repository_required", "repository_id is required")
             })?;
             let repository = find_repository(&app_paths, &project_id, &repository_id)?;
-            if rollout_snapshot {
-                match preflight_single_repository_candidate(&[repository.id]) {
-                    SingleCandidatePreflightDecision::Eligible { .. } => None,
-                    SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
-                }
-            } else {
-                None
+            // fix round 1（k3 F1/REQ-WSC-08）：preflight 恒评估，不再受 rollout
+            // flag 门控——prepare 期单路径终态收敛对 flag off 同样成立。
+            match preflight_single_repository_candidate(&[repository.id]) {
+                SingleCandidatePreflightDecision::Eligible { .. } => None,
+                SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
             }
         }
         RepositoryRouting::Logical {
@@ -697,13 +695,11 @@ pub async fn prepare_work_item_plan(
                 }
             }
             let repository_ids = selected_ids.into_iter().cloned().collect::<Vec<_>>();
-            if rollout_snapshot {
-                match preflight_single_repository_candidate(&repository_ids) {
-                    SingleCandidatePreflightDecision::Eligible { .. } => None,
-                    SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
-                }
-            } else {
-                None
+            // fix round 1（k3 F1/REQ-WSC-08）：同上——preflight 恒评估（去 rollout
+            // flag 门控），多仓/零仓在 prepare 期即收敛 durable Failed 终态。
+            match preflight_single_repository_candidate(&repository_ids) {
+                SingleCandidatePreflightDecision::Eligible { .. } => None,
+                SingleCandidatePreflightDecision::Ineligible { reason } => Some(reason),
             }
         }
         RepositoryRouting::FailClosed { code, reason } => {

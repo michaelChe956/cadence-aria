@@ -56,7 +56,7 @@
 
 | 面 | 处置 |
 |---|---|
-| `lifecycle_store/inputs.rs:229` `WorkItemPlanSessionOptions::default().flow_kind` | 翻 `SingleCandidate`（编译面最小动作；判定=新会话一律 SingleCandidate） |
+| `lifecycle_store/inputs.rs:229` `WorkItemPlanSessionOptions::default().flow_kind` | **保留 `Legacy`**（fix round 1 记录修正：初版误记「翻 SingleCandidate」；实现=Default 保持 Legacy+注释，生产路径 prepare 恒显式 SingleCandidate，见下两行；编译面无需动作） |
 | `lifecycle.rs` prepare preflight | 删 `LegacyFallback` 两分支（Legacy :653-665/Logical :696-708 的回落臂）；preflight 判定保留，失败→新路径 durable Failed 终态+原因（复用 `mark_single_candidate_prepare_failure` 形态） |
 | `models/workspace.rs:53` `default_flow_kind()`（serde 缺字段默认） | **保留 Legacy**——读侧兼容：缺字段的历史记录即 legacy 时代产物（REQ-RET-03 只读历史值），不得误读为 SC |
 | `conversational_gate_recovery.rs:104` Legacy→Err | 保留（读侧守卫，语义不变） |

@@ -110,4 +110,4 @@ web/src/state/workspace-ws-store.test.ts:387:          node_type: "human_confirm
   - it_web staged 族 51 测（staged_flow 2/serial 19/batch 7/compile 11+runtime_projection 1/mode 9/recovery_consistency 2）；
   - 前端 vitest 17 测+2 文件级；
   - **本收尾批（终版追加）**：it_web 残余红名单 **31 测**（author 7/outline 7/serial 5/batch 4/mode 5/staged_flow 1/recovery_consistency 2）+ 残留 wire 字面量驱动的 `#[ignore]` legacy 测 **11 测**（author revision_streams 1/recovery reconnect 1/confirm 3/revert 3/review 2/split_flow 1）+ 共享夹具族随删（generation `valid_canonical_draft_output`/raw_outputs/revision_output 族、compile 模块全部、`QueuedSplitOutput` 枚举收敛单值形态）。
-- it_web 终态：328 passed / 0 failed / 10 ignored（退役前 328+31 failed+12 ignored，总数 371→338）。
+- it_web 终态：328 passed / 0 failed / **1 ignored**（退役前 328 passed/31 failed/12 ignored，总数 371→**329**；fix round 1 更正：初版误记 10 ignored/338，漏计本批退役的 11 个 `#[ignore]` legacy 测）。

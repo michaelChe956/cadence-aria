@@ -372,7 +372,6 @@ const store = useWorkspaceStore.getState();
       break;
     // 退役留档（T5/REQ-RET-02）：human_presentation_revision_saved/save_failed
     // 出站消息随保存命令族删除（wp5-attribution-table.md §2）。
-      break;
     case "error":
       store.setError(msg.message as string);
       store.appendChatEntry({
