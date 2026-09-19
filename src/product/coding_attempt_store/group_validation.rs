@@ -296,7 +296,7 @@ impl super::CodingAttemptStore {
                 "attempt plan binding targets another coding group",
             ));
         }
-        let authoritative = self
+        let mut authoritative = self
             .resolve_authoritative_group_plan_binding_for_revision(
                 &stored.project_id,
                 &stored.issue_id,
@@ -304,6 +304,40 @@ impl super::CodingAttemptStore {
                 &binding.bound_plan_revision_id,
             )
             .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
+        // REQ-MTG-02（WP2 分流消费面，D2.1）：带冻结快照的 group attempt 以其
+        // target 桶为权威 unit 集与根 unit——无快照保持 whole-plan 投影序零变化
+        // （A3：不猜测归属）；单 target 全集同桶，两种序一致零变化；多 target
+        // 拆分 attempt 各自对桶内集校验。ScAdvance 建组按桶内拓扑序物化（与
+        // prepare_group_initialization_with_admission_for_target 一致），
+        // LegacyGroup 保持投影序。空桶（快照 target 不覆盖任何 unit）fail-closed。
+        match stored.target_snapshot.as_ref() {
+            None => {}
+            Some(snapshot) => {
+                let bucket = authoritative
+                    .units
+                    .iter()
+                    .filter(|unit| {
+                        unit.target_repository_id == Some(snapshot.logical_repository_id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if bucket.is_empty() {
+                    return Err(incomplete_group_attempt(
+                        &stored.id,
+                        "attempt target snapshot does not cover any authoritative unit",
+                    ));
+                }
+                authoritative.units = match stored.admission_kind {
+                    crate::product::coding_models::CodingAdmissionKind::ScAdvance => {
+                        super::group_initialization::topologically_order_unit_bindings(&bucket)
+                            .map_err(|error| {
+                                map_group_integrity_dependency_error(&stored.id, error)
+                            })?
+                    }
+                    _ => bucket,
+                };
+            }
+        }
         if stored.work_item_id
             != authoritative
                 .units

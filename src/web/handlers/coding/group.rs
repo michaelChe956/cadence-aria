@@ -549,12 +549,17 @@ fn split_group_targets(
     }
 }
 
-/// REQ-COD-04（WP1 分流化）：mixed-target group 的多值快照解析面（T2 分流创建
-/// 消费）。与 `group_target_snapshot` 共享前置与单值语义（含 0-target focus 唯一
-/// 回落、TargetUnknown/Inconsistent fail-closed）；差异仅在 `target_ids.len() >= 2`
+/// REQ-COD-04（WP1 分流化）：mixed-target group 的多值快照解析面。与
+/// `group_target_snapshot` 共享前置与单值语义（含 0-target focus 唯一回落、
+/// TargetUnknown/Inconsistent fail-closed）；差异仅在 `target_ids.len() >= 2`
 /// 不再拒绝——按 unit target 逐仓产出冻结快照。单 target 退化为单条目（语义与
 /// 单值面零变化）。Legacy 路由 → `None`（无逻辑仓可分流，走单值面既有语义）。
-#[allow(dead_code)] // T2（WP2 分流创建循环）消费；WP1 只落解析面。
+///
+/// 注：WP2 分流创建循环落在 engine 侧（`workspace_engine::advance::
+/// initialize_advance_split`，product 层同语义实现：`units_by_target` 分桶 +
+/// `build_attempt_target_snapshot` 逐仓）；本函数保持为 web 创建面的多值解析
+/// 库存（API 面后续拆分采用时接线，测试族已钉死语义）。
+#[allow(dead_code)] // web 创建面尚未消费（engine 侧分流循环用 product 层实现）。
 fn group_target_snapshots(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -589,10 +594,11 @@ fn group_target_snapshots(
     Ok(Some(snapshots))
 }
 
-/// REQ-COD-04（WP1 分流化）：`resolve_group_repository` 的多值同构变体（T2 分流
-/// 创建消费）——按 unit target 逐仓解析 RepositoryRecord；前置/错误码语义与
-/// `group_target_snapshots` 一致。Legacy 路由 → `None`。
-#[allow(dead_code)] // T2（WP2 分流创建循环）消费；WP1 只落解析面。
+/// REQ-COD-04（WP1 分流化）：`resolve_group_repository` 的多值同构变体——按
+/// unit target 逐仓解析 RepositoryRecord；前置/错误码语义与
+/// `group_target_snapshots` 一致。Legacy 路由 → `None`。同上注：engine 侧分流
+/// 循环用 product 层实现，本函数为 web 创建面多值解析库存。
+#[allow(dead_code)] // web 创建面尚未消费（engine 侧分流循环用 product 层实现）。
 fn resolve_group_repositories(
     app_paths: &ProductAppPaths,
     project_id: &str,
