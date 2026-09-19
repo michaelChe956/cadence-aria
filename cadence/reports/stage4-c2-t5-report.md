@@ -94,3 +94,13 @@
 ## 六、结论
 
 WP5 四 Step 全量闭环：增殖审计面（durable 记录+幂等首写定档+per-(plan,target) 检索）落地并接线 T2 挂点（R10 交接完成）；恢复矩阵 7×2 全量+3-target 抽样+半启动+断连重连全绿；二期 defer 登记留档；附录 B 对照+范围铁律自查通过。C2 一期（WP1-WP5）就此集齐，待 T6 关闸。
+
+## 七、Fix round 1（k3 审 1×P2，2026-09-20）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | split-audit 无删除路径——`delete_attempt` 只删 attempt+per-target journal，不删 `split-audit/{attempt_id}.json`→中断后删除+同 command_id 重试（新 attempt UUID）在同 (plan,target) 留双审计：per-(plan,target) 唯一不变式破坏+检索歧义（违 REQ-MTG-05「MUST NOT 依赖取最早等歧义」）+二期证据污染 |
+| 修法（controller 裁定=k3 建议一：同生命周期删除） | `split_audit.rs` 新增 `delete_split_audit`（按 attempt_id 寻址 remove-if-exists——写入侧已钉死 id=attempt_id，无 sibling 误删面）；`attempt.rs` `delete_attempt` 在 `delete_group_initialization_for_attempt` 之后追加调用——审计与 journal 同生命周期（增殖证据看在职 attempt）；`delete_attempts_for_work_item` 委托 `delete_attempt` 自动覆盖 |
+| TDD 红 | `split_audit_is_deleted_with_attempt_and_retry_stays_unique_per_target`：WorktreeBound Crash→删全部 target-attempts→**审计残留断言红**（"audit records must be deleted with their attempts"）；重试双记录点（残留+新 UUID 双审计、target 键重复、审计集含已删 attempt 残留）同测钉死 |
+| 绿 | 修后 1/1 绿（删除零残留+重试后恰 2 条/每 target 唯一/审计集=在职 journal 集）；重试的外层 journal 集绑定失配按 T2 既有语义 fail-closed（不属本修面，测试以 durable 审计态断言而非耦合该 outcome） |
+| 验证 | `advance_split*` 16/16（15+新 1）+`coding_attempt_store` 179/179+删除面 `delete` 过滤 38/38；fmt 幂等+clippy 本任务文件 0 新告警（余 3 条 pre-existing：contract_autorepair×2=T2 已登记、tests/issue_delivery CodingAttemptScope=e9d418b1 后遗位置） |

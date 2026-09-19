@@ -384,6 +384,10 @@ impl super::CodingAttemptStore {
         validate_relative_id(attempt_id)?;
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         self.delete_group_initialization_for_attempt(&attempt)?;
+        // k3 fix round 1（REQ-MTG-05）：增殖审计与 attempt 同生命周期——journal
+        // 删除后清 split-audit 记录，防「删除后重试」在同 (plan,target) 留双
+        // 审计（检索歧义/二期证据污染）。
+        self.delete_split_audit(project_id, issue_id, attempt_id)?;
         super::remove_file_if_exists(&self.attempt_path(project_id, issue_id, attempt_id))?;
         super::remove_dir_all_if_exists(&self.attempt_dir(project_id, issue_id, attempt_id))?;
         Ok(attempt)

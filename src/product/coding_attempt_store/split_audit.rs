@@ -147,4 +147,19 @@ impl super::CodingAttemptStore {
         });
         Ok(records)
     }
+
+    /// 审计与 attempt 同生命周期删除（k3 fix round 1，controller 裁定）：
+    /// `split-audit/{attempt_id}.json` 随 `delete_attempt` 清场——中断后删除+
+    /// 同 command_id 重试（新 attempt UUID）不得在同 (plan,target) 留双审计
+    /// （per-(plan,target) 唯一不变式+检索无歧义；增殖证据看在职 attempt）。
+    /// 落点按 attempt_id 寻址（写入侧已钉死 id=attempt_id），无 sibling 误删面。
+    pub fn delete_split_audit(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let path = self.split_audit_path(project_id, issue_id, attempt_id)?;
+        super::remove_file_if_exists(&path)
+    }
 }

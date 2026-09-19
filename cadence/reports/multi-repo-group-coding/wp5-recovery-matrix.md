@@ -86,6 +86,7 @@ T2 Batch 1 判定函数自动生效）；集外 attempt fail-closed
 | #1 分流创建留审计（全字段） | `split_advance_records_proliferation_audit_for_every_target_attempt`（id=attempt_id/project/issue/plan/target 唯一/bound_plan_revision_id=authoritative/dependency_graph_revision_id=authoritative/trigger.kind=advance/trigger.command_id=AdvanceInput 透传/created_at） |
 | #2 恢复后可追溯（不重写不漂移） | 矩阵主格逐 checkpoint created_at 断言+`split_audit_store_write_is_idempotent_first_writer_wins`（首写定档：同身份异 command/created_at 不重写；同 attempt 异 target 冲突 fail-closed） |
 | #3 检索 per-(plan,target) | `split_audit_retrieval_resolves_per_plan_target_and_filters_foreign_plans`（N targets N 条每 target 唯一；异 plan 过滤；空 plan 空集） |
+| k3 fix round 1（P2 审计同生命周期删除） | `split_audit_is_deleted_with_attempt_and_retry_stays_unique_per_target`（删 attempt 审计零残留+同 command 重试 per-(plan,target) 唯一不双录） |
 | #4 审计不承载编排（行为面） | 创建留痕测试内联断言（审计落盘后 attempts 全停 (Created, PrepareContext)）+编译面 grep（split_audit.rs 零调度调用——start/spawn/queue/schedule/transition 均无；advance.rs 命中项均为既有失败标记与初始化推进，非审计面） |
 
 ## 四、执行记录

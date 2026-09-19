@@ -283,6 +283,83 @@ fn split_audit_store_write_is_idempotent_first_writer_wins() {
     );
 }
 
+/// k3 fix round 1（P2，审计与 attempt 同生命周期删除）：`delete_attempt` 连带
+/// 清除 `split-audit/{attempt_id}.json`——中断后删除+同 command_id 重试不得在
+/// 同 (plan,target) 留下双审计（per-(plan,target) 唯一不变式+检索无歧义，
+/// REQ-MTG-05；增殖证据看在职 attempt）。
+#[tokio::test]
+async fn split_audit_is_deleted_with_attempt_and_retry_stays_unique_per_target() {
+    let fixture = split_advance_fixture(false).await;
+    let coding_store = fixture.coding_store();
+
+    // WorktreeBound Crash：两 target-attempts+journals+audits 已 durable，
+    // worktree 三件套已登记（删除面不受影响）。
+    let request = split_input("cmd_audit_delete");
+    let failpoint = register_advance_initialization_failpoint(
+        &request,
+        AdvanceInitializationFailpoint::WorktreeBound,
+        AdvanceInitializationFailpointMode::Crash,
+    );
+    let mut engine = fixture.engine();
+    let crashed_request = request.clone();
+    let crashed = tokio::spawn(async move { engine.handle_advance(crashed_request).await });
+    assert!(
+        crashed.await.is_err(),
+        "failpoint must crash the split advance"
+    );
+    drop(failpoint);
+
+    let pre_delete = split_audits(&coding_store);
+    assert_eq!(pre_delete.len(), 2);
+
+    // 删除全部 target-attempts（含 per-target journal）——审计必须同生命周期清场。
+    for audit in &pre_delete {
+        coding_store
+            .delete_attempt(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, &audit.attempt_id)
+            .unwrap();
+    }
+    assert!(
+        split_audits(&coding_store).is_empty(),
+        "audit records must be deleted with their attempts (k3 P2)"
+    );
+
+    // 同 command_id 重试：per-target journal 全部重建（全新 attempt UUID），
+    // 外层 journal 集绑定按既有语义对失配集 fail-closed——但审计面仍须
+    // per-(plan,target) 唯一（旧记录已随删除清场，重试只落新身份一条）。
+    let mut engine = fixture.engine();
+    let _ = engine.handle_advance(request).await;
+    let live_ids: BTreeSet<String> = coding_store
+        .list_group_initialization_journals_for_plan(
+            SPLIT_PROJECT_ID,
+            SPLIT_ISSUE_ID,
+            SPLIT_PLAN_ID,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|journal| journal.attempt.id)
+        .collect();
+    assert_eq!(live_ids.len(), 2, "retry rebuilds a fresh attempt set");
+    let audits_after = split_audits(&coding_store);
+    assert_eq!(
+        audits_after.len(),
+        2,
+        "exactly one audit per (plan,target) after the retry"
+    );
+    let mut targets: Vec<_> = audits_after
+        .iter()
+        .map(|audit| audit.target_repository_id.clone())
+        .collect();
+    targets.sort();
+    targets.dedup();
+    assert_eq!(targets.len(), 2, "no duplicate target keys");
+    for audit in &audits_after {
+        assert!(
+            live_ids.contains(&audit.attempt_id),
+            "audit mirrors the live attempt set, not deleted residue"
+        );
+    }
+}
+
 /// 5.2 矩阵主格：2-target × 七 checkpoint Crash 全量——每格断言 durable 中间态
 /// （中断点语义）→ 同套 attempt 集恢复至 Completed → 审计不重写不漂移 →
 /// replay Replayed 且不新增审计。
