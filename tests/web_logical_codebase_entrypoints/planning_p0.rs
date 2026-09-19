@@ -615,19 +615,18 @@ async fn reg_init_idx_pln_p0_chain_uses_only_http_routes() {
     let (status, confirmed_design) = fixture.confirm_workspace(design_session).await;
     assert_eq!(status, StatusCode::OK, "confirm Design: {confirmed_design}");
 
-    let (status, plan) = fixture
-        .prepare_work_item_plan(&project_id, &issue_id, story_id, design_id)
-        .await;
-    assert_eq!(status, StatusCode::OK, "prepare target-split plan: {plan}");
-    assert_eq!(
-        plan["work_item_plan"]["source_design_spec_ids"],
-        json!([design_id])
-    );
-    assert!(
-        plan["work_item_plan"]["work_item_ids"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "the HTTP :prepare contract intentionally stops at a Draft; per-target splitting is a later workspace compile concern: {plan}"
+    // REQ-WSC-08（retire-legacy-workitem-protocol T5 fix round 1 后 preflight 恒
+    // 评估，无 legacy 回落）：2 逻辑仓 Issue 的 prepare 在 prepare 期即收敛新路径
+    // durable Failed 终态（SINGLE_CANDIDATE_PREFLIGHT_FAILED+原因），不再回落
+    // legacy 流 200——原「prepare 200/Draft 停步/work_item_ids 空」契约由单仓
+    // HTTP 用例承载（it_web web_lifecycle_api/part_03
+    // prepare_work_item_plan_logical_branch_validates_target_in_selection）。
+    assert_error(
+        fixture
+            .prepare_work_item_plan(&project_id, &issue_id, story_id, design_id)
+            .await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "SINGLE_CANDIDATE_PREFLIGHT_FAILED",
     );
     assert_eq!(
         member_git_before,
