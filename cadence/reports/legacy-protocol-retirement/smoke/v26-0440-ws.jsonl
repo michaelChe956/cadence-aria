@@ -1,0 +1,13 @@
+{"t":"2026-09-19T10:18:09.909Z","dir":"out","type":"hello","session_id":"workspace_session_0440","last_seen_node_id":null,"role":"driver"}
+{"t":"2026-09-19T10:18:09.910Z","dir":"in","type":"session_state","stage":"human_confirm","phase":"approval","active_run_id":null}
+{"t":"2026-09-19T10:18:09.911Z","dir":"in","type":"session_state","stage":"human_confirm","phase":"approval","active_run_id":null}
+{"t":"2026-09-19T10:18:10.712Z","dir":"out","type":"human_gate_feedback","command_id":"smoke-1789813090712","payload":"冒烟反馈：门卡反馈帧路径验证"}
+{"t":"2026-09-19T10:18:10.712Z","dir":"out","type":"confirm","payload":null}
+{"t":"2026-09-19T10:18:10.781Z","dir":"in","type":"error"}
+{"t":"2026-09-19T10:18:10.985Z","dir":"in","type":"error"}
+{"t":"2026-09-19T10:18:10.985Z","dir":"in","type":"stage_change"}
+{"t":"2026-09-19T10:18:10.986Z","dir":"in","type":"timeline_node_created"}
+{"t":"2026-09-19T10:18:10.986Z","dir":"in","type":"timeline_node_updated"}
+{"t":"2026-09-19T10:18:10.986Z","dir":"in","type":"stage_change"}
+{"t":"2026-09-19T10:18:10.986Z","dir":"in","type":"timeline_node_created"}
+{"t":"2026-09-19T10:18:24.906Z","summary":{"unique_types":["session_state","error","stage_change","timeline_node_created","timeline_node_updated"]}}

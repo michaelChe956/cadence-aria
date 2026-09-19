@@ -56,3 +56,5 @@
 ## Step 5 冒烟项处置登记（k3 P2 修订）
 
 计划 Step 5 真实构建端到端冒烟（SC 会话 approve/abandon/feedback/plan-repair 路由）**顺延至 T5 完成+部署后执行**：冒烟有效性依赖 T4 前端（typed 发送器）+T5 后端（删除面）同 build 部署——当前 v25 为 T4 前二进制，冒烟会走旧前端路径失真。T6 关闸前由 controller 在新部署上执行并回贴 ws.jsonl/审计证据至本报告与 inventory。非豁免，是顺延（依赖序如实）。
+
+**冒烟已执行（2026-09-19 v26，controller）**：四路径闭环+abandon 部分验证——详见 smoke/v26-smoke-summary.md 与 v26-0440-ws.jsonl。
