@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::json_rpc_peer::{OutboundIdNamespace, ensure_request_id};
+use crate::cross_cutting::approval_bridge::ApprovalBridge;
+use crate::cross_cutting::json_rpc_peer::{JsonRpcPeer, OutboundIdNamespace, ensure_request_id};
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, CodexApprovalCategory, CodexApprovalResponse, ProviderCommand,
     ProviderCompletion, ProviderEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -19,8 +20,7 @@ use super::CodexProvider;
 use super::is_turn_completed;
 use super::parse_codex_usage;
 use super::parse_failure;
-use super::session::codex_launch_params;
-
+use super::session::{CodexSessionHandshake, codex_launch_params, run_codex_session_loop};
 mod approval_policy;
 mod version_probe;
 
@@ -1000,21 +1000,90 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_bridge_failur
     );
 }
 
+// 写失败注入确定性化（RR-3 单例销账，wave4-passive-flaky）：原形态=真实进程 fixture
+// （codex_request_user_input_peer_closes_fixture.sh 关闭 stdin 读端→EPIPE）叠加
+// TEST_TIMEOUT 墙钟窗口——全量首跑在冷缓存/高并发负载下事件窗口可被饿死（历史
+// 首跑红/单跑绿，stage4-c3-t5 §3.6/w1 登记）。验证方式迁移（d7525220 kimi terminal
+// 同款先例）：受控内存流（tokio duplex）直接驱动 run_codex_session_loop，stdin
+// 读端在触发写的 ChoiceResponse 发出之前 drop——写失败由因果定序保证，无真实
+// 进程/无墙钟竞态；断言与原形态逐字一致（code/message/question_id）。
 #[tokio::test]
 async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure() {
-    let fixture = executable_fixture(
-        "tests/fixtures/provider/codex_request_user_input_peer_closes_fixture.sh",
-    );
-    let provider = CodexProvider::new(fixture);
-    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let mut session = provider
-        .start(input, CancellationToken::new())
+    let (mut server_stdout, provider_stdout) = tokio::io::duplex(64 * 1024);
+    let (provider_stdin, server_stdin) = tokio::io::duplex(64 * 1024);
+    let peer = JsonRpcPeer::new(provider_stdout, provider_stdin)
+        .with_outbound_id_namespace(OutboundIdNamespace::Aria);
+
+    let (event_tx, mut session_events) = mpsc::channel(32);
+    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
+    let commands = bridge.command_sender();
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let cancel = CancellationToken::new();
+
+    let session_loop = tokio::spawn(async move {
+        run_codex_session_loop(
+            peer,
+            bridge,
+            event_tx,
+            input,
+            cancel,
+            CodexSessionHandshake {
+                resume_session_id: None,
+                thread_id: Some("codex_input_thread".to_string()),
+            },
+        )
         .await
-        .unwrap();
+    });
+
+    // 服务端泵：应答 turn/start（复用出站原生 id），随后回放 requestUserInput 请求
+    // （id=88/question=confirm/options=是|否——逐字取自已退役的 peer_closes 真实
+    // fixture，保证 parse 路径与原形态一致）。
+    let mut server_stdin_reader = BufReader::new(server_stdin);
+    let mut turn_start_line = String::new();
+    server_stdin_reader
+        .read_line(&mut turn_start_line)
+        .await
+        .expect("provider should send turn/start");
+    let turn_start_id = serde_json::from_str::<Value>(&turn_start_line)
+        .expect("turn/start should be valid JSON")
+        .get("id")
+        .cloned()
+        .expect("turn/start should carry an id");
+    let turn_start_response = json!({
+        "jsonrpc": "2.0",
+        "id": turn_start_id,
+        "result": { "turn": { "id": "codex_input_turn", "status": "inProgress" } },
+    });
+    server_stdout
+        .write_all(format!("{turn_start_response}\n").as_bytes())
+        .await
+        .expect("server should answer turn/start");
+
+    let request_user_input = json!({
+        "jsonrpc": "2.0",
+        "id": 88,
+        "method": "item/tool/requestUserInput",
+        "params": {
+            "threadId": "codex_input_thread",
+            "turnId": "codex_input_turn",
+            "itemId": "ask_1",
+            "questions": [{
+                "id": "confirm",
+                "header": "确认",
+                "question": "继续？",
+                "options": [{"label": "是"}, {"label": "否"}]
+            }]
+        }
+    });
+    server_stdout
+        .write_all(format!("{request_user_input}\n").as_bytes())
+        .await
+        .expect("server should emit requestUserInput");
 
     let choice = loop {
-        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+        match tokio::time::timeout(TEST_TIMEOUT, session_events.recv())
             .await
             .expect("provider should emit choice")
             .expect("provider event channel should stay open")
@@ -1027,8 +1096,12 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
         }
     };
 
-    session
-        .commands
+    // 确定性写失败注入：drop stdin 读端严格先于发出触发写的 ChoiceResponse——
+    // provider 侧写失败时序由因果定序锁定（duplex 对端 drop 后写返回 BrokenPipe，
+    // 与真实管道 EPIPE 同语义），不再依赖进程调度竞态。
+    drop(server_stdin_reader);
+
+    commands
         .send(ProviderCommand::ChoiceResponse {
             id: choice.id,
             selected_option_ids: vec!["是".to_string()],
@@ -1039,7 +1112,7 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
         .expect("send choice response");
 
     let mut saw_protocol_error = false;
-    while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+    while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session_events.recv())
         .await
         .expect("provider should emit events")
     {
@@ -1077,6 +1150,17 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
     assert!(
         saw_protocol_error,
         "expected request_user_input_unresolved protocol error when JSON-RPC response write fails"
+    );
+
+    // 写失败必须以错误终止会话循环（原形态经 provider.start 包装任务发 Failed；
+    // 迁移后直接断言会话循环返回 Err，覆盖同一契约）。
+    let session_result = tokio::time::timeout(TEST_TIMEOUT, session_loop)
+        .await
+        .expect("session loop should finish after write failure")
+        .expect("session task should join");
+    assert!(
+        session_result.is_err(),
+        "write failure must terminate the session loop with an error"
     );
 }
 
