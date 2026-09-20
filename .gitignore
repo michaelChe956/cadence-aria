@@ -43,3 +43,10 @@ cadence/reports/provider-validation-round/f24-choice/run*/ws.jsonl
 cadence/reports/provider-validation-round/f24-choice/*console*.txt
 cadence/reports/provider-validation-round/wave4-ppstress/*.jsonl
 cadence/reports/provider-validation-round/wave4-ppstress/*.cjs
+cadence/reports/legacy-protocol-retirement/wp1-gate-retest/campaign/*/rep*/ws.jsonl
+cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep*/ws.jsonl
+cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep*/*.jsonl
+cadence/reports/provider-validation-round/kimi-coding/*.cjs
+cadence/reports/provider-validation-round/wave2-2c/*.jsonl
+cadence/reports/provider-validation-round/wave2-f18/*.cjs
+cadence/reports/legacy-protocol-retirement/smoke/*.jsonl
