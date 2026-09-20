@@ -15,9 +15,8 @@ use crate::product::coding_attempt_store::{
     CreateGroupCodingAttemptInput,
 };
 use crate::product::coding_models::{
-    AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionUnitStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
-    ReviewRequestOwnerKind,
+    AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionUnitStatus,
+    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind,
 };
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::json_store::{read_json, write_json};

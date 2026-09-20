@@ -8,17 +8,17 @@
 
 ## 1. 角色指派表
 
-| 角色 | 指派 | 通道状态（2026-09-18） | 恢复后动作 |
+| 角色 | 指派 | 通道降级链（2026-09-19 用户调整） | 全挂处置 |
 |---|---|---|---|
-| **实施（worker）** | **ter-task**（现行首位） | ✅ | ds-task 恢复→切回 ds 优先；再 ter-task；glm53-task 兜底 |
-| 审核（reviewer） | k3-reviewer | ✅ 可多实例扩容 | 原 k3/my-openai 池恢复→切回 |
-| 勘察（scout） | glm5.3-f-scout | ✅ | 原 my-anthropic/glm-5.3-flash 恢复→切回 |
-| 裁决 | oracle | ✅ 原生健康 | — |
-| ds-task | （挂起） | 🔴 DeepSeek 池耗尽 | 充值后恢复实施链首位 |
-| ter-task | （现行） | ✅ 9-17 恢复（原 401 已修） | 失效→glm53-task 顶上并通知用户 |
+| **实施（worker）** | **glm53-task** | ✅ my-anthropic/glm-5.3 → bingqi/glm-5.3 | 通知用户 |
+| 审核（reviewer） | k3-reviewer | ✅ 可多实例扩容；my-anthropic/kimi-for-coding → tydic-openai/deepseek-flash | 通知用户 |
+| 勘察（scout） | glm5.3-f-scout | ✅ my-anthropic/glm-5.3-flash → bingqi/glm-5.3-flash | 通知用户 |
+| 裁决 | oracle | ✅ 保持不变（my-anthropic/k3 主链） | 分歧挂起等用户 |
+| ter-task | 🔴 **用户暂停** | 不派工（配置已加 SUSPENDED 标注） | 等用户通知解除 |
+| ds-task | 🔴 **用户暂停** | 不派工（配置已加 SUSPENDED 标注） | 等用户通知解除 |
 
-- **实施链（用户钉死）**：ds-task 优先 → ter-task 次位 → glm53-task 兜底；三者全不可用→暂停反馈用户。任一高优先通道恢复即切回。
-- **模型切换先例**：改 `~/.omp/agent/agents/<name>.md` 的 `model:` 列表（备用置首、原通道留链尾）。
+- **实施链（2026-09-19 用户调整）**：glm53-task 为唯一 worker（my-anthropic/glm-5.3 优先→bingqi/glm-5.3 自动降级）；ter-task/ds-task 暂停等通知；链全挂→通知用户，不自主启用规则外模型（max-task/通用 task 等）。
+- **模型切换先例**：改 `~/.omp/agent/agents/<name>.md` 的 `model:` 列表（首位优先、降级通道留尾）——2026-09-19 按用户指令调整三文件（glm53-task/k3-reviewer/glm5.3-f-scout）+ter/ds 加 SUSPENDED。
 - **通道探针**：派工前秒投一行探针（各角色一行回复即证健康）；通道挂的表现=404 model_not_found / 401 key disabled / 挂起无响应。
 
 ---
@@ -105,3 +105,4 @@
 | 2026-09-18 | **铁律 5 升级默认并行（不设上限+k3 扩实例+stash 三步协议）+沉淀为项目规则** | 用户裁决「能并行的尽量并行多 agents」+「作为项目规范沉淀」 |
 
 > 本节只记变更不重复正文——正文始终为现行版。
+| 2026-09-19 | **用户指令调整通道链**：worker 链 my-anthropic/glm-5.3→bingqi；k3 降级 ds-flash；scout 改 my-anthropic flash 优先；ter/ds 暂停等通知 | 用户配置指令 |
