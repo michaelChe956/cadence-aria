@@ -525,7 +525,8 @@ async fn git_add_work_item_changes_fails_closed_when_owner_read_bit_missing_but_
     git(repo, &["commit", "-m", "base"]);
     let owner_blind = repo.join("owner-blind.txt");
     fs::write(&owner_blind, "owner blind\n").expect("write owner-blind");
-    fs::set_permissions(&owner_blind, fs::Permissions::from_mode(0o044)).expect("chmod 044 fixture");
+    fs::set_permissions(&owner_blind, fs::Permissions::from_mode(0o044))
+        .expect("chmod 044 fixture");
 
     let service = GitWorkspaceService::new();
     let error = service
@@ -538,7 +539,8 @@ async fn git_add_work_item_changes_fails_closed_when_owner_read_bit_missing_but_
     );
 
     // 自修 644 后同路径放行。
-    fs::set_permissions(&owner_blind, fs::Permissions::from_mode(0o644)).expect("chmod 644 fixture");
+    fs::set_permissions(&owner_blind, fs::Permissions::from_mode(0o644))
+        .expect("chmod 644 fixture");
     service
         .git_add_work_item_changes(repo)
         .await
