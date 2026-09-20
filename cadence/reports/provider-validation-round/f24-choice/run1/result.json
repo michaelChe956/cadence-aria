@@ -1,0 +1,27 @@
+{
+  "scenario": "f24-choice-card-pi-ask-user",
+  "base_url": "http://127.0.0.1:4317",
+  "started_at": "2026-09-20T10:09:20.359Z",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 2.951,
+      "source": "session_state"
+    }
+  ],
+  "choice": null,
+  "post_answer_events": [],
+  "provider_continued": false,
+  "terminal": {
+    "kind": "ws_closed_unexpected",
+    "at": "2026-09-20T10:10:53.353Z"
+  },
+  "issue_id": "issue_0293",
+  "workspace_session_id": "workspace_session_0485",
+  "plan_id": "issue_work_item_plan_0001",
+  "cockpit_url": "http://127.0.0.1:4317/workbench/workspace/workspace_session_0485",
+  "elapsed_sec": 92.994,
+  "stage_durations_sec": {
+    "0:prepare_context": 90.043
+  }
+}
