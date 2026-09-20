@@ -281,9 +281,18 @@ pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
             } else {
                 gitdir.join(back)
             };
+            // P2 (fix round 4): the expected side is the LITERAL
+            // `<canonical-root>/.git` — never canonicalized through `.git`
+            // itself, or a symlinked `.git` pointing at a forged gitdir
+            // (whose `gitdir` file points back at the literal path) would
+            // canonicalize both sides to the forged target and pass.
             std::fs::canonicalize(&back)
                 .ok()
-                .zip(std::fs::canonicalize(root.join(".git")).ok())
+                .zip(
+                    std::fs::canonicalize(root)
+                        .map(|canonical| canonical.join(".git"))
+                        .ok(),
+                )
                 .map(|(back, expected)| back == expected)
         })
         .unwrap_or(false);
@@ -307,6 +316,56 @@ pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
         })
         .cloned()
         .collect()
+}
+
+/// Attempt-stable freeze of the writable git bind face, persisted OUTSIDE
+/// the coder-writable space (F-17 fix round 4). Every trust anchor of the
+/// worktree chain (`.git` pointer, `<gitdir>/gitdir`, `<gitdir>/commondir`)
+/// lives inside mounts the coder can write, so any filesystem-based
+/// validation can be re-wound by the next retry/rework round. The first
+/// resolution — taken while the worktree is still Aria-prepared — is
+/// therefore persisted under `<root-parent>/.provider-session-cache/<key>/`
+/// (host territory the sandbox can only read; the key is a stable hash of
+/// the worktree path, so every later dispatcher of the same attempt shares
+/// one face) and every later construction trusts the persisted face
+/// instead of re-resolving from the worktree.
+pub fn frozen_writable_git_paths(root: &Path) -> Vec<PathBuf> {
+    let cache_dir = root
+        .parent()
+        .unwrap_or(root)
+        .join(".provider-session-cache")
+        .join(provider_cache_key(root));
+    let cache_file = cache_dir.join("writable_git_paths.json");
+    // Trust the persisted face verbatim: it lives in host territory outside
+    // every coder-writable mount. A corrupt/unreadable cache falls back to a
+    // fresh resolution (round-trip validated) and re-persists it.
+    if let Ok(content) = std::fs::read_to_string(&cache_file)
+        && let Ok(paths) = serde_json::from_str::<Vec<String>>(&content)
+    {
+        return paths.into_iter().map(PathBuf::from).collect();
+    }
+    let resolved = resolve_writable_git_paths(root);
+    let persisted: Vec<String> = resolved
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    if std::fs::create_dir_all(&cache_dir).is_ok()
+        && let Ok(json) = serde_json::to_string(&persisted)
+    {
+        let _ = std::fs::write(&cache_file, json);
+    }
+    resolved
+}
+
+/// Stable (cross-process) FNV-1a 64-bit key for a cache subdirectory, so
+/// distinct worktrees sharing a parent never collide.
+fn provider_cache_key(root: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Validate that a path beneath `root` has no symlink in any existing prefix
@@ -787,6 +846,115 @@ mod tests {
         assert!(
             resolve_writable_git_paths(&root).is_empty(),
             "swapped pointer at another worktree gitdir must degrade to empty"
+        );
+    }
+
+    /// fix round 4(F-17/k3 R3 P1,跨轮重绕):所有信任锚(`.git` 指针、
+    /// `<gitdir>/gitdir`、`<gitdir>/commondir`)都在 coder 可写面内——任何
+    /// 基于 worktree 文件的校验都能被下一轮重绕。冻结面持久化到 root 外
+    /// 宿主区(`<root-parent>/.provider-session-cache/`):轮1 解析+落盘,
+    /// 轮2 无论改写 commondir 还是把 `.git` 换 symlink,读缓存的 bind 面不变。
+    #[test]
+    fn frozen_git_binds_survive_cross_round_commondir_and_symlink_rewrites() {
+        let base = tempfile::tempdir().expect("workspace");
+        let base = base.path().canonicalize().expect("canonical base");
+        let main = base.join("main");
+        host_git(&["init", "-q", "main"], &base);
+        host_git(
+            &[
+                "-c",
+                "user.name=f17",
+                "-c",
+                "user.email=f17@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            &main,
+        );
+        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
+        let root = base.join("wt");
+        let root = root.canonicalize().expect("canonical worktree");
+        let face = vec![main.join(".git").canonicalize().expect("commondir")];
+        assert_eq!(frozen_writable_git_paths(&root), face, "first resolution");
+
+        // 攻击 A:第 N 轮 coder 改写 `<gitdir>/commondir`(经 rw bind 可写)
+        // 指向宿主 evil 仓;第 N+1 轮(新 dispatcher 构造)必须读冻结面。
+        host_git(&["init", "-q", "evil"], &base);
+        std::fs::write(
+            main.join(".git")
+                .join("worktrees")
+                .join("wt")
+                .join("commondir"),
+            format!("{}\n", base.join("evil").join(".git").display()),
+        )
+        .expect("rewrite commondir");
+        assert_eq!(
+            frozen_writable_git_paths(&root),
+            face,
+            "cross-round commondir rewrite must not move the frozen bind face"
+        );
+
+        // 攻击 B:把 `.git` 换成 symlink 指向伪造 gitdir(其 `gitdir` 文件
+        // 指回本 worktree 的 `.git` 字面路径)——同样必须读冻结面。
+        host_git(&["init", "-q", "evil2"], &base);
+        std::fs::write(
+            base.join("evil2").join(".git").join("gitdir"),
+            format!("{}\n", root.join(".git").display()),
+        )
+        .expect("forge pointing-back gitdir file");
+        std::fs::remove_file(root.join(".git")).expect("remove pointer file");
+        std::os::unix::fs::symlink(base.join("evil2").join(".git"), root.join(".git"))
+            .expect("symlink .git");
+        assert_eq!(
+            frozen_writable_git_paths(&root),
+            face,
+            "symlinked .git must not move the frozen bind face"
+        );
+    }
+
+    /// fix round 4(P2,symlink 旁路):往返校验的 expected 必须是
+    /// `canonicalize(root).join(".git")` 字面值——不跟 `.git` 链接。
+    /// 否则 symlink 指向的伪造 gitdir(其 `gitdir` 文件指回 `.git` 字面)
+    /// 让两侧 canonicalize 相等,bind 面被瞄准。
+    #[test]
+    fn resolve_rejects_symlinked_git_pointer_round_trip_bypass() {
+        let base = tempfile::tempdir().expect("workspace");
+        let base = base.path().canonicalize().expect("canonical base");
+        let main = base.join("main");
+        host_git(&["init", "-q", "main"], &base);
+        host_git(
+            &[
+                "-c",
+                "user.name=f17",
+                "-c",
+                "user.email=f17@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            &main,
+        );
+        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
+        let root = base.join("wt");
+        let root = root.canonicalize().expect("canonical worktree");
+        // 伪造 gitdir:合法仓 + `gitdir` 文件指回本 worktree 的 `.git` 字面。
+        host_git(&["init", "-q", "evil2"], &base);
+        std::fs::write(
+            base.join("evil2").join(".git").join("gitdir"),
+            format!("{}\n", root.join(".git").display()),
+        )
+        .expect("forge pointing-back gitdir file");
+        std::fs::remove_file(root.join(".git")).expect("remove pointer file");
+        std::os::unix::fs::symlink(base.join("evil2").join(".git"), root.join(".git"))
+            .expect("symlink .git at the fake gitdir");
+        assert!(
+            resolve_writable_git_paths(&root).is_empty(),
+            "symlinked .git with a forged pointing-back gitdir must degrade to empty"
         );
     }
     fn host_git(args: &[&str], cwd: &Path) {

@@ -106,3 +106,32 @@ git bind 面在**构造期冻结**：`ClientServiceState` 新增 `writable_git_p
 1. 构造期冻结（fix round 2）：单 dispatcher 生命周期内 bind 面恒定。
 2. 往返校验（fix round 3）：新轮次构造期只接受「gitdir 文件互指本 worktree」的合法链，任何被改指针 → 空降级。
 3. 解析过滤（fix round 1）：根内路径不进额外 bind 面。
+
+## 9. fix round 4（k3 R3 审 1×P1+1×P2——comm/symlink 旁路）
+
+**P1（跨轮重绕）**：k3 精辟总结——所有信任锚（`.git` 指针、`<gitdir>/gitdir`、`<gitdir>/commondir`）都在 coder 可写空间内（root rw bind + gitdir rw bind），任何基于 worktree 文件系统的校验（含 fix round 3 往返校验）都能被下一轮重绕：第 N 轮 coder 改写 `<gitdir>/commondir` 或伪造 `<evil>/.git/gitdir` 指回链，第 N+1 轮新 dispatcher 构造期重解析即被引导。
+
+**P2（symlink 旁路）**：往返校验的 expected 侧 `canonicalize(root.join(".git"))` 会跟 `.git` 符号链接——coder 把 `.git` 换 symlink 指向伪造 gitdir（其 `gitdir` 文件指回 `.git` 字面路径），两侧 canonicalize 收敛到同一伪造目标，校验被绕过。
+
+### 修复（controller 设计——持久化冻结到宿主可信路径）
+
+1. **`frozen_writable_git_paths(root)`**：首次解析（worktree 仍 Aria 准备态）结果持久化到 `<root-parent>/.provider-session-cache/<fnv1a(root)>/writable_git_paths.json`——root 外宿主区（沙箱只读），后续任何轮次的 dispatcher 构造读缓存直接信任，不再从 worktree 重推信任。缓存损坏/不可读 → 回落 fix round 3 往返校验重解析并重写（纵深兜底）。寻址键 = root 路径 FNV-1a 64（跨进程稳定、同 attempt 恒定、不同 worktree 不碰撞）。
+2. **P2**：resolve 的 expected 侧改为 `canonicalize(root).join(".git")` 字面值（不跟 `.git` 链接），symlink 指向的伪造 gitdir 双侧不再收敛。
+3. **生产链切换**：`writable_git_paths_for`（mod.rs，dispatcher 构造）与真机测试统一走 `frozen_writable_git_paths`；`resolve_writable_git_paths` 保留为纯解析原语（含往返校验+根内过滤）。
+
+### TDD 证据（fix round 4）
+
+- 红（frozen 为直通 resolve 的中间态 + P2 未修）：①`frozen_git_binds_survive_cross_round_commondir_and_symlink_rewrites` FAILED——轮1 解析 `==[main/.git]` 后改写 `<gitdir>/commondir` 指向 evil 仓，轮2 bind 面漂移（跨轮重绕精确复现）；②`resolve_rejects_symlinked_git_pointer_round_trip_bypass` FAILED——symlink `.git`+伪造指回 gitdir 文件通过往返校验返回非空（symlink 旁路精确复现）。
+- 绿（持久冻结+P2 后）：定向 `cargo test --locked --lib kimi_code_provider::client_services` **78 passed / 0 failed**；fmt clean；clippy 0 警告。fix round 1/2/3 全部既有测试不动仍绿（真机 linked worktree commit 链改走 frozen 后同绿）。
+- 新增测试 2 个：①跨轮双攻击（commondir 改写 + `.git` symlink 伪造）——轮2/轮3 读缓存 bind 面恒 `==[main/.git]`；②symlink 旁路单测（resolve 层 P2：伪造指回链降级为空）。
+
+### 纵深合成（四轮完整防线）
+
+1. 构造期冻结（fix round 2）：单 dispatcher 生命周期内 bind 面恒定。
+2. 持久化冻结（fix round 4）：跨轮次信任从 worktree 移交宿主缓存层——worktree 内任何文件改写（.git/gitdir/commondir/symlink）都无法再影响后续轮次的 bind 面。
+3. 往返校验（fix round 3）+ P2 字面 expected（fix round 4）：缓存缺席（首解析/损坏回落）时的文件系统校验防线，symlink 不可绕。
+4. 解析过滤（fix round 1）：根内路径不进额外 bind 面。
+
+### 部署注记
+
+- `.provider-session-cache/` 沉淀在 worktree 父目录（宿主区，attempt 级隔离寻址）；缓存文件极小（JSON 路径数组），随 attempt worktree 生命周期管理（后续可按 attempt 清理策略回收，非本修复面）。

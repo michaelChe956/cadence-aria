@@ -32,8 +32,8 @@ use self::fs_service::{FsError, read_text_file, write_text_file};
 use self::grammar::{Binary, GrammarError, ParsedCommand, parse_command};
 use self::policy::{ClientAction, ClientServicePolicy, PolicyDecision};
 use self::sandbox::{
-    canonical_path_of_fd, canonicalize_root, open_dir_no_follow, probe_bwrap,
-    resolve_trusted_binary, resolve_writable_git_paths, validate_path_no_follow,
+    canonical_path_of_fd, canonicalize_root, frozen_writable_git_paths, open_dir_no_follow,
+    probe_bwrap, resolve_trusted_binary, validate_path_no_follow,
 };
 use self::terminal::{TerminalCommand, TerminalError, TerminalIsolation, TerminalManager};
 
@@ -333,12 +333,14 @@ async fn evaluate_policy(
 }
 /// Git paths to bind read-write alongside a writable root, resolved once at
 /// construction time — when the root is still Aria-prepared and untouched by
-/// the coder (F-17 fix round 2): re-resolving per terminal command would let
-/// a sandboxed coder rewrite the `.git` pointer at an arbitrary valid host
-/// git dir and aim the next extra rw bind at it.
+/// the coder — and frozen for the whole attempt via the host-side provider
+/// session cache (F-17 fix round 2/4): re-resolving per terminal command, or
+/// per retry/rework round, would let a sandboxed coder rewrite the `.git`
+/// pointer (or `<gitdir>/gitdir`/`commondir`) and aim the extra rw binds at
+/// an arbitrary valid host git dir.
 fn writable_git_paths_for(role: &AdapterRole, root: &Path) -> Vec<PathBuf> {
     if matches!(role, AdapterRole::Executor) {
-        resolve_writable_git_paths(root)
+        frozen_writable_git_paths(root)
     } else {
         Vec::new()
     }

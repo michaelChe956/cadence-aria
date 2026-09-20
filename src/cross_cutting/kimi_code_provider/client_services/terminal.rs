@@ -893,10 +893,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn executor_writable_root_sandbox_allows_git_commit_inside_root() {
-        use super::super::sandbox::resolve_writable_git_paths;
+        use super::super::sandbox::frozen_writable_git_paths;
         let dir = tempfile::tempdir().expect("worktree");
         let root = dir.path().canonicalize().expect("canonical root");
-        let Some(isolation) = bwrap_isolation(true, resolve_writable_git_paths(&root)) else {
+        let Some(isolation) = bwrap_isolation(true, frozen_writable_git_paths(&root)) else {
             return; // bubblewrap 不在时跳过真机隔离路径
         };
         let script = "git init -q \
@@ -926,7 +926,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn executor_writable_root_sandbox_allows_git_commit_in_linked_worktree() {
-        use super::super::sandbox::resolve_writable_git_paths;
+        use super::super::sandbox::frozen_writable_git_paths;
         let base = tempfile::tempdir().expect("workspace");
         let base = base.path().canonicalize().expect("canonical base");
         let main = base.join("main");
@@ -949,7 +949,7 @@ mod tests {
         let root = main.parent().unwrap().join("wt");
         let root = root.canonicalize().expect("canonical worktree");
         assert!(root.join(".git").is_file(), "linked worktree shape");
-        let git_paths = resolve_writable_git_paths(&root);
+        let git_paths = frozen_writable_git_paths(&root);
         assert_eq!(
             git_paths,
             vec![main.join(".git").canonicalize().expect("commondir")],
