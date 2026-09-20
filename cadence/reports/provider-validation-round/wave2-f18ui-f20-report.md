@@ -88,7 +88,7 @@
 | P2-1 门卡离场兜底 | GatePromptEntry 兜底分支从 `stage:human_confirm` 特判推广为通用 `stage:` 前缀判据：`gateIdentity.startsWith("stage:") && gateIdentity !== stage:${state.stage}` → `terminal_stage`（文案「已离开人工确认门」）。修复：门开态发修订反馈起 Author run（UserMessage 不经矩阵直接起跑，stage_change 只 setStage 不重建 chatEntries）或 confirm 后阶段推进时，旧门卡不再渲染可点但被静默拦截的假按钮 |
 | P2-2 author_confirm 禁 advance | 双面：①门面 `advance()` 加 `stage === "author_confirm"` 早退 false（矩阵 AuthorConfirm 臂只放行 Abort/AbandonHumanGate——覆盖热键与全部调用点）；②`canManualAdvance` 排除该阶段（HTTP confirm 乐观 confirmed 后不再露出「手动推进」死按钮）。autopilot 不受影响（stage-only 门在 gateIdentityFromState 无 identity，不建 advance 锚） |
 
-TDD：红证 3 失败（stash 两修复文件后实测：routing advance story/design 零发送 2 例+页面离场兜底文案 1 例）→ 恢复后绿；新增 5 测（routing it.each 3 含 work_item_plan 边界+页面 2：离场兜底文案+按钮消失+零发送、手动推进隐藏）。
+TDD：红证共 4 失败，分两步取证——①stash 两修复文件（GatePromptEntry+cockpit-action-routing）实测 3 红：routing advance story/design 零发送 2 例+页面离场兜底文案 1 例；②「手动推进隐藏」页面测依赖 ChatCockpitPage.tsx（当时同文件有 F-19 在途 hunk，未纳入 stash），提交 17d21491 后单独反打该 hunk 补证第 4 红（复跑 1 failed→恢复后绿）。新增 5 测（routing it.each 3 含 work_item_plan 边界+页面 2：离场兜底+手动推进隐藏）。
 
 回归：定向 6 文件 96/96；全量 vitest **1502/1502**（175 文件，含 B 线在途 generation 测试）；`tsc --noEmit` 0 错。
 
