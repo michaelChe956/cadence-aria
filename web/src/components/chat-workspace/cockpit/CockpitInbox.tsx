@@ -319,7 +319,15 @@ function GateInboxActions({
 }) {
   const [feedback, setFeedback] = useState("");
   const actionBlockReason = item.gate?.action_block_reason ?? null;
-  if (actionBlockReason) {
+  // F-21：终止专属判据（缺省回退通用判据）——plan 会话停在 human_confirm 的
+  // context blocker/author 失败/缺相位门允许终止（矩阵+引擎只校验 stage+flow）。
+  // F-21：terminate_block_reason 显式 null=终止放行；仅缺省（undefined，旧投影
+  // 形态）才回退通用判据——?? 会把 null 吞成回退。
+  const terminateBlockReason =
+    item.gate !== null && item.gate.terminate_block_reason !== undefined
+      ? item.gate.terminate_block_reason
+      : actionBlockReason;
+  if (actionBlockReason && terminateBlockReason) {
     return (
       <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
         {gateActionBlockCopy(actionBlockReason)}
@@ -339,7 +347,14 @@ function GateInboxActions({
     <div className="mt-3 space-y-3">
       {summary ? <GateSummary {...summary} /> : null}
       <div className="flex flex-wrap gap-2">
-        {typed ? (
+        {actionBlockReason !== null ? (
+          // F-21：phase_mismatch 的 plan 门终止专属放行——只露终止，说明行替代
+          // 确认/反馈（相位纪律维持）。
+          <p className="w-full text-xs text-[var(--aria-ink-muted)]">
+            {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起
+          </p>
+        ) : null}
+        {typed && actionBlockReason === null ? (
           <>
             {typedGateNeedsNewCommand ? (
               <p className="w-full text-xs text-[var(--aria-ink-muted)]">
@@ -355,14 +370,16 @@ function GateInboxActions({
           </>
         ) : null}
         {/* L1（REQ-RET-02）：legacy 门「采纳建议并返修」（request-change）发送面删除。 */}
-        <button
-          type="button"
-          onClick={actions.confirm}
-          className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-        >
-          <Check className="h-3.5 w-3.5" aria-hidden="true" />
-          确认
-        </button>
+        {actionBlockReason === null ? (
+          <button
+            type="button"
+            onClick={actions.confirm}
+            className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+            确认
+          </button>
+        ) : null}
         <ConfirmTwiceButton
           label="终止"
           confirmLabel="确认终止"

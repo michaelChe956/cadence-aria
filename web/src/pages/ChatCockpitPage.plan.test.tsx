@@ -446,4 +446,88 @@ describe("ChatCockpitPage", () => {
       expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("child_plan_002", 2);
     });
   });
+
+  // F-21（v28 监控 0449，三次未修 v26/v27/v28）：plan 会话 human_confirm 门
+  // 的终止接线。d2d67b39 只覆盖 story/design AuthorConfirm 面；plan 会话还会以
+  // SC 流停在 human_confirm 的 context blocker（prepare 相位）/author 连续
+  // validate 失败（generate 相位）/旧会话缺相位（null）形态——此前这些形态被
+  // phase_mismatch 一刀切，门卡/收件箱零决策面，终止点击零 WS 出站且无可见反馈。
+  // 矩阵（protocol.rs HumanConfirm SC 臂）与引擎 close_human_gate 均只校验
+  // stage+flow_kind——终止接 sendAbandonGate（C3-T4 发送器）放行，二次确认惯例
+  // 与 story/design 面一致；confirm/反馈维持相位纪律。
+  describe("F-21 plan human_confirm gate terminate wiring", () => {
+    function planGateSession(singleCandidatePhase: "prepare" | "generate" | null) {
+      useWorkspaceStore.setState({
+        sessionId: "session_001",
+        stage: "human_confirm",
+        workspaceType: "work_item_plan",
+        flowKind: "single_candidate",
+        singleCandidatePhase,
+        sessionStatus: "waiting_for_human",
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+        providers: { author: "pi", reviewer: null },
+        chatEntries: [],
+        timelineNodes: [],
+      });
+      useWorkspaceStore.getState().rebuildChatEntries();
+    }
+
+    it.each([
+      ["prepare", "context blocker 门"],
+      ["generate", "author validate 失败门"],
+      [null, "旧会话缺相位门"],
+    ] as const)(
+      "%s（%s）：收件箱门条与对话流门卡终止点击恰发一次 abandon_human_gate",
+      async (singleCandidatePhase, _label) => {
+        const user = userEvent.setup();
+        planGateSession(singleCandidatePhase);
+        const workspaceWs = mockWorkspaceWs();
+        renderCockpitWith(workspaceWs);
+
+        const inbox = screen.getByTestId("cockpit-inbox");
+        expect(within(inbox).getByText("门禁等待")).toBeVisible();
+
+        // 收件箱门条：终止二次确认后恰一次发送。
+        await user.click(
+          within(inbox).getByRole("button", { name: "终止" }),
+        );
+        expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+        await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+        expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
+        expect(workspaceWs.sendAbandonGate).toHaveBeenCalledWith(expect.any(String));
+        expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+        vi.mocked(workspaceWs.sendAbandonGate).mockClear();
+
+        // 对话流门卡：同一发送器、同一惯例。
+        await user.click(screen.getByTestId("cockpit-conversation-tab"));
+        const gateCard = screen.getByTestId("gate-prompt-entry");
+        await user.click(within(gateCard).getByRole("button", { name: "终止" }));
+        expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+        await user.click(
+          within(gateCard).getByRole("button", { name: "确认终止" }),
+        );
+        expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
+        expect(workspaceWs.sendAbandonGate).toHaveBeenCalledWith(expect.any(String));
+      },
+    );
+
+    it("keeps the plan approval gate (evaluate phase) fully operable — confirm and terminate both wired", async () => {
+      const user = userEvent.setup();
+      planGateSession(null);
+      useWorkspaceStore.setState({ singleCandidatePhase: "evaluate" });
+      useWorkspaceStore.getState().rebuildChatEntries();
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+
+      const inbox = screen.getByTestId("cockpit-inbox");
+      await user.click(within(inbox).getByRole("button", { name: "确认" }));
+      expect(workspaceWs.sendConfirmGate).toHaveBeenCalledTimes(1);
+
+      await user.click(within(inbox).getByRole("button", { name: "终止" }));
+      await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+      expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
+    });
+  });
 });

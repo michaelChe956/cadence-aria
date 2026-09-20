@@ -119,4 +119,38 @@ describe("GatePromptEntry actionability", () => {
     expect(gateActions.confirm).toHaveBeenCalledOnce();
     expect(gateActions.terminate).toHaveBeenCalledOnce();
   });
+
+  // F-21（v28 监控 0449）：plan 会话停在 human_confirm 的 context blocker 门
+  //（prepare 相位）——actionBlockReason=phase_mismatch 时终止仍必须露出并接
+  // facade.terminate（confirm/反馈编辑器维持相位纪律不渲染）。
+  it("renders a terminate-only plan gate card for a phase-mismatched context blocker gate (F-21)", async () => {
+    const gateActions = actions();
+    const user = userEvent.setup();
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "prepare",
+      sessionStatus: "waiting_for_human",
+      humanGateClosure: null,
+    });
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry("phase_mismatch", "stage:human_confirm")}
+        actions={gateActions}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "终止" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "终止" }));
+    expect(gateActions.terminate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "确认终止" }));
+    expect(gateActions.terminate).toHaveBeenCalledOnce();
+    expect(gateActions.confirm).not.toHaveBeenCalled();
+    expect(gateActions.feedback).not.toHaveBeenCalled();
+  });
 });

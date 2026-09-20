@@ -569,6 +569,8 @@ export function buildGatePromptEntry(
     ...(projection.turn?.inlineError ? { inline_error: projection.turn.inlineError } : {}),
     gate_status: projection.closed ?? projection.status,
     action_block_reason: projection.action_block_reason,
+    // F-21：终止专属阻断持久化（null=允许终止）——门卡离场兜底分支读取。
+    terminate_block_reason: projection.terminate_block_reason,
     ...(contextBlockerGate
       ? {
           gate_kind: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND,

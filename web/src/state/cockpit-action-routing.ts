@@ -1,5 +1,5 @@
 import { newCommandId } from "../hooks/useWorkspaceWs";
-import { gateActionBlockReason } from "./workspace-cockpit-projection";
+import { gateActionBlockReason, gateTerminateBlockReason } from "./workspace-cockpit-projection";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export type CockpitActionFacade = {
@@ -48,11 +48,14 @@ export function createCockpitActionFacade(input: {
       return input.sendHumanGateFeedback(feedback, input.commandId ?? newCommandId());
     },
     terminate() {
-      if (gateActionBlockReason(input.getState()) !== null) {
-        return false;
-      }
       // L1 typed 重承载（REQ-RET-02）：终止=显式 abandon_human_gate 命令；
       // 重连/刷新后无活 turn command_id 时凭新 id 提交（与 feedback 同款纪律）。
+      // F-21：用终止专属判据——plan 会话停在 human_confirm 的 context blocker/
+      // author 失败/缺相位门此前被 phase_mismatch 静默拦截（点击零 WS 出站），
+      // 而矩阵与引擎对这些形态均接受 abandon（confirm/feedback 纪律不变）。
+      if (gateTerminateBlockReason(input.getState()) !== null) {
+        return false;
+      }
       return input.sendAbandonGate(input.commandId ?? newCommandId());
     },
     advance() {

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ChatEntry } from "./chat-entries";
+import type { WorkspaceWsState } from "./workspace-ws-store-types";
 import { useWorkspaceStore, type TimelineNode } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 import {
   formatFlowElapsed,
   gateActionBlockCopy,
   gateActionBlockReason,
+  gateTerminateBlockReason,
   isStaleDriverLeaseItem,
   selectCockpitFlow,
   selectCockpitInbox,
@@ -253,15 +255,51 @@ describe("workspace cockpit gate projection", () => {
     expect(gateActionBlockReason(useWorkspaceStore.getState())).toBeNull();
   });
 
-  it("prioritizes the closed reason over a stale stage", () => {
-    useWorkspaceStore.setState({
-      stage: "running",
-      humanGateClosure: { decision: "confirm", stage: "human_confirm" },
-      humanGateSnapshot: humanGateSnapshotFixture(),
-    });
+  // F-21（v28 监控）：plan 会话（SC 流）除 approval/evaluate 终审门外，还会停在
+  // human_confirm：context blocker（prepare 相位，authoring.rs
+  // enter_work_item_plan_context_blocker）/author 连续 validate 失败（generate
+  // 相位）/旧会话缺相位字段（null）。矩阵（protocol.rs HumanConfirm SC 臂）与引擎
+  // close_human_gate 只校验 stage+flow_kind——terminate 在这些形态同样可达，
+  // 相位白名单不得一刀切拦掉终止（confirm/feedback 维持相位纪律）。
+  it.each(["prepare", "generate", null] as const)(
+    "allows terminate but not confirm for a plan gate parked at human_confirm with phase %s (F-21)",
+    (singleCandidatePhase) => {
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        stage: "human_confirm",
+        flowKind: "single_candidate",
+        singleCandidatePhase,
+        sessionStatus: "waiting_for_human",
+        humanGateClosure: null,
+      });
 
-    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("closed");
+      const state = useWorkspaceStore.getState();
+      expect(gateActionBlockReason(state)).toBe("phase_mismatch");
+      expect(gateTerminateBlockReason(state)).toBeNull();
+      expect(selectGateProjection(state)?.terminate_block_reason).toBeNull();
+      expect(selectGateProjection(state)?.action_block_reason).toBe("phase_mismatch");
+    },
+  );
+
+  it.each([
+    ["terminal_stage", { workspaceType: "work_item_plan", stage: "running", humanGateSnapshot: humanGateSnapshotFixture() }],
+    ["closed", { workspaceType: "work_item_plan", stage: "human_confirm", humanGateClosure: { decision: "confirm", stage: "human_confirm" } }],
+    ["non-plan phase_mismatch", { workspaceType: null, stage: "human_confirm", flowKind: "single_candidate", singleCandidatePhase: "generate" }],
+  ] as const)("keeps terminate blocked for %s", (_label, overrides) => {
+    useWorkspaceStore.setState({
+      flowKind: "single_candidate",
+      singleCandidatePhase: "generate",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      ...overrides,
+    } as Partial<WorkspaceWsState>);
+
+    const state = useWorkspaceStore.getState();
+    // 终止跟随通用阻断判据（terminal_stage / closed / 非会话归属的 phase_mismatch）。
+    expect(gateTerminateBlockReason(state)).toBe(gateActionBlockReason(state));
+    expect(gateActionBlockReason(state)).not.toBeNull();
   });
+
 });
 
 describe("workspace cockpit inbox projection", () => {

@@ -264,4 +264,72 @@ describe("cockpit gate action facade", () => {
       expect(sendAdvance).not.toHaveBeenCalled();
     },
   );
+
+  // F-21（v28 监控 0449）：plan 会话停在 human_confirm 的非终审门（context
+  // blocker=prepare 相位/author validate 失败=generate 相位/旧会话缺相位），
+  // 终止此前被 phase_mismatch 静默拦截——点击零 WS 出站、无任何可见反馈。
+  // 矩阵已放行 AbandonHumanGate 到 SC human_confirm（59d59760），引擎
+  // close_human_gate 只校验 stage+flow_kind——terminate 必须放行；
+  // confirm/feedback 维持相位纪律不变。
+  it.each(["prepare", "generate", null] as const)(
+    "sends typed abandon exactly once for a plan gate parked at human_confirm with phase %s (F-21)",
+    (singleCandidatePhase) => {
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        stage: "human_confirm",
+        flowKind: "single_candidate",
+        singleCandidatePhase,
+        sessionStatus: "waiting_for_human",
+        humanGateTurn: null,
+        humanGateClosure: null,
+      });
+      const sendAbandonGate = vi.fn((_commandId: string) => true);
+      const sendConfirm = vi.fn(() => true);
+      const sendHumanGateFeedback = vi.fn(() => true);
+      const actions = createCockpitActionFacade({
+        flowKind: "single_candidate",
+        commandId: null,
+        getState: useWorkspaceStore.getState,
+        sendConfirm,
+        sendAbandonGate,
+        sendHumanGateFeedback,
+        sendAdvance: vi.fn(() => true),
+      });
+
+      expect(actions.confirm()).toBe(false);
+      expect(actions.feedback("请补充上下文")).toBe(false);
+      expect(actions.terminate()).toBe(true);
+
+      expect(sendAbandonGate).toHaveBeenCalledTimes(1);
+      expect(sendAbandonGate.mock.calls[0]?.[0]).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+      expect(sendConfirm).not.toHaveBeenCalled();
+      expect(sendHumanGateFeedback).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reuses the live turn command id for a terminate-only plan gate (F-21)", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "human_confirm",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "prepare",
+      humanGateClosure: null,
+    });
+    useWorkspaceStore.getState().applyHumanGateTurnOpen("turn_1", "cmd_live", 1);
+    const sendAbandonGate = vi.fn(() => true);
+
+    createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: "cmd_live",
+      getState: useWorkspaceStore.getState,
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate,
+      sendHumanGateFeedback: vi.fn(() => true),
+      sendAdvance: vi.fn(() => true),
+    }).terminate();
+
+    expect(sendAbandonGate).toHaveBeenCalledWith("cmd_live");
+  });
 });

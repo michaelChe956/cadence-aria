@@ -37,6 +37,7 @@ const gateItem: CockpitInboxItem = {
     opened_at: "2026-09-15T00:00:00.000Z",
     turn: null,
     action_block_reason: null,
+    terminate_block_reason: null,
   },
   inlineError: null,
 };
@@ -160,7 +161,11 @@ describe("CockpitInbox", () => {
         items={[
           {
             ...gateItem,
-            gate: { ...gateItem.gate!, action_block_reason: "terminal_stage" },
+            gate: {
+              ...gateItem.gate!,
+              action_block_reason: "terminal_stage",
+              terminate_block_reason: "terminal_stage",
+            },
           },
         ]}
         actions={actions}
@@ -173,8 +178,48 @@ describe("CockpitInbox", () => {
     expect(within(inbox).getByText("已离开人工确认门")).toBeVisible();
     expect(within(inbox).queryByLabelText("选择 门禁等待")).toBeNull();
     expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
+  });
+
+  // F-21（v28 监控 0449）：plan 会话停在 human_confirm 的 context blocker/
+  // author 失败门（phase_mismatch）——终止专属放行（terminate_block_reason
+  // null）时门条渲染终止（二次确认），确认与反馈编辑器维持相位纪律不露出。
+  it("renders a terminate-only gate row for a phase-mismatched plan gate (F-21)", async () => {
+    const user = userEvent.setup();
+    const gateActions: CockpitActionFacade = {
+      confirm: vi.fn(),
+      feedback: vi.fn(),
+      terminate: vi.fn(),
+      advance: vi.fn(),
+    };
+    render(
+      <CockpitInbox
+        items={[
+          {
+            ...gateItem,
+            gate: {
+              ...gateItem.gate!,
+              action_block_reason: "phase_mismatch",
+              terminate_block_reason: null,
+            },
+          },
+        ]}
+        actions={gateActions}
+        actionableSessionId="session_001"
+        onBulkConfirm={vi.fn()}
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
     expect(within(inbox).queryByRole("button", { name: "确认" })).toBeNull();
-    expect(within(inbox).queryByRole("button", { name: "终止" })).toBeNull();
+    expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
+    // phase_mismatch 语义对 confirm 仍成立：批量勾选同样不提供。
+    expect(within(inbox).queryByLabelText("选择 门禁等待")).toBeNull();
+
+    await user.click(within(inbox).getByRole("button", { name: "终止" }));
+    expect(gateActions.terminate).not.toHaveBeenCalled();
+    await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+    expect(gateActions.terminate).toHaveBeenCalledOnce();
   });
 
   it("跨会话多选：观察会话的开态门可选（REQ-CFC-06 解锁 3.7 同会话限定）；当前会话门亦可选", async () => {

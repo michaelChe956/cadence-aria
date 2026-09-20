@@ -5,8 +5,10 @@ import {
   gateActionBlockCopy,
   selectGateProjection,
   type GateActionBlockReason,
+  type GateProjection,
   GATE_TRIGGER_LABELS,
 } from "../../../state/workspace-cockpit-projection";
+import type { WorkspaceWsState } from "../../../state/workspace-ws-store-types";
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
@@ -51,26 +53,27 @@ export function GatePromptEntry({
   const typedGateAwaitingCommand =
     actionFacade === "typed" &&
     typeof (entry.metadata as Record<string, unknown> | undefined)?.command_id !== "string";
-  const persistedActionBlockReason = actionBlockReasonFromEntry(entry);
-  const actionBlockReason = useWorkspaceStore((state) => {
-    const gateIdentity = (entry.metadata as Record<string, unknown> | undefined)?.gate_identity;
-    if (typeof gateIdentity !== "string") {
-      return persistedActionBlockReason;
-    }
-    const projection = selectGateProjection(state);
-    if (projection?.key === gateIdentity) {
-      return projection.turn && state.stage !== "human_confirm"
-        ? "terminal_stage"
-        : projection.action_block_reason ?? null;
-    }
-    // 通用 stage 前缀门离场兜底（k3 P2-1）：门卡不随 stage_change 重建（仅
-    // setStage），阶段离开后投影消失——按 gateIdentity 与当前 stage 不一致判
-    // terminal_stage，避免重渲染出可点但被静默拦截的假按钮（human_confirm 与
-    // F-20 story/design author_confirm 门同款纪律）。
-    return gateIdentity.startsWith("stage:") && gateIdentity !== `stage:${state.stage}`
-      ? "terminal_stage"
+  const persistedActionBlockReason = blockReasonFromEntry(entry, "action_block_reason");
+  // F-21：终止判据缺省（undefined）回退通用判据；显式 null=终止放行（?? 会把
+  // null 吞成回退，必须辨 undefined）。
+  const persistedTerminateBlockReason =
+    (entry.metadata as Record<string, unknown> | undefined)?.terminate_block_reason !== undefined
+      ? blockReasonFromEntry(entry, "terminate_block_reason")
       : persistedActionBlockReason;
-  });
+  // F-21：终止与确认共用「活投影匹配 + stage 前缀离场兜底」骨架，仅判据不同
+  // （terminate_block_reason 允许 plan 会话 human_confirm 非终审门放行终止）。
+  const actionBlockReason = useWorkspaceStore((state) =>
+    gateCardBlockReason(state, entry, persistedActionBlockReason, (projection) =>
+      projection.action_block_reason ?? null,
+    ),
+  );
+  const terminateBlockReason = useWorkspaceStore((state) =>
+    gateCardBlockReason(state, entry, persistedTerminateBlockReason, (projection) =>
+      projection.terminate_block_reason !== undefined
+        ? projection.terminate_block_reason
+        : (projection.action_block_reason ?? null),
+    ),
+  );
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
     : allowsCurrentVersion
@@ -137,13 +140,17 @@ export function GatePromptEntry({
         ) : null}
         {isResolved ? (
           <ResolutionBadge resolution={entry.resolution} />
-        ) : actionBlockReason ? (
-          <p className="text-xs text-[var(--aria-ink-muted)]">
-            {gateActionBlockCopy(actionBlockReason)}
-          </p>
-        ) : actions ? (
+        ) : terminateBlockReason === null && actions ? (
+          // F-21：终止放行即渲染动作位——phase_mismatch 的 plan 门（context
+          // blocker/author 失败/缺相位）此前整面消失，终止零通路；现在露出
+          // 终止（二次确认惯例），confirm/反馈编辑器维持相位纪律不渲染。
           <div className="space-y-2">
-            {actionFacade === "typed" ? (
+            {actionBlockReason !== null ? (
+              <p className="text-xs text-[var(--aria-ink-muted)]">
+                {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起
+              </p>
+            ) : null}
+            {actionFacade === "typed" && actionBlockReason === null ? (
               <GateFeedbackEditor
                 multiline={false}
                 value={feedback}
@@ -151,13 +158,13 @@ export function GatePromptEntry({
                 onSubmit={actions.feedback}
               />
             ) : null}
-            {typedGateAwaitingCommand ? (
+            {typedGateAwaitingCommand && actionBlockReason === null ? (
               <p className="text-xs text-[var(--aria-ink-muted)]">
                 未同步门命令，将以新命令提交
               </p>
             ) : null}
             <div className="flex flex-wrap justify-end gap-2">
-              {isContextBlockerGate ? null : (
+              {isContextBlockerGate || actionBlockReason !== null ? null : (
                 <button
                   type="button"
                   onClick={() => actions.confirm()}
@@ -174,6 +181,10 @@ export function GatePromptEntry({
               />
             </div>
           </div>
+        ) : actionBlockReason ? (
+          <p className="text-xs text-[var(--aria-ink-muted)]">
+            {gateActionBlockCopy(actionBlockReason)}
+          </p>
         ) : null}
       </div>
     </ChatEntryContainer>
@@ -225,11 +236,39 @@ function gateKindFromEntry(entry: ChatEntry) {
   return typeof metadata?.gate_kind === "string" ? metadata.gate_kind : null;
 }
 
-function actionBlockReasonFromEntry(entry: ChatEntry): Exclude<GateActionBlockReason, null> | null {
-  const value = (entry.metadata as Record<string, unknown> | undefined)?.action_block_reason;
+function blockReasonFromEntry(
+  entry: ChatEntry,
+  key: "action_block_reason" | "terminate_block_reason",
+): Exclude<GateActionBlockReason, null> | null {
+  const value = (entry.metadata as Record<string, unknown> | undefined)?.[key];
   return value === "terminal_stage" || value === "phase_mismatch" || value === "closed"
     ? value
     : null;
+}
+
+// 通用 stage 前缀门离场兜底（k3 P2-1）：门卡不随 stage_change 重建（仅
+// setStage），阶段离开后投影消失——按 gateIdentity 与当前 stage 不一致判
+// terminal_stage，避免重渲染出可点但被静默拦截的假按钮（human_confirm 与
+// F-20 story/design author_confirm 门同款纪律）。
+function gateCardBlockReason(
+  state: WorkspaceWsState,
+  entry: ChatEntry,
+  persistedReason: Exclude<GateActionBlockReason, null> | null,
+  fromProjection: (projection: GateProjection) => Exclude<GateActionBlockReason, null> | null,
+): Exclude<GateActionBlockReason, null> | null {
+  const gateIdentity = (entry.metadata as Record<string, unknown> | undefined)?.gate_identity;
+  if (typeof gateIdentity !== "string") {
+    return persistedReason;
+  }
+  const projection = selectGateProjection(state);
+  if (projection?.key === gateIdentity) {
+    return projection.turn && state.stage !== "human_confirm"
+      ? "terminal_stage"
+      : fromProjection(projection);
+  }
+  return gateIdentity.startsWith("stage:") && gateIdentity !== `stage:${state.stage}`
+    ? "terminal_stage"
+    : persistedReason;
 }
 function gateTriggerFromEntry(
   entry: ChatEntry,

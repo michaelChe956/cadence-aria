@@ -78,6 +78,30 @@ export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockR
   return state.humanGateSnapshot || state.humanGateTurn ? null : "terminal_stage";
 }
 
+/**
+ * F-21（v28 监控 0449，v26/v27/v28 三次未修）：终止专属阻断判据。
+ * plan 会话（SC 流）除 approval/evaluate 终审门外还会停在 human_confirm——
+ * context blocker（prepare 相位，workspace_engine/plan_outline/authoring.rs
+ * enter_work_item_plan_context_blocker）/author 连续 validate 失败（generate
+ * 相位，decisions.rs enter_human_confirm_for_work_item_plan_author_failure）/
+ * 旧会话缺相位字段（null）。矩阵（workspace_ws_handler/protocol.rs HumanConfirm
+ * SC 臂）已放行 AbandonHumanGate（59d59760），引擎 close_human_gate 只校验
+ * stage+flow_kind 不校验相位——这些形态的 phase_mismatch 不得拦终止
+ * （confirm/feedback 维持 gateActionBlockReason 相位纪律，由渲染面分流）。
+ */
+export function gateTerminateBlockReason(state: WorkspaceWsState): GateActionBlockReason {
+  const reason = gateActionBlockReason(state);
+  if (
+    reason === "phase_mismatch" &&
+    state.workspaceType === "work_item_plan" &&
+    state.stage === "human_confirm" &&
+    state.flowKind === "single_candidate"
+  ) {
+    return null;
+  }
+  return reason;
+}
+
 export function gateActionBlockCopy(reason: Exclude<GateActionBlockReason, null>): string {
   switch (reason) {
     case "terminal_stage":
@@ -105,6 +129,8 @@ export interface GateProjection {
   opened_at: string;
   turn: HumanGateTurnState | null;
   action_block_reason?: GateActionBlockReason;
+  /** 终止专属阻断（F-21）：null 即终止可发；缺席时回退 action_block_reason。 */
+  terminate_block_reason?: GateActionBlockReason;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -136,6 +162,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   const triage = isGateTriage(state);
   const turn = state.humanGateTurn;
   const actionBlockReason = gateActionBlockReason(state);
+  const terminateBlockReason = gateTerminateBlockReason(state);
 
   if (turn) {
     return {
@@ -154,6 +181,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       opened_at: turn.opened_at,
       turn,
       action_block_reason: actionBlockReason,
+      terminate_block_reason: terminateBlockReason,
     };
   }
 
@@ -174,6 +202,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       opened_at: state.snapshotGateOpenedAt ?? "",
       turn: null,
       action_block_reason: actionBlockReason,
+      terminate_block_reason: terminateBlockReason,
     };
   }
   // F-20：story/design legacy 流 author_confirm 即人工门（无 typed turn/durable
@@ -197,6 +226,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       opened_at: "",
       turn: null,
       action_block_reason: actionBlockReason,
+      terminate_block_reason: terminateBlockReason,
     };
   }
 
@@ -221,6 +251,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
     opened_at: "",
     turn: null,
     action_block_reason: actionBlockReason,
+    terminate_block_reason: terminateBlockReason,
   };
 }
 

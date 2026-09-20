@@ -119,6 +119,7 @@ export function gateItem(sessionId: string, key: string): CockpitInboxItem {
       opened_at: "2026-09-15T00:00:00.000Z",
       turn: null,
       action_block_reason: null,
+      terminate_block_reason: null,
     },
     inlineError: null,
   };
