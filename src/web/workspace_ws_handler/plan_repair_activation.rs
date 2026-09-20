@@ -19,11 +19,16 @@ pub(crate) async fn activate_published_plan_amendment(
     if state.coding_runs.runner_count(&attempt_key) > 0 {
         return Ok(());
     }
-    let event_tx = state.coding_sockets.sender(&attempt_key).ok_or_else(|| {
-        CodingWorkspaceEngineError::ProviderStream(
-            "plan_amendment_coding_socket_unavailable".to_string(),
-        )
-    })?;
+    // F-19：发射面取 attempt 级 hub（fan-out 到所有存活 socket）；无存活
+    // socket 时保持既有 fail-closed（plan_amendment_coding_socket_unavailable）。
+    let event_tx = state
+        .coding_sockets
+        .hub_sender_if_live(&attempt_key)
+        .ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "plan_amendment_coding_socket_unavailable".to_string(),
+            )
+        })?;
     let attempt = coding_store.get_attempt(project_id, issue_id, attempt_id)?;
     let Some(reservation) = state.coding_runs.try_reserve_attempt(&attempt_key) else {
         if state.coding_runs.runner_count(&attempt_key) > 0 {

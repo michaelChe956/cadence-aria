@@ -94,10 +94,14 @@ async fn handle_coding_socket(
     let attempt_issue_id = attempt.issue_id.clone();
     let attempt_id = attempt.id.clone();
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
-    let (event_tx, event_rx) = mpsc::channel(1024);
+    let (socket_event_tx, event_rx) = mpsc::channel(1024);
     let socket_token = state
         .coding_sockets
-        .register(&attempt_key, event_tx.clone());
+        .register(&attempt_key, socket_event_tx.clone());
+    // F-19：发射面换用 attempt 级 hub——runner/engine 事件经 registry 路由
+    // fan-out 到所有存活 socket，驱动连接断开不再终结事件流；本 socket 的
+    // event_rx 消费行为（快照/flush/ack）零回归。
+    let event_tx = state.coding_sockets.hub_sender(&attempt_key);
     let resumed_attempt = attempt.clone();
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
@@ -440,6 +444,10 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
@@ -447,6 +455,10 @@ async fn handle_coding_socket(
                 } else if inbound == CodingWsInMessage::AbortAttempt {
                     let attempt_key = CodingAttemptRunKey::from_attempt(&current_attempt);
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     let abort_result = abort_attempt_while_draining_events(
                         &state.coding_runs,
                         &attempt_key,
@@ -497,6 +509,10 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
@@ -562,6 +578,10 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
@@ -603,6 +623,10 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;

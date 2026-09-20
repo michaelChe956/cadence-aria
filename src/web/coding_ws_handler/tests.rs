@@ -49,6 +49,7 @@ use super::{
 };
 
 mod code_review_router;
+mod event_hub;
 mod failed_review_recovery;
 mod plan_repair;
 mod runner_cleanup;
