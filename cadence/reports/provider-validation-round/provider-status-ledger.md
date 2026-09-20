@@ -21,3 +21,13 @@
 - 如实登记（非判据反例）：rep2（issue_0287）workspace_error——compile 阶段 lowering_error×3（输入契约缺 compatibility_policy），初评未进入，补齐器未触达（compile 失败先于校验，fail-closed 原样上抛=既有语义）；RR-3 定向复跑 rep3 Confirmed，失败集无交集→随机作者语法质量缺陷，非系统性。malformed markdown 的 compile 失败是否增设机械修复/返修路由=后续 change 裁决面，登记不扩 scope。
 - 证据：`.superpowers/sdd/2026-09-04_计划文档_3.6全量收敛轮_v1.0/wave2-2a-report.md`（判据五元组钉死+逐项判定+补齐日志/CAS 落盘全文）；原始产物 `cadence/reports/provider-validation-round/codex-ab/codex/rep{1,2,3}/`；B 侧历史对照 `cadence/reports/legacy-protocol-retirement/wp1-gate-retest/campaign/codex/rep{1,2}/`；服务器=v27 PID 2698026（runtime-info git_sha=556f74b36f56，二进制字节级含补齐器字符串）。
 - 范围边界：本结论只覆盖 workitem/work-item-plan campaign 面；codex coding 链（internal_pr_review 等）证据不在本轮采集范围（kimi 线先行，codex coding 面随后续轮）。gate 边界（REQ-PVR-03）同 kimi 段口径。
+
+## DEF-PVR-ALL 裁决（2026-09-20，Wave 3.2）
+
+| Provider | 终态 | 依据 |
+|---|---|---|
+| **pi** | ✅ **全量通过** | 门重测 rep2 Confirmed 424.5s=7.09min（pi 时长+计数全子项达标）；全程 campaign 实证 |
+| **codex** | ✅ **通过（补齐器后）** | A/B 对照实证：补齐器上线后 rep1/rep3 Confirmed（7.03/5.18min，零返修零指纹）；门重测 codex 面四子项全达成；原 B 裁决例外已可撤销 |
+| **claude_code** | ✅ **通过** | REQ-CCI-06 smoke 一次 PASS（四段所有权链完整）；headless 修复已落地 |
+| **kimi_code** | 🔶 **受限登记维持** | Coder+Code Reviewer 真实终态证据完整（1103/1598/70272 usage+code_review_complete）；**Internal Reviewer 未到达**——三键不齐；attempt 544a 冻结 code_review>2h（drive 超时+服务端无推进）；深层障碍=F-17（bwrap 沙箱 vs coder commit 契约）+F-19 广播后驱动失明+验证证据不可观测环境限制 |
+| | | **kimi 升级路径已铺平**：F-16 恢复通道+F-19 广播已修+F-15 权限预检已修——后续轮在 bwrap 沙箱面解除后可重跑收口 |
