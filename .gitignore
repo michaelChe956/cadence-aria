@@ -32,8 +32,8 @@ frontend.log
 # Python 字节码缓存
 __pycache__/
 *.pyc
-kimi-coding/coding-kimi_code-coding_attempt_*/
-kimi-coding/*console*.txt
-kimi-coding/coding-drive*.cjs
-kimi-coding/gate-release*.cjs
+cadence/reports/provider-validation-round/kimi-coding/coding-kimi_code-coding_attempt_*/
+cadence/reports/provider-validation-round/kimi-coding/*console*.txt
+cadence/reports/provider-validation-round/kimi-coding/coding-drive*.cjs
+cadence/reports/provider-validation-round/kimi-coding/gate-release*.cjs
 codex-ab/codex/rep*/ws.jsonl
