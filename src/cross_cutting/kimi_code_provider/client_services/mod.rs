@@ -326,7 +326,10 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
         crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto => state
             .bwrap
             .clone()
-            .map(|bwrap| TerminalIsolation::Bubblewrap { bwrap })
+            .map(|bwrap| TerminalIsolation::Bubblewrap {
+                bwrap,
+                writable_root: matches!(state.policy.role, AdapterRole::Executor),
+            })
             .ok_or_else(|| {
                 ClientServiceError::Rejected(
                     "bubblewrap is unavailable; terminal execution is disabled in auto mode"
@@ -985,6 +988,46 @@ mod tests {
             bwrap: None,
             cleanup_cancel: CancellationToken::new().child_token(),
         })
+    }
+
+    /// F-17:可写沙箱授权只发给 Executor(coder 契约:写路径+commit 责任);
+    /// Orchestrator 的终端保持只读挂载语义。bwrap 路径仅作形状参数,
+    /// `isolation_for` 只探测 Some/None,不执行该二进制。
+    fn bwrap_state(role: AdapterRole) -> Arc<ClientServiceState> {
+        let dir = tempfile::tempdir().expect("dir");
+        let (event_tx, _events) = mpsc::channel(32);
+        Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root: dir.path().canonicalize().expect("canonical root"),
+            policy: ClientServicePolicy::new(role, ProviderPermissionMode::Auto),
+            permission_mode: ProviderPermissionMode::Auto,
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(),
+            bwrap: Some(PathBuf::from("/usr/bin/bwrap")),
+            cleanup_cancel: CancellationToken::new().child_token(),
+        })
+    }
+
+    #[tokio::test]
+    async fn isolation_grants_writable_root_to_executor_role_only() {
+        match isolation_for(&bwrap_state(AdapterRole::Executor)).expect("executor isolation") {
+            TerminalIsolation::Bubblewrap { writable_root, .. } => assert!(
+                writable_root,
+                "coder contract (F-17): executor worktree must be writable inside the sandbox"
+            ),
+            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
+        }
+        match isolation_for(&bwrap_state(AdapterRole::Orchestrator)).expect("orchestrator") {
+            TerminalIsolation::Bubblewrap { writable_root, .. } => assert!(
+                !writable_root,
+                "planning terminal keeps the read-only mount"
+            ),
+            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
+        }
     }
 
     #[tokio::test]

@@ -27,7 +27,16 @@ pub const TERMINAL_COMMAND_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalIsolation {
-    Bubblewrap { bwrap: PathBuf },
+    /// Run inside a bubblewrap sandbox. `writable_root` selects the mount
+    /// mode of the authorized root (and the anchored cwd): the coding
+    /// (Executor) role needs a read-write worktree to honour its TDD write
+    /// path + commit responsibility (F-17), while every other role keeps the
+    /// read-only mount. Everything outside the authorized root stays
+    /// read-only either way.
+    Bubblewrap {
+        bwrap: PathBuf,
+        writable_root: bool,
+    },
     Unavailable,
 }
 
@@ -38,7 +47,9 @@ pub struct TerminalCommand {
     pub argv: Vec<String>,
     /// Absolute trusted path of the executable.
     pub binary: PathBuf,
-    /// Authorized root (canonical) — read-only bind-mount inside bwrap.
+    /// Authorized root (canonical) — bind-mounted read-only (or read-write
+    /// for the coding role, see [`TerminalIsolation::Bubblewrap`]) inside
+    /// bwrap.
     pub root: PathBuf,
     /// Verified working directory (inside the authorized root).
     pub cwd: PathBuf,
@@ -480,12 +491,16 @@ fn build_terminal_command(
     anchor: Option<&OwnedFd>,
 ) -> Command {
     let mut builder = match isolation {
-        TerminalIsolation::Bubblewrap { bwrap } => {
+        TerminalIsolation::Bubblewrap {
+            bwrap,
+            writable_root,
+        } => {
             let mut builder = Command::new(bwrap);
             let args = build_bwrap_args(
                 &command.root,
                 &command.cwd,
                 anchor.map(AsRawFd::as_raw_fd),
+                *writable_root,
                 env,
                 &command.binary,
                 &command.argv,
@@ -805,6 +820,110 @@ mod tests {
             .await
             .expect("kill after release must succeed (idempotent)");
         manager.release(&id).await.expect("idempotent release");
+    }
+
+    // —— F-17:kimi coder 承包契约(TDD 写路径 + commit 责任)与只读终端
+    // 沙箱的系统性冲突——授权根 ro-bind 下终端内 `git add/commit` 必死于
+    // index.lock 只读,coder 只能判 plan defect 掷骰 blocked 门。修复 =
+    // Executor 角色的授权根以 rw bind-mount 进入沙箱(宿主其余路径仍只
+    // 读、网络/pid 隔离不变);其他角色保持只读挂载。真实 bwrap 端到端。
+    #[cfg(unix)]
+    fn bwrap_isolation(writable_root: bool) -> Option<TerminalIsolation> {
+        use super::super::sandbox::probe_bwrap;
+        probe_bwrap().map(|bwrap| TerminalIsolation::Bubblewrap {
+            bwrap,
+            writable_root,
+        })
+    }
+
+    #[cfg(unix)]
+    async fn run_bwrap_script(
+        root: &Path,
+        isolation: TerminalIsolation,
+        script: &str,
+    ) -> (TerminalResult, String) {
+        use super::super::sandbox::resolve_trusted_binary;
+        let manager = manager(Duration::from_secs(60));
+        let command = TerminalCommand {
+            argv: vec!["-c".to_string(), script.to_string()],
+            binary: resolve_trusted_binary("bash").expect("trusted bash"),
+            root: root.to_path_buf(),
+            cwd: root.to_path_buf(),
+            isolation,
+        };
+        let id = manager.create(command).await.expect("create");
+        manager.start(&id).expect("start");
+        // 60s 负载不敏感口径(与真实进程 smoke 一致)。
+        let result = tokio::time::timeout(Duration::from_secs(60), manager.wait_for_exit(&id))
+            .await
+            .expect("sandbox script timed out (60s load-insensitive budget)")
+            .expect("wait result");
+        let output = manager.output(&id).expect("retained output");
+        manager.release(&id).await.expect("release");
+        (result, output)
+    }
+
+    /// 修前必红:只读挂载下该脚本死于 `index.lock: Read-only file system`。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn executor_writable_root_sandbox_allows_git_commit_inside_root() {
+        let Some(isolation) = bwrap_isolation(true) else {
+            return; // bubblewrap 不在时跳过真机隔离路径
+        };
+        let dir = tempfile::tempdir().expect("worktree");
+        let root = dir.path().canonicalize().expect("canonical root");
+        let script = "git init -q \
+                      && echo f17 > f17.txt \
+                      && git add f17.txt \
+                      && git -c user.name=f17 -c user.email=f17@example.com commit -qm f17 \
+                      && echo COMMIT_OK";
+        let (result, output) = run_bwrap_script(&root, isolation, script).await;
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "coder contract: git add/commit must succeed inside the writable \
+             worktree; output: {output}"
+        );
+        assert!(output.contains("COMMIT_OK"), "{output}");
+        assert!(root.join(".git").is_dir(), "committed worktree");
+        assert!(root.join("f17.txt").is_file());
+    }
+
+    /// 安全边界回归锁 1:非 Executor 挂载语义不变——授权根内写仍被拒。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_root_sandbox_still_blocks_writes_inside_root() {
+        let Some(isolation) = bwrap_isolation(false) else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("worktree");
+        let root = dir.path().canonicalize().expect("canonical root");
+        let (result, output) =
+            run_bwrap_script(&root, isolation, "touch ro-probe.txt; echo done").await;
+        assert_eq!(result.exit_code, Some(0), "{output}");
+        assert!(
+            !root.join("ro-probe.txt").exists(),
+            "read-only mount must keep rejecting writes inside the root"
+        );
+    }
+
+    /// 安全边界回归锁 2:可写模式下宿主其余路径仍只读(ro-bind / / 不变)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writable_root_sandbox_keeps_host_outside_root_read_only() {
+        let Some(isolation) = bwrap_isolation(true) else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("worktree");
+        let root = dir.path().canonicalize().expect("canonical root");
+        let (result, output) =
+            run_bwrap_script(&root, isolation, "touch /etc/f17-must-fail 2>&1; true").await;
+        assert_eq!(result.exit_code, Some(0), "{output}");
+        assert!(
+            output.contains("Read-only file system"),
+            "host outside the authorized root must stay read-only; output: {output}"
+        );
+        assert!(!Path::new("/etc/f17-must-fail").exists());
     }
 
     #[cfg(unix)]

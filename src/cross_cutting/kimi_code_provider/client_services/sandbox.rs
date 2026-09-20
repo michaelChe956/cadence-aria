@@ -249,27 +249,37 @@ pub fn validate_path_no_follow(root: &Path, rel: &Path) -> std::io::Result<()> {
 }
 
 /// Build the `bwrap` arguments (excluding the `bwrap` program itself) that
-/// execute `binary argv...` inside a read-only sandbox: read-only bind of the
-/// authorized root and of the whole host filesystem, no network, limited
-/// empty `/tmp`, no new privileges, cleared environment with an explicit
-/// allowlist, and an anchored verified cwd (via `--dir FD /work` when a
-/// directory fd is supplied).
+/// execute `binary argv...` inside a sandbox: read-only bind of the whole
+/// host filesystem, no network, limited empty `/tmp`, no new privileges,
+/// cleared environment with an explicit allowlist, and an anchored verified
+/// cwd. The authorized root is bound read-only by default; the coding
+/// (Executor) role passes `writable_root` so its worktree — whose contract
+/// includes the TDD write path and commit responsibility (F-17) — is bound
+/// read-write instead. Everything outside the authorized root stays
+/// read-only in both modes.
 pub fn build_bwrap_args(
     root: &Path,
     cwd: &Path,
     cwd_fd: Option<RawFd>,
+    writable_root: bool,
     env: &BTreeMap<String, String>,
     binary: &Path,
     argv: &[String],
 ) -> Vec<OsString> {
+    let root_str = root.as_os_str().to_str().expect("utf8 root");
+    // The root mount MUST come after `--ro-bind / /`: bubblewrap applies
+    // mounts in argv order and a later mount on an ancestor path (/) shadows
+    // earlier mounts beneath it, so a rw root bind placed first would be
+    // silently covered by the read-only host root (verified live).
+    let root_flag = if writable_root { "--bind" } else { "--ro-bind" };
     let mut command = Vec::<OsString>::new();
     for value in [
         "--ro-bind",
-        root.as_os_str().to_str().expect("utf8 root"),
-        root.as_os_str().to_str().expect("utf8 root"),
-        "--ro-bind",
         "/",
         "/",
+        root_flag,
+        root_str,
+        root_str,
         "--proc",
         "/proc",
         "--dev",
@@ -288,12 +298,19 @@ pub fn build_bwrap_args(
     }
     match cwd_fd {
         Some(fd) => {
-            // Bind the openat-anchored cwd directory fd read-only under the
-            // /tmp tmpfs (`--ro-bind-fd FD DEST`): the root filesystem is
-            // ro-bound, so bwrap cannot create the /work mountpoint there.
-            // (The previous `--dir FD /work` form passed an FD to an option
-            // that takes none and made bwrap abort with exit 1.)
-            command.push(OsString::from("--ro-bind-fd"));
+            // Bind the openat-anchored cwd directory fd under the /tmp tmpfs
+            // (`--bind-fd FD DEST`, read-only variant for read-only roots):
+            // the root filesystem is ro-bound, so bwrap cannot create the
+            // /work mountpoint there. (The previous `--dir FD /work` form
+            // passed an FD to an option that takes none and made bwrap abort
+            // with exit 1.) The cwd anchor follows the root mount mode — a
+            // read-only anchor inside a writable-root sandbox would still
+            // kill `git add`/`commit` in the anchored cwd.
+            command.push(OsString::from(if writable_root {
+                "--bind-fd"
+            } else {
+                "--ro-bind-fd"
+            }));
             command.push(OsString::from(fd.to_string()));
             command.push(OsString::from("/tmp/work"));
             command.push(OsString::from("--chdir"));
@@ -387,6 +404,7 @@ mod tests {
             &root,
             &cwd,
             Some(42),
+            false,
             &env,
             &PathBuf::from("/usr/bin/cat"),
             &["file".to_string()],
@@ -395,7 +413,22 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(text.contains(&"--ro-bind".to_string()));
+        // Host root stays read-only and the authorized root mounts AFTER it
+        // (a later ancestor mount would shadow an earlier root bind).
+        let ro_host = text
+            .iter()
+            .position(|arg| arg == "--ro-bind")
+            .expect("--ro-bind present");
+        assert_eq!(text[ro_host + 1], "/");
+        assert_eq!(text[ro_host + 2], "/");
+        let ro_root = text
+            .iter()
+            .skip(ro_host + 3)
+            .position(|arg| arg == "--ro-bind")
+            .map(|offset| offset + ro_host + 3)
+            .expect("root ro-bind follows the host root bind");
+        assert_eq!(text[ro_root + 1], "/tmp/root");
+        assert_eq!(text[ro_root + 2], "/tmp/root");
         assert!(text.contains(&"--unshare-net".to_string()));
         assert!(text.contains(&"--tmpfs".to_string()));
         assert!(text.contains(&"--clearenv".to_string()));
@@ -410,5 +443,67 @@ mod tests {
         assert_eq!(text[fd_index + 2], "/tmp/work");
         assert!(text.contains(&"--chdir".to_string()));
         assert_eq!(text.last().map(String::as_str), Some("file"));
+    }
+
+    /// F-17:coder(Executor)契约面——授权根以 rw bind 进入沙箱,且必须
+    /// 挂在只读宿主根之后(后挂祖先会遮蔽先前子挂载);cwd 锚定同步 rw。
+    /// 宿主根与其余隔离旗标保持不变。
+    #[test]
+    fn bwrap_args_writable_root_binds_root_rw_after_read_only_host() {
+        let root = PathBuf::from("/tmp/root");
+        let cwd = PathBuf::from("/tmp/root/work");
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), trusted_path_env());
+        let argv = build_bwrap_args(
+            &root,
+            &cwd,
+            Some(42),
+            true,
+            &env,
+            &PathBuf::from("/usr/bin/git"),
+            &["status".to_string()],
+        );
+        let text = argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        // Writable root: `--bind root root`, never a ro root bind.
+        let bind = text
+            .iter()
+            .position(|arg| arg == "--bind")
+            .expect("--bind present");
+        assert_eq!(text[bind + 1], "/tmp/root");
+        assert_eq!(text[bind + 2], "/tmp/root");
+        // The rw root bind must come after the read-only host root bind.
+        let ro_host = text
+            .iter()
+            .position(|arg| arg == "--ro-bind")
+            .expect("host --ro-bind still present");
+        assert_eq!(text[ro_host + 1], "/");
+        assert_eq!(text[ro_host + 2], "/");
+        assert!(bind > ro_host, "rw root bind must follow --ro-bind / /");
+        assert_eq!(
+            text.iter().filter(|arg| *arg == "--ro-bind").count(),
+            1,
+            "exactly one ro bind: the host root"
+        );
+        // The cwd anchor follows the root mount mode.
+        let fd_index = text
+            .iter()
+            .position(|arg| arg == "--bind-fd")
+            .expect("--bind-fd present");
+        assert_eq!(text[fd_index + 1], "42");
+        assert_eq!(text[fd_index + 2], "/tmp/work");
+        assert!(!text.contains(&"--ro-bind-fd".to_string()));
+        // Isolation boundary unchanged.
+        for flag in [
+            "--unshare-net",
+            "--unshare-pid",
+            "--die-with-parent",
+            "--clearenv",
+        ] {
+            assert!(text.contains(&flag.to_string()), "{flag} missing");
+        }
+        assert_eq!(text.last().map(String::as_str), Some("status"));
     }
 }

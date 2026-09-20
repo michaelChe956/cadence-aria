@@ -44,3 +44,24 @@ terminal 状态机 SHALL 为：created→running→(exited|killed)→released；
 
 - **WHEN** 确定性改造完成后的全量回归运行
 - **THEN** 本 requirement 的全部行为约束（上限常量、合计口径、截断标记语义、并发预算原子性、幂等清理）与改造前一致，无断言放宽或用例删除导致的保护面缩水
+
+### Requirement: 终端 OS 级隔离（auto 模式）（SHALL）
+
+系统 SHALL 满足本 requirement 的全部场景约束。
+
+auto 权限模式下，terminal 执行 SHALL 在 OS 级隔离中运行（优先 bubblewrap/bwrap：只读根文件系统、无网络、有限 /tmp、无新特权），从根本上消除外部工具重新按字符串打开路径的 TOCTOU。授权根的挂载模式 SHALL 按角色区分：coding（Executor）角色——其承包契约含 TDD 写路径与 commit 责任（F-17：只读挂载下终端内 `git add/commit` 必死于 index.lock，coder 只能判 plan defect 掷骰 blocked 门）——SHALL 以读写 bind-mount 进入沙箱（挂载于只读宿主根之后，锚定 cwd 同步读写）；其余角色 SHALL 保持只读 bind-mount。无论何种模式，授权根之外的宿主文件系统 SHALL 保持只读。bwrap 不可用时，auto 模式 SHALL 拒绝一切 terminal 请求（fail-closed），仅 supervised 模式可经 ApprovalBridge 在非隔离下执行（并保留路径/grammar 校验作为 defense-in-depth）。cwd 锚定 SHALL 在隔离根内（fchdir 到已验证目录 FD）。隔离可用性探测结果与每次执行模式 SHALL 记入 capability/审计。
+
+#### Scenario: bwrap 可用（非 coding 角色）
+
+- **WHEN** auto 模式且 bwrap 探测成功，会话角色非 Executor（如 Orchestrator；reviewer 的 terminal 请求在 policy 层已拒）
+- **THEN** 命令在只读隔离根内执行，根外不可见/不可写、网络隔离、授权根不可写；cwd 在路径验证后即使被替换为 symlink 仍锚定到已验证目录 FD，不逃逸
+
+#### Scenario: bwrap 可用（coding 可写 worktree，F-17）
+
+- **WHEN** auto 模式且 bwrap 探测成功，会话角色为 Executor（coding）
+- **THEN** 授权根以读写 bind-mount 进入沙箱（挂载于只读宿主根之后），锚定 cwd 同步读写；终端内 `git add`/`git commit` 等工作树写操作成功，授权根之外的宿主路径仍只读（写入报 Read-only file system）、网络/pid 隔离不变
+
+#### Scenario: bwrap 不可用
+
+- **WHEN** auto 模式且 bwrap 探测失败
+- **THEN** terminal 请求被拒绝；supervised 模式经 ApprovalBridge 执行合规模板内命令并记录非隔离模式
