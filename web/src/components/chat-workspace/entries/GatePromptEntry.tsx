@@ -63,7 +63,11 @@ export function GatePromptEntry({
         ? "terminal_stage"
         : projection.action_block_reason ?? null;
     }
-    return gateIdentity === "stage:human_confirm" && state.stage !== "human_confirm"
+    // 通用 stage 前缀门离场兜底（k3 P2-1）：门卡不随 stage_change 重建（仅
+    // setStage），阶段离开后投影消失——按 gateIdentity 与当前 stage 不一致判
+    // terminal_stage，避免重渲染出可点但被静默拦截的假按钮（human_confirm 与
+    // F-20 story/design author_confirm 门同款纪律）。
+    return gateIdentity.startsWith("stage:") && gateIdentity !== `stage:${state.stage}`
       ? "terminal_stage"
       : persistedActionBlockReason;
   });

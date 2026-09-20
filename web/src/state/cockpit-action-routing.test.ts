@@ -233,4 +233,35 @@ describe("cockpit gate action facade", () => {
     expect(sendHumanGateFeedback).not.toHaveBeenCalled();
     expect(sendAdvance).not.toHaveBeenCalled();
   });
+  // k3 P2-2：AuthorConfirm 矩阵只放行 Abort/AbandonHumanGate——即便 HTTP confirm
+  // 乐观 confirmed 态也不发 advance（否则必回 ADVANCE_STAGE_INVALID 红条）。
+  it.each(["story", "design", "work_item_plan"] as const)(
+    "never sends advance from %s author_confirm even after an optimistic confirm",
+    (workspaceType) => {
+      useWorkspaceStore.setState({
+        stage: "author_confirm",
+        workspaceType,
+        flowKind: "legacy",
+        sessionStatus: "confirmed",
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+      });
+      const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
+
+      expect(
+        createCockpitActionFacade({
+          flowKind: "legacy",
+          commandId: null,
+          getState: useWorkspaceStore.getState,
+          sendConfirm: vi.fn(() => true),
+          sendAbandonGate: vi.fn(() => true),
+          sendHumanGateFeedback: vi.fn(() => true),
+          sendAdvance,
+        }).advance(),
+      ).toBe(false);
+
+      expect(sendAdvance).not.toHaveBeenCalled();
+    },
+  );
 });

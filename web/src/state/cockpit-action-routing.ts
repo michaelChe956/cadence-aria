@@ -56,6 +56,11 @@ export function createCockpitActionFacade(input: {
       return input.sendAbandonGate(input.commandId ?? newCommandId());
     },
     advance() {
+      // k3 P2-2：AuthorConfirm 矩阵只放行 Abort/AbandonHumanGate——HTTP confirm 的
+      // 乐观 confirmed 态也不发 advance（否则必回 ADVANCE_STAGE_INVALID 红条）。
+      if (input.getState().stage === "author_confirm") {
+        return false;
+      }
       const reason = gateActionBlockReason(input.getState());
       if (reason !== null && reason !== "closed") {
         return false;

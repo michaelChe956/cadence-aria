@@ -544,8 +544,12 @@ export function ChatCockpitPage({
     });
     setAuditOpen(true);
   }, [selectedState, sessionId, state]);
+  // k3 P2-2：author_confirm 阶段矩阵不放行 advance——即便 confirmed（HTTP confirm
+  // 乐观态）也不露出「手动推进」（门面 advance 同款早退兜底）。
   const canManualAdvance =
-    state.humanGateClosure?.decision === "confirm" || state.sessionStatus === "confirmed";
+    (state.humanGateClosure?.decision === "confirm" ||
+      state.sessionStatus === "confirmed") &&
+    state.stage !== "author_confirm";
   const handleTakeover = async (parentSessionId: string) => {
     const child = await takeoverWorkspaceSession(parentSessionId);
     useOperationAuditStore.getState().recordTakeoverLink(

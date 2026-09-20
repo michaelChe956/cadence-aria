@@ -377,5 +377,49 @@ describe("ChatCockpitPage", () => {
       expect(screen.queryByRole("checkbox")).toBeNull();
       expect(screen.queryByRole("button", { name: /批量确认/ })).toBeNull();
     });
+
+    // k3 P2-1：门卡不随 stage_change 重建——修订反馈起 Author run（stage 离开
+    // author_confirm 且无投影）后，旧门卡必须落「已离开人工确认门」且按钮不再发送。
+    it("shows the left-stage fallback on the stale gate card and sends nothing", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      authorConfirmSession("story");
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+      await user.click(screen.getByTestId("cockpit-conversation-tab"));
+      const gateCard = screen.getByTestId("gate-prompt-entry");
+      expect(
+        within(gateCard).getByRole("button", { name: "确认产物" }),
+      ).toBeEnabled();
+      act(() => {
+        // stage_change 现场只 setStage 不重建 chatEntries——旧门卡留在对话流
+        // （修订反馈起 Author run=running 阶段）。
+        useWorkspaceStore.getState().setStage("running");
+      });
+
+      expect(within(gateCard).getByText("已离开人工确认门")).toBeVisible();
+      expect(
+        within(gateCard).queryByRole("button", { name: "确认产物" }),
+      ).toBeNull();
+      // 即便遗留按钮被点到（防御），确认/终止零发送。
+      expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+      expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+      expect(
+        fetchMock.mock.calls.filter(([url]) =>
+          typeof url === "string" && url.endsWith("/confirm"),
+        ),
+      ).toHaveLength(0);
+    });
+
+    // k3 P2-2：author_confirm 矩阵不放行 advance——HTTP confirm 乐观 confirmed 后
+    // 也不露「手动推进」（门面 advance 同款早退，routing 级单测覆盖发送面）。
+    it("hides manual advance at author_confirm even after an optimistic confirm", () => {
+      authorConfirmSession("story");
+      useWorkspaceStore.setState({ sessionStatus: "confirmed" });
+      renderCockpitWith(mockWorkspaceWs());
+
+      expect(screen.queryByRole("button", { name: "手动推进" })).toBeNull();
+    });
   });
 });

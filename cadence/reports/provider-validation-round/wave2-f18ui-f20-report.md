@@ -35,18 +35,23 @@
   `terminal_stage`；收件箱零门条；live stage_change→author_confirm 无门卡；页面无任何
   确认/终止按钮。
 
-绿（新增 18 测全过）：
+绿（新增 16 测全过）：
 
-- `workspace-cockpit-projection.test.ts`（+7）：story/design 投影形状；work_item_plan
-  边界；开态放行/confirmed 关门/terminate closure 关门；收件箱门条（`gate:stage:author_confirm`）；
+- `workspace-cockpit-projection.test.ts`（+7）：story/design 投影形状（it.each 2）；
+  work_item_plan 边界；story 非 author_confirm 阶段维持 terminal_stage；开态放行/
+  confirmed 关门/terminate closure 关门；收件箱门条（`gate:stage:author_confirm`）；
   confirmed 后等待项消失。
 - `workspace-ws-message-handler.test.ts`（+3）：story/design live stage_change→author_confirm
-  落门卡（gate_identity/action_facade 元数据）；work_item_plan 不落。
-- `ChatCockpitPage.confirm.test.tsx`（+8）：渲染（收件箱+门卡+产物面板三面两按钮可点，
-  ConfirmTwice 惯例）；确认接线（fetch 断言 `POST /api/workspace-sessions/session_001/confirm`
+  落门卡（gate_identity/action_facade 元数据，it.each 2）；work_item_plan 不落。
+- `ChatCockpitPage.confirm.test.tsx`（+6）：渲染（收件箱+门卡+产物面板三面两按钮可点，
+  ConfirmTwice 惯例，it.each 2）；确认接线（fetch 断言 `POST /api/workspace-sessions/session_001/confirm`
   +`{"confirmed_by":"user"}`，零 WS confirm 帧，乐观收敛 sessionStatus=confirmed+等待面消失）；
   HTTP 失败不收敛（门保持可操作）；终止接线（一次点击仅 arm、二次确认后恰一次
   `sendAbandonGate`）；author 门不提供批量勾选。
+- 边界说明（有意为之）：`work_item_plan` 与 `work_item` 的 author_confirm 不投影门、
+  维持 `terminal_stage` 拦截——SC 流的人工门在 human_confirm（typed turn/durable
+  snapshot 通路），legacy work_item 非本修复（F-20）范围；advance 在该阶段矩阵同样
+  只放行 Abort/Abandon（见 fix round 1 的早退兜底）。
 
 回归：定向 11 文件 183/183；全量 vitest **1496/1496**（175 文件）；`tsc --noEmit` 0 错。
 
@@ -69,8 +74,22 @@
 - `web/src/state/workspace-cockpit-projection.test.ts`
 - `web/src/hooks/workspace-ws-message-handler.ts`（live 门卡）
 - `web/src/hooks/workspace-ws-message-handler.test.ts`
+
 - `web/src/api/client.ts`（confirmWorkspaceSession）
 - `web/src/pages/ChatCockpitPage.tsx`（路由 confirm+产物面板动作位）
 - `web/src/pages/ChatCockpitPage.confirm.test.tsx`
 - `web/src/components/chat-workspace/cockpit/CockpitInbox.tsx`（批量勾选边界）
 - `cadence/reports/provider-validation-round/wave2-f18ui-f20-report.md`（本报告）
+
+## 6. Fix round 1（k3 审 2×P2）
+
+| 项 | 修法 |
+|---|---|
+| P2-1 门卡离场兜底 | GatePromptEntry 兜底分支从 `stage:human_confirm` 特判推广为通用 `stage:` 前缀判据：`gateIdentity.startsWith("stage:") && gateIdentity !== stage:${state.stage}` → `terminal_stage`（文案「已离开人工确认门」）。修复：门开态发修订反馈起 Author run（UserMessage 不经矩阵直接起跑，stage_change 只 setStage 不重建 chatEntries）或 confirm 后阶段推进时，旧门卡不再渲染可点但被静默拦截的假按钮 |
+| P2-2 author_confirm 禁 advance | 双面：①门面 `advance()` 加 `stage === "author_confirm"` 早退 false（矩阵 AuthorConfirm 臂只放行 Abort/AbandonHumanGate——覆盖热键与全部调用点）；②`canManualAdvance` 排除该阶段（HTTP confirm 乐观 confirmed 后不再露出「手动推进」死按钮）。autopilot 不受影响（stage-only 门在 gateIdentityFromState 无 identity，不建 advance 锚） |
+
+TDD：红证 3 失败（stash 两修复文件后实测：routing advance story/design 零发送 2 例+页面离场兜底文案 1 例）→ 恢复后绿；新增 5 测（routing it.each 3 含 work_item_plan 边界+页面 2：离场兜底文案+按钮消失+零发送、手动推进隐藏）。
+
+回归：定向 6 文件 96/96；全量 vitest **1502/1502**（175 文件，含 B 线在途 generation 测试）；`tsc --noEmit` 0 错。
+
+本轮文件：`GatePromptEntry.tsx` / `cockpit-action-routing{.test}.ts` / `ChatCockpitPage.tsx`（仅 canManualAdvance hunk）/ `ChatCockpitPage.confirm.test.tsx` / 本报告。ChatInputBar 渲染条件扩展（F-19）与 generation 测试为 B 线工作，留其自行提交。
