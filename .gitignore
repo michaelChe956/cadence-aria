@@ -37,3 +37,9 @@ cadence/reports/provider-validation-round/kimi-coding/*console*.txt
 cadence/reports/provider-validation-round/kimi-coding/coding-drive*.cjs
 cadence/reports/provider-validation-round/kimi-coding/gate-release*.cjs
 codex-ab/codex/rep*/ws.jsonl
+cadence/reports/provider-validation-round/codex-ab/codex/rep*/ws.jsonl
+cadence/reports/provider-validation-round/f24-choice/*.mjs
+cadence/reports/provider-validation-round/f24-choice/run*/ws.jsonl
+cadence/reports/provider-validation-round/f24-choice/*console*.txt
+cadence/reports/provider-validation-round/wave4-ppstress/*.jsonl
+cadence/reports/provider-validation-round/wave4-ppstress/*.cjs
