@@ -29,6 +29,7 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 
 - **WHEN** Plan 已 durable Confirmed 且客户端显式调用 `advance`
 - **THEN** 系统建立该 plan 唯一的 WorkItemGroup coding attempt 并返回 group workspace 入口（ready-only，不启动 coding provider）；advance 语义以 `work-item-plan-advance` capability 为唯一来源
+
 ### Requirement: markdown 编译器模型（REQ-WSC-02）
 
 系统 SHALL 以 markdown/EARS 文档作为 work item plan 的唯一可编辑源，并提供确定性编译器将其单向编译为顶层 `PlanCandidateIr { source_revision_hash, compiler_version, items: Vec<PlanCandidateItemIr> }`；每个 item SHALL 为 `PlanCandidateItemIr { target_repository_id, contract, verification_plan: WorkItemDraftVerificationPlan, trusted_commands }`。typed IR 的 source revision hash 与 compiler version 仅位于顶层；**publish 前** hash 或版本不匹配时系统 SHALL 拒绝发布并提示重新编译，hash/version 随不可变 publication provenance 落盘。coding 段只消费已发布的 immutable runtime binding，SHALL NOT 在执行期间解析 markdown 或重新解释 compiler version；write_policy 与 trusted commands 等安全边界 SHALL 保持强类型。对 markdown 的人工或模型修改 SHALL 产生新 revision 并触发重新编译。
@@ -118,18 +119,26 @@ reviewer（单候选）SHALL 在复评前获得只读契约覆盖投影，内容
 - **WHEN** 构建 reviewer context 的契约覆盖投影
 - **THEN** 投影复用 `dependency.rs` 同一确定性计算逻辑（同输入同口径），覆盖能力缺口与 handoff 消费闭环两类事实；legacy/story/design reviewer 路径不接收该投影且行为不变
 
-### Requirement: 新旧路径并存与可验证退役（REQ-WSC-07）
+### Requirement: 旧协议退役与单路径收敛（REQ-WSC-08）
 
-系统 SHALL 以持久化 `flow_kind` 维持新旧两条 workitem 路径并存，直到以下全部满足才允许删除旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法）：codex 与 pi 各 1 案例到达 Confirmed（2/2）、单案例时长 ≤12 分钟、初评 ≤1 次且复评 ≤1 次（总 ≤2）、自动返修 ≤1 次（均从服务端持久计数读取）、阶段 1 的 14 条 classifier golden（rep2/3/4 的 9 条、rep1 round-1 的 2 条 Advisory、3 条人工标注 class_hint 变体）全部归入预期 finding 分类、仅明确属 grammar/lowering 的 reviewer finding 通过 compiler diagnostic golden（其余明确仅为 prompt few-shot 素材）、断线重连/恢复测试通过、legacy 路径回归全绿。
+REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测解锁后（2026-09-19 用户终裁 B：pi 全子项达标=协议质量实证；codex Confirmed 子项登记已知例外——系统性 provider 内容缺陷与协议无关，门文本据此显式修订，属 1c 裁决预留的「后续专项裁决」路径显式行使；**后续义务：codex/claude_code/kimi_code 全部 provider 最终 SHALL 全测通过（defer-ledger DEF-PVR-ALL），在义前不得视为 provider 面收官**），旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO）SHALL 删除。删除后：新会话 SHALL 一律走单候选流，不存在 legacy 入口；收到已删除消息类型系统 SHALL 返回 stage-specific protocol error 且零副作用；多仓 Issue 的确定性 preflight 失败 SHALL 收敛为新路径 durable fatal/recoverable 终态（含失败原因），系统 MUST NOT 存在 legacy fallback 路径，MUST NOT 静默切换 `flow_kind`（本句修订并取代 REQ-WSC-07 原「legacy fallback 只允许在确定性 preflight 失败且新路径尚未产生副作用时发生」条款）；历史 legacy session 的 durable 记录与事件前缀 SHALL 只读保留（处置细则以 `legacy-protocol-retirement` REQ-RET-03 为唯一来源）；SC 门消息面（`human_gate_feedback`/approve/abandon）以 `work-item-plan-conversational-gate` 为唯一来源。
 
-对于多仓 Issue，legacy fallback 只允许在确定性 preflight 失败且新路径尚未产生副作用时发生。一旦已经持久化新路径状态或启动 provider，失败 SHALL 收敛为新路径的 durable fatal/recoverable 终态，SHALL NOT 静默切换 `flow_kind` 或回落 legacy。
+#### Scenario: 已删除消息协议错误拒绝
 
-#### Scenario: 退役门未达成不删除
+- **WHEN** 退役完成后客户端发送任一已删除的 legacy 决策消息（generation-mode 决策、逐段确认、review_decision 双选项、human_confirm）
+- **THEN** 系统返回 stage-specific protocol error 且零副作用，会话状态与事件流不变
 
-- **WHEN** campaign 验收指标未全部满足
-- **THEN** 旧 WS 协议与中间状态结构保持可用，新路径缺陷可回退
+#### Scenario: 多仓 preflight 失败收敛新路径终态
 
-#### Scenario: 多仓 preflight 后失败不静默回落
+- **WHEN** 多仓 Issue 的确定性 preflight 失败（无论新路径是否已产生副作用）
+- **THEN** 失败以新路径 durable fatal/recoverable 终态记录并含原因，系统不存在任何 legacy fallback 或 `flow_kind` 切换路径
 
-- **WHEN** 多仓新路径已写入任一 durable record 或已启动 provider 后发生失败
-- **THEN** 原 flow_kind 保持不变，失败以 durable fatal/recoverable 状态记录；系统不得改走 legacy
+#### Scenario: 新会话一律单候选流
+
+- **WHEN** 退役完成后创建任意 workitem workspace 会话
+- **THEN** 会话走单候选流（prepare → generate → evaluate → approval → completed），不存在 legacy 逐段路径选项
+
+#### Scenario: 历史 legacy 记录只读保留
+
+- **WHEN** 退役完成后读取历史 legacy session 的 durable 记录
+- **THEN** 记录与事件前缀原样保留可读，未被迁移或清洗

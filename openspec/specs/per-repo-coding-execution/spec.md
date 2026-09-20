@@ -1,7 +1,7 @@
 # per-repo-coding-execution Specification
 
 ## Purpose
-Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared worktree 键升级为 `(project, issue, repository)`，attempt 冻结 target 快照，mixed-target group 一律拒绝；交付为推分支 + 人工评审（ReviewRequest），自动 PR 后置。
+Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared worktree 键升级为 `(project, issue, repository)`，attempt 冻结 target 快照；mixed-target WorkItemGroup 按 target 分流为独立 target-attempt（每 `(plan, target)` 至多一个，单 target 场景零变化，分流契约以 `multi-target-group-coding` 为唯一来源）；交付为推分支 + 人工评审（ReviewRequest），自动 PR 后置。
 
 ## Requirements
 
@@ -15,12 +15,14 @@ Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared work
 #### Scenario: worktree 隔离不依赖 provider 自觉
 - **WHEN** provider 尝试越出 worktree 写入主 checkout 或其他路径
 - **THEN** 系统 SHALL 通过 pre/post 越界检测与配置约束（best-effort）标记并阻断；不宣称 OS 级不可达；硬隔离需 provider/OS sandbox（后置）
+
 ### Requirement: attempt 冻结 target 快照（REQ-COD-02）
 系统 SHALL 使 `CodingExecutionAttempt` 持久化不可变 `target_repository_id`/checkout/revision 与 policy digest；创建、恢复、重放一律使用冻结快照；旧 attempt 缺快照时 display-only 或人工恢复，不得从活 Work Item/`Issue.repo_id` 重新猜测。attempt 冻结快照含三层身份映射(`target_repository_id` 语义类型为 `LogicalRepositoryId`、`RepositoryCheckoutId`、`RepositoryRecord.id` + canonical_path + git_dir_identity + revision + policy_digest);旧 `issue-shared-worktree.json` 经 journal 迁移:验证 record.repository_id 一致性 → 原子写新 record `issues/{issue}/shared-worktrees/{repository_id}.json` → 保留 legacy tombstone/redirect → 仅在无活动引用时清除旧文件;锁 API 增加 repository 参数。
 
 #### Scenario: 创建与恢复 coding attempt
 - **WHEN** 创建、恢复或重放 coding attempt
 - **THEN** 系统 SHALL 使用 attempt 内冻结的 target 快照；快照缺失时 fail-closed 拒绝启动或进入人工恢复
+
 ### Requirement: shared worktree 按三元键（REQ-COD-03）
 系统 SHALL 使 Issue shared worktree 的存储、锁、获取/释放/迁移/删除接口全部升级为 `(project, issue, repository)` 键；新路径为 `issues/{issue}/shared-worktrees/{repository_id}.json`，其中 `repository_id` 的 ID 域为 `LogicalRepositoryId`（与 `target_repository_id` 语义类型一致；迁移时旧物理 `RepositoryRecord.id` SHALL 经 migration journal 唯一解析为 logical ID，不混用 ID 域）；锁文件随该 JSON 同址（如 `issues/{issue}/shared-worktrees/{repository_id}.json.lock`）。**锁迁移协议（二审 worker F-6 闭合）**：迁移者 SHALL 先持有 legacy 锁（`.issue-shared-worktree.json.lock`），再按固定全局顺序（如 repository_id 字典序）取得仓维新锁，避免并发迁移死锁；迁移期间通过 journal/redirect 对旧 API 提供可见性；活动 attempt 阻塞迁移直至释放；崩溃恢复与旧锁清理仅在「无活动引用 + redirect 已持久化」双条件满足时执行。旧 `issue-shared-worktree.json` 经 journal 迁移（验证 record.repository_id 一致性→原子写新 record→legacy tombstone/redirect→无活动引用时清除旧文件与旧锁）；同一仓库多个 Work Item 可共享同一仓库级 worktree 并串行，不同仓库可并行。
 
@@ -31,18 +33,33 @@ Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared work
 #### Scenario: 同仓串行
 - **WHEN** 同一 Issue 同一仓库的多个 Work Item
 - **THEN** 复用同一仓库级 shared worktree，由该仓库锁串行化
-### Requirement: mixed-target group 一律拒绝（REQ-COD-04）
-系统 SHALL 使多成员 Issue 下创建 mixed-target WorkItemGroup 被一律拒绝并返回稳定错误码（在创建、恢复、replay 三处一致）；同 target 的 group 允许；不做自动按仓拆分。
+
+### Requirement: mixed-target group 按 target 分流（REQ-COD-04）
+
+系统 SHALL 使多成员 Issue 下创建 mixed-target WorkItemGroup 时按 target 分流：为每个目标仓库建立独立的 target-attempt（每 `(plan, target)` 至多一个），MUST NOT 以单一 attempt 承载多 target；「group 内存在多 target」本身 SHALL NOT 构成拒绝理由。分流 SHALL 在创建、恢复、replay 三处及全部路由消费面一致适用。无唯一 target 归属（units 无 `target_repository_id` 且 issue codebase selection focus 不唯一）SHALL 保持 fail-closed 拒绝并返回稳定错误码（TargetMissing 语义）；「group 内多 target」不再返回多目标歧义拒绝（TargetAmbiguous 在 group attempt 路由面退役，selection focus 面等其他消费点语义不变）。同 target 的 group 行为 SHALL 与分流引入前完全一致。分流的完整契约（per-`(plan, target)` 唯一性、单 target 零变化、per-target 冻结快照、手动推进、聚合视图、增殖审计）以 `multi-target-group-coding` capability 为唯一来源，本 requirement 只锁 per-repo-coding-execution 侧的分流义务与拒绝语义变更。
 
 #### Scenario: 尝试 mixed-target group
-- **WHEN** 用户尝试对涉及多个目标仓库的 Work Item 建立同一 group
-- **THEN** 创建 SHALL 被拒绝并返回稳定错误码；拆分能力不在本 change 范围
+
+- **WHEN** 用户对涉及多个目标仓库的 Work Item 建立同一 group
+- **THEN** 系统为每个目标仓库分别建立独立 target-attempt（各自冻结该 target 快照、承载该 target 的 units），不再返回多目标歧义拒绝
+
+#### Scenario: 无唯一 target 归属仍 fail-closed
+
+- **WHEN** group 的 units 均无 `target_repository_id` 且 issue codebase selection focus 不唯一
+- **THEN** 创建被拒绝并返回稳定错误码，不静默选择任一 target、不创建任何 attempt
+
+#### Scenario: 同 target 的 group 行为零变化
+
+- **WHEN** group 全部 units 属同一目标仓库
+- **THEN** 建组、路由与执行行为与分流引入前完全一致：单 attempt、单快照、既有收敛路径不变
+
 ### Requirement: 跨仓只读证据检索（REQ-COD-05）
 系统 SHALL 使 Coder 可经受控检索接口获取其他成员仓的只读证据（改 A 的接口时查 B 的调用点），证据带 ACL/snapshot/token 预算/审计；Coder 不持有聚合根；跨仓调用点检索为启发式符号/字符串近似（CodeGraph 非 Java 语义级），非精确调用图；「无法写入其他仓」为 best-effort 表述，不宣称 OS 级强制。
 
 #### Scenario: coding 中检索跨仓证据
 - **WHEN** coding 过程中 Coder 需要了解其他仓的调用关系
 - **THEN** 通过受控检索接口获取只读证据注入上下文；证据记录来源 snapshot 与预算；Coder 的写入配置目标仅为目标 worktree
+
 ### Requirement: 每仓独立交付（推分支 + 人工评审）（REQ-COD-06）
 系统 SHALL 使每仓独立 branch/commit/push 并持久化 `ReviewRequest`（GitBranchOnly，含分支/推送状态，无外部 PR URL）；Issue 完成 = 所有必需 Work Item 完成（以已推分支为完成级别），partial failure 显式呈现，不伪装全局成功；自动创建 GitHub/GitLab PR 不在本 change 范围。
 
