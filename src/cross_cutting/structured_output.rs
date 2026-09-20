@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 const START_PREFIX: &str = "<ARIA_STRUCTURED_OUTPUT";
 const END_PREFIX: &str = "</ARIA_STRUCTURED_OUTPUT";
@@ -261,9 +262,18 @@ fn parse_start_tag(
 }
 
 fn parse_nonce(attrs: &str) -> Option<String> {
-    let nonce = attrs
-        .strip_prefix("nonce=\"")
-        .and_then(|value| value.strip_suffix('"'))?;
+    let value = attrs.strip_prefix("nonce=")?;
+    // 引号字形不是信任边界（见下方值比较注释）：CJK 输入法现场曾把属性值
+    // 整体输出为全角弯引号（nonce=“86bc0a08”），直引号剥离失败即
+    // missing_start_tag 楔死 needs_human。直/弯两种字形都接受，值等式仍在。
+    let nonce = value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\u{201c}')
+                .and_then(|inner| inner.strip_suffix('\u{201d}'))
+        })?;
     // The contract generates compact random nonces, while its intentional few-shot
     // placeholder is `EXAMPLE_NONCE`; format is not the trust boundary. The exact
     // value comparison below is, so retain any non-empty attribute value here.
@@ -350,12 +360,74 @@ fn find_end_tag_outside_json_strings(text: &str) -> Option<usize> {
 }
 
 fn recover_json_object(text: &str) -> Result<Value, ()> {
-    let candidate = sentinel_json_candidate(text)?;
+    let text = normalize_curly_json_delimiters(text);
+    let candidate = sentinel_json_candidate(&text)?;
     let object = extract_unique_json_object(candidate)?;
     if object.len() > MAX_JSON_BYTES {
         return Err(());
     }
     serde_json::from_str(object).map_err(|_| ())
+}
+
+/// 确定性机械修复：CJK 输入法现场曾把 sentinel JSON 的全部定界引号输出为
+/// 全角弯引号（`{“nonce”:“86bc0a08”}`）。仅在**结构位置**把弯引号定界符
+/// 归一为直引号——字符串外 `“` 视为开定界；弯引号串内 `”` 仅当后随
+/// 结构字符（`,` `:` `}` `]` 或结尾）才视为闭定界，其余逐字保留；直引号
+/// 串内的弯引号是数据，一律不动。serde 仍是 JSON 合法性的最终权威：
+/// 归一后仍非法则照旧 `invalid_json`，不静默放行。
+fn normalize_curly_json_delimiters(text: &str) -> Cow<'_, str> {
+    if !text.contains('\u{201c}') && !text.contains('\u{201d}') {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut curly_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            } else if curly_string && ch == '\u{201d}' && next_is_structural(&chars, index + 1) {
+                out.pop();
+                out.push('"');
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '"' => {
+                out.push('"');
+                in_string = true;
+                curly_string = false;
+            }
+            '\u{201c}' => {
+                out.push('"');
+                in_string = true;
+                curly_string = true;
+            }
+            _ => out.push(ch),
+        }
+        index += 1;
+    }
+    Cow::Owned(out)
+}
+
+/// 弯引号串内的 `”` 后随（跳过空白） `,` `:` `}` `]` 或输入结尾时判定为
+/// 闭定界符；否则视为内容字符保留。
+fn next_is_structural(chars: &[char], from: usize) -> bool {
+    chars[from..]
+        .iter()
+        .find(|ch| !ch.is_whitespace())
+        .is_none_or(|ch| matches!(ch, ',' | ':' | '}' | ']'))
 }
 
 fn sentinel_json_candidate(text: &str) -> Result<&str, ()> {
@@ -749,5 +821,66 @@ mod tests {
             serde_json::to_string(&StructuredOutputErrorCode::InvalidEndTag).expect("serialize"),
             "\"invalid_end_tag\""
         );
+    }
+
+    #[test]
+    fn normalizes_fullwidth_curly_quoted_sentinel_into_authoritative_parse() {
+        // 门重测 rep2/rep4 现场形态：CJK 输入法把 sentinel 的定界引号全部
+        // 输出为全角弯引号（属性与 JSON 双侧），修复前 missing_start_tag 楔死
+        // needs_human。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f”>\n{“nonce”:“96aca42f”,“verdict”:“pass”,“summary”:“全候选评估通过”}\n</ARIA_STRUCTURED_OUTPUT>";
+
+        let parsed = parse_structured_output(output, &contract());
+
+        assert_eq!(parsed.readable_output, "");
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass", "summary": "全候选评估通过"}))
+        );
+    }
+
+    #[test]
+    fn curly_normalization_keeps_curly_quotes_inside_straight_quoted_values() {
+        // 合法 JSON 字符串值内的弯引号是数据而非定界符，必须逐字保留。
+        let parsed = parse_structured_output(
+            &block(r#"{"nonce":"96aca42f","summary":"保留“弯引号”与“嵌套”内容"}"#),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"summary": "保留“弯引号”与“嵌套”内容"}))
+        );
+    }
+
+    #[test]
+    fn curly_normalization_is_structural_and_handles_nested_payloads() {
+        // 嵌套 findings 数组（reviewer 现场形态）+ 弯引号串内内容级弯引号：
+        // 仅后随结构字符（, : } ] 或结尾）的 ” 视为定界符，其余逐字保留。
+        let body = "{“nonce”:“96aca42f”,“verdict”:“revise”,“findings”:[{“severity”:“must_fix”,“message”:“引用“内层”文本”}]}";
+
+        let parsed = parse_structured_output(
+            &format!("<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f”>{body}</ARIA_STRUCTURED_OUTPUT>"),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({
+                "verdict": "revise",
+                "findings": [{"severity": "must_fix", "message": "引用“内层”文本"}]
+            }))
+        );
+    }
+
+    #[test]
+    fn curly_quoted_nonce_attribute_still_enforces_exact_value_equality() {
+        // 放宽的是引号字形，不是 nonce 值等式——值不匹配仍 NonceMismatch。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“deadbeef”>{“nonce”:“96aca42f”,“verdict”:“pass”}</ARIA_STRUCTURED_OUTPUT>";
+
+        let error = failed_error(output);
+
+        assert_eq!(error.code, StructuredOutputErrorCode::NonceMismatch);
+        assert_eq!(error.observed_nonce.as_deref(), Some("deadbeef"));
     }
 }
