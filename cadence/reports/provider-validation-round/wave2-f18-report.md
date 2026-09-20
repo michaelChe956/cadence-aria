@@ -107,6 +107,37 @@ waiting_for_human。
 - HTTP confirm 端点对已 Terminated 会话仍是记录级无条件写 Confirmed（既有形态，本修复不改；
   引擎侧 terminate 已 fail-closed 反向防护）。
 
+## 5a. Fix round 1（k3 审 1×P2）：终态写非原子 → CAS 单飞
+
+**问题**：round 0 的 `terminate_story_author_gate` 终态写走非原子
+`update_workspace_session_status(Terminated)`——HTTP confirm 端点不持锁无条件写
+Confirmed，若落在引擎 durable 读与终态写之间，Terminated 覆盖 Confirmed：durable
+矛盾（confirm 方已收 200）且 terminate 伪报成功。
+
+**修法**（k3 给定）：
+
+- 终态写改 `compare_and_update_workspace_session_status(&durable, Terminated)` CAS
+  （amendment.rs:733 同款先例：独占锁内比对 expected 快照后置终态）。
+- CAS `IdentityMismatch` 经新 `translate_lost_story_terminate_race` 重读翻译（与 SC
+  `translate_lost_human_gate_close_race` 同族）：durable 已 Terminated（另一 terminate
+  先到）→ 幂等 `AlreadyClosed`（同步内存态、不重复 close 语义/事件）；其余漂移（含
+  HTTP confirm 先行的 Confirmed）→ 明确错误上抛，绝不覆盖先到者。
+- 测试注入口：`#[cfg(test)]` drift-hook 注册表（session id 键，生产构建空内联），
+  在「durable 读 → CAS 写」窗口注入一次外部写，确定性复现竞态。
+
+**TDD**：
+
+- 红（round 0 代码实测）：竞态窗口注入 Confirmed → terminate 仍报 `Ok(Abandoned)` 且
+  durable 被**覆盖成 Terminated**（k3 指出的矛盾现场）；注入 Terminated → 重复报
+  成功+重复 close 事件。
+- 绿（3 新测）：confirm 先行 → Err 点名 race+Confirmed、durable 保持 Confirmed、零
+  close 事件；另一 terminate 先行 → `AlreadyClosed` 幂等、无重复事件、不本地关门；
+  store 级 CAS 钉测（drifted expected → IdentityMismatch、零写入）。
+- fixture 强化：session id 进程内唯一（drift-hook 注册表全局键防并行串扰）。
+
+**回归**：`story_author_gate` 8/8、`product::workspace_engine` 674、
+`web::workspace_ws_handler` 118 全绿；rustfmt+clippy 干净。
+
 ## 6. Commit 文件清单
 
 - `src/web/workspace_ws_handler/protocol.rs`

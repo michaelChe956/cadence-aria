@@ -22,20 +22,31 @@ async fn story_gate_fixture(
     let root = TempDir::new().expect("tempdir");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths);
+    // session id 进程内唯一：竞态 drift-hook 注册表以 session id 为全局键，
+    // 并行测试族不得串扰（campaign harness 同款纪律）。
+    static F18_SESSION_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    let session_id = format!(
+        "workspace_session_f18_{}",
+        F18_SESSION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let mut record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 0,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-            // story/design 会话不带 plan options：flow_kind 落默认 Legacy（生产同构）。
-            work_item_plan_options: None,
-        })
+        .create_workspace_session_with_id(
+            CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: ProviderName::Fake,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                // story/design 会话不带 plan options：flow_kind 落默认 Legacy（生产同构）。
+                work_item_plan_options: None,
+            },
+            session_id,
+        )
         .expect("create story session");
     record.status = WorkspaceSessionStatus::WaitingForHuman;
     crate::product::json_store::write_json(
@@ -190,5 +201,122 @@ async fn work_item_plan_author_confirm_abandon_keeps_sc_close_boundary() {
     assert!(
         error.contains("single-candidate work-item plan"),
         "必须由 SC close 守卫报语义前置错误：{error}"
+    );
+}
+
+#[tokio::test]
+async fn story_author_gate_terminate_loses_race_to_http_confirm_without_overwrite() {
+    // k3 审 P2：HTTP confirm（不持锁无条件写 Confirmed）落在引擎读与终态写之间时，
+    // terminate 不得覆盖 Confirmed——CAS 失配后翻译为明确错误，durable 保持 Confirmed。
+    let (_root, lifecycle, mut engine, mut event_rx) =
+        story_gate_fixture(WorkspaceType::Story).await;
+    let session_id = engine.session().session_id.clone();
+    let raced_lifecycle = lifecycle.clone();
+    let drifted_id = session_id.clone();
+    crate::product::workspace_engine::conversational_gate::register_story_terminate_drift_hook(
+        &session_id,
+        Box::new(move || {
+            raced_lifecycle
+                .update_workspace_session_status(&drifted_id, WorkspaceSessionStatus::Confirmed)
+                .expect("seed http-confirm race drift");
+        }),
+    );
+
+    let outcome = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
+        .await;
+    match outcome {
+        Err(error) => assert!(
+            error.contains("race") && error.contains("Confirmed"),
+            "竞态输方必须点名单飞竞态与当前终态：{error}"
+        ),
+        other => panic!("race-lost terminate must not report success: {other:?}"),
+    }
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable story session");
+    assert_eq!(
+        durable.status,
+        WorkspaceSessionStatus::Confirmed,
+        "Confirmed 不得被迟到 terminate 覆盖"
+    );
+    assert!(
+        collect_close_events(&mut event_rx).is_empty(),
+        "竞态输方不得发 close 事件"
+    );
+}
+
+#[tokio::test]
+async fn story_author_gate_terminate_race_lost_to_other_terminate_translates_already_closed() {
+    // 另一 worker 先到 terminate（读-CAS 窗口内落 Terminated）：迟到者 CAS 失配
+    // 重读后翻译幂等 AlreadyClosed，不重复关门、不重复发事件。
+    let (_root, lifecycle, mut engine, mut event_rx) =
+        story_gate_fixture(WorkspaceType::Story).await;
+    let session_id = engine.session().session_id.clone();
+    let raced_lifecycle = lifecycle.clone();
+    let drifted_id = session_id.clone();
+    crate::product::workspace_engine::conversational_gate::register_story_terminate_drift_hook(
+        &session_id,
+        Box::new(move || {
+            raced_lifecycle
+                .update_workspace_session_status(&drifted_id, WorkspaceSessionStatus::Terminated)
+                .expect("seed other-terminate race drift");
+        }),
+    );
+
+    let outcome = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Abandon)
+        .await
+        .expect("race-lost terminate must translate, not error");
+    assert_eq!(
+        outcome,
+        HumanGateCloseOutcome::AlreadyClosed {
+            status: WorkspaceSessionStatus::Terminated
+        }
+    );
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable story session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+    assert!(
+        collect_close_events(&mut event_rx).is_empty(),
+        "迟到者不得重复发 close 事件"
+    );
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::AuthorConfirm,
+        "迟到者不本地关门（先到者已关门，无 second close 语义）"
+    );
+}
+
+#[tokio::test]
+async fn story_terminate_store_cas_rejects_drifted_expected_record() {
+    // 原子积木钉测（amendment.rs:733 同款）：expected 快照漂移后 CAS 必须
+    // IdentityMismatch 且不落任何写入。
+    let (_root, lifecycle, _engine, _event_rx) = story_gate_fixture(WorkspaceType::Story).await;
+    let session_id = _engine.session().session_id.clone();
+    let expected = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("read expected snapshot");
+    lifecycle
+        .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Confirmed)
+        .expect("drift durable record");
+
+    let raced = lifecycle
+        .compare_and_update_workspace_session_status(&expected, WorkspaceSessionStatus::Terminated);
+    assert!(
+        matches!(
+            raced,
+            Err(crate::product::json_store::ProductStoreError::IdentityMismatch { .. })
+        ),
+        "drifted expected must be rejected by CAS: {raced:?}"
+    );
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("durable story session");
+    assert_eq!(
+        durable.status,
+        WorkspaceSessionStatus::Confirmed,
+        "CAS 失配路径零写入"
     );
 }
