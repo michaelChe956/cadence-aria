@@ -800,6 +800,65 @@ async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response
     server.abort();
 }
 
+/// F-24 现场锚（0484）：provider 挂起 choice 期间另一连接接入（页面刷新/断线
+/// 重连后 cockpit 重开），必须能收到挂起 choice 卡并代答——否则引擎等待界
+/// （F-22 900s）只能把卡死降级为超时失败，用户全程看不到问题。
+#[tokio::test]
+async fn workspace_ws_second_connection_receives_and_answers_pending_choice() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ChoiceThenCompletingStreamingProvider),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut primary, _) = connect_async(url.clone()).await.expect("connect primary");
+    let _initial = recv_json(&mut primary).await;
+    send_json(
+        &mut primary,
+        &WsInMessage::UserMessage {
+            content: "run choice provider for takeover".to_string(),
+        },
+    )
+    .await;
+    let _choice = recv_until_choice_request(&mut primary).await;
+
+    // 次连接重连：初帧（grace/首入站激活）必须带回挂起 choice 卡。
+    let (mut secondary, _) = connect_async(url).await.expect("connect secondary");
+    let _state = recv_json(&mut secondary).await;
+    let replayed_choice = recv_until_choice_request(&mut secondary).await;
+
+    // 次连接已取 lease（legacy 次连接接管语义），可代答；run 驱动至完成。
+    send_json(
+        &mut secondary,
+        &WsInMessage::ChoiceResponse {
+            id: replayed_choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+            answers: vec![],
+        },
+    )
+    .await;
+    let checkpoint = recv_until_message_complete(&mut secondary).await;
+    assert!(checkpoint.starts_with("cp_"));
+
+    drop(secondary);
+    drop(primary);
+    server.abort();
+}
+
 #[tokio::test]
 async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_provider() {
     let root = tempdir().expect("root");

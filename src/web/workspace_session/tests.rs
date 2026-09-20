@@ -669,3 +669,286 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
     .await
     .expect("无订阅者时接力 run 必须仍被 spawn（F-1：修复前事件被 continue 丢弃，本断言超时必红）");
 }
+
+// ---------------------------------------------------------------------------
+// F-24（choice 卡不送达用户）：挂起 provider choice 的可靠重投面
+// ---------------------------------------------------------------------------
+
+fn provider_choice_frame(id: &str) -> crate::web::workspace_ws_types::WsOutMessage {
+    use crate::web::workspace_ws_types::{ChoiceOption, WsOutMessage};
+
+    WsOutMessage::ChoiceRequest {
+        id: id.to_string(),
+        prompt: "验收口径歧义需要用户裁定".to_string(),
+        options: vec![ChoiceOption {
+            id: "option-a".to_string(),
+            label: "按全局口径".to_string(),
+            description: None,
+        }],
+        allow_multiple: false,
+        allow_free_text: false,
+        questions: Vec::new(),
+        source: "provider_choice".to_string(),
+    }
+}
+
+fn frames_contain_choice(frames: &[String], id: &str) -> bool {
+    frames.iter().any(|json| {
+        let value: serde_json::Value =
+            serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+        value["type"] == "choice_request" && value["id"] == id
+    })
+}
+
+/// F-24 现场锚（0484）：满队列 attachment 降级期间广播的 choice 帧被 try_send 丢弃，
+/// 恢复只补 session_state 基线（不含 choice）→ 用户全程在线也永远看不到卡。
+/// 修复后：degraded 恢复必须在基线之外补发挂起 choice 帧。
+#[tokio::test]
+async fn degraded_attachment_recovery_redelivers_pending_provider_choice() {
+    use crate::web::workspace_ws_types::WsProviderStatus;
+
+    let manager = WorkspaceSessionManager::test_fixture("session_choice_degraded_redelivery");
+    let (slow_tx, mut slow_rx) = mpsc::channel(1);
+    manager.attach("slow", slow_tx).await;
+    manager
+        .broadcast_test_event(WsProviderStatus::Starting)
+        .await;
+    manager
+        .broadcast_test_event(WsProviderStatus::Running)
+        .await;
+    assert!(
+        manager.attachment_is_degraded("slow"),
+        "满队列 attachment 必须被标为 degraded"
+    );
+
+    manager
+        .start_run(ProviderRunKind::ReviewOnly, None)
+        .await
+        .expect("active run for pending choice");
+    manager.register_pending_choice_frame(provider_choice_frame("choice_degraded_1"));
+
+    let _first = slow_rx.recv().await.expect("first queued event");
+    manager
+        .broadcast_test_event(WsProviderStatus::Completed)
+        .await;
+    assert!(!manager.attachment_is_degraded("slow"));
+
+    let mut saw_baseline = false;
+    let mut saw_choice = false;
+    for _ in 0..4 {
+        match tokio::time::timeout(std::time::Duration::from_millis(500), slow_rx.recv()).await {
+            Ok(Some(OutboundControl::Text(json))) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&json).expect("recovery frame JSON");
+                match value["type"].as_str() {
+                    Some("session_state") => saw_baseline = true,
+                    Some("choice_request") if value["id"] == "choice_degraded_1" => {
+                        saw_choice = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(saw_baseline, "degraded 恢复必须先发 session_state 基线");
+    assert!(
+        saw_choice,
+        "degraded 恢复必须补发挂起 choice 卡（F-24：卡片丢失即 run 永久楔死）"
+    );
+}
+
+/// F-24：初帧激活与 cursor 重订阅（snapshot 分支）都必须补发活跃 run 的挂起
+/// choice——`pending_author_choice_request_message` 只覆盖 TextFallback 面。
+#[tokio::test]
+async fn attach_and_cursor_resubscribe_redeliver_pending_provider_choices() {
+    let manager = WorkspaceSessionManager::test_fixture("session_choice_attach_redelivery");
+    manager
+        .start_run(ProviderRunKind::ReviewOnly, None)
+        .await
+        .expect("active run");
+    manager.register_pending_choice_frame(provider_choice_frame("choice_attach_1"));
+
+    let (session_state, _text_fallback) = manager.attached_session_state().await;
+    let frames = manager.activate_attachment_with_initial_frames(
+        "conn-attach",
+        session_state,
+        None,
+        manager.attach_baseline_seq(),
+    );
+    assert!(
+        frames_contain_choice(&frames, "choice_attach_1"),
+        "初帧激活必须补发挂起 provider choice：{frames:?}"
+    );
+
+    let (cursor_tx, mut cursor_rx) = mpsc::channel(16);
+    manager.register_attachment("conn-cursor", cursor_tx.clone());
+    manager.resubscribe(&cursor_tx, "conn-cursor", 9_999).await;
+    let mut resubscribed = Vec::new();
+    while let Ok(control) = cursor_rx.try_recv() {
+        let OutboundControl::Text(json) = control else {
+            panic!("resubscribe must only send text frames");
+        };
+        resubscribed.push(json);
+    }
+    assert!(
+        frames_contain_choice(&resubscribed, "choice_attach_1"),
+        "cursor snapshot 重订阅必须补发挂起 provider choice：{resubscribed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F-23（跨重启僵尸 run）：manager 创建面恢复
+// ---------------------------------------------------------------------------
+
+fn zombie_author_run_node() -> crate::web::workspace_ws_types::TimelineNode {
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::models::WorkspaceRolePermissionModes;
+    use crate::web::workspace_ws_handler::ProviderName;
+    use crate::web::workspace_ws_types::{
+        ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+        WorkspaceStage as WsWorkspaceStage,
+    };
+
+    TimelineNode {
+        node_id: "timeline_node_002".to_string(),
+        node_type: TimelineNodeType::AuthorRun,
+        agent: Some(ProviderName::ClaudeCode),
+        stage: WsWorkspaceStage::Running,
+        round: Some(1),
+        status: TimelineNodeStatus::Active,
+        title: "Author 生成".to_string(),
+        summary: None,
+        started_at: "2026-09-20T08:00:00Z".to_string(),
+        completed_at: None,
+        duration_ms: None,
+        artifact_ref: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: Some(ProviderName::Codex),
+            review_rounds: 0,
+            permission_modes: WorkspaceRolePermissionModes {
+                author: ProviderPermissionMode::Auto,
+                reviewer: ProviderPermissionMode::Auto,
+            },
+        },
+        retry: None,
+    }
+}
+
+/// F-23 现场锚（0482 三小时僵尸）：跨服务器重启后 durable 会话停在
+/// running + active author_run 节点，无任何恢复臂触达——manager 创建时必须
+/// 落 AbortedByDisconnect 终态并整流回 prepare_context（retry 面可恢复）。
+#[tokio::test]
+async fn manager_creation_recovers_stale_running_session_after_process_restart() {
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::lifecycle_store::{
+        CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
+    };
+    use crate::product::models::WorkspaceType;
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+    use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+    use crate::product::workspace_engine::WorkspaceStage;
+    use crate::web::runtime::WebRuntime;
+    use crate::web::state::WebAppState;
+    use crate::web::workspace_ws_handler::ProviderName;
+    use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+
+    let root = tempfile::tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let project = ProjectStore::new(app_paths.clone())
+        .create(CreateProjectInput {
+            name: "f23 zombie recovery".to_string(),
+            description: None,
+        })
+        .expect("project");
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: project.id.clone(),
+            name: "f23 repository".to_string(),
+            path: root.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "f23-zombie-recovery-repository".to_string(),
+        })
+        .expect("repository");
+    let issue = IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project.id.clone(),
+            repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
+            title: "f23 zombie issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            repository_id: repository.id,
+            title: "f23 zombie story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story");
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("workspace session");
+    lifecycle
+        .save_timeline_nodes(&session_record.id, &[zombie_author_run_node()])
+        .expect("persist zombie running timeline");
+
+    let manager = WorkspaceSessionManager::create(
+        &WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            ProviderRegistry::new(),
+        ),
+        &session_record.id,
+    )
+    .await
+    .expect("create manager for zombie session");
+
+    let engine_arc = manager.engine();
+    let engine = engine_arc.lock().await;
+    assert_eq!(
+        engine.current_stage(),
+        WorkspaceStage::PrepareContext,
+        "跨重启僵尸必须整流回 prepare_context，不得永久楔死在 running"
+    );
+
+    assert!(
+        engine
+            .timeline_nodes
+            .iter()
+            .any(|node| node.node_id == "timeline_node_002"
+                && node.status == TimelineNodeStatus::Failed),
+        "僵尸 author_run 节点必须落失败终态：{:?}",
+        engine
+            .timeline_nodes
+            .iter()
+            .map(|node| (node.node_id.clone(), node.status.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        engine
+            .timeline_nodes
+            .iter()
+            .any(|node| node.node_type == TimelineNodeType::AbortedByDisconnect),
+        "恢复必须追加 AbortedByDisconnect 标记节点（retry_interrupted_run 恢复面依赖它）"
+    );
+}

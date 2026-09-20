@@ -95,7 +95,7 @@ async fn single_candidate_scope_rejection_does_not_wait_for_provider_engine_lock
             node_id: None,
             cancel,
             command_tx: command_tx_for_run,
-            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pending_choices: Arc::new(std::sync::Mutex::new(Vec::new())),
             lease_epoch: 0,
         })
         .await;

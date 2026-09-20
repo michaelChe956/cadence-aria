@@ -264,12 +264,10 @@ async fn handle_workspace_inbound_message_inner(
             );
             let active_run = run_context.manager.active_run().await;
             if let Some(run) = active_run {
-                let mut pending_choice_ids = run.pending_choice_ids.lock().await;
-                if !pending_choice_ids.remove(&id) {
+                if !run_context.manager.remove_pending_choice_frame(&id) {
                     let _ = send_json_outbound(&outbound_tx, &choice_id_unmatched_error(&id)).await;
                     return;
                 }
-                drop(pending_choice_ids);
 
                 eprintln!(
                     "[aria-choice-diag] ws forwarding choice_response to active run session={} id={}",

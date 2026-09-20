@@ -185,7 +185,7 @@ async fn provider_run_request_event_replaces_an_active_run_for_a_new_timeline_no
             node_id: Some("old-timeline-node".to_string()),
             cancel: old_cancel.clone(),
             command_tx: old_command_tx,
-            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pending_choices: Arc::new(std::sync::Mutex::new(Vec::new())),
             lease_epoch: 0,
         })
         .await;
@@ -297,7 +297,7 @@ async fn review_only_relay_event_yields_to_in_flight_run_review_handoff() {
             node_id: Some("single-candidate-author-node".to_string()),
             cancel: in_flight_cancel.clone(),
             command_tx: in_flight_command_tx,
-            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pending_choices: Arc::new(std::sync::Mutex::new(Vec::new())),
             lease_epoch: 0,
         })
         .await;
@@ -432,7 +432,7 @@ async fn handler_originated_spawn_still_supersedes_in_flight_run() {
             node_id: Some("old-timeline-node".to_string()),
             cancel: old_cancel.clone(),
             command_tx: old_command_tx,
-            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pending_choices: Arc::new(std::sync::Mutex::new(Vec::new())),
             lease_epoch: 0,
         })
         .await;
@@ -962,7 +962,7 @@ async fn single_candidate_author_relay_still_supersedes_in_flight_run() {
             node_id: Some("single-candidate-author-node".to_string()),
             cancel: old_cancel.clone(),
             command_tx: old_command_tx,
-            pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pending_choices: Arc::new(std::sync::Mutex::new(Vec::new())),
             lease_epoch: 0,
         })
         .await;

@@ -409,9 +409,26 @@ pub(crate) fn spawn_engine_event_forward_task(
                 } => {
                     if source != ChoiceRequestSource::TextFallback
                         && let Some(run_context) = run_context.as_ref()
-                        && let Some(run) = run_context.manager.active_run().await
                     {
-                        run.pending_choice_ids.lock().await.insert(id.clone());
+                        run_context.manager.register_pending_choice_frame(
+                            WsOutMessage::ChoiceRequest {
+                                id: id.clone(),
+                                prompt: prompt.clone(),
+                                options: options
+                                    .clone()
+                                    .into_iter()
+                                    .map(ws_choice_option)
+                                    .collect(),
+                                allow_multiple,
+                                allow_free_text,
+                                questions: questions
+                                    .clone()
+                                    .into_iter()
+                                    .map(ws_choice_question)
+                                    .collect(),
+                                source: source.as_str().to_string(),
+                            },
+                        );
                     }
                     let message = WsOutMessage::ChoiceRequest {
                         id,

@@ -56,7 +56,10 @@ pub struct ActiveRun {
     pub node_id: Option<String>,
     pub cancel: CancellationToken,
     pub command_tx: mpsc::Sender<ProviderCommand>,
-    pub pending_choice_ids: Arc<Mutex<HashSet<String>>>,
+    /// F-24：挂起 provider choice 的完整 wire 帧（保持到达顺序）。到达时注册，
+    /// 应答/终态时移除；attach/重订阅/degraded 恢复按此补发，用户不可见窗口
+    /// 即 run 楔死窗口（0484 现场锚）。
+    pub pending_choices: Arc<StdMutex<Vec<WsOutMessage>>>,
     /// 启动该 run 时的授权 epoch；角色仲裁在 Task 8 落地。
     pub lease_epoch: u64,
 }
@@ -433,7 +436,7 @@ impl WorkspaceSessionManager {
                 node_id: node_id.clone(),
                 cancel: cancel.clone(),
                 command_tx,
-                pending_choice_ids: Arc::new(Mutex::new(HashSet::new())),
+                pending_choices: Arc::new(StdMutex::new(Vec::new())),
                 lease_epoch,
             });
             state
@@ -497,6 +500,58 @@ impl WorkspaceSessionManager {
     }
 
     pub async fn active_run(&self) -> Option<ActiveRun> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run
+            .clone()
+    }
+
+    /// F-24：注册挂起 provider choice 帧（按 id 幂等）。无活跃 run 时丢弃——
+    /// 该 choice 无应答通道，重投只会制造 stale 卡。
+    pub fn register_pending_choice_frame(&self, frame: WsOutMessage) {
+        let Some(run) = self.active_run_ref() else {
+            return;
+        };
+        let mut pending = run
+            .pending_choices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !pending
+            .iter()
+            .any(|existing| choice_frame_id(existing) == choice_frame_id(&frame))
+        {
+            pending.push(frame);
+        }
+    }
+
+    /// F-24：应答到达时移除挂起帧。返回 false 表示该 id 不在挂起集（stale 应答）。
+    pub fn remove_pending_choice_frame(&self, id: &str) -> bool {
+        let Some(run) = self.active_run_ref() else {
+            return false;
+        };
+        let mut pending = run
+            .pending_choices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = pending.len();
+        pending.retain(|frame| choice_frame_id(frame) != Some(id));
+        before != pending.len()
+    }
+
+    /// F-24：当前活跃 run 的挂起 choice 帧（供 attach/重订阅/degraded 恢复补发）。
+    pub(crate) fn pending_choice_frames(&self) -> Vec<WsOutMessage> {
+        self.active_run_ref()
+            .map(|run| {
+                run.pending_choices
+                    .lock()
+                    .map(|pending| pending.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    fn active_run_ref(&self) -> Option<ActiveRun> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -761,6 +816,21 @@ impl WorkspaceSessionManager {
         {
             frames.push(json);
         }
+        // F-24：补发活跃 run 的挂起 provider choice。journal 窗口缺失/截断或
+        // 初帧路径无窗口时（`pending_author_choice_request_message` 只覆盖
+        // TextFallback 面），挂起帧是用户可见性的唯一来源。
+        let replayed = active_window
+            .as_ref()
+            .map(|(_, events)| choice_ids_in_frames(events))
+            .unwrap_or_default();
+        for pending_choice in self.pending_choice_frames() {
+            if choice_frame_id(&pending_choice).is_some_and(|id| replayed.contains(id)) {
+                continue;
+            }
+            if let Ok(json) = serde_json::to_string(&pending_choice) {
+                frames.push(json);
+            }
+        }
         if let Some((_, events)) = active_window {
             frames.extend(events);
         }
@@ -821,9 +891,9 @@ impl WorkspaceSessionManager {
 
         match subscription {
             Resubscription::Replay(events) => {
-                for event in events {
+                for event in &events {
                     if outbound_tx
-                        .send(OutboundControl::Text(event))
+                        .send(OutboundControl::Text(event.clone()))
                         .await
                         .is_err()
                     {
@@ -831,7 +901,11 @@ impl WorkspaceSessionManager {
                     }
                 }
                 let (_, choice) = self.attached_session_state().await;
-                let _ = send_optional_message(outbound_tx, choice).await;
+                if !send_optional_message(outbound_tx, choice).await {
+                    return;
+                }
+                self.send_pending_choices_for_resubscription(outbound_tx, &events)
+                    .await;
             }
             Resubscription::ActiveRunWindow { baseline, events } => {
                 let (snapshot, choice) = self.attached_session_state().await;
@@ -848,15 +922,17 @@ impl WorkspaceSessionManager {
                 if !send_optional_message(outbound_tx, choice).await {
                     return;
                 }
-                for event in events {
+                for event in &events {
                     if outbound_tx
-                        .send(OutboundControl::Text(event))
+                        .send(OutboundControl::Text(event.clone()))
                         .await
                         .is_err()
                     {
                         return;
                     }
                 }
+                self.send_pending_choices_for_resubscription(outbound_tx, &events)
+                    .await;
             }
             Resubscription::Snapshot { baseline } => {
                 let (snapshot, choice) = self.attached_session_state().await;
@@ -871,6 +947,29 @@ impl WorkspaceSessionManager {
                     return;
                 }
                 let _ = send_optional_message(outbound_tx, choice).await;
+                self.send_pending_choices_for_resubscription(outbound_tx, &[])
+                    .await;
+            }
+        }
+    }
+
+    /// F-24：重订阅收尾补发活跃 run 的挂起 provider choice。`replayed` 是本次
+    /// 已经回放/补发过的帧集合——已含同 id 的挂起卡不重复投递。
+    async fn send_pending_choices_for_resubscription(
+        &self,
+        outbound_tx: &mpsc::Sender<OutboundControl>,
+        replayed: &[String],
+    ) {
+        let replayed_ids = choice_ids_in_frames(replayed);
+        for pending_choice in self.pending_choice_frames() {
+            if choice_frame_id(&pending_choice).is_some_and(|id| replayed_ids.contains(id)) {
+                continue;
+            }
+            let Ok(json) = serde_json::to_string(&pending_choice) else {
+                continue;
+            };
+            if outbound_tx.send(OutboundControl::Text(json)).await.is_err() {
+                return;
             }
         }
     }
@@ -974,6 +1073,38 @@ impl WorkspaceSessionManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .recovery_error = Some(message);
+        }
+        // F-23（0482 跨重启僵尸）：恢复臂（human gate resume / outline resume）之后
+        // 仍停留在 Running/CrossReview/Revision 且无活跃 run 的 durable 会话，只可能是
+        // 进程重启孤儿——registry 单例契约保证 manager 创建时不存在幸存 run。落
+        // AbortedByDisconnect 终态并整流回 prepare_context，否则会话永久楔死在
+        // running、abort 无处落地（旧架构连接关闭曾走的正是同两条引擎 API）。
+        self.recover_stale_run_if_zombie().await;
+    }
+
+    async fn recover_stale_run_if_zombie(self: &Arc<Self>) {
+        if self.active_run().await.is_some() {
+            return;
+        }
+        let recovered = {
+            let mut engine = self.engine.lock().await;
+            if !matches!(
+                engine.current_stage(),
+                crate::product::workspace_engine::WorkspaceStage::Running
+                    | crate::product::workspace_engine::WorkspaceStage::CrossReview
+                    | crate::product::workspace_engine::WorkspaceStage::Revision
+            ) {
+                return;
+            }
+            engine.recover_stale_active_run_after_disconnect().await;
+            true
+        };
+        if recovered {
+            eprintln!(
+                "[aria-recovery] stale zombie run recovered to prepare_context session={}",
+                self.session_id
+            );
+            self.broadcast_current_session_state();
         }
     }
 
@@ -1157,4 +1288,23 @@ pub(super) fn inject_event_seq(message: String, seq: u64) -> Option<String> {
     let object = value.as_object_mut()?;
     object.insert("event_seq".to_string(), serde_json::Value::from(seq));
     serde_json::to_string(&value).ok()
+}
+
+/// F-24：从 wire 帧提取 choice id（仅 choice_request 帧有）。
+fn choice_frame_id(frame: &WsOutMessage) -> Option<&str> {
+    match frame {
+        WsOutMessage::ChoiceRequest { id, .. } => Some(id),
+        _ => None,
+    }
+}
+
+fn choice_ids_in_frames(frames: &[String]) -> HashSet<String> {
+    frames
+        .iter()
+        .filter_map(|json| {
+            let value: serde_json::Value = serde_json::from_str(json).ok()?;
+            let id = value.get("id")?.as_str()?;
+            (value.get("type")?.as_str()? == "choice_request").then(|| id.to_string())
+        })
+        .collect()
 }

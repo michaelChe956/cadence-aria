@@ -88,12 +88,7 @@ impl WorkspaceSessionManager {
                         questions,
                         source,
                     } => {
-                        if source != ChoiceRequestSource::TextFallback
-                            && let Some(run) = manager.active_run().await
-                        {
-                            run.pending_choice_ids.lock().await.insert(id.clone());
-                        }
-                        manager.broadcast(WsOutMessage::ChoiceRequest {
+                        let message = WsOutMessage::ChoiceRequest {
                             id,
                             prompt,
                             options: options
@@ -107,7 +102,13 @@ impl WorkspaceSessionManager {
                                 .map(crate::web::workspace_ws_handler::ws_choice_question)
                                 .collect(),
                             source: source.as_str().to_string(),
-                        });
+                        };
+                        // F-24：广播前先登记挂起帧——本次广播若降级丢弃该帧，
+                        // 挂起帧是 attach/重订阅/degraded 恢复补发的唯一来源。
+                        if source != ChoiceRequestSource::TextFallback {
+                            manager.register_pending_choice_frame(message.clone());
+                        }
+                        manager.broadcast(message);
                     }
                     event => {
                         if let Some(message) = map_engine_event(event) {
@@ -232,15 +233,35 @@ impl WorkspaceSessionManager {
 
         match sender.try_send(OutboundControl::Text(baseline.to_string())) {
             Ok(()) => {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(attachment) = state.attachments.get_mut(connection_id)
-                    && attachment.degraded
-                    && attachment.outbound_tx.same_channel(&sender)
                 {
-                    attachment.degraded = false;
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(attachment) = state.attachments.get_mut(connection_id)
+                        && attachment.degraded
+                        && attachment.outbound_tx.same_channel(&sender)
+                    {
+                        attachment.degraded = false;
+                    }
+                }
+                // F-24（0484 现场锚）：降级期间被 try_send 丢弃的 choice 帧不在
+                // session_state 里——恢复时必须补发挂起帧，否则连接全程在线的
+                // 用户永远看不到卡。等待式投递放独立任务：队列腾出即送达，
+                // 不依赖后续广播、也绝不让 router 等待（pending_choice_frames
+                // 内部会再取 state 锁，必须在上述锁释放后调用）。
+                let pending_choices = self.pending_choice_frames();
+                if !pending_choices.is_empty() {
+                    tokio::spawn(async move {
+                        for choice in pending_choices {
+                            let Ok(json) = serde_json::to_string(&choice) else {
+                                continue;
+                            };
+                            if sender.send(OutboundControl::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
                 }
             }
             Err(mpsc::error::TrySendError::Full(_)) => {}
@@ -252,5 +273,11 @@ impl WorkspaceSessionManager {
                     .remove(connection_id);
             }
         }
+    }
+
+    /// F-23：恢复链整流后向全部连接广播当前快照（manager 创建时无订阅者，
+    /// 广播仍入 journal 供后续 cursor 回放）。
+    pub(crate) fn broadcast_current_session_state(&self) {
+        self.broadcast(self.current_session_state());
     }
 }
