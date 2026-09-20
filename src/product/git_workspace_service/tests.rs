@@ -509,3 +509,38 @@ async fn git_add_work_item_changes_allows_partial_read_bits_and_deletions() {
         .await
         .expect("partial read bits and deletions must stage normally");
 }
+
+#[tokio::test]
+async fn git_add_work_item_changes_fails_closed_when_owner_read_bit_missing_but_group_readable() {
+    // k3 W1K3 P2：0o044（属主读位 0、组/其他可读）——git 以属主身份运行且 Linux
+    // 不向 group/other 回退，add 仍 Permission denied；属主读位判定（0o400==0）
+    // 必须拦截。修前 0o444 掩码漏过此形态（实测 add 退出 128）。
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    git(repo, &["commit", "-m", "base"]);
+    let owner_blind = repo.join("owner-blind.txt");
+    fs::write(&owner_blind, "owner blind\n").expect("write owner-blind");
+    fs::set_permissions(&owner_blind, fs::Permissions::from_mode(0o044)).expect("chmod 044 fixture");
+
+    let service = GitWorkspaceService::new();
+    let error = service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect_err("owner read bit zero must fail closed");
+    assert!(
+        matches!(error, GitWorkspaceError::UnreadableArtifact { .. }),
+        "got: {error:?}"
+    );
+
+    // 自修 644 后同路径放行。
+    fs::set_permissions(&owner_blind, fs::Permissions::from_mode(0o644)).expect("chmod 644 fixture");
+    service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect("self-healed 644 stages normally");
+}

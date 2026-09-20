@@ -835,11 +835,12 @@ fn should_exclude_from_work_item_commit(path: &str) -> bool {
         || path.ends_with(".pyc")
 }
 
-/// F-15：判定单个产物文件是否无任何读位（unix mode & 0o444 == 0）。
+/// F-15：判定单个产物文件属主读位是否为零（unix mode & 0o400 == 0）。
 ///
-/// 只拦「任何用户都读不了」的确定形态（chmod 000 / umask 异常产物）——这是
-/// `git add` 必然失败、且 commit 进仓也会毒化队友与 CI 的自我死锁产物；
-/// 部分读位（如 0o400）由 git 以当前用户语义自行处理，不在预检范围。
+/// git 以文件属主身份运行且 Linux 不向 group/other 类回退——属主读位为零
+/// （chmod 000 / 0o044 / 0o040 / 0o004 等）即 `git add` 必然失败的自我死锁
+/// 产物，且 commit 进仓也会毒化队友与 CI；组/其他读位不影响属主判定。
+/// 属主可读但组只读等形态（0o400+）由 git 语义自行处理，不在预检范围。
 /// symlink 与已删除文件不读内容、不受影响，直接放行。
 fn unreadable_artifact_error(worktree_path: &Path, relative: &str) -> Option<GitWorkspaceError> {
     #[cfg(unix)]
@@ -850,7 +851,7 @@ fn unreadable_artifact_error(worktree_path: &Path, relative: &str) -> Option<Git
             return None;
         }
         let permissions = metadata.permissions().mode();
-        if permissions & 0o444 == 0 {
+        if permissions & 0o400 == 0 {
             return Some(GitWorkspaceError::UnreadableArtifact {
                 path: relative.to_string(),
                 mode: permissions & 0o777,
