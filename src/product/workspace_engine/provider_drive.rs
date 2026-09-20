@@ -1,7 +1,9 @@
 use super::*;
 
+mod aggregate_writeback;
 mod artifact_retry;
 mod choice_audit;
+mod watchdog;
 
 use crate::product::lifecycle_store::spec::ExistingSpecRecord;
 use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
@@ -10,100 +12,9 @@ use crate::product::workspace_engine::aggregate_output_parser::{
     parse_design_aggregate_output, parse_story_aggregate_output,
 };
 use choice_audit::ChoiceResponseAuditInput;
-
-/// F-19 看门狗：provider 会话零活动上限（拉起后无事件/命令持续至此即判楔死）。
-///
-/// 依据：v27 story 会话 codex app-server 楔死实测——09:16 拉起，前几分钟 9 条
-/// skill 探索命令后**完全静默 27min**（CPU 时间采样零增长、出站 TCP 0 条、
-/// durable streaming 恒 137 字；cadence/notes 2026-09-19 阶段4监控 F-19）。
-/// 流式 provider 正常推理逐 token 产出事件，合法静默间隙远小于 10min；
-/// `DEFAULT_PROVIDER_TIMEOUT_SECS=3h` 是整 run 总上限，对「子进程活着但不
-/// 干活」无效（27min 楔死全程在总上限内）。取 600s：约为实测楔死确认时间
-/// 的 1/3（27min→10min 即转可诊断终态），同时低于 ApprovalBridge
-/// `PERMISSION_TIMEOUT=15min` 的人工等待界（权限/选择挂起期间看门狗不计时，
-/// 见驱动循环挂起逻辑）。
-#[cfg(not(test))]
-pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(600);
-#[cfg(test)]
-pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(150);
+pub(crate) use watchdog::PROVIDER_IDLE_WATCHDOG_TIMEOUT;
 
 impl WorkspaceEngine {
-    /// F-19：legacy 流（story/design/workitem）provider start 的诊断登记。
-    ///
-    /// 拉起 provider 子进程前在 durable `provider_start_ledger` 落一条带
-    /// provider 名与时间戳的条目（key 形 `workspace_{role}:{session_id}:{n}`，
-    /// 对照 SC 面 `single_candidate_author:{session}:{n}` 先例）。F-19 实测中
-    /// ledger 恒空导致「start 未发生」与「start 后楔死」无法区分——本登记补齐
-    /// 该诊断面（SC/门预留路径各自已有登记，不经此处）。
-    ///
-    /// 失败语义：诊断面 best-effort——登记失败仅告警不阻断 run（fail-closed 会
-    /// 因 store 抖动杀死正常生成，与登记目的不成比例；对照 tool-policy audit
-    /// 的 fail-closed 语义：那是承重契约，这是观测登记）。
-    pub(crate) fn register_provider_start_in_ledger(
-        &mut self,
-        role: ProviderConversationRole,
-        provider: ProviderName,
-    ) {
-        // 范围闸：WorkItemPlan 面（Legacy+SingleCandidate）的 ledger 键索引由
-        // 既有预留路径按 len 派生（routing_scope/SC reserve），追加诊断条目会
-        // 漂移其键算术；该面已各自登记，本登记仅覆盖 story/design/workitem
-        // 聊天面（F-19 实测楔死面）。
-        if matches!(self.session.workspace_type, WorkspaceType::WorkItemPlan) {
-            return;
-        }
-        let Some(store) = self.lifecycle_store.as_ref() else {
-            return;
-        };
-        let session_id = self.session.session_id.clone();
-        let attempt = self.session.provider_start_ledger.len();
-        // ProviderConversationRole/ProviderName 均为 snake_case serde 枚举：
-        // key 与 provider 文本统一取 serde 投影（author/reviewer、codex/pi…）。
-        let role_text = serde_json::to_value(&role)
-            .ok()
-            .and_then(|value| value.as_str().map(ToString::to_string))
-            .unwrap_or_else(|| "provider".to_string());
-        let key = format!("workspace_{role_text}:{session_id}:{attempt}");
-        let provider_text = serde_json::to_value(&provider)
-            .ok()
-            .and_then(|value| value.as_str().map(ToString::to_string))
-            .unwrap_or_else(|| "unknown".to_string());
-        let started_at = chrono::Utc::now().to_rfc3339();
-        match store.claim_provider_start_with_details(
-            &session_id,
-            &key,
-            Some(provider_text.as_str()),
-            Some(started_at.clone()),
-        ) {
-            Ok(true) => {
-                self.session.provider_start_ledger.push(
-                    crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
-                        provider_start_idempotency_key: key,
-                        started: true,
-                        provider: Some(provider_text),
-                        started_at: Some(started_at),
-                    },
-                );
-            }
-            Ok(false) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    key = %key,
-                    "provider start already registered; skipping duplicate ledger entry"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    key = %key,
-                    error = %error,
-                    "provider start ledger registration failed (best-effort diagnostics)"
-                );
-            }
-        }
-    }
-
     pub async fn handle_user_message(
         &mut self,
         content: String,
@@ -1155,119 +1066,6 @@ impl WorkspaceEngine {
         self.complete_active_node(Some("生成完成".to_string()))
             .await;
         self.enter_author_confirm(Some(confirm_summary)).await;
-    }
-
-    /// 方案X阶段2：AI run 完成后解析 structured output，将 AI 声明的 involved/change_order
-    /// 回写到 Spec record（Task 4 集成点，复用 Task 3 的 parse_* 与 Task 2 的 update_*）。
-    ///
-    /// 仅对**聚合代码库** Story/Design 生效（record.logical_codebase_ref 非空）；传统单仓
-    /// （logical_codebase_ref 为 None）不执行回写，保持既有 append_version 行为不变。
-    ///
-    /// 返回：
-    /// - `Ok(None)`：回写成功，或回写不适用（单仓/非 Story/Design），无需诊断。
-    /// - `Ok(Some(message))`：回写被跳过但需可见——AI 未产出结构化 involved（缺 tag /
-    ///   schema 非法，REQ-PLN-04）或规划上下文 snapshot 缺失，消息供调用方记录诊断。
-    /// - `Err(ProductStoreError)`：真实 store 错误（加载 record/snapshot 失败、update
-    ///   校验失败），由调用方转为可见诊断（约束4：不沿用 `let _ =` 静默吞）。
-    fn write_back_aggregate_output(
-        &self,
-        store: &LifecycleStore,
-        artifact_markdown: &str,
-    ) -> Result<Option<String>, ProductStoreError> {
-        if !matches!(
-            self.session.workspace_type,
-            WorkspaceType::Story | WorkspaceType::Design
-        ) {
-            return Ok(None);
-        }
-        let project_id = &self.session.project_id;
-        let issue_id = &self.session.issue_id;
-        let entity_id = &self.session.entity_id;
-
-        // 从 record 读 logical_codebase_ref（单仓 None → 跳过回写）。
-        let record = store.load_existing_spec(project_id, issue_id, entity_id)?;
-        let logical_codebase_ref = match &record {
-            ExistingSpecRecord::Story { record, .. } => record.logical_codebase_ref,
-            ExistingSpecRecord::Design { record, .. } => record.logical_codebase_ref,
-        };
-        let Some(logical_codebase_ref) = logical_codebase_ref else {
-            return Ok(None);
-        };
-
-        // 从 snapshot 读 effective_member_ids（权威；缺失 → 可见诊断，无法校验）。
-        let effective_member_ids = match PlanningContextSnapshotStore::new(store.app_paths())
-            .load(project_id, issue_id)?
-        {
-            Some(snapshot) => snapshot.effective_member_ids,
-            None => {
-                return Ok(Some(
-                    "聚合代码库回写跳过：规划上下文 snapshot 缺失，无法校验 effective_member_ids"
-                        .to_string(),
-                ));
-            }
-        };
-
-        match self.session.workspace_type {
-            WorkspaceType::Story => {
-                let output = match parse_story_aggregate_output(artifact_markdown) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        return Ok(Some(format!(
-                            "Story 聚合回写跳过：AI 未产出结构化 involved（REQ-PLN-04）：{error:?}"
-                        )));
-                    }
-                };
-                let scope = AggregateStorySpecScope {
-                    logical_codebase_ref,
-                    effective_member_ids,
-                    involved_repository_ids: output.involved_repository_ids,
-                    focus_repository_id: output.focus_repository_id,
-                };
-                store.update_story_spec_aggregate(project_id, issue_id, entity_id, &scope)?;
-            }
-            WorkspaceType::Design => {
-                let output = match parse_design_aggregate_output(artifact_markdown) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        return Ok(Some(format!(
-                            "Design 聚合回写跳过：AI 未产出结构化 involved（REQ-PLN-04）：{error:?}"
-                        )));
-                    }
-                };
-                let scope = AggregateDesignSpecScope {
-                    logical_codebase_ref,
-                    effective_member_ids,
-                    involved_repository_ids: output.involved_repository_ids,
-                    change_order: output.change_order,
-                };
-                store.update_design_spec_aggregate(project_id, issue_id, entity_id, &scope)?;
-            }
-            _ => return Ok(None),
-        }
-        Ok(None)
-    }
-
-    /// 将聚合回写诊断追加为 session 的 system 消息（约束4：回写失败可见，不静默吞）。
-    /// 需在 checkpoint 创建**之后**调用：避免改变 `session.messages.len()` 或末尾消息，
-    /// 干扰 checkpoint 对最后一条 assistant 消息的 checkpoint_id 绑定。
-    fn append_aggregate_write_back_diagnostic(&mut self, message: &str) {
-        tracing::warn!(message, "aggregate involved write-back diagnostic");
-        let msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
-        let now = chrono::Utc::now().to_rfc3339();
-        self.session.messages.push(SessionMessage {
-            id: msg_id,
-            role: "system".to_string(),
-            content: message.to_string(),
-            checkpoint_id: None,
-            created_at: now,
-        });
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.append_workspace_message(
-                &self.session.session_id,
-                "system".to_string(),
-                message.to_string(),
-            );
-        }
     }
 }
 
