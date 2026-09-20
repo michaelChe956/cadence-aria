@@ -274,6 +274,12 @@ impl WorkspaceEngine {
         // P1-2：gateway review 路径同样绑定 run-bound durable sink（input 进入
         // validated 包装前附着，sink 随 input 原样透传 gateway.start_streaming）。
         let input = self.attach_tool_policy_audit(input);
+        // F-19：gateway review 路径同样登记 reviewer provider start（k3 P2——
+        // drive_review_session 的镜像，logical repository 会话实际走此分支）。
+        self.register_provider_start_in_ledger(
+            ProviderConversationRole::Reviewer,
+            reviewer.clone(),
+        );
         let first_session = start_review_session_via_gateway(
             &gateway,
             &reviewer,
