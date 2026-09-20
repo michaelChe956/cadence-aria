@@ -2,7 +2,7 @@
 
 ## Purpose
 
-在用户打开工作台时，按版本去重展示当前版本的中文更新说明弹窗，让用户及时了解版本更新内容。
+在用户打开工作台（`/workbench`）时，按版本去重展示当前版本的中文更新说明弹窗，让用户及时了解版本更新内容。已读状态按版本记录于浏览器本地（localStorage 不可用时静默降级不阻断工作台），展示内容取自人工维护的 CHANGELOG 中不高于当前版本的至多 4 个版本条目。
 
 ## Requirements
 
@@ -24,8 +24,6 @@
 
 - **WHEN** `CHANGELOG` 中存在版本高于 `CURRENT_VERSION` 的预备条目
 - **THEN** 弹窗不展示该条目，展示窗口从 `CURRENT_VERSION` 起向下取至多 4 条
-
-## ADDED Requirements
 
 ### Requirement: 关闭弹窗后标记版本为已读
 

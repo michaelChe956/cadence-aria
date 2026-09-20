@@ -44,8 +44,6 @@
 - **WHEN** 客户端对已删除或不存在的会话发起请求
 - **THEN** 系统返回明确「会话不存在」结果，不创建副作用
 
-## ADDED Requirements
-
 ### Requirement: 多轮 prompt 迭代由现有 CLI 执行器驱动
 
 系统 SHALL 复用现有 CLI 执行器（Claude Code / Codex 等所有受支持执行器）承载图片 prompt 迭代对话。系统 SHALL 通过执行器原生 session 续接机制传递上一轮的 provider session 标识，使后续轮次在该 session 上继续。每轮迭代中，系统 SHALL 要求执行器按约定结构化产出「建议的最终 prompt」。
