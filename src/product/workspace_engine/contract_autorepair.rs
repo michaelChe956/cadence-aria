@@ -271,18 +271,16 @@ fn outputs_capabilities_anchor(
                     contract_line = Some(field.value.line);
                 }
             }
-            "capabilities" => {
-                if contract_line.is_some() {
-                    // 块内多行 capabilities：`lower_outputs` 末行生效，
-                    // 持续覆盖以锚定末行。
-                    last_capabilities = Some((field.value.line, field.value.value.clone()));
-                }
+            "capabilities" if contract_line.is_some() => {
+                // 块内多行 capabilities：`lower_outputs` 末行生效，
+                // 持续覆盖以锚定末行。
+                last_capabilities = Some((field.value.line, field.value.value.clone()));
             }
             _ => {}
         }
     }
     match (contract_line, last_capabilities) {
-        (Some(line), Some((cap_line, value))) => OutputsAnchor::MergeInto {
+        (Some(_line), Some((cap_line, value))) => OutputsAnchor::MergeInto {
             line: cap_line,
             value,
         },
