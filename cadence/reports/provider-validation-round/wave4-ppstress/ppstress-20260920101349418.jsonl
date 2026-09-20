@@ -1,0 +1,191 @@
+{"at":"2026-09-20T10:13:49.469Z","event":"setup_done","issue_id":"issue_0296","work_item":"work_item_0001"}
+{"at":"2026-09-20T10:13:49.469Z","run":1,"event":"run_start"}
+{"at":"2026-09-20T10:13:49.482Z","run":1,"event":"attempt_created","attempt_id":"coding_attempt_8a9ef5d7e13e4f1a9552dad8419f8ff9","dto_status":"created"}
+{"at":"2026-09-20T10:13:49.486Z","run":1,"event":"ws_open"}
+{"at":"2026-09-20T10:13:49.487Z","run":1,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:13:49.702Z","run":1,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:49.735Z","run":1,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:13:49.735Z","run":1,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:13:49.736Z","run":1,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:49.742Z","run":1,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:13:49.785Z","run":1,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:13:49.785Z","run":1,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:54.764Z","run":1,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:13:54.764Z","run":1,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:54.764Z","run":1,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:54.764Z","run":1,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:13:55.265Z","run":1,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:13:55.270Z","run":1,"event":"ws_error"}
+{"at":"2026-09-20T10:13:55.270Z","run":1,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:13:55.282Z","run":1,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:13:56.284Z","run":2,"event":"run_start"}
+{"at":"2026-09-20T10:13:56.299Z","run":2,"event":"attempt_created","attempt_id":"coding_attempt_4fa9da0b6aa14e81bfdb3fe518520424","dto_status":"created"}
+{"at":"2026-09-20T10:13:56.301Z","run":2,"event":"ws_open"}
+{"at":"2026-09-20T10:13:56.302Z","run":2,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:13:56.511Z","run":2,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:56.534Z","run":2,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:13:56.534Z","run":2,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:13:56.534Z","run":2,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:13:56.541Z","run":2,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:13:56.589Z","run":2,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:13:56.589Z","run":2,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:01.550Z","run":2,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:01.550Z","run":2,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:01.550Z","run":2,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:01.550Z","run":2,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:02.052Z","run":2,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:02.053Z","run":2,"event":"ws_error"}
+{"at":"2026-09-20T10:14:02.053Z","run":2,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:02.085Z","run":2,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:03.085Z","run":3,"event":"run_start"}
+{"at":"2026-09-20T10:14:03.101Z","run":3,"event":"attempt_created","attempt_id":"coding_attempt_e77301a0a542434b918aafbca12a9a1b","dto_status":"created"}
+{"at":"2026-09-20T10:14:03.102Z","run":3,"event":"ws_open"}
+{"at":"2026-09-20T10:14:03.104Z","run":3,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:03.315Z","run":3,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:03.337Z","run":3,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:03.337Z","run":3,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:03.338Z","run":3,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:03.342Z","run":3,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:03.385Z","run":3,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:03.385Z","run":3,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:08.360Z","run":3,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:08.360Z","run":3,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:08.360Z","run":3,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:08.360Z","run":3,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:08.861Z","run":3,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:08.863Z","run":3,"event":"ws_error"}
+{"at":"2026-09-20T10:14:08.863Z","run":3,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:08.892Z","run":3,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:09.892Z","run":4,"event":"run_start"}
+{"at":"2026-09-20T10:14:10.407Z","run":4,"event":"attempt_created","attempt_id":"coding_attempt_58e682216afb49358ae1b1b51319df4f","dto_status":"created"}
+{"at":"2026-09-20T10:14:10.410Z","run":4,"event":"ws_open"}
+{"at":"2026-09-20T10:14:10.410Z","run":4,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:11.615Z","run":4,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:11.661Z","run":4,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:11.662Z","run":4,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:11.662Z","run":4,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:11.669Z","run":4,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:11.716Z","run":4,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:11.717Z","run":4,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:16.699Z","run":4,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:16.699Z","run":4,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:16.699Z","run":4,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:16.699Z","run":4,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:17.200Z","run":4,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:17.209Z","run":4,"event":"ws_error"}
+{"at":"2026-09-20T10:14:17.209Z","run":4,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:17.648Z","run":4,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:18.650Z","run":5,"event":"run_start"}
+{"at":"2026-09-20T10:14:19.057Z","run":5,"event":"attempt_created","attempt_id":"coding_attempt_389d87a8510242cd9b97611bd7fef6bb","dto_status":"created"}
+{"at":"2026-09-20T10:14:19.061Z","run":5,"event":"ws_open"}
+{"at":"2026-09-20T10:14:19.063Z","run":5,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:19.306Z","run":5,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:19.410Z","run":5,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:19.410Z","run":5,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:19.410Z","run":5,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:19.462Z","run":5,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:19.505Z","run":5,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:19.505Z","run":5,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:24.473Z","run":5,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:24.473Z","run":5,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:24.474Z","run":5,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:24.474Z","run":5,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:24.975Z","run":5,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:25.029Z","run":5,"event":"ws_error"}
+{"at":"2026-09-20T10:14:25.029Z","run":5,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:25.361Z","run":5,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:26.361Z","run":6,"event":"run_start"}
+{"at":"2026-09-20T10:14:26.389Z","run":6,"event":"attempt_created","attempt_id":"coding_attempt_04e03ec6cbbe47d7b32d41d5f48bb008","dto_status":"created"}
+{"at":"2026-09-20T10:14:26.390Z","run":6,"event":"ws_open"}
+{"at":"2026-09-20T10:14:26.391Z","run":6,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:26.652Z","run":6,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:26.705Z","run":6,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:26.706Z","run":6,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:26.706Z","run":6,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:26.719Z","run":6,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:26.761Z","run":6,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:26.761Z","run":6,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:31.730Z","run":6,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:31.730Z","run":6,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:31.730Z","run":6,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:31.730Z","run":6,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:32.230Z","run":6,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:32.232Z","run":6,"event":"ws_error"}
+{"at":"2026-09-20T10:14:32.232Z","run":6,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:32.254Z","run":6,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:33.254Z","run":7,"event":"run_start"}
+{"at":"2026-09-20T10:14:33.369Z","run":7,"event":"attempt_created","attempt_id":"coding_attempt_21476d4a060f4ac294d2ae3f328453ad","dto_status":"created"}
+{"at":"2026-09-20T10:14:33.371Z","run":7,"event":"ws_open"}
+{"at":"2026-09-20T10:14:33.372Z","run":7,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:34.135Z","run":7,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:34.158Z","run":7,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:34.158Z","run":7,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:34.158Z","run":7,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:34.164Z","run":7,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:34.208Z","run":7,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:34.209Z","run":7,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:39.213Z","run":7,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:39.213Z","run":7,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:39.213Z","run":7,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:39.213Z","run":7,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:39.714Z","run":7,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:39.715Z","run":7,"event":"ws_error"}
+{"at":"2026-09-20T10:14:39.715Z","run":7,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:39.944Z","run":7,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:40.944Z","run":8,"event":"run_start"}
+{"at":"2026-09-20T10:14:40.974Z","run":8,"event":"attempt_created","attempt_id":"coding_attempt_f37fadc146444458a6d1539ec4cf2383","dto_status":"created"}
+{"at":"2026-09-20T10:14:40.976Z","run":8,"event":"ws_open"}
+{"at":"2026-09-20T10:14:40.977Z","run":8,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:41.203Z","run":8,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:41.260Z","run":8,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:41.260Z","run":8,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:41.260Z","run":8,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:41.269Z","run":8,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:41.316Z","run":8,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:41.317Z","run":8,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:46.302Z","run":8,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:46.303Z","run":8,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:46.303Z","run":8,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:46.303Z","run":8,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:46.804Z","run":8,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:46.805Z","run":8,"event":"ws_error"}
+{"at":"2026-09-20T10:14:46.805Z","run":8,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:46.819Z","run":8,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:47.820Z","run":9,"event":"run_start"}
+{"at":"2026-09-20T10:14:47.844Z","run":9,"event":"attempt_created","attempt_id":"coding_attempt_041b8fb84c0144c2af807651b28b2747","dto_status":"created"}
+{"at":"2026-09-20T10:14:47.847Z","run":9,"event":"ws_open"}
+{"at":"2026-09-20T10:14:47.849Z","run":9,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:48.058Z","run":9,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:48.081Z","run":9,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:48.082Z","run":9,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:48.082Z","run":9,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:48.088Z","run":9,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:48.129Z","run":9,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:48.129Z","run":9,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:53.099Z","run":9,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:53.099Z","run":9,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:53.099Z","run":9,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:53.099Z","run":9,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:53.602Z","run":9,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:14:53.605Z","run":9,"event":"ws_error"}
+{"at":"2026-09-20T10:14:53.605Z","run":9,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:14:53.626Z","run":9,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:14:54.626Z","run":10,"event":"run_start"}
+{"at":"2026-09-20T10:14:54.648Z","run":10,"event":"attempt_created","attempt_id":"coding_attempt_1f2e3c29f60b49aaa84e82034a4ed486","dto_status":"created"}
+{"at":"2026-09-20T10:14:54.650Z","run":10,"event":"ws_open"}
+{"at":"2026-09-20T10:14:54.651Z","run":10,"event":"session_state","status":"created","stage":"prepare_context"}
+{"at":"2026-09-20T10:14:54.861Z","run":10,"event":"stage_change","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:54.892Z","run":10,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:54.892Z","run":10,"event":"provider_select_sent","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:54.892Z","run":10,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:54.899Z","run":10,"event":"provider_config_updated","role":"coder","provider":"fake"}
+{"at":"2026-09-20T10:14:54.941Z","run":10,"event":"gate_required","gate_id":"coding_stage_gate_0001","kind":"stage_gate","stage":"coding","isStageGate":true}
+{"at":"2026-09-20T10:14:54.941Z","run":10,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:59.918Z","run":10,"event":"stage_gate_auto_continue"}
+{"at":"2026-09-20T10:14:59.918Z","run":10,"event":"session_state","status":"running","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:59.918Z","run":10,"event":"session_state","status":"awaiting_manual_recovery","stage":"worktree_prepare"}
+{"at":"2026-09-20T10:14:59.918Z","run":10,"event":"protocol_error","code":"coding_start_failed","message":"product_store_not_found: coding author provider Fake"}
+{"at":"2026-09-20T10:15:00.418Z","run":10,"event":"run_ws_phase_done","outcome":"death_amr","final_status":"awaiting_manual_recovery"}
+{"at":"2026-09-20T10:15:00.420Z","run":10,"event":"ws_error"}
+{"at":"2026-09-20T10:15:00.420Z","run":10,"event":"ws_close","code":1006}
+{"at":"2026-09-20T10:15:00.445Z","run":10,"event":"run_done","outcome":"death_amr","final_status":"awaiting_manual_recovery","aborted":true,"death_detail":"product_store_not_found: coding author provider Fake"}

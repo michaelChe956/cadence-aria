@@ -1,0 +1,1297 @@
+{
+  "started_at": "2026-09-20T10:13:49.424Z",
+  "base_url": "http://127.0.0.1:4317",
+  "server_pid": 3305925,
+  "provider": "fake",
+  "runs_requested": 10,
+  "setup": {
+    "issue_id": "issue_0296",
+    "work_item_id": "work_item_0001"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "attempt_id": "coding_attempt_8a9ef5d7e13e4f1a9552dad8419f8ff9",
+      "t_create": "2026-09-20T10:13:49.469Z",
+      "t_gate": "2026-09-20T10:13:49.735Z",
+      "t_provider_select": "2026-09-20T10:13:49.735Z",
+      "t_gate_expired": "2026-09-20T10:13:54.764Z",
+      "t_end": "2026-09-20T10:13:55.264Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:13:49.741Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:13:49.487Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:13:49.736Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:13:54.764Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:13:49.486Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:49.487Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:13:49.702Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:13:49.735Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:13:49.735Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:49.736Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:13:49.742Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:13:49.784Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:49.785Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:13:54.764Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:54.764Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:54.764Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:13:54.764Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:13:55.270Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:13:55.270Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:13:55.282Z"
+    },
+    {
+      "run": 2,
+      "attempt_id": "coding_attempt_4fa9da0b6aa14e81bfdb3fe518520424",
+      "t_create": "2026-09-20T10:13:56.284Z",
+      "t_gate": "2026-09-20T10:13:56.534Z",
+      "t_provider_select": "2026-09-20T10:13:56.534Z",
+      "t_gate_expired": "2026-09-20T10:14:01.550Z",
+      "t_end": "2026-09-20T10:14:02.051Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:13:56.541Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:13:56.302Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:13:56.534Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:01.550Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:13:56.301Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:56.302Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:13:56.511Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:13:56.534Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:13:56.534Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:56.534Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:13:56.541Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:13:56.588Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:13:56.589Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:01.550Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:01.550Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:01.550Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:01.550Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:02.053Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:02.053Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:02.085Z"
+    },
+    {
+      "run": 3,
+      "attempt_id": "coding_attempt_e77301a0a542434b918aafbca12a9a1b",
+      "t_create": "2026-09-20T10:14:03.085Z",
+      "t_gate": "2026-09-20T10:14:03.337Z",
+      "t_provider_select": "2026-09-20T10:14:03.337Z",
+      "t_gate_expired": "2026-09-20T10:14:08.360Z",
+      "t_end": "2026-09-20T10:14:08.861Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:03.342Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:03.104Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:03.338Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:08.360Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:03.102Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:03.104Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:03.315Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:03.337Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:03.337Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:03.338Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:03.342Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:03.385Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:03.385Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:08.360Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:08.360Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:08.360Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:08.360Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:08.863Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:08.863Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:08.892Z"
+    },
+    {
+      "run": 4,
+      "attempt_id": "coding_attempt_58e682216afb49358ae1b1b51319df4f",
+      "t_create": "2026-09-20T10:14:09.892Z",
+      "t_gate": "2026-09-20T10:14:11.661Z",
+      "t_provider_select": "2026-09-20T10:14:11.661Z",
+      "t_gate_expired": "2026-09-20T10:14:16.699Z",
+      "t_end": "2026-09-20T10:14:17.199Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:11.669Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:10.410Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:11.662Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:16.699Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:10.410Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:10.410Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:11.615Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:11.661Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:11.662Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:11.662Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:11.669Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:11.716Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:11.717Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:16.699Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:16.699Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:16.699Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:16.699Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:17.209Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:17.209Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:17.648Z"
+    },
+    {
+      "run": 5,
+      "attempt_id": "coding_attempt_389d87a8510242cd9b97611bd7fef6bb",
+      "t_create": "2026-09-20T10:14:18.650Z",
+      "t_gate": "2026-09-20T10:14:19.410Z",
+      "t_provider_select": "2026-09-20T10:14:19.410Z",
+      "t_gate_expired": "2026-09-20T10:14:24.473Z",
+      "t_end": "2026-09-20T10:14:24.974Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:19.462Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:19.063Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:19.410Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:24.473Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:19.061Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:19.063Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:19.306Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:19.410Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:19.410Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:19.410Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:19.462Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:19.505Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:19.505Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:24.473Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:24.473Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:24.474Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:24.474Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:25.029Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:25.029Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:25.361Z"
+    },
+    {
+      "run": 6,
+      "attempt_id": "coding_attempt_04e03ec6cbbe47d7b32d41d5f48bb008",
+      "t_create": "2026-09-20T10:14:26.361Z",
+      "t_gate": "2026-09-20T10:14:26.705Z",
+      "t_provider_select": "2026-09-20T10:14:26.705Z",
+      "t_gate_expired": "2026-09-20T10:14:31.730Z",
+      "t_end": "2026-09-20T10:14:32.230Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:26.719Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:26.391Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:26.706Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:31.730Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:26.390Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:26.391Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:26.652Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:26.705Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:26.706Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:26.706Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:26.719Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:26.761Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:26.761Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:31.730Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:31.730Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:31.730Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:31.730Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:32.232Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:32.232Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:32.254Z"
+    },
+    {
+      "run": 7,
+      "attempt_id": "coding_attempt_21476d4a060f4ac294d2ae3f328453ad",
+      "t_create": "2026-09-20T10:14:33.254Z",
+      "t_gate": "2026-09-20T10:14:34.158Z",
+      "t_provider_select": "2026-09-20T10:14:34.158Z",
+      "t_gate_expired": "2026-09-20T10:14:39.213Z",
+      "t_end": "2026-09-20T10:14:39.713Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:34.164Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:33.372Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:34.158Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:39.213Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:33.371Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:33.372Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:34.135Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:34.158Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:34.158Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:34.158Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:34.164Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:34.208Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:34.209Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:39.213Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:39.213Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:39.213Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:39.213Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:39.715Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:39.715Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:39.944Z"
+    },
+    {
+      "run": 8,
+      "attempt_id": "coding_attempt_f37fadc146444458a6d1539ec4cf2383",
+      "t_create": "2026-09-20T10:14:40.944Z",
+      "t_gate": "2026-09-20T10:14:41.260Z",
+      "t_provider_select": "2026-09-20T10:14:41.260Z",
+      "t_gate_expired": "2026-09-20T10:14:46.302Z",
+      "t_end": "2026-09-20T10:14:46.804Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:41.269Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:40.977Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:41.260Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:46.303Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:40.976Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:40.977Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:41.203Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:41.260Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:41.260Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:41.260Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:41.269Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:41.316Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:41.317Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:46.302Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:46.302Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:46.303Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:46.303Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:46.805Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:46.805Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:46.819Z"
+    },
+    {
+      "run": 9,
+      "attempt_id": "coding_attempt_041b8fb84c0144c2af807651b28b2747",
+      "t_create": "2026-09-20T10:14:47.820Z",
+      "t_gate": "2026-09-20T10:14:48.082Z",
+      "t_provider_select": "2026-09-20T10:14:48.082Z",
+      "t_gate_expired": "2026-09-20T10:14:53.099Z",
+      "t_end": "2026-09-20T10:14:53.602Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:48.088Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:47.849Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:48.082Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:53.099Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:47.847Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:47.849Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:48.057Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:48.081Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:48.082Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:48.082Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:48.088Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:48.129Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:48.129Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:53.099Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:53.099Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:53.099Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:53.099Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:14:53.605Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:14:53.605Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:14:53.626Z"
+    },
+    {
+      "run": 10,
+      "attempt_id": "coding_attempt_1f2e3c29f60b49aaa84e82034a4ed486",
+      "t_create": "2026-09-20T10:14:54.626Z",
+      "t_gate": "2026-09-20T10:14:54.892Z",
+      "t_provider_select": "2026-09-20T10:14:54.892Z",
+      "t_gate_expired": "2026-09-20T10:14:59.918Z",
+      "t_end": "2026-09-20T10:15:00.418Z",
+      "provider_select_ack": {
+        "role": "coder",
+        "provider": "fake",
+        "at": "2026-09-20T10:14:54.899Z"
+      },
+      "status_timeline": [
+        {
+          "status": "created",
+          "stage": "prepare_context",
+          "at": "2026-09-20T10:14:54.651Z"
+        },
+        {
+          "status": "running",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:54.892Z"
+        },
+        {
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare",
+          "at": "2026-09-20T10:14:59.918Z"
+        }
+      ],
+      "ws_events": [
+        {
+          "name": "ws_open",
+          "at": "2026-09-20T10:14:54.650Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:54.651Z",
+          "status": "created",
+          "stage": "prepare_context"
+        },
+        {
+          "name": "stage_change",
+          "at": "2026-09-20T10:14:54.860Z",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:54.892Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "provider_select_sent",
+          "at": "2026-09-20T10:14:54.892Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:54.892Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "provider_config_updated",
+          "at": "2026-09-20T10:14:54.899Z",
+          "role": "coder",
+          "provider": "fake"
+        },
+        {
+          "name": "gate_required",
+          "at": "2026-09-20T10:14:54.941Z",
+          "gate_id": "coding_stage_gate_0001",
+          "kind": "stage_gate",
+          "stage": "coding",
+          "isStageGate": true
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:54.941Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "stage_gate_auto_continue",
+          "at": "2026-09-20T10:14:59.918Z"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:59.918Z",
+          "status": "running",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "session_state",
+          "at": "2026-09-20T10:14:59.918Z",
+          "status": "awaiting_manual_recovery",
+          "stage": "worktree_prepare"
+        },
+        {
+          "name": "protocol_error",
+          "at": "2026-09-20T10:14:59.918Z",
+          "code": "coding_start_failed",
+          "message": "product_store_not_found: coding author provider Fake"
+        },
+        {
+          "name": "ws_error",
+          "at": "2026-09-20T10:15:00.420Z"
+        },
+        {
+          "name": "ws_close",
+          "at": "2026-09-20T10:15:00.420Z",
+          "code": 1006
+        }
+      ],
+      "outcome": "death_amr",
+      "final_status": "awaiting_manual_recovery",
+      "manual_recovery_reason": "coding_runner_failed_while_running",
+      "death_failure_detail": "product_store_not_found: coding author provider Fake",
+      "aborted": true,
+      "initial_status": "created",
+      "death_diagnostic_entry_id": "coding_manual_recovery_diagnostic_0001",
+      "abort_http_status": 200,
+      "t_abort_done": "2026-09-20T10:15:00.445Z"
+    }
+  ],
+  "death_count": 10,
+  "no_death_count": 0,
+  "error_count": 0,
+  "completed_at": "2026-09-20T10:15:01.447Z"
+}
