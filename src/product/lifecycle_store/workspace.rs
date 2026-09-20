@@ -650,6 +650,26 @@ impl LifecycleStore {
         session_id: &str,
         provider_start_idempotency_key: &str,
     ) -> Result<bool, ProductStoreError> {
+        self.claim_provider_start_with_details(
+            session_id,
+            provider_start_idempotency_key,
+            None,
+            None,
+        )
+    }
+
+    /// F-19：带诊断详情的 provider start 登记（story/design 等 legacy 流专用，
+    /// 对照 SC 面 `reserve_single_candidate_provider_start` 先例）。与
+    /// `claim_provider_start` 同语义：同 key 幂等（重复 claim 返回 false）、
+    /// 排它锁下原子落盘；条目额外携带 provider 名与登记时间，供监控区分
+    /// 「start 未发生」（ledger 空）与「start 后楔死」（有登记无后续事件）。
+    pub fn claim_provider_start_with_details(
+        &self,
+        session_id: &str,
+        provider_start_idempotency_key: &str,
+        provider: Option<&str>,
+        started_at: Option<String>,
+    ) -> Result<bool, ProductStoreError> {
         validate_relative_id(session_id)?;
         if provider_start_idempotency_key.trim().is_empty() {
             return Err(ProductStoreError::InvalidRecord {
@@ -671,6 +691,8 @@ impl LifecycleStore {
                 crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                     provider_start_idempotency_key: provider_start_idempotency_key.to_string(),
                     started: true,
+                    provider: provider.map(ToString::to_string),
+                    started_at,
                 },
             );
             session.updated_at = Utc::now().to_rfc3339();

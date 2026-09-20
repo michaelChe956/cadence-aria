@@ -72,8 +72,14 @@ fn human_gate_close_confirm_at_evaluate_promotes_phase_atomically() {
         .compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running)
         .expect("confirm at an Evaluate gate must close via human-authority promotion");
     assert_eq!(saved.status, WorkspaceSessionStatus::Running);
-    assert_eq!(saved.single_candidate_phase, Some(SingleCandidatePhase::Approval));
-    assert!(saved.human_gate_snapshot.is_some(), "Running 关门不清门快照");
+    assert_eq!(
+        saved.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval)
+    );
+    assert!(
+        saved.human_gate_snapshot.is_some(),
+        "Running 关门不清门快照"
+    );
     assert_eq!(
         saved.work_item_plan_source_revision_ref,
         Some("source_revision_ref_0001".to_string())
@@ -89,11 +95,23 @@ fn human_gate_close_confirm_at_evaluate_promotes_phase_atomically() {
 
     let durable = store.get_workspace_session(&expected.id).unwrap();
     assert_eq!(durable.status, WorkspaceSessionStatus::Running);
-    assert_eq!(durable.single_candidate_phase, Some(SingleCandidatePhase::Approval));
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval)
+    );
     assert!(durable.human_gate_snapshot.is_some());
-    assert_eq!(durable.work_item_plan_source_revision_ref, expected.work_item_plan_source_revision_ref);
-    assert_eq!(durable.plan_candidate_ir_ref, expected.plan_candidate_ir_ref);
-    assert_eq!(durable.mechanical_report_ref, expected.mechanical_report_ref);
+    assert_eq!(
+        durable.work_item_plan_source_revision_ref,
+        expected.work_item_plan_source_revision_ref
+    );
+    assert_eq!(
+        durable.plan_candidate_ir_ref,
+        expected.plan_candidate_ir_ref
+    );
+    assert_eq!(
+        durable.mechanical_report_ref,
+        expected.mechanical_report_ref
+    );
 }
 
 /// ②反伪造：Evaluate 相位但快照缺席 → Conflict（不是本 CAS 应关的门形态）。
@@ -138,7 +156,8 @@ fn human_gate_close_rejects_non_gate_phases() {
         Some(SingleCandidatePhase::Failed),
         None,
     ] {
-        let expected = gate_close_session(&store, phase, WorkspaceSessionStatus::WaitingForHuman, true);
+        let expected =
+            gate_close_session(&store, phase, WorkspaceSessionStatus::WaitingForHuman, true);
         assert_conflict_kind(
             store.compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running),
             "human_gate_close",
@@ -155,7 +174,8 @@ fn human_gate_close_requires_waiting_for_human_status() {
         WorkspaceSessionStatus::Confirmed,
         WorkspaceSessionStatus::Terminated,
     ] {
-        let expected = gate_close_session(&store, Some(SingleCandidatePhase::Approval), status, true);
+        let expected =
+            gate_close_session(&store, Some(SingleCandidatePhase::Approval), status, true);
         assert_conflict_kind(
             store.compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running),
             "human_gate_close",
@@ -204,7 +224,10 @@ fn human_gate_close_terminate_at_evaluate_closes_without_phase_promotion() {
 
     let durable = store.get_workspace_session(&expected.id).unwrap();
     assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
-    assert_eq!(durable.single_candidate_phase, Some(SingleCandidatePhase::Evaluate));
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Evaluate)
+    );
     assert_eq!(durable.human_gate_snapshot, None);
     assert_eq!(durable.human_gate_reservation, None);
 }
@@ -225,6 +248,8 @@ fn human_gate_close_stale_expected_record_keeps_workspace_session_conflict() {
         crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
             provider_start_idempotency_key: "stale_start_0001".to_string(),
             started: true,
+            provider: None,
+            started_at: None,
         },
     );
     write_json(

@@ -328,6 +328,8 @@ mod tests {
         provider_start_ledger.push(ProviderStartLedgerEntry {
             provider_start_idempotency_key: "start:author:round-1".to_string(),
             started: true,
+            provider: None,
+            started_at: None,
         });
 
         let value = serde_json::to_value(message).unwrap();

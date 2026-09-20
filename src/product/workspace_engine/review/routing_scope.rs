@@ -74,6 +74,8 @@ fn preclaimed_repair_start(
         crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
             provider_start_idempotency_key,
             started: true,
+            provider: None,
+            started_at: None,
         },
     )
 }

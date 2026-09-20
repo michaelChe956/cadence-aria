@@ -210,6 +210,8 @@ impl LifecycleStore {
                 crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                     provider_start_idempotency_key: provider_start_idempotency_key.to_string(),
                     started: true,
+                    provider: None,
+                    started_at: None,
                 },
             );
             stored.updated_at = Utc::now().to_rfc3339();
@@ -783,6 +785,8 @@ mod tests {
             crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                 provider_start_idempotency_key: repair_key.clone(),
                 started: true,
+                provider: None,
+                started_at: None,
             },
         );
         let preclaimed = store

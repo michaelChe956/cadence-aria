@@ -396,6 +396,8 @@ fn verification_scope_repeated_original_fingerprint_enters_human_without_second_
     engine.session.provider_start_ledger = vec![ProviderStartLedgerEntry {
         provider_start_idempotency_key: "repair-001".to_string(),
         started: true,
+        provider: None,
+        started_at: None,
     }];
     let mut persisted = lifecycle
         .get_workspace_session(&engine.session().session_id)

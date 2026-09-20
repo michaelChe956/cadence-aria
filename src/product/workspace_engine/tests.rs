@@ -52,6 +52,7 @@ mod conversational_gate_close;
 mod conversational_gate_recovery;
 mod conversational_gate_revision;
 mod conversational_gate_revision_fingerprint;
+mod provider_idle_watchdog;
 mod review_repair_prompt;
 mod sc_compile_reredrive_prompt;
 mod single_candidate;

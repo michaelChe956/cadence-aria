@@ -90,6 +90,14 @@ pub struct HumanGateSnapshot {
 pub struct ProviderStartLedgerEntry {
     pub provider_start_idempotency_key: String,
     pub started: bool,
+    /// F-19（诊断，wire 兼容）：登记的 provider 名（ProviderName 的 serde 文本，
+    /// 如 `codex`/`pi`/`claude_code`）。仅 legacy 流登记路径填写；既有 SC/门
+    /// 预留路径保持 `None`，旧 JSON 与 wire 输出零变化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// F-19（诊断，wire 兼容）：登记时间（RFC3339 UTC）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
 }
 
 /// Per-artifact review budget state. A review cycle is identified by the

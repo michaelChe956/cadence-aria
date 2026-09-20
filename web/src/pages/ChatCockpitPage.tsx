@@ -1093,8 +1093,18 @@ export function ChatCockpitPage({
                 role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
               />
             ) : null}
+            {/* F-19（cadence/notes 2026-09-19 阶段4监控）：生成/评审/修订期必须
+                暴露中止入口——此前仅 prepare_context/author_confirm 渲染输入条，
+                codex run 楔死 27min 期间页面无任何脱困控件。矩阵
+                （workspace_ws_handler/protocol.rs Running/CrossReview/Revision 臂）
+                均已放行 WsInMessage::Abort；ChatInputBar 的 BUSY_STAGES 自带
+                禁输入+仅中止钮形态。 */}
             {isCurrentSession &&
-            (state.stage === "prepare_context" || state.stage === "author_confirm") ? (
+            (state.stage === "prepare_context" ||
+              state.stage === "author_confirm" ||
+              state.stage === "running" ||
+              state.stage === "cross_review" ||
+              state.stage === "revision") ? (
               <ChatInputBar
                 ref={chatInputRef}
                 stage={state.stage}

@@ -534,4 +534,26 @@ describe("ChatCockpitPage", () => {
 
     expect(screen.getByRole("button", { name: "开始生成" })).toBeDisabled();
   });
+
+  // F-19（cadence/notes 2026-09-19 阶段4监控）：v27 story 会话 codex run 楔死
+  // 27min，运行中页面无任何 中止/终止/放弃 控件（abortish 空），用户无法脱困。
+  // cockpit 页 ChatInputBar 此前仅在 prepare_context/author_confirm 渲染；
+  // 生成期（running，矩阵 protocol.rs 已放行 WsInMessage::Abort）必须暴露
+  // 中止入口。
+  it("exposes the abort entry during a running story generation and wires it to ws abort", async () => {
+    const user = userEvent.setup();
+    const abort = vi.fn();
+    const runningWorkspaceWs = mockWorkspaceWs({ abort, connectionStatus: "connected" });
+    useWorkspaceStore.setState({ stage: "running" });
+
+    renderCockpitWith(runningWorkspaceWs);
+
+    const abortButton = screen.getByRole("button", { name: /中止/ });
+    expect(abortButton).toBeEnabled();
+
+    await user.click(abortButton);
+
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "开始生成" })).toBeNull();
+  });
 });

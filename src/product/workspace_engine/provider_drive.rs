@@ -11,7 +11,99 @@ use crate::product::workspace_engine::aggregate_output_parser::{
 };
 use choice_audit::ChoiceResponseAuditInput;
 
+/// F-19 看门狗：provider 会话零活动上限（拉起后无事件/命令持续至此即判楔死）。
+///
+/// 依据：v27 story 会话 codex app-server 楔死实测——09:16 拉起，前几分钟 9 条
+/// skill 探索命令后**完全静默 27min**（CPU 时间采样零增长、出站 TCP 0 条、
+/// durable streaming 恒 137 字；cadence/notes 2026-09-19 阶段4监控 F-19）。
+/// 流式 provider 正常推理逐 token 产出事件，合法静默间隙远小于 10min；
+/// `DEFAULT_PROVIDER_TIMEOUT_SECS=3h` 是整 run 总上限，对「子进程活着但不
+/// 干活」无效（27min 楔死全程在总上限内）。取 600s：约为实测楔死确认时间
+/// 的 1/3（27min→10min 即转可诊断终态），同时低于 ApprovalBridge
+/// `PERMISSION_TIMEOUT=15min` 的人工等待界（权限/选择挂起期间看门狗不计时，
+/// 见驱动循环挂起逻辑）。
+#[cfg(not(test))]
+pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(600);
+#[cfg(test)]
+pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(150);
+
 impl WorkspaceEngine {
+    /// F-19：legacy 流（story/design/workitem）provider start 的诊断登记。
+    ///
+    /// 拉起 provider 子进程前在 durable `provider_start_ledger` 落一条带
+    /// provider 名与时间戳的条目（key 形 `workspace_{role}:{session_id}:{n}`，
+    /// 对照 SC 面 `single_candidate_author:{session}:{n}` 先例）。F-19 实测中
+    /// ledger 恒空导致「start 未发生」与「start 后楔死」无法区分——本登记补齐
+    /// 该诊断面（SC/门预留路径各自已有登记，不经此处）。
+    ///
+    /// 失败语义：诊断面 best-effort——登记失败仅告警不阻断 run（fail-closed 会
+    /// 因 store 抖动杀死正常生成，与登记目的不成比例；对照 tool-policy audit
+    /// 的 fail-closed 语义：那是承重契约，这是观测登记）。
+    pub(crate) fn register_provider_start_in_ledger(
+        &mut self,
+        role: ProviderConversationRole,
+        provider: ProviderName,
+    ) {
+        // 范围闸：WorkItemPlan 面（Legacy+SingleCandidate）的 ledger 键索引由
+        // 既有预留路径按 len 派生（routing_scope/SC reserve），追加诊断条目会
+        // 漂移其键算术；该面已各自登记，本登记仅覆盖 story/design/workitem
+        // 聊天面（F-19 实测楔死面）。
+        if matches!(self.session.workspace_type, WorkspaceType::WorkItemPlan) {
+            return;
+        }
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            return;
+        };
+        let session_id = self.session.session_id.clone();
+        let attempt = self.session.provider_start_ledger.len();
+        // ProviderConversationRole/ProviderName 均为 snake_case serde 枚举：
+        // key 与 provider 文本统一取 serde 投影（author/reviewer、codex/pi…）。
+        let role_text = serde_json::to_value(&role)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "provider".to_string());
+        let key = format!("workspace_{role_text}:{session_id}:{attempt}");
+        let provider_text = serde_json::to_value(&provider)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        let started_at = chrono::Utc::now().to_rfc3339();
+        match store.claim_provider_start_with_details(
+            &session_id,
+            &key,
+            Some(provider_text.as_str()),
+            Some(started_at.clone()),
+        ) {
+            Ok(true) => {
+                self.session.provider_start_ledger.push(
+                    crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+                        provider_start_idempotency_key: key,
+                        started: true,
+                        provider: Some(provider_text),
+                        started_at: Some(started_at),
+                    },
+                );
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    key = %key,
+                    "provider start already registered; skipping duplicate ledger entry"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    key = %key,
+                    error = %error,
+                    "provider start ledger registration failed (best-effort diagnostics)"
+                );
+            }
+        }
+    }
+
     pub async fn handle_user_message(
         &mut self,
         content: String,
@@ -125,6 +217,12 @@ impl WorkspaceEngine {
                     attempted: false,
                 }
             });
+        // F-19：legacy story/design author run 拉起前登记 provider start
+        //（SC 面有自己的 reserve_single_candidate_provider_start，不经此处）。
+        self.register_provider_start_in_ledger(
+            ProviderConversationRole::Author,
+            self.session.author_provider.clone(),
+        );
         let input = self.attach_tool_policy_audit(input);
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
@@ -305,9 +403,54 @@ impl WorkspaceEngine {
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
         let mut pending_choice_requests: HashMap<String, ChoiceRequestData> = HashMap::new();
+        // F-19 零活动看门狗：事件/命令任一活动即重置；等待人工权限/选择应答
+        // 期间挂起（人工等待由 ApprovalBridge PERMISSION_TIMEOUT 与其
+        // PermissionTimeout 事件收口，不是 provider 楔死）。
+        let idle_watchdog_timeout = PROVIDER_IDLE_WATCHDOG_TIMEOUT;
+        let idle_watchdog =
+            tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
+        tokio::pin!(idle_watchdog);
+        let mut waiting_for_permission = false;
 
         while events_open {
             tokio::select! {
+                _ = &mut idle_watchdog,
+                if !waiting_for_permission && pending_choice_requests.is_empty() =>
+                {
+                    // F-19：provider 会话零活动楔死（触发依据见常量注释）。
+                    // 处置对照 handle_permission_timeout 先例：Abort 命令入会话
+                    // kill 链 + cancel 触发 adapter 侧 child kill；失败节点带
+                    // 稳定原因码；finish_failed_run 把会话转回 Open/
+                    // prepare_context——story/design 面的恢复语义即「可重新
+                    // 开始生成」（对照 coding 面 AwaitingManualRecovery 的
+                    // abort-only：workspace 会话是对话式可重跑面，无需 AMR）。
+                    eprintln!(
+                        "[aria-cancellation] workspace provider_drive idle_watchdog trigger=provider_idle_watchdog session_id={} role={role:?} timeout_secs={}",
+                        self.session.session_id,
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_idle_watchdog: provider 会话 {} 秒零活动（无事件/命令），疑似楔死，运行已由看门狗中止；可重新开始生成",
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    if let Some(node_id) = node_id.as_deref() {
+                        let _ = self.flush_stream_buffer(node_id).await;
+                        self.update_timeline_node(
+                            node_id,
+                            TimelineNodeStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
+                    }
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error { message })
+                        .await;
+                    self.finish_failed_run().await;
+                    return;
+                }
                 _ = cancel.cancelled() => {
                     // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：驱动循环观察到
                     // engine/run token 被外部取消（谁取消见 ws 侧 trigger 打点）。
@@ -322,6 +465,10 @@ impl WorkspaceEngine {
                     return;
                 }
                 command = command_rx.recv(), if commands_open => {
+                    // F-19：任何命令活动（含人工权限/选择应答）重置零活动看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     match command {
                         Some(ProviderCommand::Abort) => {
                             // 诊断打点：Abort 命令到达驱动循环（来源：ws abort/断连
@@ -343,6 +490,9 @@ impl WorkspaceEngine {
                             approved,
                             reason,
                         }) => {
+                            // F-19：人工权限应答到达，解除看门狗挂起（permission
+                            // 等待期由 adapter 侧 PERMISSION_TIMEOUT 收口）。
+                            waiting_for_permission = false;
                             tracing::info!(permission_id = %id, "engine forwarding permission response");
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self
@@ -412,6 +562,10 @@ impl WorkspaceEngine {
                     }
                 }
                 event = session.events.recv() => {
+                    // F-19：任何 provider 事件重置零活动看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     let Some(event) = event else {
                         events_open = false;
                         continue;
@@ -433,6 +587,8 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            // F-19：权限请求悬置期间等待人工输入，看门狗挂起。
+                            waiting_for_permission = true;
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self
                                     .persist_permission_request(

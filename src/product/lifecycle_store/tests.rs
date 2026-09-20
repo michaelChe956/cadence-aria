@@ -204,6 +204,8 @@ fn human_gate_reservation_replay_repairs_torn_turn_file_without_double_debit() {
         crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
             provider_start_idempotency_key: reservation.provider_start_idempotency_key.clone(),
             started: true,
+            provider: None,
+            started_at: None,
         },
     );
     write_json(&session_path, &session).unwrap();
@@ -624,6 +626,52 @@ fn lifecycle_creation_uses_ids_above_deleted_middle_records() {
         .unwrap();
 
     assert_eq!(create_story("Replacement").id, "story_spec_0004");
+}
+
+// F-19：provider start 诊断登记（story/design 等 legacy 流）——条目必须带
+// provider/时间戳且同 key 幂等；缺省两字段条目与旧 JSON 双向兼容。
+#[test]
+fn claim_provider_start_with_details_registers_provider_and_timestamp_idempotently() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "story_spec_0001", WorkspaceType::Story);
+    let started_at = "2026-09-20T02:00:00+00:00".to_string();
+
+    let first = store
+        .claim_provider_start_with_details(
+            &session.id,
+            "workspace_author:session:0",
+            Some("codex"),
+            Some(started_at.clone()),
+        )
+        .expect("claim provider start");
+    assert!(first, "首次登记必须成功");
+    let replay = store
+        .claim_provider_start_with_details(
+            &session.id,
+            "workspace_author:session:0",
+            Some("codex"),
+            Some(started_at.clone()),
+        )
+        .expect("replay claim");
+    assert!(!replay, "同 key 重放不得二次登记");
+
+    let reloaded = store.get_workspace_session(&session.id).expect("reload");
+    assert_eq!(reloaded.provider_start_ledger.len(), 1);
+    let entry = &reloaded.provider_start_ledger[0];
+    assert_eq!(
+        entry.provider_start_idempotency_key,
+        "workspace_author:session:0"
+    );
+    assert!(entry.started);
+    assert_eq!(entry.provider.as_deref(), Some("codex"));
+    assert_eq!(entry.started_at.as_deref(), Some(started_at.as_str()));
+
+    // 旧两字段 ledger JSON 必须继续可读（wire 兼容：缺省字段反序列化为 None）。
+    let legacy_entry: crate::product::work_item_plan_policy::ProviderStartLedgerEntry =
+        serde_json::from_str(r#"{"provider_start_idempotency_key":"legacy:1","started":true}"#)
+            .expect("legacy two-field entry deserializes");
+    assert_eq!(legacy_entry.provider, None);
+    assert_eq!(legacy_entry.started_at, None);
 }
 
 // Task 9 三元键 shared worktree 回归测试拆分到独立文件，经 include! 引入（large_file_guard 1200 行红线）。

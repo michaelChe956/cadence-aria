@@ -47,7 +47,9 @@ fn recovery_gate(resumable: bool) -> crate::product::work_item_plan_policy::Huma
                 "需要人工决定范围",
                 Some("scope"),
             ),
-            category: Some(crate::product::work_item_plan_policy::ReviewFindingCategory::ScopeConflict),
+            category: Some(
+                crate::product::work_item_plan_policy::ReviewFindingCategory::ScopeConflict,
+            ),
             severity: "blocking".to_string(),
             message: "需要人工决定范围".to_string(),
             evidence: Some("冲突证据".to_string()),
@@ -68,7 +70,12 @@ fn recovery_engine(
     record: WorkspaceSessionRecord,
 ) -> WorkspaceEngine {
     let (events, _events_rx) = mpsc::channel(8);
-    WorkspaceEngine::new_persistent(checkpoints, store, events, WorkspaceSession::from_record(record))
+    WorkspaceEngine::new_persistent(
+        checkpoints,
+        store,
+        events,
+        WorkspaceSession::from_record(record),
+    )
 }
 
 fn stopped_takeover_parent(
@@ -88,9 +95,11 @@ fn stopped_takeover_parent(
                 status: WorkspaceSessionStatus::StoppedNeedsHuman,
                 single_candidate_phase: None,
                 run_history: parent.run_history.clone(),
-                scope: Some(crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
-                    format!("outline:{entity_id}"),
-                )),
+                scope: Some(
+                    crate::product::work_item_plan_policy::ReviewInvocationScope::initial(format!(
+                        "outline:{entity_id}"
+                    )),
+                ),
                 gate: Some(recovery_gate(resumable)),
                 diagnostics: Vec::new(),
                 repair_reservation: None,
@@ -116,10 +125,14 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
         state: crate::product::work_item_plan_policy::RepairReservationState::Reserved,
         commit_id: None,
     };
-    let ledger = vec![crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
-        provider_start_idempotency_key: "provider-start-1".to_string(),
-        started: true,
-    }];
+    let ledger = vec![
+        crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+            provider_start_idempotency_key: "provider-start-1".to_string(),
+            started: true,
+            provider: None,
+            started_at: None,
+        },
+    ];
 
     let saved = store
         .compare_and_save_policy_route(
@@ -139,7 +152,10 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
     assert_eq!(saved.repair_reservation, Some(reservation));
     assert_eq!(saved.provider_start_ledger, ledger);
     assert_eq!(
-        store.get_workspace_session(&expected.id).unwrap().provider_start_ledger,
+        store
+            .get_workspace_session(&expected.id)
+            .unwrap()
+            .provider_start_ledger,
         saved.provider_start_ledger
     );
 }
@@ -200,8 +216,7 @@ fn policy_cas_conflict_rejects_stale_record_and_routing_reloads_then_reevaluates
     assert_eq!(persisted.status, WorkspaceSessionStatus::StoppedNeedsHuman);
     assert_eq!(persisted.run_history.initial_review_count, 1);
     assert_eq!(
-        persisted.run_history.review_cycles["review:outline_review"].initial_count,
-        1,
+        persisted.run_history.review_cycles["review:outline_review"].initial_count, 1,
         "re-evaluation must not merge the stale history delta twice"
     );
 }
@@ -222,9 +237,11 @@ fn awaiting_human_reconnect_restores_durable_gate_without_provider_restart_or_ev
                 status: WorkspaceSessionStatus::WaitingForHuman,
                 single_candidate_phase: None,
                 run_history: parent.run_history.clone(),
-                scope: Some(crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
-                    "outline:awaiting".to_string(),
-                )),
+                scope: Some(
+                    crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
+                        "outline:awaiting".to_string(),
+                    ),
+                ),
                 gate: Some(gate.clone()),
                 diagnostics: Vec::new(),
                 repair_reservation: None,
@@ -283,9 +300,11 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
                 status: WorkspaceSessionStatus::StoppedNeedsHuman,
                 single_candidate_phase: None,
                 run_history: history,
-                scope: Some(crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
-                    "outline:takeover".to_string(),
-                )),
+                scope: Some(
+                    crate::product::work_item_plan_policy::ReviewInvocationScope::initial(
+                        "outline:takeover".to_string(),
+                    ),
+                ),
                 gate: Some(recovery_gate(true)),
                 diagnostics: Vec::new(),
                 repair_reservation: None,
@@ -311,10 +330,7 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
         crate::product::work_item_plan_policy::RunPolicy::Interactive
     );
     assert_eq!(child.status, WorkspaceSessionStatus::WaitingForHuman);
-    assert_eq!(
-        child.human_gate_snapshot,
-        persisted.human_gate_snapshot
-    );
+    assert_eq!(child.human_gate_snapshot, persisted.human_gate_snapshot);
     assert!(child.provider_start_ledger.is_empty());
     assert_eq!(
         serde_json::to_value(store.get_workspace_session(&persisted.id).unwrap()).unwrap(),
@@ -384,7 +400,10 @@ fn conversational_gate_takeover_inherits_snapshot_budget_and_refs() {
     assert_eq!(child.flow_kind, parent.flow_kind);
     assert_eq!(child.human_gate_snapshot, parent.human_gate_snapshot);
     assert_eq!(child.run_history, parent.run_history);
-    assert_eq!(child.review_invocation_scope, parent.review_invocation_scope);
+    assert_eq!(
+        child.review_invocation_scope,
+        parent.review_invocation_scope
+    );
     assert_eq!(child.policy_diagnostics, parent.policy_diagnostics);
     assert_eq!(
         child.work_item_plan_source_revision_ref,
@@ -478,13 +497,11 @@ fn conversational_gate_takeover_rejects_fatal_or_persistence_diagnostic() {
                     run_history: parent.run_history.clone(),
                     scope: parent.review_invocation_scope.clone(),
                     gate: parent.human_gate_snapshot.clone(),
-                    diagnostics: vec![
-                        crate::product::work_item_plan_policy::PolicyDiagnostic {
-                            code: diagnostic_code.to_string(),
-                            message: "fatal takeover diagnostic".to_string(),
-                            field: None,
-                        },
-                    ],
+                    diagnostics: vec![crate::product::work_item_plan_policy::PolicyDiagnostic {
+                        code: diagnostic_code.to_string(),
+                        message: "fatal takeover diagnostic".to_string(),
+                        field: None,
+                    }],
                     repair_reservation: None,
                     provider_start_ledger: Vec::new(),
                 },
@@ -500,10 +517,12 @@ fn conversational_gate_takeover_rejects_fatal_or_persistence_diagnostic() {
                 ..
             }
         ));
-        assert!(store
-            .get_human_gate_takeover_event(&parent.id)
-            .expect("read rejected event")
-            .is_none());
+        assert!(
+            store
+                .get_human_gate_takeover_event(&parent.id)
+                .expect("read rejected event")
+                .is_none()
+        );
         assert_eq!(
             store
                 .list_workspace_sessions(&parent.project_id, &parent.issue_id)
@@ -542,10 +561,12 @@ fn stopped_needs_human_takeover_recovers_precreated_child_without_event() {
             child_id,
         )
         .expect("simulate crash after child creation and before event write");
-    assert!(store
-        .get_human_gate_takeover_event(&parent.id)
-        .expect("read absent event")
-        .is_none());
+    assert!(
+        store
+            .get_human_gate_takeover_event(&parent.id)
+            .expect("read absent event")
+            .is_none()
+    );
 
     let retried = store
         .takeover_stopped_needs_human(&parent.id)
@@ -575,11 +596,8 @@ fn stopped_needs_human_takeover_rejects_non_stopped_or_non_resumable_parents() {
         "work_item_plan_takeover_not_stopped",
         crate::product::work_item_plan_policy::RunPolicy::AutoIfValid,
     );
-    let non_resumable = stopped_takeover_parent(
-        &store,
-        "work_item_plan_takeover_not_resumable",
-        false,
-    );
+    let non_resumable =
+        stopped_takeover_parent(&store, "work_item_plan_takeover_not_resumable", false);
 
     for parent in [&non_stopped, &non_resumable] {
         let error = store
@@ -592,10 +610,12 @@ fn stopped_needs_human_takeover_rejects_non_stopped_or_non_resumable_parents() {
                 ..
             }
         ));
-        assert!(store
-            .get_human_gate_takeover_event(&parent.id)
-            .expect("invalid parent must not create an event")
-            .is_none());
+        assert!(
+            store
+                .get_human_gate_takeover_event(&parent.id)
+                .expect("invalid parent must not create an event")
+                .is_none()
+        );
     }
     assert_eq!(
         store
@@ -711,12 +731,16 @@ fn provider_start_ledger_claim_is_idempotent_across_generate_and_repair_recovery
             )
             .expect("events before recovery");
 
-        assert!(store
-            .claim_provider_start(&persisted.id, &reservation.provider_start_idempotency_key)
-            .expect("initial start claim"));
-        assert!(!store
-            .claim_provider_start(&persisted.id, &reservation.provider_start_idempotency_key)
-            .expect("recovery replay claim"));
+        assert!(
+            store
+                .claim_provider_start(&persisted.id, &reservation.provider_start_idempotency_key)
+                .expect("initial start claim")
+        );
+        assert!(
+            !store
+                .claim_provider_start(&persisted.id, &reservation.provider_start_idempotency_key)
+                .expect("recovery replay claim")
+        );
         let restored = store.get_workspace_session(&persisted.id).expect("restore");
         assert_eq!(restored.repair_reservation, Some(reservation));
         assert_eq!(restored.run_history, history_before);

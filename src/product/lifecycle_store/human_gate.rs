@@ -177,6 +177,8 @@ impl LifecycleStore {
                 crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                     provider_start_idempotency_key: reservation.provider_start_idempotency_key,
                     started: true,
+                    provider: None,
+                    started_at: None,
                 },
             );
             next.updated_at = Utc::now().to_rfc3339();
@@ -382,6 +384,8 @@ impl LifecycleStore {
                     crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                         provider_start_idempotency_key,
                         started: true,
+                        provider: None,
+                        started_at: None,
                     },
                 );
                 next.updated_at = Utc::now().to_rfc3339();

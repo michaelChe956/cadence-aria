@@ -51,6 +51,11 @@ impl WorkspaceEngine {
         // P1-2：reviewer 是策略角色——与 author 主流同法绑定 run-bound durable
         // sink（持久 store 缺失时不接线，真实 adapter 对 policy+缺 sink fail-closed）。
         let input = self.attach_tool_policy_audit(input);
+        // F-19：reviewer run 拉起前登记 provider start（诊断面，best-effort）。
+        self.register_provider_start_in_ledger(
+            ProviderConversationRole::Reviewer,
+            reviewer.clone(),
+        );
         let first_session = provider.start(input.clone(), self.cancel.clone()).await;
         let first_completion = match self
             .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
@@ -491,6 +496,8 @@ impl WorkspaceEngine {
             None
         };
         let input = self.attach_tool_policy_audit(input);
+        // F-19：revision run 拉起前登记 provider start（诊断面，best-effort）。
+        self.register_provider_start_in_ledger(ProviderConversationRole::Author, author.clone());
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
             session,
