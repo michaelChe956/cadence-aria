@@ -1,0 +1,2 @@
+{"at":"2026-09-20T01:41:29.918Z","event":"existing_session_selected","issue_id":"issue_0286","plan_id":"issue_work_item_plan_0001","session_id":"workspace_session_takeover_workspace_session_0460","session_path":"/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/.aria/projects/project_0001/issues/issue_0286/workspace-sessions/workspace_session_takeover_workspace_session_0460.json"}
+{"at":"2026-09-20T01:41:29.918Z","event":"failure","failureClass":"setup_error","error":"ARIA_HUMAN_SCRIPT 第 1 条仅支持 confirm、request-change:<文本>、abandon 或 advance"}

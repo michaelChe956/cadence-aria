@@ -1,0 +1,244 @@
+{
+  "event_seq": 3060,
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "canonical_contract_hash": "a6c244a2edb8b5d7e895a65b86d53490fa97fc38a1543f76e00dce4bf4832d46",
+    "coder_projection": {
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-002",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN node --test tests/frontend/frontend.test.js 执行 THE SYSTEM SHALL 通过 DOM 替身验证页面容器、脚本接口、名称、难度和锁定态渲染。"
+        },
+        {
+          "criterion_id": "AC-003",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN frontend 测试模拟 API 失败、非成功状态或响应结构无效 THE SYSTEM SHALL 进入错误提示分支并保留基本页面框架。"
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "provided_contract_refs": [
+          "CT-003"
+        ],
+        "required_fields": [
+          "contract_id",
+          "capabilities"
+        ],
+        "reviewer_check_refs": [
+          "AC-002",
+          "AC-003"
+        ]
+      },
+      "objective": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 使用原生前端脚本渲染关卡列表并在请求或响应异常时保留页面框架与可读错误。",
+      "required_input_contracts": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ]
+        }
+      ],
+      "task_refs": [
+        "TASK-004",
+        "TASK-005"
+      ],
+      "tasks": [
+        {
+          "done_when_refs": [
+            "AC-002"
+          ],
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "statement": "WHEN 编写 frontend 测试 THE SYSTEM SHALL 先在 tests/frontend/frontend.test.js 用 document 与 fetch 替身建立成功渲染和失败降级的失败测试。",
+          "task_id": "TASK-004"
+        },
+        {
+          "done_when_refs": [
+            "AC-003"
+          ],
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "statement": "WHEN 实现关卡选择页与脚本 THE SYSTEM SHALL 提供三个容器标记、/api/levels 引用、可注入渲染接口、安全文本渲染、锁定态和错误提示分支。",
+          "task_id": "TASK-005"
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend/frontend.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_cb159d6ac502fda97f8e416f",
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      }
+    },
+    "coder_projection_hash": "14eb80e5210e1df6326da78f841e8c68fbb3e1f6abe41f08f5b1ab95928e2331",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T01:18:32.916471550+00:00",
+    "human_projection": {
+      "completion_summary": [
+        "WHEN node --test tests/frontend/frontend.test.js 执行 THE SYSTEM SHALL 通过 DOM 替身验证页面容器、脚本接口、名称、难度和锁定态渲染。",
+        "WHEN frontend 测试模拟 API 失败、非成功状态或响应结构无效 THE SYSTEM SHALL 进入错误提示分支并保留基本页面框架。"
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 使用原生前端脚本渲染关卡列表并在请求或响应异常时保留页面框架与可读错误。",
+      "inputs": [
+        {
+          "capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "contract_id": "CT-002",
+          "source_refs": [
+            "CT-002"
+          ]
+        }
+      ],
+      "logical_work_item_id": "WI-002",
+      "non_goals": [
+        "不修改后端实现，不启动浏览器，不实现关卡玩法。",
+        "不重复执行集成验收。"
+      ],
+      "normative": false,
+      "outputs": [
+        {
+          "capabilities": [
+            "前端响应校验复用关卡字段约束",
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+          ],
+          "contract_id": "CT-003",
+          "source_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "scope_summary": {
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ],
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ]
+      },
+      "source_refs": [
+        "AC-002",
+        "AC-003",
+        "CHECK-002",
+        "CT-002",
+        "CT-003",
+        "REQ-005",
+        "REQ-006",
+        "TASK-004",
+        "TASK-005"
+      ],
+      "title": "Level Select Frontend",
+      "used_by_provider": false
+    },
+    "human_projection_hash": "d96b96ebaac3b53161423abd8e910565d2b8e6a668738b6ddcc3ba4afa9d0e62",
+    "id": "work_item_projection_bundle_cb159d6ac502fda97f8e416f",
+    "projection_schema_version": 1,
+    "reviewer_projection": {
+      "blocker_routing": [],
+      "criterion_refs": [
+        "AC-002",
+        "AC-003"
+      ],
+      "input_contract_checks": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ]
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "capabilities": [
+            "前端响应校验复用关卡字段约束",
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+          ],
+          "contract_id": "CT-003"
+        }
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-002",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-005"
+          ]
+        },
+        {
+          "criterion_id": "AC-003",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-006"
+          ]
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test tests/frontend/frontend.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_cb159d6ac502fda97f8e416f"
+    },
+    "reviewer_projection_hash": "c203c906ccd30683aa7aa21c1e915116103954aff038d8cf4963ccec6a83af8c",
+    "work_item_revision_id": "work_item_revision_cb159d6ac502fda97f8e416f"
+  }
+}

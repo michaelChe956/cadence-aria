@@ -1,0 +1,16 @@
+{"t":"2026-09-20T01:29:22.603Z","event":"issue_created","issue_id":"issue_0291"}
+{"t":"2026-09-20T01:29:22.604Z","event":"fixtures_seeded"}
+{"t":"2026-09-20T01:29:24.521Z","event":"plan_prepared","plan_id":"issue_work_item_plan_0001","session_id":"workspace_session_0468","flow_kind":null}
+{"t":"2026-09-20T01:29:24.525Z","event":"ws_open"}
+{"t":"2026-09-20T01:29:24.541Z","event":"start_generation_sent","at":"2026-09-20T01:29:24.541Z","provider":"pi"}
+{"t":"2026-09-20T01:29:24.585Z","event":"stage_change","stage":"running"}
+{"t":"2026-09-20T01:29:24.604Z","event":"ws_message","type":"execution_event","title":null,"node_id":null}
+{"t":"2026-09-20T01:29:24.673Z","event":"prompt_on_disk","file":"timeline_node_002.json","delta_from_click_ms":132}
+{"t":"2026-09-20T01:29:24.680Z","event":"pi_version_probe_detected","cmd":"2746801 Sun Sep 20 09:29:23 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/pi --version","delta_from_click_ms":139}
+{"t":"2026-09-20T01:29:24.833Z","event":"provider_subprocess_spawn_detected","pid":"2746822","cmd":"2746822 Sun Sep 20 09:29:23 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/pi --mode rpc -e /home/michaelche/.cache/cadence-aria/aria-ask-bb5b6ded.ts --session-id f69c0795-0741-42ec-9772-e7fb850d5d03 --exclude-tools edit,write","delta_from_click_ms":292}
+{"t":"2026-09-20T01:29:24.834Z","event":"ws_message","type":"execution_event","title":null,"node_id":null}
+{"t":"2026-09-20T01:29:26.334Z","event":"abort_sent"}
+{"t":"2026-09-20T01:29:26.379Z","event":"stage_change","stage":"prepare_context"}
+{"t":"2026-09-20T01:29:29.334Z","event":"post_abort_session_status","status":"failed"}
+{"t":"2026-09-20T01:29:29.339Z","event":"ws_error","message":""}
+{"t":"2026-09-20T01:29:29.340Z","event":"ws_close","code":1006,"reason":""}

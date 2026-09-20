@@ -1,0 +1,304 @@
+{
+  "event_seq": 4513,
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "canonical_contract_hash": "b2ecacea1af999ab103479dc10d0df32dda646864f42af204ee83b25ad9ef8b9",
+    "coder_projection": {
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-006",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN initLevelSelect 以返回合法数组的 fetch 替身初始化 THE SYSTEM SHALL 在列表容器渲染全部关卡名称与难度且 unlocked 为 false 的项呈现锁定不可选。"
+        },
+        {
+          "criterion_id": "AC-007",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN fetch 替身抛错或返回非成功状态或响应非数组或字段校验不通过 THE SYSTEM SHALL 在错误容器显示可读错误提示且不渲染列表且不抛出未捕获异常。"
+        },
+        {
+          "criterion_id": "AC-008",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 检查 web/index.html THE SYSTEM SHALL 存在 id 为 loading 与 level-list 与 error-message 的三容器并以 script 引用 level-select.js。"
+        },
+        {
+          "criterion_id": "AC-009",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 运行前端测试 THE SYSTEM SHALL 限定于 tests/frontend/** 的 node --test 全部通过且全程以替身运行不启动浏览器。"
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "provided_contract_refs": [
+          "CT-005"
+        ],
+        "required_fields": [
+          "页面入口路径 web/index.html、三容器 id 取值、脚本路径 web/level-select.js、initLevelSelect({ document",
+          "fetchImpl }) 签名、API 相对路径 /api/levels、限定 tests/frontend/** 的测试命令"
+        ],
+        "reviewer_check_refs": [
+          "AC-006",
+          "AC-007",
+          "AC-008",
+          "AC-009"
+        ]
+      },
+      "objective": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生脚本消费 /api/levels 渲染关卡名称、难度与锁定态并在请求失败时展示可读错误提示。",
+      "required_input_contracts": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 数组元素满足字段级约束 id 为非空字符串且文件内唯一 name 为非空字符串 difficulty 取值为 简单 普通 困难 之一 unlocked 为布尔值"
+          ]
+        }
+      ],
+      "task_refs": [
+        "TASK-004",
+        "TASK-005",
+        "TASK-006",
+        "TASK-007"
+      ],
+      "tasks": [
+        {
+          "done_when_refs": [
+            "AC-008"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "statement": "WHEN 开始前端实现 THE SYSTEM SHALL 在 tests/frontend/** 以 node --test 与 DOM 及 fetch 替身先行编写失败测试覆盖名称与难度渲染、锁定态、请求失败与非成功状态与非法结构错误分支及页面结构断言。",
+          "task_id": "TASK-004"
+        },
+        {
+          "done_when_refs": [
+            "AC-008"
+          ],
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "statement": "WHEN 提供页面骨架 THE SYSTEM SHALL web/index.html 含 id 为 loading 与 level-list 与 error-message 的三容器并以 script 加载 level-select.js 且不内联业务逻辑。",
+          "task_id": "TASK-005"
+        },
+        {
+          "done_when_refs": [
+            "AC-007"
+          ],
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "statement": "WHEN 实现页面逻辑 THE SYSTEM SHALL web/level-select.js 导出 initLevelSelect({ document, fetchImpl }) 以相对路径 /api/levels 请求并按字段级约束校验后以文本节点渲染列表或进入错误提示分支。",
+          "task_id": "TASK-006"
+        },
+        {
+          "done_when_refs": [
+            "AC-009"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "statement": "WHEN 前端实现完成 THE SYSTEM SHALL 运行限定于 tests/frontend/** 的 node --test 并使全部测试通过。",
+          "task_id": "TASK-007"
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test 'tests/frontend/**/*.test.js'",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_c161076fe110a10ab71657e5",
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      }
+    },
+    "coder_projection_hash": "14a980d43210657ab5ceb2cfa16ea31d9ec9a59f5f2c6964d0916ba6e6759880",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T12:32:45.911167269+00:00",
+    "human_projection": {
+      "completion_summary": [
+        "WHEN initLevelSelect 以返回合法数组的 fetch 替身初始化 THE SYSTEM SHALL 在列表容器渲染全部关卡名称与难度且 unlocked 为 false 的项呈现锁定不可选。",
+        "WHEN fetch 替身抛错或返回非成功状态或响应非数组或字段校验不通过 THE SYSTEM SHALL 在错误容器显示可读错误提示且不渲染列表且不抛出未捕获异常。",
+        "WHEN 检查 web/index.html THE SYSTEM SHALL 存在 id 为 loading 与 level-list 与 error-message 的三容器并以 script 引用 level-select.js。",
+        "WHEN 运行前端测试 THE SYSTEM SHALL 限定于 tests/frontend/** 的 node --test 全部通过且全程以替身运行不启动浏览器。"
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生脚本消费 /api/levels 渲染关卡名称、难度与锁定态并在请求失败时展示可读错误提示。",
+      "inputs": [
+        {
+          "capabilities": [
+            "GET /api/levels 数组元素满足字段级约束 id 为非空字符串且文件内唯一 name 为非空字符串 difficulty 取值为 简单 普通 困难 之一 unlocked 为布尔值"
+          ],
+          "contract_id": "CT-001",
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "logical_work_item_id": "WI-002",
+      "non_goals": [
+        "不启动浏览器或真实后端服务而以 DOM 与 fetch 替身测试；不实现关卡玩法与选中后的跳转；不引入 npm 依赖或前端框架。"
+      ],
+      "normative": false,
+      "outputs": [
+        {
+          "capabilities": [
+            "web/index.html 包含 id 为 loading 与 level-list 与 error-message 的三个容器并以 script 加载 web/level-select.js 且该脚本以相对路径 /api/levels 请求数据"
+          ],
+          "contract_id": "CT-005",
+          "source_refs": [
+            "CT-005"
+          ]
+        }
+      ],
+      "scope_summary": {
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ],
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ]
+      },
+      "source_refs": [
+        "AC-006",
+        "AC-007",
+        "AC-008",
+        "AC-009",
+        "CHECK-002",
+        "CT-001",
+        "CT-005",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-004",
+        "TASK-005",
+        "TASK-006",
+        "TASK-007"
+      ],
+      "title": "关卡选择页与渲染脚本",
+      "used_by_provider": false
+    },
+    "human_projection_hash": "07bba26cb8c40f0ed088797a4dc7bfe6aced94f74312b882826a3e37a0e1b586",
+    "id": "work_item_projection_bundle_c161076fe110a10ab71657e5",
+    "projection_schema_version": 1,
+    "reviewer_projection": {
+      "blocker_routing": [],
+      "criterion_refs": [
+        "AC-006",
+        "AC-007",
+        "AC-008",
+        "AC-009"
+      ],
+      "input_contract_checks": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 数组元素满足字段级约束 id 为非空字符串且文件内唯一 name 为非空字符串 difficulty 取值为 简单 普通 困难 之一 unlocked 为布尔值"
+          ]
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "capabilities": [
+            "web/index.html 包含 id 为 loading 与 level-list 与 error-message 的三个容器并以 script 加载 web/level-select.js 且该脚本以相对路径 /api/levels 请求数据"
+          ],
+          "contract_id": "CT-005"
+        }
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-006",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": []
+        },
+        {
+          "criterion_id": "AC-007",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-006"
+          ]
+        },
+        {
+          "criterion_id": "AC-008",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-005"
+          ]
+        },
+        {
+          "criterion_id": "AC-009",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ]
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "node --test 'tests/frontend/**/*.test.js'",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_c161076fe110a10ab71657e5"
+    },
+    "reviewer_projection_hash": "c07f45d379d862d98d86e5ad349ed9712bac9d7b7807a01c07c1c457f3957367",
+    "work_item_revision_id": "work_item_revision_c161076fe110a10ab71657e5"
+  }
+}

@@ -1,0 +1,273 @@
+{
+  "event_seq": 3061,
+  "type": "artifact_update",
+  "version": 5,
+  "work_item_projection": {
+    "canonical_contract_hash": "7a0ec133512729866ba2eb3b42e02e0a07ed2a66ec188c009ffc16278510380d",
+    "coder_projection": {
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-004",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 声明的全部 node --test 文件执行 THE SYSTEM SHALL 零失败退出并至少执行一个 integration 测试。"
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "provided_contract_refs": [],
+        "required_fields": [
+          "contract_id",
+          "capabilities"
+        ],
+        "reviewer_check_refs": [
+          "AC-004"
+        ]
+      },
+      "objective": "WHEN 同一 Node 服务承载页面与 API THE SYSTEM SHALL 通过 HTTP 证据验证同源入口、页面可观测结构、脚本引用和 API 契约。",
+      "required_input_contracts": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回注入 staticRoot 下的 index.html"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+          ]
+        }
+      ],
+      "task_refs": [
+        "TASK-006",
+        "TASK-007"
+      ],
+      "tasks": [
+        {
+          "done_when_refs": [
+            "AC-004"
+          ],
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "statement": "WHEN 编写 integration 测试 THE SYSTEM SHALL 先在 tests/integration/integration.test.js 建立同源页面、脚本引用、成功 API、错误语义和字段约束的失败测试。",
+          "task_id": "TASK-006"
+        },
+        {
+          "done_when_refs": [
+            "AC-004"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "statement": "WHEN 执行集成验收 THE SYSTEM SHALL 以 port: 0 启动真实服务、断言 HTTP 契约、执行清理并确认 backend、frontend 和 integration 测试全部通过。",
+          "task_id": "TASK-007"
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/backend/backend.test.js tests/frontend/frontend.test.js tests/integration/integration.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_dbdcc1522d2eafb7bdddb2f9",
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      }
+    },
+    "coder_projection_hash": "e8c0f9f1c0f6b40d21a17bd703dccce1703a5595082951a8944185cdc98a37eb",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T01:18:32.916471550+00:00",
+    "human_projection": {
+      "completion_summary": [
+        "WHEN 声明的全部 node --test 文件执行 THE SYSTEM SHALL 零失败退出并至少执行一个 integration 测试。"
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "goal": "WHEN 同一 Node 服务承载页面与 API THE SYSTEM SHALL 通过 HTTP 证据验证同源入口、页面可观测结构、脚本引用和 API 契约。",
+      "inputs": [
+        {
+          "capabilities": [
+            "GET / 返回注入 staticRoot 下的 index.html"
+          ],
+          "contract_id": "CT-001",
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "contract_id": "CT-002",
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "capabilities": [
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+          ],
+          "contract_id": "CT-003",
+          "source_refs": [
+            "CT-003"
+          ]
+        }
+      ],
+      "logical_work_item_id": "WI-003",
+      "non_goals": [
+        "不修改 server/**、web/**、data/levels.json、tests/backend/** 或 tests/frontend/**。",
+        "不重复验证浏览器运行时动态渲染。"
+      ],
+      "normative": false,
+      "outputs": [
+        {
+          "capabilities": [
+            "全部 node --test 目录化命令零失败退出"
+          ],
+          "contract_id": "CT-004",
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "scope_summary": {
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ],
+        "owned_scopes": [
+          "tests/integration/**"
+        ]
+      },
+      "source_refs": [
+        "AC-004",
+        "CHECK-003",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "NFR-001",
+        "REQ-002",
+        "TASK-006",
+        "TASK-007"
+      ],
+      "title": "Levels Integration Verification",
+      "used_by_provider": false
+    },
+    "human_projection_hash": "f5cb1fe352af5e00c3c072ec75ed8f3a3c9179da7cf259b90002f466c1a4f4a2",
+    "id": "work_item_projection_bundle_dbdcc1522d2eafb7bdddb2f9",
+    "projection_schema_version": 1,
+    "reviewer_projection": {
+      "blocker_routing": [],
+      "criterion_refs": [
+        "AC-004"
+      ],
+      "input_contract_checks": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回注入 staticRoot 下的 index.html"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+          ]
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "capabilities": [
+            "全部 node --test 目录化命令零失败退出"
+          ],
+          "contract_id": "CT-004"
+        }
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-004",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "NFR-001",
+            "REQ-002"
+          ]
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/backend/backend.test.js tests/frontend/frontend.test.js tests/integration/integration.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_dbdcc1522d2eafb7bdddb2f9"
+    },
+    "reviewer_projection_hash": "aca3c9f0fdacecb247c9b3aedb316aeed193b0e7695381a9628e946b6c444862",
+    "work_item_revision_id": "work_item_revision_dbdcc1522d2eafb7bdddb2f9"
+  }
+}

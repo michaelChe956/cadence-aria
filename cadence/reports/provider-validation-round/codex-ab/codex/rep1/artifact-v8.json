@@ -1,0 +1,380 @@
+{
+  "event_seq": 3064,
+  "plan_projection": {
+    "coder_group_context": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "API 错误响应体结构为 { error: { code",
+                "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET / 返回注入 staticRoot 下的 index.html"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "API 错误响应体结构为 { error: { code",
+                "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**"
+          ]
+        }
+      },
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "plan_id": "issue_work_item_plan_0001"
+    },
+    "coder_group_context_hash": "14d486ec52a092ccede90f0b981a66e56ebbdbfccad2870e4765d43ecf9cc650",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T01:18:32.916471550+00:00",
+    "dependency_graph_revision_id": "dependency_graph_revision_ad6fb94712e8c63ac5c491f2",
+    "human_group_projection": {
+      "contract_flow": [
+        {
+          "contract_id": "CT-002",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "required_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "to": "WI-002"
+        },
+        {
+          "contract_id": "CT-001",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET / 返回注入 staticRoot 下的 index.html",
+            "服务仅使用 node:http、node:fs、node:path"
+          ],
+          "required_capabilities": [
+            "GET / 返回注入 staticRoot 下的 index.html"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-002",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "required_capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-003",
+          "from": "WI-002",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用",
+            "前端响应校验复用关卡字段约束"
+          ],
+          "required_capabilities": [
+            "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "normative": false,
+      "plan_id": "issue_work_item_plan_0001",
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "split_reason": "由 canonical handoff schema 投影",
+      "used_by_provider": false,
+      "work_items": [
+        {
+          "depends_on": [],
+          "goal": "WHEN 服务收到关卡数据或页面资源请求 THE SYSTEM SHALL 使用 Node 内置模块提供可注入的关卡 API、错误语义和静态托管能力。",
+          "logical_work_item_id": "WI-001",
+          "provides": [
+            "CT-001",
+            "CT-002"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**"
+            ],
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ]
+          },
+          "title": "Backend Levels API"
+        },
+        {
+          "depends_on": [
+            "WI-001"
+          ],
+          "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 使用原生前端脚本渲染关卡列表并在请求或响应异常时保留页面框架与可读错误。",
+          "logical_work_item_id": "WI-002",
+          "provides": [
+            "CT-003"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**"
+            ],
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ]
+          },
+          "title": "Level Select Frontend"
+        },
+        {
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "goal": "WHEN 同一 Node 服务承载页面与 API THE SYSTEM SHALL 通过 HTTP 证据验证同源入口、页面可观测结构、脚本引用和 API 契约。",
+          "logical_work_item_id": "WI-003",
+          "provides": [
+            "CT-004"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**"
+            ],
+            "owned_scopes": [
+              "tests/integration/**"
+            ]
+          },
+          "title": "Levels Integration Verification"
+        }
+      ]
+    },
+    "human_group_projection_hash": "da989909895a3b22e29d9008cb8476bd9aa51e81bfa7d470fdabb650ebb9cdf4",
+    "id": "plan_projection_bundle_ad6fb94712e8c63ac5c491f2",
+    "plan_revision_id": "plan_revision_ad6fb94712e8c63ac5c491f2",
+    "reviewer_group_matrix": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "API 错误响应体结构为 { error: { code",
+                "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET / 返回注入 staticRoot 下的 index.html"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "API 错误响应体结构为 { error: { code",
+                "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "web/index.html 加载 /level-select.js 并包含 /api/levels 引用"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "requirement_id": "NFR-001",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        },
+        {
+          "requirement_id": "REQ-002",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        },
+        {
+          "requirement_id": "REQ-003",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        },
+        {
+          "requirement_id": "REQ-004",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        },
+        {
+          "requirement_id": "REQ-005",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        },
+        {
+          "requirement_id": "REQ-006",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        }
+      ],
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "criterion_refs": [
+            "AC-001"
+          ],
+          "input_contract_refs": [],
+          "logical_work_item_id": "WI-001",
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-002",
+            "AC-003"
+          ],
+          "input_contract_refs": [
+            "CT-002"
+          ],
+          "logical_work_item_id": "WI-002",
+          "output_contract_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-004"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ],
+          "logical_work_item_id": "WI-003",
+          "output_contract_refs": [
+            "CT-004"
+          ]
+        }
+      ]
+    },
+    "reviewer_group_matrix_hash": "70fbd0eac279717b3ce184829a6b2358bd44a938d1345c22ce4dd3b862ed3959",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_4d4bfb69187295206ee3ab48",
+      "work_item_projection_bundle_cb159d6ac502fda97f8e416f",
+      "work_item_projection_bundle_dbdcc1522d2eafb7bdddb2f9"
+    ]
+  },
+  "type": "artifact_update",
+  "version": 8
+}

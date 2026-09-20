@@ -1,0 +1,80 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0299",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "kimi_code",
+  "attempt_id": "coding_attempt_62ae9aaac02d4045ab3d60a9af90a79f",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/coding-kimi_code-coding_attempt_62ae9aaac02d4045ab3d60a9af90a79f",
+  "startedAt": "2026-09-20T12:33:44.369Z",
+  "finishedAt": "2026-09-20T12:33:57.698Z",
+  "elapsedSec": 13.33,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.247,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.36,
+      "source": "coding_stage_change"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.448,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0299",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0299",
+    "head_commit": null,
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "usage_unavailable": true
+  },
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_62ae9aaac02d4045ab3d60a9af90a79f",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-20T12:33:44.725402360+00:00",
+      "completed_at": "2026-09-20T12:33:44.757216997+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_62ae9aaac02d4045ab3d60a9af90a79f",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "running",
+      "agent_role": "author",
+      "summary": null,
+      "started_at": "2026-09-20T12:33:49.825820472+00:00",
+      "completed_at": null,
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "blocked_gate_awaiting_triage",
+  "error": "Coder 执行中断：kind=blocked 门无自动放行（expires_at=null），attempt 留存服务端待人工分诊",
+  "completed": false
+}

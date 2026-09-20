@@ -1,0 +1,64 @@
+{
+  "provider": "kimi_code",
+  "repetition": 8,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep8",
+  "startedAt": "2026-09-20T12:15:39.577Z",
+  "finishedAt": "2026-09-20T12:15:44.093Z",
+  "elapsedSec": 4.514,
+  "issue_id": "issue_0297",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0488",
+  "prepare_options": null,
+  "fixture_digests": {},
+  "description_digest": null,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.078,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.182,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [],
+  "validator_findings": [],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "provider_empty_output: Kimi agent turn ended without assistant output after one bounded in-session retry\n; Kimi ACP process exited with code 0 before terminal prompt result",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 4514,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.104,
+    "1:running": 4.332
+  }
+}

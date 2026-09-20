@@ -1,0 +1,46 @@
+{
+  "rep": "2",
+  "provider": "pi",
+  "server_pid": "2698026",
+  "started_at": "2026-09-20T01:29:22.562Z",
+  "issue_id": "issue_0291",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0468",
+  "baseline_children": [
+    "2735053 Sun Sep 20 09:16:25 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/codex app-server --enable default_mode_request_user_input",
+    "2742760 Sun Sep 20 09:25:08 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/codex app-server --enable default_mode_request_user_input",
+    "2746190 Sun Sep 20 09:28:50 2026 kimi-cod"
+  ],
+  "t0_click": "2026-09-20T01:29:24.541Z",
+  "t1_prompt_disk": "2026-09-20T01:29:24.673Z",
+  "t1_prompt_file": "timeline_node_002.json",
+  "t1_prompt_mtime": "2026-09-20T01:29:24.593Z",
+  "t2_spawn_detected": "2026-09-20T01:29:24.830Z",
+  "t2_spawn_lstart": "Sun Sep 20 09:29:23 2026",
+  "t2_spawn_cmd": "2746822 Sun Sep 20 09:29:23 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/pi --mode rpc -e /home/michaelche/.cache/cadence-aria/aria-ask-bb5b6ded.ts --session-id f69c0795-0741-42ec-9772-e7fb850d5d03 --exclude-tools edit,write",
+  "delta_click_to_prompt_ms": 132,
+  "delta_prompt_to_spawn_ms": 160,
+  "delta_click_to_spawn_ms": 292,
+  "ws_prompt_event": null,
+  "stage_timeline": [
+    {
+      "stage": "prepare_context",
+      "at": "2026-09-20T01:29:24.541Z",
+      "mono_ms": 166249632.777
+    }
+  ],
+  "abort_sent_at": "2026-09-20T01:29:26.334Z",
+  "abort_final_stage": null,
+  "session_status_after_abort": "failed",
+  "outcome": "spawn_measured_and_aborted",
+  "prepare_flow_kind": null,
+  "t_probe": {
+    "at": "2026-09-20T01:29:24.680Z",
+    "cmd": "2746801 Sun Sep 20 09:29:23 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/pi --version",
+    "delta_from_click_ms": 139
+  },
+  "t2_all_new_children": [
+    "2746822 Sun Sep 20 09:29:23 2026 node /home/michaelche/.local/share/fnm/aliases/default/bin/pi --mode rpc -e /home/michaelche/.cache/cadence-aria/aria-ask-bb5b6ded.ts --session-id f69c0795-0741-42ec-9772-e7fb850d5d03 --exclude-tools edit,write"
+  ],
+  "completed_at": "2026-09-20T01:29:29.526Z"
+}

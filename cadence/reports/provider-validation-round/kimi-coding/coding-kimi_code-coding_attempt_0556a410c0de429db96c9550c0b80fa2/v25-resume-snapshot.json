@@ -1,0 +1,132 @@
+{
+ "probe": "kimi-upgrade-v25-resume-verification",
+ "attempt_id": "coding_attempt_0556a410c0de429db96c9550c0b80fa2",
+ "verified_at": "2026-09-19T01:31:09Z/2026-09-19T01:38:20Z",
+ "server": {
+  "pid": 1005268,
+  "version": "v25 (HEAD 4d097c1d, F-14 修复后)",
+  "started": "2026-09-19 07:23 CST",
+  "port": 4317
+ },
+ "terminal_state": {
+  "status": "awaiting_manual_recovery",
+  "manual_recovery_reason": "coding_runner_failed_while_running",
+  "stage": "coding",
+  "updated_at": "2026-09-19T01:31:09.802282809+00:00",
+  "transition_trigger": "未知方 WS attach 09:31:04（Main 排除 controller 与 C3T1；最大嫌疑=监控测试会话）→ ensure_runner_for_resumed_attempt 半启动重启 → stage_gate_0010 (09:31:04.667) → 5s 过期 (09:31:09.667) → runner 于 ~135ms 内死于 pre-provider 窗口（无 provider 输出、无 role_run_0007）→ task.rs F-14 fail-closed 转换 (09:31:09.802)"
+ },
+ "f14_fix_live_verification": {
+  "verdict": "生效",
+  "evidence": "v24 同场景=静默死循环（gate 0006/0007/0008 反复创建过期、provider 零启动、updated_at 冻结）；v25 同场景=单次死亡后 fail-closed 转 awaiting_manual_recovery（可见、持久 reason、不再空转）",
+  "code_refs": [
+   "src/web/coding_ws_handler/runner/task.rs:169-230 (F-14 注释+转换)",
+   "src/web/coding_ws_handler/socket/resumption.rs:43 (半启动重启)"
+  ]
+ },
+ "retry_availability_wire_probe": {
+  "method": "WS attach 后依次发 gate_response(retry_coding)/start_coding/stage_gate_confirm",
+  "result": "全部拒绝：coding_protocol_error code=coding_message_not_allowed (×3)",
+  "corroboration": {
+   "socket_rs_897": "AwaitingManualRecovery 状态仅接受 AbortAttempt",
+   "attempt_rs_valid_status_transition": "AwaitingManualRecovery → 仅 Aborted",
+   "admission_rs": "AwaitingManualRecovery 拒绝 admit_attempt_for_execution / transition_to_executable",
+   "http_routes": "coding-attempts 仅有 abort 端点，无 recover/retry"
+  },
+  "log": "v25-retry-probe-ws.jsonl"
+ },
+ "role_runs": [
+  {
+   "id": "coding_role_run_0001",
+   "role": "coder",
+   "status": "completed",
+   "completed_at": "2026-09-18T18:05:12Z"
+  },
+  {
+   "id": "coding_role_run_0002",
+   "role": "code_reviewer",
+   "status": "completed",
+   "completed_at": "2026-09-18T18:12:46Z"
+  },
+  {
+   "id": "coding_role_run_0003",
+   "role": "coder",
+   "status": "completed",
+   "completed_at": "2026-09-18T18:35:57Z"
+  },
+  {
+   "id": "coding_role_run_0004",
+   "role": "code_reviewer",
+   "status": "completed",
+   "completed_at": "2026-09-18T18:39:41Z"
+  },
+  {
+   "id": "coding_role_run_0005",
+   "role": "coder",
+   "status": "completed",
+   "completed_at": "2026-09-18T18:51:58Z"
+  },
+  {
+   "id": "coding_role_run_0006",
+   "role": "coder",
+   "status": "completed",
+   "completed_at": "2026-09-18T22:34:38Z"
+  }
+ ],
+ "usage_by_role": {
+  "source": "driver result.json（usage_by_role 仅 driver 侧物化；服务端 session_state/role_runs 无 usage 字段）",
+  "author": {
+   "input_tokens": 1642,
+   "output_tokens": 2700,
+   "cache_read_tokens": 100800,
+   "cache_creation_tokens": 0
+  },
+  "reviewer": {
+   "input_tokens": 3678,
+   "output_tokens": 1793,
+   "cache_read_tokens": 60288,
+   "cache_creation_tokens": 0
+  },
+  "internal_reviewer": null,
+  "gap_note": "internal_reviewer 键缺失=internal_pr_review 阶段从未到达（stage 停于 coding，WI-003 unit=running）；升级三键判据不满足"
+ },
+ "units": [
+  {
+   "unit_id": "coding_unit_0001",
+   "wi": "WI-001",
+   "status": "completed"
+  },
+  {
+   "unit_id": "coding_unit_0002",
+   "wi": "WI-002",
+   "status": "completed"
+  },
+  {
+   "unit_id": "coding_unit_0003",
+   "wi": "WI-003",
+   "status": "running",
+   "note": "实现+CHECK-003 已完成，仅提交环节两次被 F-15 fixture 卡死后由环境修复（chmod 644）；coder 重启未再发生（runner pre-provider 死亡）"
+  }
+ ],
+ "new_findings": [
+  {
+   "id": "pre-provider-death-recurrence-v25",
+   "fact": "v25 上 runner 仍于 pre-provider 窗口死亡（gate 0010 过期后 ~135ms，零 provider 输出零 role run）",
+   "pattern": "间歇性：v24 06:15/06:21 死、06:28 活；v25 09:31 死",
+   "cause_observability": "不可考：错误串仅达 WS 客户端（09:31 attach 方=监控会话，帧不可回收）与服务器 tty（/dev/pts/1，无落盘）；durable 层（attempt json/chat-entries/role-runs）无错误尾帧",
+   "disposition": "如实登记；F-14 fail-closed 使其可见且不再空转（修复目的达成），残余死因待后续轮服务端日志通道（evidence-matrix §5 同款口径）"
+  }
+ ],
+ "evidence_files": [
+  "v25-resume-ws.jsonl (attach 观察 90s)",
+  "v25-retry-probe-ws.jsonl (三探测拒绝帧)"
+ ],
+ "conclusion": "升级转正失败（终局）：0556a410 经 awaiting_manual_recovery（F-14 fail-closed，修复生产验证生效）→ controller 批准 abort → 终态 aborted；internal_reviewer 全程未到达（stage 停于 coding），usage_by_role 无 internal_reviewer 键，internal_pr_review_complete 未出现；kimi 维持受限登记，收口路径=后续轮新 attempt 加长 ARIA_CODING_HARD_TIMEOUT_MS 重跑。",
+ "controller_verdict_and_abort": {
+  "verdict": "controller 批准 abort（经 Main 转达 09:4x：attempt 两度人工分诊+两度 pre-provider 死+parked 无通道，价值耗尽；升级路径改走新 attempt 加长硬超时重跑）",
+  "abort_phase1": "09:41:05 被 shared_worktree_dirty_manual_gate 拦截（blocked_gate_0003 open：manual_continue/abort；worktree 含 WI-003 未提交实现 data/server/tests/web）",
+  "manual_cleanup": "git stash push -u 保全（stash@{0} on aria/issues/issue_0278，含 CHECK-003 7/7 已验证实现；清单 v25-worktree-dirty-inventory.txt）；不伪造 coder 提交史，后续轮可恢复或忽略",
+  "abort_phase2": "清理后二次 POST abort → HTTP 200",
+  "durable_terminal": "status=aborted, completed_at=2026-09-19T01:42:58.892175454+00:00（attempt json version=4 实读）",
+  "residue_note": "blocked_gate_0003 在 store 内保持 open（abort 仅取消 stage gates）——UI pending 列表不显示（状态过滤），作为门触发证据留档"
+ }
+}

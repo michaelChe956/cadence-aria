@@ -1,0 +1,7 @@
+{
+  "session_id": "workspace_session_0490",
+  "command_id": "advance_b17e901a-e39e-4ca8-bcce-aa4c144c1f91",
+  "completed": false,
+  "code": "ADVANCE_HANDLER_FAILED",
+  "reason": "existing group initialization is bound to another advance identity"
+}
