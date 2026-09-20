@@ -882,3 +882,105 @@ async fn late_confirm_after_gate_closed_is_silent_idempotent_noop_at_ws_boundary
         "idempotent no-op must keep durable state untouched"
     );
 }
+
+#[tokio::test]
+async fn story_author_gate_abandon_terminates_session_through_socket_dispatch() {
+    // F-18（w2c 实测矩阵）：story 会话（legacy 流）停 author_confirm 门，
+    // typed abandon 经真实 inbound 分发链关门—— durable 置 Terminated、
+    // 引擎发 terminate close 事件，且不回 Error/ProtocolError 出站帧。
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+    use crate::product::models::{ProviderName, WorkspaceSessionStatus, WorkspaceType};
+    use tempfile::tempdir;
+
+    let root = tempdir().expect("tempdir");
+    let app_paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let mut record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("create story session");
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    crate::product::json_store::write_json(
+        &app_paths
+            .issue_lifecycle_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist story gate session");
+
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let mut session = WorkspaceSession::from_record(record.clone());
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n".to_string(),
+        diff: None,
+    });
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    )));
+    engine
+        .lock()
+        .await
+        .enter_author_confirm(Some("Author 结果等待确认".to_string()))
+        .await;
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        engine: engine.clone(),
+        run_context: ProviderRunContext::test_fixture(
+            Arc::new(ProviderRegistry::new()),
+            engine.clone(),
+            workspace_runs.clone(),
+            record.id.clone(),
+            app_paths,
+            record.clone(),
+        ),
+        outbound_tx,
+        session_id: record.id.clone(),
+    };
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::AbandonHumanGate {
+            command_id: "cmd-story-abandon".to_string(),
+        },
+    )
+    .await;
+
+    assert!(
+        outbound_rx.try_recv().is_err(),
+        "关门成功不得回 Error/ProtocolError 出站帧（close 通知走引擎事件）"
+    );
+    let mut close_events = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        if let crate::product::workspace_engine::EngineEvent::HumanGateClosed { decision, stage } =
+            event
+            && decision == "terminate"
+            && stage == "completed"
+        {
+            close_events += 1;
+        }
+    }
+    assert_eq!(close_events, 1, "恰好一条 terminate close 事件");
+    let durable = lifecycle
+        .get_workspace_session(&record.id)
+        .expect("durable story session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+}

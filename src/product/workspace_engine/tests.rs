@@ -59,3 +59,4 @@ mod single_candidate_flow_dispatch;
 mod single_candidate_prompt;
 pub(crate) mod single_candidate_recovery;
 mod single_candidate_reviewer_coverage;
+mod story_author_gate;

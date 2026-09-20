@@ -39,6 +39,25 @@ fn conversational_gate_stage_matrix_accepts_only_typed_gate_commands_and_advance
         &WorkspaceStage::HumanConfirm,
     ));
 
+    // F-18（w2c 实测矩阵）：story/design 会话（legacy 流）恒停 author_confirm 门，
+    // typed abandon 在该门放行补 terminate 通路（approve 仍走 HTTP confirm 端点，
+    // Confirm 帧在 author_confirm 继续不放行）；语义边界由引擎守卫承接。
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &abandon,
+        &WorkspaceStage::AuthorConfirm,
+    ));
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &WsInMessage::Abort,
+        &WorkspaceStage::AuthorConfirm,
+    ));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &confirm,
+        &WorkspaceStage::AuthorConfirm,
+    ));
+
     for stage in [
         WorkspaceStage::Running,
         WorkspaceStage::CrossReview,

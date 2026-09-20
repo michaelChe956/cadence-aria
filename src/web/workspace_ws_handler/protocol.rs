@@ -136,7 +136,16 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
         // L2 退役后 author_confirm 的 legacy 逐段/author 决策消息已删除
         //（REQ-RET-02）；RequestRevision 的 WorkItemPlan 放行特例在 socket
         // 层（author_confirm + WorkItemPlan），此处不重复。
-        WorkspaceStage::AuthorConfirm => matches!(msg, WsInMessage::Abort),
+        // F-18（w2c 实测矩阵）：story/design 会话（legacy 流）恒停本门，
+        // typed abandon 在此放行补 terminate 通路（approve 走 HTTP confirm
+        // 端点，Confirm 帧继续不放行）；WorkItemPlan 语义边界由引擎
+        // handle_human_gate_termination 的 story 门分流守卫承接。
+        WorkspaceStage::AuthorConfirm => {
+            matches!(
+                msg,
+                WsInMessage::Abort | WsInMessage::AbandonHumanGate { .. }
+            )
+        }
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
