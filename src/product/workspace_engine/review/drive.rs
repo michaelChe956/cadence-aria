@@ -7,7 +7,11 @@ use crate::product::logical_codebase::{
     LogicalCodebaseProviderGateway, PolicyTarget, ProviderGatewayError, ProviderRef,
     SessionLaunchRequest, SessionPolicyAction,
 };
+use crate::product::workspace_engine::provider_drive::{
+    PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT,
+};
 use crate::product::workspace_engine::types::ReviewProviderRunFailure;
+use std::collections::HashSet;
 
 impl WorkspaceEngine {
     pub async fn drive_review_session(
@@ -613,6 +617,21 @@ impl WorkspaceEngine {
         let mut commands_open = true;
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
+        // F-19b：review 面补零活动看门狗（对照 author 面 provider_drive 先例；
+        // 此前 review 驱动循环完全无超时臂，reviewer 静默即永久悬置）。
+        // 权限/choice 悬置等待人工期间按同法挂起（权限由 adapter 侧
+        // PERMISSION_TIMEOUT 收口；choice 由下方等待界收口）。
+        let idle_watchdog_timeout = PROVIDER_IDLE_WATCHDOG_TIMEOUT;
+        let idle_watchdog =
+            tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
+        tokio::pin!(idle_watchdog);
+        let mut waiting_for_permission = false;
+        // F-22/F-19b：choice 悬置等待界（语义同 author 面先例）。
+        let choice_wait_timeout = PROVIDER_CHOICE_WAIT_TIMEOUT;
+        let choice_wait_timer =
+            tokio::time::sleep_until(tokio::time::Instant::now() + choice_wait_timeout);
+        tokio::pin!(choice_wait_timer);
+        let mut pending_choice_ids: HashSet<String> = HashSet::new();
 
         while events_open {
             tokio::select! {
@@ -630,7 +649,59 @@ impl WorkspaceEngine {
                     self.finish_aborted_run().await;
                     return ReviewProviderRunResult::Aborted;
                 }
+                _ = &mut idle_watchdog,
+                if !waiting_for_permission && pending_choice_ids.is_empty() =>
+                {
+                    // F-19b：reviewer 零活动楔死——Abort kill 链 + cancel，
+                    // 经 Failed(Provider) 让 finish_review_provider_run_failure
+                    // 统一收口（Error 事件 + 节点失败 + finish_failed_run）。
+                    eprintln!(
+                        "[aria-cancellation] workspace review_drive idle_watchdog trigger=provider_idle_watchdog session_id={} role=reviewer agent={reviewer:?} timeout_secs={}",
+                        self.session.session_id,
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_idle_watchdog: reviewer 会话 {} 秒零活动（无事件/命令），疑似楔死，运行已由看门狗中止；可重新开始生成",
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    if let Some(node_id) = node_id.as_deref() {
+                        let _ = self.flush_stream_buffer(node_id).await;
+                    }
+                    return ReviewProviderRunResult::Failed(
+                        ReviewProviderRunFailure::Provider(message),
+                    );
+                }
+                _ = &mut choice_wait_timer,
+                if !pending_choice_ids.is_empty() =>
+                {
+                    // F-22/F-19b：reviewer choice 卡丢失/无人应答超界。
+                    eprintln!(
+                        "[aria-cancellation] workspace review_drive choice_wait_timeout trigger=provider_choice_wait_timeout session_id={} role=reviewer agent={reviewer:?} pending={:?} timeout_secs={}",
+                        self.session.session_id,
+                        pending_choice_ids,
+                        choice_wait_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_choice_wait_timeout: 等待用户选择应答超过 {} 秒（choice 卡未达用户或无人应答，pending={:?}），运行已中止；可重新开始生成",
+                        choice_wait_timeout.as_secs(),
+                        pending_choice_ids
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    if let Some(node_id) = node_id.as_deref() {
+                        let _ = self.flush_stream_buffer(node_id).await;
+                    }
+                    return ReviewProviderRunResult::Failed(
+                        ReviewProviderRunFailure::Provider(message),
+                    );
+                }
                 command = command_rx.recv(), if commands_open => {
+                    // F-19b：任何命令活动（含人工权限/选择应答）重置看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     match command {
                         Some(ProviderCommand::Abort) => {
                             // 诊断打点：Abort 命令到达 reviewer 驱动循环。
@@ -651,6 +722,8 @@ impl WorkspaceEngine {
                             approved,
                             reason,
                         }) => {
+                            // F-19b：人工权限应答到达，解除看门狗挂起。
+                            waiting_for_permission = false;
                             tracing::info!(permission_id = %id, "engine forwarding permission response");
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self
@@ -683,6 +756,8 @@ impl WorkspaceEngine {
                             free_text,
                             answers,
                         }) => {
+                            // F-22/F-19b：choice 应答到达——解除 pending 等待界。
+                            pending_choice_ids.remove(&id);
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
                             eprintln!(
@@ -719,6 +794,10 @@ impl WorkspaceEngine {
                     }
                 }
                 event = session.events.recv() => {
+                    // F-19b：任何 reviewer 事件重置零活动看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     let Some(event) = event else {
                         events_open = false;
                         continue;
@@ -740,6 +819,9 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            // F-19b：权限请求悬置期间等待人工输入，看门狗挂起
+                            //（权限等待由 adapter 侧 PERMISSION_TIMEOUT 收口）。
+                            waiting_for_permission = true;
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self
                                     .persist_permission_request(
@@ -786,6 +868,14 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ChoiceRequest(request) => {
+                            // F-22/F-19b：pending 由空转非空时起算/重置等待界。
+                            let choice_wait_started = pending_choice_ids.is_empty();
+                            pending_choice_ids.insert(request.id.clone());
+                            if choice_wait_started {
+                                choice_wait_timer
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + choice_wait_timeout);
+                            }
                             let questions = request.effective_questions();
                             let _ = self
                                 .event_tx

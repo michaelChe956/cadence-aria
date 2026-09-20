@@ -21,6 +21,26 @@ pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
 pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(150);
 
+/// F-22/F-19b：choice（结构化提问）悬置等待上限——provider 发出
+/// ChoiceRequest（pi `ask_user`/claude AskUserQuestion/codex requestUserInput）
+/// 后等待人工应答的界。
+///
+/// 依据：v28 实测 0482（codex 首跑 + abort 后 pi 重跑）与 0483（全新会话，无
+/// abort）三连楔死——provider 经结构化提问等待用户，看门狗按设计挂起
+/// （`pending_choice_requests` 非空不计时），而 choice 卡经 broadcast 的
+/// try_send 送达面无重发/无恢复（丢失即无人应答），run 无人收口永久楔死
+/// （12–15+ 分钟零增长零出站，看门狗零触发）。取 900s 与 ApprovalBridge
+/// `PERMISSION_TIMEOUT` 的人工等待界对齐：权限悬置由 adapter 侧超时收口，
+/// choice 悬置此前无任何界——本常量补齐对称语义。触发后转可诊断失败态
+/// （原因码 `provider_choice_wait_timeout`），story/design 面回 prepare_context
+/// 可重跑。
+#[cfg(not(test))]
+pub(crate) const PROVIDER_CHOICE_WAIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(900);
+#[cfg(test)]
+pub(crate) const PROVIDER_CHOICE_WAIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(150);
+
 impl WorkspaceEngine {
     /// F-19：legacy 流（story/design/workitem）provider start 的诊断登记。
     ///

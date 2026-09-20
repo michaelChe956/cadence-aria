@@ -12,7 +12,7 @@ use crate::product::workspace_engine::aggregate_output_parser::{
     parse_design_aggregate_output, parse_story_aggregate_output,
 };
 use choice_audit::ChoiceResponseAuditInput;
-pub(crate) use watchdog::PROVIDER_IDLE_WATCHDOG_TIMEOUT;
+pub(crate) use watchdog::{PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT};
 
 impl WorkspaceEngine {
     pub async fn handle_user_message(
@@ -322,6 +322,15 @@ impl WorkspaceEngine {
             tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
         tokio::pin!(idle_watchdog);
         let mut waiting_for_permission = false;
+        // F-22/F-19b choice 悬置等待界：看门狗对 choice 挂起是「无人应答不是
+        // provider 楔死」的设计豁免，但 choice 卡经 broadcast try_send 送达无
+        // 重发/无恢复（丢失即永久无应答，v28 0482/0483 三连楔死实测）。本界
+        // 补对称语义：pending choice 首次出现起计时，超界即按可诊断失败收口
+        //（对照权限面 PERMISSION_TIMEOUT 先例）。清空后再次出现则重新计时。
+        let choice_wait_timeout = PROVIDER_CHOICE_WAIT_TIMEOUT;
+        let choice_wait_timer =
+            tokio::time::sleep_until(tokio::time::Instant::now() + choice_wait_timeout);
+        tokio::pin!(choice_wait_timer);
 
         while events_open {
             tokio::select! {
@@ -343,6 +352,45 @@ impl WorkspaceEngine {
                     let message = format!(
                         "provider_idle_watchdog: provider 会话 {} 秒零活动（无事件/命令），疑似楔死，运行已由看门狗中止；可重新开始生成",
                         idle_watchdog_timeout.as_secs()
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    if let Some(node_id) = node_id.as_deref() {
+                        let _ = self.flush_stream_buffer(node_id).await;
+                        self.update_timeline_node(
+                            node_id,
+                            TimelineNodeStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
+                    }
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error { message })
+                        .await;
+                    self.finish_failed_run().await;
+                    return;
+                }
+                _ = &mut choice_wait_timer,
+                if !pending_choice_requests.is_empty() =>
+                {
+                    // F-22/F-19b：choice 卡丢失/无人应答超界——处置与看门狗
+                    // 触发一致（Abort kill 链 + cancel + 失败节点原因码 +
+                    // finish_failed_run 回 prepare_context 可重跑）。
+                    let pending_ids: Vec<&str> = pending_choice_requests
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    eprintln!(
+                        "[aria-cancellation] workspace provider_drive choice_wait_timeout trigger=provider_choice_wait_timeout session_id={} role={role:?} pending={:?} timeout_secs={}",
+                        self.session.session_id,
+                        pending_ids,
+                        choice_wait_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_choice_wait_timeout: 等待用户选择应答超过 {} 秒（choice 卡未达用户或无人应答，pending={:?}），运行已中止；可重新开始生成",
+                        choice_wait_timeout.as_secs(),
+                        pending_ids
                     );
                     let _ = session.commands.send(ProviderCommand::Abort).await;
                     cancel.cancel();
@@ -547,7 +595,14 @@ impl WorkspaceEngine {
                         }
                         ProviderEvent::ChoiceRequest(request) => {
                             let questions = request.effective_questions();
+                            // F-22/F-19b：pending 由空转非空时起算/重置等待界。
+                            let choice_wait_started = pending_choice_requests.is_empty();
                             pending_choice_requests.insert(request.id.clone(), request.clone());
+                            if choice_wait_started {
+                                choice_wait_timer
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + choice_wait_timeout);
+                            }
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {
