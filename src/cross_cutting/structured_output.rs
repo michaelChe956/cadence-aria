@@ -388,17 +388,29 @@ fn normalize_curly_json_delimiters(text: &str) -> Cow<'_, str> {
     while index < chars.len() {
         let ch = chars[index];
         if in_string {
-            out.push(ch);
             if escaped {
+                // k3 P2：转义弯引号（\“/\”）→ 合法 JSON 转义 \"——
+                // RFC 8259 只允许 \" \\ \/ \b \f \n \r \t \uXXXX；
+                // 反斜杠已在 out（上一轮 else 分支 push），只需把弯引号
+                // 字符替换为 ASCII 引号即可形成合法 \"。
+                if ch == '\u{201c}' || ch == '\u{201d}' {
+                    out.push('"');
+                } else {
+                    out.push(ch);
+                }
                 escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            } else if curly_string && ch == '\u{201d}' && next_is_structural(&chars, index + 1) {
-                out.pop();
-                out.push('"');
-                in_string = false;
+            } else {
+                out.push(ch);
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                } else if curly_string && ch == '\u{201d}' && next_is_structural(&chars, index + 1)
+                {
+                    out.pop();
+                    out.push('"');
+                    in_string = false;
+                }
             }
             index += 1;
             continue;
