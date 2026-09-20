@@ -137,3 +137,57 @@ fn scope_overlap_and_path_normalization_reject_forbidden_or_escaping_paths() {
         WorktreeError::SymlinkEscape
     );
 }
+
+/// F-25（kimi author 方言，现场 attempt 9298fe0b final_confirm 拒绝）：author
+/// 把 exclusive_scopes 产成顿号单串（"server/**、data/levels.json、
+/// tests/backend/**"）而非数组。gates final_confirm 的 diff 校验
+/// （validate_changed_files_for_work_item → validate_write_path）把它当整体
+/// glob 解析，base 钉在 "server/"，合法改动 data/levels.json 被 ScopeDenied。
+/// 修复：顿号按分隔符切分、逐段独立匹配，授权面不扩大。
+#[test]
+fn dun_separated_scope_string_allows_in_scope_paths_through_final_confirm_gate() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    fs::create_dir_all(workspace.path().join("data")).expect("data dir");
+    fs::create_dir_all(workspace.path().join("server/api")).expect("server api dir");
+    fs::create_dir_all(workspace.path().join("tests/backend")).expect("tests backend dir");
+    fs::create_dir_all(workspace.path().join("web")).expect("web dir");
+    fs::write(workspace.path().join("server/api/mod.rs"), "").expect("server file");
+    fs::write(workspace.path().join("data/levels.json"), "{}").expect("levels file");
+    fs::write(workspace.path().join("web/index.html"), "").expect("web file");
+
+    let dun_scopes = vec!["server/**、data/levels.json、tests/backend/**".to_string()];
+
+    // 现场：第二段（精确路径）必须放行——修复前整体解析 base=server/ 错拒。
+    assert_eq!(
+        validate_write_path(
+            workspace.path(),
+            &dun_scopes,
+            &workspace.path().join("data/levels.json"),
+            true,
+        )
+        .expect("顿号单串 scope 的段内路径必须放行"),
+        "data/levels.json"
+    );
+    // wildcard 段照常工作。
+    assert_eq!(
+        validate_write_path(
+            workspace.path(),
+            &dun_scopes,
+            &workspace.path().join("server/api/mod.rs"),
+            true,
+        )
+        .expect("wildcard 段照常放行"),
+        "server/api/mod.rs"
+    );
+    // 顿号分隔不扩大授权面：段外路径仍拒绝。
+    assert_eq!(
+        validate_write_path(
+            workspace.path(),
+            &dun_scopes,
+            &workspace.path().join("web/index.html"),
+            true,
+        )
+        .expect_err("段外路径仍拒绝"),
+        WorktreeError::ScopeDenied("web/index.html".to_string())
+    );
+}

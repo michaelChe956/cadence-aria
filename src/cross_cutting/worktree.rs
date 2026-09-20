@@ -332,6 +332,17 @@ fn scope_pair_may_overlap(left: &str, right: &str, case_sensitive: bool) -> bool
 }
 
 pub(crate) fn scope_allows_path(scope: &str, relative_path: &str, case_sensitive: bool) -> bool {
+    // F-25（kimi author 方言，现场 attempt 9298fe0b）：author 可能把
+    // exclusive/forbidden scopes 产成顿号单串（"server/**、data/levels.json"）
+    // 而非数组；整体当 glob 解析会把 base 钉在首段上，错拒/错放后续段
+    // （final_confirm diff 门错拒 data/levels.json）。确定性机械修：顿号按
+    // 分隔符切分、逐段独立匹配，空段永不放行；glob/大小写/路径归一语义
+    // 零变化（对照弯引号归一化 c60dbae9 的同族保守边界）。
+    if scope.contains('、') {
+        return scope
+            .split('、')
+            .any(|part| scope_allows_path(part, relative_path, case_sensitive));
+    }
     let pattern = ScopePattern::parse(scope, case_sensitive);
     let path = normalize_scope_text(relative_path, case_sensitive);
     if pattern.all {
@@ -427,4 +438,49 @@ fn platform_case_sensitive() -> bool {
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scope_allows_path;
+
+    /// F-25（kimi author 方言，现场 attempt 9298fe0b）：author 把
+    /// exclusive_scopes 产成顿号单串（"server/**、data/levels.json、
+    /// tests/backend/**"）而非数组；整体当 glob 解析时 base 钉在首段
+    /// "server/" 上，final_confirm diff 门错拒合法改动 data/levels.json。
+    /// 确定性机械修：顿号是分隔符，逐段独立匹配，不扩大也不缩小授权面。
+    #[test]
+    fn dun_separated_scope_string_matches_each_alternative_independently() {
+        let scope = "server/**、data/levels.json、tests/backend/**";
+        // 现场：单串第二段（精确路径）必须放行——修复前 base=server/ 错拒。
+        assert!(scope_allows_path(scope, "data/levels.json", true));
+        // 各段按独立 glob 生效：wildcard 段、目录前缀段照常匹配。
+        assert!(scope_allows_path(scope, "server/api/mod.rs", true));
+        assert!(scope_allows_path(scope, "tests/backend/init.rs", true));
+        // 顿号外路径仍拒绝——分隔不扩大授权面。
+        assert!(!scope_allows_path(scope, "web/index.html", true));
+        assert!(!scope_allows_path(scope, "server", true));
+    }
+
+    /// forbidden 方向同方言：顿号单串 forbidden scope 逐段生效，任一段
+    /// 命中即违规（gates final_confirm 的 forbidden 检查消费同一函数）。
+    #[test]
+    fn dun_separated_forbidden_scope_flags_each_alternative() {
+        let scope = "docs/**、secrets.json";
+        assert!(scope_allows_path(scope, "docs/api.md", true));
+        assert!(scope_allows_path(scope, "secrets.json", true));
+        assert!(!scope_allows_path(scope, "src/main.rs", true));
+    }
+
+    /// 空段永不放行：连续顿号/首尾顿号产生的空串不是通配授权。
+    #[test]
+    fn dun_split_empty_segments_never_allow() {
+        assert!(!scope_allows_path("、", "anything.rs", true));
+        assert!(!scope_allows_path(
+            "server/**、、web/**",
+            "anything.rs",
+            true
+        ));
+        assert!(!scope_allows_path("、server/**", "web/x.rs", true));
+    }
 }
