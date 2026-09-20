@@ -266,3 +266,74 @@ fn human_gate_close_stale_expected_record_keeps_workspace_session_conflict() {
         "workspace_session",
     );
 }
+
+// F-21 fix round（controller 裁定）：plan 会话（SC 流）除终审门外还会停在
+// human_confirm——context blocker 门（prepare 相位，plan_outline/authoring.rs
+// enter_work_item_plan_context_blocker）与 author 连续 validate 失败门
+//（generate 相位，decisions.rs enter_human_confirm_for_work_item_plan_author_
+// failure）。这两个入口只置 stage+WaitingForHuman，不写快照不提相位；矩阵
+// HumanConfirm SC 臂放行 AbandonHumanGate，引擎 close_human_gate 已在内存校验
+// stage==HumanConfirm——CAS 对 terminate（Terminated）放行这三形态（Prepare/
+// Generate/None），confirm（Running）前置一字不动（反伪造与 Completed 拒收
+// 维持）。
+/// ⑧F-21：terminate 放行 context blocker/author 失败/缺相位门（无快照）。
+#[test]
+fn human_gate_close_terminate_relaxes_non_approval_gate_shapes() {
+    let (_tmp, store) = setup();
+    for phase in [
+        Some(SingleCandidatePhase::Prepare),
+        Some(SingleCandidatePhase::Generate),
+        None,
+    ] {
+        let expected = gate_close_session(
+            &store,
+            phase.clone(),
+            WorkspaceSessionStatus::WaitingForHuman,
+            false,
+        );
+        let saved = store
+            .compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Terminated)
+            .unwrap_or_else(|error| panic!("phase {phase:?} terminate must close: {error:?}"));
+        assert_eq!(saved.status, WorkspaceSessionStatus::Terminated);
+        assert_eq!(saved.single_candidate_phase, phase, "terminate 不改相位");
+        assert_eq!(saved.human_gate_snapshot, None);
+
+        let durable = store.get_workspace_session(&expected.id).unwrap();
+        assert_eq!(durable.status, WorkspaceSessionStatus::Terminated);
+    }
+}
+
+/// ⑨F-21 边界：confirm（Running）对这些形态维持 Conflict——approve 仍必须是
+/// Evaluate/Approval+快照在场的批准链门（反伪造判据不动）。
+#[test]
+fn human_gate_close_confirm_keeps_rejecting_non_approval_gate_shapes() {
+    let (_tmp, store) = setup();
+    for phase in [
+        Some(SingleCandidatePhase::Prepare),
+        Some(SingleCandidatePhase::Generate),
+        None,
+    ] {
+        let expected =
+            gate_close_session(&store, phase, WorkspaceSessionStatus::WaitingForHuman, false);
+        assert_conflict_kind(
+            store.compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running),
+            "human_gate_close",
+        );
+    }
+}
+
+/// ⑩F-21 边界：Failed 相位 terminate 仍拒（失败终态门不在放行面）。
+#[test]
+fn human_gate_close_terminate_still_rejects_failed_phase() {
+    let (_tmp, store) = setup();
+    let expected = gate_close_session(
+        &store,
+        Some(SingleCandidatePhase::Failed),
+        WorkspaceSessionStatus::WaitingForHuman,
+        true,
+    );
+    assert_conflict_kind(
+        store.compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Terminated),
+        "human_gate_close",
+    );
+}

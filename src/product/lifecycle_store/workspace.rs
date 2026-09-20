@@ -580,12 +580,14 @@ impl LifecycleStore {
     /// （request-change 修订后 repeated_fingerprint 门经 EnterHumanGate 保持
     /// Evaluate），confirm 是人工批准权威，在锁内判等通过后原子提升
     /// phase→Approval 再走既有 compile 链——compile 链三处 Approval 前置靠满足
-    /// 而非削弱；terminate 关门成功但不提升相位。前置接受 phase∈{Approval,
-    /// Evaluate}，但 `human_gate_snapshot` 必须在场：这是反伪造判据——
-    /// `update_workspace_session_status` 只在终态清快照、从不创建快照，没有
-    /// 快照在场的 Evaluate 记录不是本 CAS 应当关闭的门；Completed 相位继续拒
-    /// （amendment 重开门不得流经 approval compile）。禁止 trigger/resumable
-    /// 判据：NativeHumanRequired 跨两族复用、resumable 是策略派生值。
+///
+/// F-21 fix round（controller 裁定）：terminate（Terminated）对 plan 会话
+///（SC 流）非终审门形态放行——context blocker 门（prepare 相位，plan_outline/
+/// authoring.rs enter_work_item_plan_context_blocker）与 author 连续 validate
+/// 失败门（generate 相位，decisions.rs）只置 stage+WaitingForHuman，不写快照
+/// 不提相位，WaitingForHuman 本身即这两门的 durable 开态证据；引擎
+/// close_human_gate 已在内存校验 stage==HumanConfirm 后才抵达本 CAS，矩阵
+/// HumanConfirm SC 臂放行 AbandonHumanGate。confirm（Running）前置一字不动。
     pub fn compare_and_save_human_gate_close(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -600,13 +602,20 @@ impl LifecycleStore {
                 reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
             });
         }
-        if expected.status != WorkspaceSessionStatus::WaitingForHuman
-            || !matches!(
+        let relaxed_terminate = status == WorkspaceSessionStatus::Terminated
+            && matches!(
                 expected.single_candidate_phase,
-                Some(crate::product::models::SingleCandidatePhase::Approval)
-                    | Some(crate::product::models::SingleCandidatePhase::Evaluate)
-            )
-            || expected.human_gate_snapshot.is_none()
+                None
+                    | Some(crate::product::models::SingleCandidatePhase::Prepare)
+                    | Some(crate::product::models::SingleCandidatePhase::Generate)
+            );
+        if expected.status != WorkspaceSessionStatus::WaitingForHuman
+            || !(relaxed_terminate
+                || (matches!(
+                    expected.single_candidate_phase,
+                    Some(crate::product::models::SingleCandidatePhase::Approval)
+                        | Some(crate::product::models::SingleCandidatePhase::Evaluate)
+                ) && expected.human_gate_snapshot.is_some()))
         {
             return Err(ProductStoreError::Conflict {
                 kind: "human_gate_close",
