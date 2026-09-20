@@ -1,7 +1,7 @@
 # coding-code-review-triage Specification
 
 ## Purpose
-TBD - created by archiving change open-code-review-triage-gate. Update Purpose after archive.
+为 Code Review 阶段需要人工介入的三类流程决策（人工分诊、验证不完整、运维阻塞）落地可操作的 blocked gate，提供「送回 Coder 返修、重试代码审查、人工继续、终止」四个处置动作且不触发 plan repair；约束单次审查结论至多落地一个门禁，并界定 Reviewer implementation defect finding 的输出契约字段边界。
 ## Requirements
 ### Requirement: Code Review 人工分诊决策必须落地可操作门禁
 

@@ -1,7 +1,7 @@
 # coding-workspace-completion Specification
 
 ## Purpose
-TBD - created by archiving change relax-completion-testing-report-gate. Update Purpose after archive.
+在 Testing 阶段未纳入产品流程期间，解除 Coding Workspace completion gate 对 testing report 的依赖：完成判定以适用的 review 流程通过及全部非 testing gate 满足为准，不伪造 testing report 或成功状态；文件范围、runtime binding、handoff、terminal 完整性等非 testing 门禁继续生效，Testing 基础设施与既有 report 数据保持兼容。
 ## Requirements
 ### Requirement: Coding Workspace completion gate 不依赖 TestingReport
 

@@ -1,7 +1,7 @@
 # group-final-review-triage Specification
 
 ## Purpose
-TBD - created by archiving change open-group-final-review-change-gate. Update Purpose after archive.
+为 internal PR review 与 group final review 阶段需要人工介入的流程决策（送回 Coder 返修、重试验证、人工分诊、运维阻塞）落地阻塞门禁，把 attempt 置为阻塞状态而非静默退出；四类决策使用互不相同的原因码，同一次评审结论至多落地一个门禁，门禁提供重试评审、人工继续、终止三个可操作动作，且原因码判定不含不可达分支。
 ## Requirements
 ### Requirement: internal PR review 的人工路由决策必须落地阻塞门禁
 

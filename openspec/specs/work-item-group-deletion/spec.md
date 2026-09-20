@@ -1,7 +1,7 @@
 # work-item-group-deletion Specification
 
 ## Purpose
-TBD - created by archiving change harden-work-item-group-deletion. Update Purpose after archive.
+规范 work item group 的删除边界：存在对应 coding attempt 时拒绝删除并提示先删除 coding workspace（不自动删除或中止该 attempt），删除时按 `(project, issue, repository)` 键清理该 group 的 shared-worktree、锁、journal 与产物且不连带删除同 issue 异仓数据，不误伤 issue 本身、spec 版本历史与其他 plan，失败时返回稳定错误码并标注涉及的 target repository 集合。
 ## Requirements
 ### Requirement: 存在 coding workspace 时拒绝删除 work item group
 

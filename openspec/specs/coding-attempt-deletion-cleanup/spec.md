@@ -1,7 +1,7 @@
 # coding-attempt-deletion-cleanup Specification
 
 ## Purpose
-TBD - created by archiving change cleanup-attempt-handoff-revisions. Update Purpose after archive.
+规范删除 coding attempt 时对已认领 handoff revision 的连带清理：系统在 attempt 记录删除前遍历其全部 coding unit，按归属校验从 issue 级 work item lineage 移除对应 handoff revision，保证删除后可重建 attempt 并重跑同一 work item，且不触及计划编译产物与 handoff revision 的既有发布语义。
 ## Requirements
 ### Requirement: 删除 attempt 时清理其已认领的 handoff revision
 

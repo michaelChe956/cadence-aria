@@ -1,7 +1,7 @@
 # work-item-handoff-removal Specification
 
 ## Purpose
-TBD - created by archiving change remove-work-item-handoff. Update Purpose after archive.
+移除 work item 交接摘要产物：完成 coding unit 不再生成交接摘要，跨 unit 交接语义完全由 HandoffRevision 的契约与能力承担（不再携带测试与产物清单），组完成的写入范围门禁改以 git 事实为数据源继续生效，评审提示词与完成判定不再以交接摘要的存在或字段完整度为对象，完成 commit 记录与 schema v2 契约体系不受影响。
 ## Requirements
 ### Requirement: 交接摘要不再存在
 

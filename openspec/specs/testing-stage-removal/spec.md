@@ -1,7 +1,7 @@
 # testing-stage-removal Specification
 
 ## Purpose
-TBD - created by archiving change remove-testing-stage. Update Purpose after archive.
+从 Coding Workspace 产品流程中整体移除 Testing 阶段：不再存在 Testing 阶段、Tester 角色与测试计划/测试报告产物，恢复、重试与门禁动作不指向已移除阶段，评审与完成判定不依赖测试证据；通用测试命令规划能力保留，不留恢复 Testing 的兼容开关或死代码，非测试功能失去的数据源与保留节点的执行链契约变化均须显式处置。
 ## Requirements
 ### Requirement: Coding Workspace 不含 Testing 阶段与 Tester 角色
 

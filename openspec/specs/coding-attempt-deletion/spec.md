@@ -1,7 +1,7 @@
 # coding-attempt-deletion Specification
 
 ## Purpose
-TBD - created by archiving change harden-coding-attempt-deletion. Update Purpose after archive.
+规范删除 coding attempt 时的清理边界：系统按 `(project, issue, repository)` 判定 shared-worktree 是否仍被同仓库其他 attempt 使用、仅同仓无使用者时清理，连带清理该 attempt 遗留的各级 lock；worktree 缺失时容错跳过不阻断删除，且不误伤同 issue 其他仓库的 shared-worktree、锁与数据。
 ## Requirements
 ### Requirement: 删除 coding attempt 必须按条件清理 shared-worktree（REQ-DEL-01）
 系统 SHALL 使逻辑代码库场景下删除 coding attempt 时按 `(project, issue, repository)` 判定 shared-worktree 是否仍被同仓库其他 attempt 使用；仅当同仓无其他使用者时才清理，不得因异仓 attempt 存在而误删或误留。

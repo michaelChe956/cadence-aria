@@ -1,7 +1,7 @@
 # provider-stream-log-placement Specification
 
 ## Purpose
-TBD - created by archiving change fix-provider-stream-log-location. Update Purpose after archive.
+修正 provider 流日志的落盘位置边界：流日志目录必须由调用方通过 adapter 输入显式提供绝对路径，adapter 不得从 provider 子进程工作目录推导，也不得向目标代码库写入任何流日志；持有 coding attempt 上下文的执行路径将流日志落在该 attempt 目录下（与 provider-raw 同根）并随 attempt 删除一并清理，流日志命名与写入语义、provider-raw 落盘及门禁判定保持不变。
 ## Requirements
 ### Requirement: 流日志目录由调用方提供
 

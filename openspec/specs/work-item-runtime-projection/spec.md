@@ -1,7 +1,7 @@
 # work-item-runtime-projection Specification
 
 ## Purpose
-TBD - created by archiving change fix-work-item-runtime-projection. Update Purpose after archive.
+修复 Work Item 运行期投影的绑定与读取路径：以只保存定位与完整性校验凭据的 RuntimeBinding 关联不可变 PlanRevision/WorkItemRevision/ProjectionBundle，运行期各角色经 Revision Store 读取各自绑定的 Projection 而非最新 Plan，Group Coding 从 PlanRevision 物化成员、顺序与依赖，Final Compile 仅在全部子 Workspace 运行期就绪后才报成功，且 Schema Cutover 不留 legacy 兼容、Story/Design 共享链路不依赖 Work Item Binding。
 ## Requirements
 ### Requirement: Schema v2 RuntimeBinding 只定位不可变 Revision
 系统 SHALL 为每个 Schema v2 Work Item 子 Workspace 以及每个 Coding Attempt/Unit 的运行期读取保存或解析不可变 RuntimeBinding。该 Binding MUST 精确关联 Plan、PlanRevision、LogicalWorkItem、WorkItemRevision、WorkItemProjectionBundle 与 VerificationPlanRevision，并验证关联对象的 ID、版本和 Canonical Contract/Projection Hash 一致性。

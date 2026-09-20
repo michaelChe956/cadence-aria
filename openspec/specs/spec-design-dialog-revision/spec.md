@@ -7,7 +7,7 @@ Story/Design workspace 的 spec 生成采用对话式修订循环：AuthorConfir
 
 ### Requirement: AuthorConfirm 对话式修订循环
 
-Story/Design workspace 在 AuthorConfirm 阶段必须接受用户自由文本反馈，并驱动 author 基于当前产物与反馈进行增量修订；修订完成后流程必须回到 AuthorConfirm 等待下一轮用户决策。
+Story/Design workspace 在 AuthorConfirm 阶段 MUST 接受用户自由文本反馈，并驱动 author 基于当前产物与反馈进行增量修订；修订完成后流程 MUST 回到 AuthorConfirm 等待下一轮用户决策。
 
 #### Scenario: 用户提交反馈触发增量修订
 - **WHEN** Story/Design workspace 处于 AuthorConfirm 阶段，用户提交非空自由文本反馈
@@ -27,7 +27,7 @@ Story/Design workspace 在 AuthorConfirm 阶段必须接受用户自由文本反
 
 ### Requirement: 确认双出口与 review 默认值
 
-用户确认 Author 产物时必须有两个出口：「确认并送审」与「确认定稿」；创建 workspace 时的 reviewer 配置决定两者的默认推荐项，但不锁死另一个出口。
+用户确认 Author 产物时 MUST 有两个出口：「确认并送审」与「确认定稿」；创建 workspace 时的 reviewer 配置决定两者的默认推荐项，但不锁死另一个出口。
 
 #### Scenario: 配置启用 review 时默认推荐送审
 - **WHEN** workspace 创建时启用了 reviewer，用户在 AuthorConfirm 点击「确认并送审」
@@ -51,7 +51,7 @@ Story/Design workspace 在 AuthorConfirm 阶段必须接受用户自由文本反
 
 ### Requirement: review 结果回对话流
 
-reviewer 评审完成后，其报告必须作为消息进入对话流并回到 AuthorConfirm；reviewer 的结论不得直接驱动流程终结或自动返修。
+reviewer 评审完成后，其报告 MUST 作为消息进入对话流并回到 AuthorConfirm；reviewer 的结论不得直接驱动流程终结或自动返修。
 
 #### Scenario: review 报告展示后回 AuthorConfirm
 - **WHEN** reviewer 评审完成（无论结论为通过还是建议修订）
@@ -63,7 +63,7 @@ reviewer 评审完成后，其报告必须作为消息进入对话流并回到 A
 
 ### Requirement: 存量会话恢复兼容
 
-升级前停留在已退役中间阶段（HumanConfirm / ReviewDecision）的 Story/Design 存量会话，恢复时必须被安全引导。
+升级前停留在已退役中间阶段（HumanConfirm / ReviewDecision）的 Story/Design 存量会话，恢复时 MUST 被安全引导。
 
 #### Scenario: 停留在 HumanConfirm 的存量会话
 - **WHEN** 恢复一个阶段为 HumanConfirm 的 Story/Design 存量会话
@@ -75,7 +75,7 @@ reviewer 评审完成后，其报告必须作为消息进入对话流并回到 A
 
 ### Requirement: 修订中断线恢复
 
-修订 run（Revision 阶段）执行期间连接中断后重连时，系统必须将会话恢复到一致状态且不丢失数据。
+修订 run（Revision 阶段）执行期间连接中断后重连时，系统 MUST 将会话恢复到一致状态且不丢失数据。
 
 #### Scenario: 修订 run 完成后重连
 - **WHEN** 修订 run 已完成但连接在中断前未收到完成事件，用户重连

@@ -1,7 +1,7 @@
 # work-item-draft-generation-reliability Specification
 
 ## Purpose
-TBD - created by archiving change improve-work-item-draft-generation-reliability. Update Purpose after archive.
+提升 Work Item Draft 生成的可靠性：向 Draft author 提供可产出语义闭合 Canonical Contract 的 Prompt 契约，约束任务、需求追踪、交接审查、blocker 与验证项之间的引用关系；Draft 已解析但本地语义校验失败时执行恰好一次携带全部 findings 的有界自动修复，并允许在操作者明确授权下用一至两个脱敏案例对 Claude Code 做临时 Prompt 试运行验证。
 ## Requirements
 ### Requirement: 语义闭合的 Draft 生成契约
 系统 SHALL 向 Work Item Draft author 提供可生成语义闭合 Canonical Contract 的 Prompt 契约。Prompt MUST 约束任务完成条件、需求追踪、交接审查、blocker 目标和验证项之间的引用关系；必需验证项 MUST 使用可信验证命令目录中的非空命令。
