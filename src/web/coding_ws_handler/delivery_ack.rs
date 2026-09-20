@@ -11,6 +11,10 @@ use super::CodingWsOutMessage;
 struct SocketWriteAckEntry {
     registration_id: u64,
     sender: oneshot::Sender<bool>,
+    /// F-19/k3-P2：fan-out 写结算份额。None=未登记（单写语义：首个 settle 即
+    /// 结算）；Some(n)=还有 n 份 socket 写待结算——任一 confirm 立即结算成功，
+    /// 递减到零（全部失败）才结算失败。
+    pending_writes: Option<usize>,
 }
 
 pub(crate) struct PlanAmendmentSocketWriteWaiter {
@@ -39,6 +43,7 @@ pub(crate) fn register_plan_amendment_socket_write(
         SocketWriteAckEntry {
             registration_id,
             sender,
+            pending_writes: None,
         },
     );
     Ok(PlanAmendmentSocketWriteWaiter {
@@ -100,15 +105,54 @@ pub(crate) fn fail_plan_amendment_socket_write(message: &CodingWsOutMessage) {
     settle_plan_amendment_socket_write(message, false);
 }
 
+/// F-19/k3-P2：broadcast fan-out **发送前**登记该事件的写份额。socket 循环的
+/// 写结算（confirm/fail）只会在事件进入 channel 之后发生，登记先行即无竞态。
+/// 零份额（k3-P1：registry 无该 attempt 的 sockets entry / 全部关闭）在此
+/// 立即结算失败，恢复旧直连路径 channel 关闭的快速失败语义。
+pub(crate) fn expect_plan_amendment_fan_out_writes(message: &CodingWsOutMessage, writes: usize) {
+    let CodingWsOutMessage::PlanAmendmentUpdated { event_id, .. } = message else {
+        return;
+    };
+    let mut acknowledgements = socket_write_acknowledgements()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(entry) = acknowledgements.get_mut(event_id) else {
+        return;
+    };
+    if entry.pending_writes.is_some() {
+        return;
+    }
+    if writes == 0 {
+        let entry = acknowledgements.remove(event_id).expect("entry present");
+        let _ = entry.sender.send(false);
+        return;
+    }
+    entry.pending_writes = Some(writes);
+}
+
 fn settle_plan_amendment_socket_write(message: &CodingWsOutMessage, written: bool) {
     let CodingWsOutMessage::PlanAmendmentUpdated { event_id, .. } = message else {
         return;
     };
-    let entry = socket_write_acknowledgements()
+    let mut acknowledgements = socket_write_acknowledgements()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(event_id);
-    if let Some(entry) = entry {
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(entry) = acknowledgements.get_mut(event_id) else {
+        return;
+    };
+    // 任一成功立即结算成功；未登记份额的单写路径保持「首 settle 即结算」；
+    // 登记过的份额递减，最后一份失败才结算失败。
+    let settle_now = written
+        || match entry.pending_writes {
+            None => true,
+            Some(remaining) if remaining <= 1 => true,
+            Some(remaining) => {
+                entry.pending_writes = Some(remaining - 1);
+                false
+            }
+        };
+    if settle_now {
+        let entry = acknowledgements.remove(event_id).expect("entry present");
         let _ = entry.sender.send(written);
     }
 }

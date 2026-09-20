@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::web::coding_ws_handler::CodingWsOutMessage;
+use crate::web::coding_ws_handler::delivery_ack::expect_plan_amendment_fan_out_writes;
 use crate::web::coding_ws_handler::delivery_ack::fail_plan_amendment_socket_write;
 
 use super::CodingAttemptRunKey;
@@ -180,34 +181,34 @@ impl CodingSocketRegistry {
     }
 
     /// hub 路由 fan-out：目标按 registry 现存 socket 动态解析（与 hub 实例无关，
-    /// 旧 hub 的路由同样能把事件送到新 socket）。任一投递成功即视为已投递；
-    /// 全部失败或无目标时 fail 该事件的 plan_amendment socket-write ack，
-    /// 避免 waiter 悬挂（等价旧直连路径下 channel 关闭的失败语义）。
+    /// 旧 hub 的路由同样能把事件送到新 socket）。发送前先向 delivery ack 登记
+    /// 该事件的写份额：任一 socket 写成功即 confirm、全部失败才 fail；零份额
+    /// （k3-P1：无 sockets entry / 全部关闭）由登记侧立即结算失败——等价旧
+    /// 直连路径下 channel 关闭的快速失败语义，amendment waiter 不悬挂。
     async fn broadcast(&self, attempt_key: &CodingAttemptRunKey, event: &CodingWsOutMessage) {
         let targets: Vec<_> = {
             let mut inner = self.inner.lock().expect("coding socket registry lock");
-            let Some(sockets) = inner.sockets.get_mut(attempt_key) else {
-                return;
-            };
-            sockets.retain(|_, sender| !sender.is_closed());
-            if sockets.is_empty() {
-                inner.sockets.remove(attempt_key);
-                Vec::new()
-            } else {
-                sockets.values().cloned().collect()
+            match inner.sockets.get_mut(attempt_key) {
+                Some(sockets) => {
+                    sockets.retain(|_, sender| !sender.is_closed());
+                    if sockets.is_empty() {
+                        inner.sockets.remove(attempt_key);
+                        Vec::new()
+                    } else {
+                        sockets.values().cloned().collect()
+                    }
+                }
+                None => Vec::new(),
             }
         };
-        if targets.is_empty() {
-            fail_plan_amendment_socket_write(event);
-            return;
-        }
-        let mut delivered = false;
+        expect_plan_amendment_fan_out_writes(event, targets.len());
+        let mut failed_sends = 0usize;
         for target in targets {
-            if target.send(event.clone()).await.is_ok() {
-                delivered = true;
+            if target.send(event.clone()).await.is_err() {
+                failed_sends += 1;
             }
         }
-        if !delivered {
+        for _ in 0..failed_sends {
             fail_plan_amendment_socket_write(event);
         }
     }

@@ -92,3 +92,24 @@ flush，wire 顺序与旧直连路径逐帧一致。
 - 并发验证环境注记：本修复验证期间共享工作树内 P0Watchdog 的 lifecycle_store/
   workspace_engine 在途改动多次阻断 lib 构建，所有定向测试均在编译窗口内完成，
   结果如上；全仓全量验证归 controller 终态复核。
+
+## 6. k3 review round 1 修复（P1 无 entry 漏 fail-ack + P2 fan-out 单份 ack 误判）
+
+- **P1（amendment waiter 无限阻塞）**：`broadcast` 在 registry 无该 attempt 的
+  sockets entry 时 `let-else` 早返回，跳过 `fail_plan_amendment_socket_write`——
+  驱动断开后 runner 持 hub clone 保活、hub channel 不关闭，`wait_or_channel_closed`
+  两臂均不触发=无限阻塞（旧直连实现会因 channel 关闭快速失败）。修：早返回改
+  `match`（None 分支返回空目标 Vec），零份额统一由登记侧结算失败。
+- **P2（一败一胜误判失败）**：`PlanAmendmentUpdated` 广播到多个 socket 但 ack 单例、
+  首 settle 胜出——任一 socket 写失败立即 fail 结算，其它 socket 的成功写救不回，
+  amendment 被误判失败中断。修：`delivery_ack` entry 增 `pending_writes` 份额计数，
+  broadcast 在**发送循环之前**登记目标数（socket 循环的写结算只会在事件进入
+  channel 后发生，登记先行即无竞态）；结算规则=任一 confirm 立即成功、份额递减
+  到零（全部失败）才失败、send 失败份额按 fail 计；未登记（非广播路径）保持
+  「首 settle 即结算」旧单写语义。
+- TDD：新增 2 例红→绿——`hub_without_live_sockets_fails_plan_amendment_delivery_
+  quickly`（修复前 waiter 2s 超时挂起=红）、`plan_amendment_fan_out_one_failure_
+  one_success_confirms`（修复前 fail 先结算 → wait Err=红）。
+- 复跑全绿：`event_hub` 6/6；`--lib coding_ws_handler` 118/118；
+  `--lib plan_amendment` 49/49；`--test it_web web_coding_ws_handler` 66/66；
+  fmt/clippy（改动面）clean。
