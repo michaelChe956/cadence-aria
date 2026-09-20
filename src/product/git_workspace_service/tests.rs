@@ -433,3 +433,79 @@ async fn delete_remote_branch_rejects_unsafe_branch_name() {
         "unsafe branch name must surface as UnsafePath, got {error:?}"
     );
 }
+
+#[tokio::test]
+async fn git_add_work_item_changes_fails_closed_on_unreadable_artifact() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    git(repo, &["commit", "-m", "base"]);
+
+    // F-15 现场形态：coding run 的 agent 在 worktree 里落出无读位的产物
+    // （naruto issue_0062 的 tests/backend/fixtures/bad-data/unreadable.json，
+    // chmod 000）。git add -A 对其报 unable to index file，且文件留在 worktree
+    // 会让同 worktree 后续所有 run 的 staging 永久失败。
+    let fixture_dir = repo.join("tests/backend/fixtures/bad-data");
+    fs::create_dir_all(&fixture_dir).expect("create fixture dir");
+    let unreadable = fixture_dir.join("unreadable.json");
+    fs::write(&unreadable, "{}\n").expect("write unreadable fixture");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmod 000 fixture");
+
+    let service = GitWorkspaceService::new();
+    let error = service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect_err("unreadable artifact must fail closed before git add");
+    let GitWorkspaceError::UnreadableArtifact { path, mode } = &error else {
+        panic!("expected UnreadableArtifact, got: {error:?}");
+    };
+    assert_eq!(path, "tests/backend/fixtures/bad-data/unreadable.json");
+    assert_eq!(*mode, 0o000);
+    let message = error.to_string();
+    assert!(
+        message.contains("chmod 644"),
+        "error must carry the remedy for the agent, got: {message}"
+    );
+
+    // agent 自修权限后同一路径放行，staging 恢复正常。
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmod 644 fixture");
+    service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect("readable artifact stages normally");
+}
+
+#[tokio::test]
+async fn git_add_work_item_changes_allows_partial_read_bits_and_deletions() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    fs::write(repo.join("owner-only.txt"), "owner read\n").expect("write owner-only");
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-m", "base"]);
+
+    // 边界一：仅属主可读（0o400）不拦——git 以当前用户运行可正常索引，
+    // 预检只拦「任何用户都读不了」的自我死锁形态。
+    fs::write(repo.join("owner-only.txt"), "changed\n").expect("modify owner-only");
+    fs::set_permissions(
+        repo.join("owner-only.txt"),
+        fs::Permissions::from_mode(0o400),
+    )
+    .expect("chmod 400 owner-only");
+
+    // 边界二：tracked 文件被删除不拦——git add -A 只记录删除，不读内容。
+    fs::remove_file(repo.join("README.md")).expect("delete tracked file");
+
+    let service = GitWorkspaceService::new();
+    service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect("partial read bits and deletions must stage normally");
+}

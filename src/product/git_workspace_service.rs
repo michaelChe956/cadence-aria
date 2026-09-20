@@ -35,6 +35,14 @@ pub enum GitWorkspaceError {
     Cancelled { args: String, cwd: String },
     #[error("git_workspace_unsafe_path: {0}")]
     UnsafePath(String),
+    /// F-15：staging 前发现无任何读位的产物文件（如 agent 造的 chmod 000
+    /// fixture）。`git add -A` 对这类文件报 `unable to index file` 失败，且文件
+    /// 留在 worktree 会让同 worktree 后续所有 run 的 staging 永久失败；必须在
+    /// staging 前 fail-closed，错误指名文件与修法让 agent 自修重写。
+    #[error(
+        "git_workspace_unreadable_artifact: {path} 权限 {mode:o} 无任何读位，git add 无法索引；请修正权限（如 chmod 644 {path}）或重写该产物后重试"
+    )]
+    UnreadableArtifact { path: String, mode: u32 },
     #[error("git_workspace_parse: {0}")]
     Parse(String),
     #[error("git_push_indeterminate: {remote}/{branch} at {commit_sha}")]
@@ -247,6 +255,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
         self.ensure_git_repo(worktree_path).await?;
+        self.ensure_staged_files_readable(worktree_path).await?;
         self.run_git(worktree_path, &["add", "-A"]).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
@@ -255,6 +264,34 @@ impl GitWorkspaceService {
             if should_exclude_from_work_item_commit(path) {
                 self.run_git(worktree_path, &["restore", "--staged", "--", path])
                     .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// F-15 预检：枚举 `git add -A` 将索引的文件（索引内已修改 + 未忽略的
+    /// untracked，与 add -A 的触达面一致），任一无读位即 fail-closed——
+    /// 否则 add -A 以不可归因的 `unable to index file` 失败，且残留文件会
+    /// 卡死同 worktree 后续所有 run 的 staging。
+    async fn ensure_staged_files_readable(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<(), GitWorkspaceError> {
+        let output = self
+            .run_git(
+                worktree_path,
+                &[
+                    "ls-files",
+                    "-z",
+                    "--modified",
+                    "--others",
+                    "--exclude-standard",
+                ],
+            )
+            .await?;
+        for relative in output.stdout.split('\0').filter(|path| !path.is_empty()) {
+            if let Some(error) = unreadable_artifact_error(worktree_path, relative) {
+                return Err(error);
             }
         }
         Ok(())
@@ -796,6 +833,33 @@ fn should_exclude_from_work_item_commit(path: &str) -> bool {
         || path.starts_with("__pycache__/")
         || path.contains("/__pycache__/")
         || path.ends_with(".pyc")
+}
+
+/// F-15：判定单个产物文件是否无任何读位（unix mode & 0o444 == 0）。
+///
+/// 只拦「任何用户都读不了」的确定形态（chmod 000 / umask 异常产物）——这是
+/// `git add` 必然失败、且 commit 进仓也会毒化队友与 CI 的自我死锁产物；
+/// 部分读位（如 0o400）由 git 以当前用户语义自行处理，不在预检范围。
+/// symlink 与已删除文件不读内容、不受影响，直接放行。
+fn unreadable_artifact_error(worktree_path: &Path, relative: &str) -> Option<GitWorkspaceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::symlink_metadata(worktree_path.join(relative)).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let permissions = metadata.permissions().mode();
+        if permissions & 0o444 == 0 {
+            return Some(GitWorkspaceError::UnreadableArtifact {
+                path: relative.to_string(),
+                mode: permissions & 0o777,
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (worktree_path, relative);
+    None
 }
 
 fn push_output_is_explicit_remote_rejection(stderr: &str) -> bool {
