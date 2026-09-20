@@ -421,7 +421,10 @@ function GateSummary({
 
 function isSelectableGate(item: CockpitInboxItem): boolean {
   const sessionId = cockpitInboxItemSessionId(item.id);
+  // F-20：author_confirm 门（story/design AuthorConfirm）的 confirm 通路是 HTTP
+  // 端点，而批量 runner 只发 WS confirm 帧（该阶段被矩阵拒收）——不提供批量勾选。
   return item.kind === "gate" &&
+    item.gate?.stage !== "author_confirm" &&
     item.gate?.closed === null &&
     item.gate.action_block_reason === null &&
     sessionId !== null &&

@@ -25,6 +25,7 @@ import type {
   RepositoryInitializationOperationSnapshot,
   RepositoryListResponse,
   TakeoverResponse,
+  WorkspaceSession,
   WorkItemExecutionPlan,
 } from "./types";
 
@@ -89,6 +90,18 @@ export function takeoverWorkspaceSession(sessionId: string): Promise<TakeoverRes
   return requestJson<TakeoverResponse>(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/takeover`,
     { method: "POST" },
+  );
+}
+
+// F-20：story/design AuthorConfirm 的 approve 设计通路（WS confirm 帧在该阶段被
+// 矩阵拒收，wave2-f18-report §5）；confirmed_by 为审计署名（服务端落 system 消息）。
+export function confirmWorkspaceSession(
+  sessionId: string,
+  confirmedBy = "user",
+): Promise<WorkspaceSession> {
+  return requestJson<WorkspaceSession>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/confirm`,
+    { method: "POST", body: JSON.stringify({ confirmed_by: confirmedBy }) },
   );
 }
 

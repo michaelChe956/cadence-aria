@@ -30,6 +30,7 @@ import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artif
 import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 import { buildGatePromptEntry } from "../state/workspace-chat-rebuild";
+import { isStoryDesignAuthorConfirm } from "../state/workspace-cockpit-projection";
 import { classifyProtocolError } from "../state/cockpit-action-routing";
 
 export type WsServerMessage = WsOutMessage & Record<string, unknown>;
@@ -145,7 +146,15 @@ const store = useWorkspaceStore.getState();
           timestamp: new Date().toISOString(),
           metadata: { stage: nextStage },
         });
-        if (nextStage === "human_confirm") {
+        if (
+          nextStage === "human_confirm" ||
+          // F-20：story/design 的 AuthorConfirm 即人工门——live 转换同样落门卡，
+          // 否则门开瞬间无决策面（仅在 session_state 全量重建时才可见）。
+          isStoryDesignAuthorConfirm({
+            stage: nextStage,
+            workspaceType: useWorkspaceStore.getState().workspaceType,
+          })
+        ) {
           const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
           if (gatePrompt) {
             store.appendChatEntry(gatePrompt);

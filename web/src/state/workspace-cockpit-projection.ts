@@ -39,6 +39,16 @@ const TERMINAL_GATE_STAGES: Record<string, true> = {
   revision: true,
 };
 
+/** F-20：story/design legacy 流的 AuthorConfirm 阶段本身即人工门（无 typed turn/snapshot）。 */
+export function isStoryDesignAuthorConfirm(
+  state: Pick<WorkspaceWsState, "stage" | "workspaceType">,
+): boolean {
+  return (
+    state.stage === "author_confirm" &&
+    (state.workspaceType === "story" || state.workspaceType === "design")
+  );
+}
+
 export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockReason {
   if (state.humanGateClosure?.decision) {
     return "closed";
@@ -52,6 +62,12 @@ export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockR
       state.singleCandidatePhase === "evaluate"
       ? null
       : "phase_mismatch";
+  }
+  // F-20：story/design legacy 流的 AuthorConfirm 阶段本身即人工门（approve 走 HTTP
+  // confirm 端点、terminate 走 abandon_human_gate，wave2-f18-report §5）——不再按
+  // 非门阶段拦截；sessionStatus=confirmed（HTTP 200 乐观/权威）即视为已收口。
+  if (isStoryDesignAuthorConfirm(state)) {
+    return state.sessionStatus === "confirmed" ? "closed" : null;
   }
   if (state.stage === "completed" && state.humanGateSnapshot) {
     return null;
@@ -160,6 +176,30 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       action_block_reason: actionBlockReason,
     };
   }
+  // F-20：story/design legacy 流 author_confirm 即人工门（无 typed turn/durable
+  // snapshot），以 stage 前缀投影——收件箱门条/对话流门卡/审计 gateId 同源派生。
+  // confirmed（HTTP confirm 200 乐观/权威）即关门，收件箱不再挂等待项。
+  if (isStoryDesignAuthorConfirm(state)) {
+    const confirmed = state.sessionStatus === "confirmed";
+    return {
+      key: `stage:${state.stage}`,
+      turn_id: null,
+      stage: state.stage,
+      flow_kind: state.flowKind,
+      status: "open",
+      trigger: null,
+      remaining_budget: null,
+      findings: [],
+      resumable: false,
+      triage,
+      closed: confirmed ? "confirm" : (closure?.decision ?? null),
+      closure_stage: confirmed ? state.stage : (closure?.stage ?? null),
+      opened_at: "",
+      turn: null,
+      action_block_reason: actionBlockReason,
+    };
+  }
+
 
   if (state.stage !== "human_confirm") {
     return null;

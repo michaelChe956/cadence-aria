@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, ClipboardCopy, GitBranch, History, Radio } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
-import { takeoverWorkspaceSession } from "../api/client";
+import { confirmWorkspaceSession, takeoverWorkspaceSession } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
   ChatEntryList,
@@ -36,8 +36,10 @@ import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   cockpitInboxItemSessionId,
-  selectCockpitFlow,
+  gateActionBlockReason,
+  isStoryDesignAuthorConfirm,
   selectGateProjection,
+  selectCockpitFlow,
   STALE_DRIVER_LEASE_CODE,
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
@@ -459,6 +461,45 @@ export function ChatCockpitPage({
     setDrilldownView("conversation");
     setJumpEntryId(entryId);
   }, []);
+  // F-20（wave2-f18-report §5）：story/design AuthorConfirm 的 approve 设计通路是
+  // HTTP confirm 端点——WS confirm 帧在该阶段被矩阵拒收。200 后乐观置 confirmed
+  // 收敛决策面（投影层按 confirmed 关门），权威状态以服务端 session_state 广播为准。
+  const confirmStoryAuthorGate = useCallback((): boolean => {
+    const current = useWorkspaceStore.getState();
+    const targetSessionId = current.sessionId;
+    if (!isStoryDesignAuthorConfirm(current) || targetSessionId === null) {
+      return false;
+    }
+    const auditRecordId = useOperationAuditStore.getState().record({
+      sessionId: targetSessionId,
+      gateId: selectGateProjection(current)?.key ?? null,
+      operation: "confirm",
+      source: "chat",
+      outcome: "sent",
+      detail: "http-confirm",
+    });
+    void confirmWorkspaceSession(targetSessionId)
+      .then(() => {
+        useOperationAuditStore.getState().markCompleted(auditRecordId);
+        useWorkspaceStore.getState().setSessionStatus("confirmed");
+      })
+      .catch((error: unknown) => {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? String(error.code)
+            : "http_confirm_failed";
+        useOperationAuditStore.getState().markRejected(auditRecordId, code);
+      });
+    return true;
+  }, []);
+  // 门面 confirm 统一入口：story/design author 门走 HTTP，其余（SC typed/legacy
+  // human_confirm）走既有 WS confirm 帧。
+  const routeGateConfirm = useCallback((): boolean => {
+    if (isStoryDesignAuthorConfirm(useWorkspaceStore.getState())) {
+      return confirmStoryAuthorGate();
+    }
+    return workspaceWs.sendConfirmGate();
+  }, [confirmStoryAuthorGate, workspaceWs.sendConfirmGate]);
   const actions = useMemo(
     () =>
       createCockpitActionFacade({
@@ -468,7 +509,7 @@ export function ChatCockpitPage({
             ? state.humanGateTurn.command_id
             : null,
         getState: useWorkspaceStore.getState,
-        sendConfirm: workspaceWs.sendConfirmGate,
+        sendConfirm: routeGateConfirm,
         sendAbandonGate: workspaceWs.sendAbandonGate,
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
         sendAdvance: workspaceWs.sendAdvance,
@@ -482,7 +523,7 @@ export function ChatCockpitPage({
       state.stage,
       workspaceWs.sendAdvance,
       workspaceWs.sendAbandonGate,
-      workspaceWs.sendConfirmGate,
+      routeGateConfirm,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
@@ -604,7 +645,7 @@ export function ChatCockpitPage({
               ? current.humanGateTurn.command_id
               : null,
           getState: useWorkspaceStore.getState,
-          sendConfirm: workspaceWs.sendConfirmGate,
+          sendConfirm: routeGateConfirm,
           sendAbandonGate: workspaceWs.sendAbandonGate,
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
@@ -631,7 +672,7 @@ export function ChatCockpitPage({
               ? current.humanGateTurn.command_id
               : null,
           getState: useWorkspaceStore.getState,
-          sendConfirm: workspaceWs.sendConfirmGate,
+          sendConfirm: routeGateConfirm,
           sendAbandonGate: workspaceWs.sendAbandonGate,
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
@@ -642,7 +683,7 @@ export function ChatCockpitPage({
       takeoverTargetSessionId,
       workspaceWs.sendAdvance,
       workspaceWs.sendAbandonGate,
-      workspaceWs.sendConfirmGate,
+      routeGateConfirm,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
@@ -978,7 +1019,9 @@ export function ChatCockpitPage({
                 changelogSummary={changelogSummary}
                 onClose={() => setDrilldownView("conversation")}
                 actions={
-                  isCurrentSession && state.stage === "author_confirm" ? (
+                  isCurrentSession &&
+                  state.stage === "author_confirm" &&
+                  gateActionBlockReason(state) === null ? (
                     <>
                       {latestReviewReport ? (
                         <button
@@ -994,9 +1037,21 @@ export function ChatCockpitPage({
                           <ClipboardCopy className="h-4 w-4" /> 采纳 Review 意见
                         </button>
                       ) : null}
-                      {/* 退役留档（T5/REQ-RET-02）：确认并送审/确认定稿按钮随
-                          author_decision 消息族删除（story/design 产物确认走 HTTP
-                          confirm 端点；wp5-attribution-table.md §2）。 */}
+                      {/* F-18/F-20 决策面（对照门卡/收件箱先例）：确认=门面 confirm
+                          （story/design author 门经 routeGateConfirm 走 HTTP confirm
+                          端点）；终止=门面 terminate（WS abandon_human_gate）+二次确认。 */}
+                      <button
+                        type="button"
+                        className="btn-primary h-9"
+                        onClick={() => actions.confirm()}
+                      >
+                        <Check className="h-4 w-4" aria-hidden="true" /> 确认产物
+                      </button>
+                      <ConfirmTwiceButton
+                        label="终止"
+                        confirmLabel="确认终止"
+                        onConfirm={actions.terminate}
+                      />
                     </>
                   ) : undefined
                 }

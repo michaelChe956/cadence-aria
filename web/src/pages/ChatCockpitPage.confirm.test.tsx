@@ -3,9 +3,9 @@ import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
 import type { TakeoverResponse } from "../api/types";
 import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   selectCockpitInbox,
   type CockpitInboxItem,
@@ -224,6 +224,158 @@ describe("ChatCockpitPage", () => {
       renderCockpitWith(mockWorkspaceWs());
 
       expect(screen.queryByTestId("context-note-input")).toBeNull();
+    });
+  });
+
+  // F-18/F-20（wave2-f18-report §5 遗留观察）：story/design AuthorConfirm 门 UI 决策面
+  // ——确认接 HTTP confirm 端点（WS confirm 帧在该阶段被矩阵拒收），终止接 WS
+  // abandon_human_gate（59d59760 矩阵放行）。
+  describe("F-18/F-20 story/design author_confirm decision surface", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    function authorConfirmSession(workspaceType: "story" | "design") {
+      useWorkspaceStore.setState({
+        sessionId: "session_001",
+        stage: "author_confirm",
+        workspaceType,
+        flowKind: "legacy",
+        sessionStatus: "waiting_for_human",
+        singleCandidatePhase: null,
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+        providers: { author: "pi", reviewer: null },
+        artifact: "# Story Spec",
+        chatEntries: [],
+        timelineNodes: [],
+      });
+      useWorkspaceStore.getState().rebuildChatEntries();
+    }
+
+    it.each(["story", "design"] as const)(
+      "renders the author gate with clickable confirm and terminate buttons (%s)",
+      async (workspaceType) => {
+        const user = userEvent.setup();
+        authorConfirmSession(workspaceType);
+        renderCockpitWith(mockWorkspaceWs());
+
+        // 收件箱门条（默认产物视图下仍可见）带 确认+终止 两按钮。
+        const inbox = screen.getByTestId("cockpit-inbox");
+        expect(within(inbox).getByText("门禁等待")).toBeVisible();
+        expect(within(inbox).getByRole("button", { name: "确认" })).toBeEnabled();
+        expect(within(inbox).getByRole("button", { name: "终止" })).toBeEnabled();
+
+        // 产物审核页签（author_confirm 默认视图）动作位同样露出两按钮。
+        expect(screen.getByTestId("cockpit-artifact-review-tab")).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(screen.getByRole("button", { name: "确认产物" })).toBeEnabled();
+        // 收件箱与产物面板各一枚终止（二次确认惯例），均可点。
+        const terminateButtons = screen.getAllByRole("button", { name: "终止" });
+        expect(terminateButtons.length).toBeGreaterThanOrEqual(2);
+        for (const button of terminateButtons) {
+          expect(button).toBeEnabled();
+        }
+
+        // 对话流门卡。
+        await user.click(screen.getByTestId("cockpit-conversation-tab"));
+        const gateCard = screen.getByTestId("gate-prompt-entry");
+        expect(gateCard).toBeVisible();
+        expect(within(gateCard).getByRole("button", { name: "确认产物" })).toBeEnabled();
+        expect(within(gateCard).getByRole("button", { name: "终止" })).toBeEnabled();
+      },
+    );
+
+    it("wires confirm to the HTTP confirm endpoint and never the WS confirm frame", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ workspace_session_id: "session_001", status: "confirmed" }),
+      } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      authorConfirmSession("story");
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+      );
+
+      await waitFor(() => {
+        const confirmCalls = fetchMock.mock.calls.filter(
+          (call) => call[0] === "/api/workspace-sessions/session_001/confirm",
+        );
+        expect(confirmCalls).toHaveLength(1);
+        expect(confirmCalls[0]?.[1]).toMatchObject({
+          method: "POST",
+          body: JSON.stringify({ confirmed_by: "user" }),
+        });
+      });
+      expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+
+      // 乐观收敛：sessionStatus confirmed → 决策面关闭。
+      await waitFor(() => {
+        expect(useWorkspaceStore.getState().sessionStatus).toBe("confirmed");
+      });
+      expect(
+        screen.queryByRole("button", { name: "确认产物" }),
+      ).toBeNull();
+      expect(
+        within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待"),
+      ).toBeNull();
+    });
+
+    it("keeps the decision surface open when the HTTP confirm call fails", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: "Unprocessable Entity",
+        json: async () => ({ code: "confirm_gate_failed", message: "gate rejected", details: {} }),
+      } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      authorConfirmSession("design");
+      renderCockpitWith(mockWorkspaceWs());
+
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+      );
+
+      await waitFor(() => {
+        expect(useWorkspaceStore.getState().sessionStatus).toBe("waiting_for_human");
+      });
+      // 失败不收敛：门条仍在、按钮仍可点（用户可重试或终止）。
+      expect(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+      ).toBeEnabled();
+    });
+
+    it("wires terminate through ConfirmTwice to the WS abandon_human_gate sender", async () => {
+      const user = userEvent.setup();
+      authorConfirmSession("story");
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+      const inbox = screen.getByTestId("cockpit-inbox");
+
+      await user.click(within(inbox).getByRole("button", { name: "终止" }));
+      expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+
+      await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+
+      expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
+      expect(workspaceWs.sendAbandonGate).toHaveBeenCalledWith(expect.any(String));
+    });
+
+    it("keeps bulk confirm away from author gates (the runner only serves WS confirm gates)", () => {
+      authorConfirmSession("story");
+      renderCockpit();
+
+      expect(screen.queryByRole("checkbox")).toBeNull();
+      expect(screen.queryByRole("button", { name: /批量确认/ })).toBeNull();
     });
   });
 });

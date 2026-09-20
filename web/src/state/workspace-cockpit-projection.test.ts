@@ -497,3 +497,123 @@ describe("workspace cockpit execution flow projection", () => {
     expect(topologyTokenName("running")).toBe("running");
   });
 });
+
+describe("F-20 story/design author_confirm gate projection", () => {
+  installWorkspaceStoreTestHooks();
+
+  it.each(["story", "design"] as const)(
+    "projects the %s author_confirm stage as an open stage-prefixed gate",
+    (workspaceType) => {
+      useWorkspaceStore.setState({
+        sessionId: "session_story_gate",
+        stage: "author_confirm",
+        workspaceType,
+        flowKind: "legacy",
+        sessionStatus: "waiting_for_human",
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+      });
+
+      expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+        key: "stage:author_confirm",
+        turn_id: null,
+        stage: "author_confirm",
+        status: "open",
+        trigger: null,
+        remaining_budget: null,
+        findings: [],
+        closed: null,
+        turn: null,
+        action_block_reason: null,
+      });
+    },
+  );
+
+  it("keeps work_item_plan author_confirm gateless (SC typed 门不随 stage 投影)", () => {
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "legacy",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+    });
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toBeNull();
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("terminal_stage");
+  });
+
+  it("keeps other non-gate stages terminal for story sessions", () => {
+    useWorkspaceStore.setState({
+      stage: "running",
+      workspaceType: "story",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("terminal_stage");
+  });
+
+  it("allows confirm/terminate while the story author gate is open, closes once confirmed", () => {
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "story",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+    });
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBeNull();
+
+    useWorkspaceStore.setState({ sessionStatus: "confirmed" });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("closed");
+    // 已确认门不再进收件箱（等待面收敛）。
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).filter((item) => item.kind === "gate"),
+    ).toHaveLength(0);
+  });
+
+  it("closes the story author gate on the server terminate closure", () => {
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "design",
+      sessionStatus: "waiting_for_human",
+      humanGateClosure: { decision: "terminate", stage: "completed" },
+    });
+
+    expect(gateActionBlockReason(useWorkspaceStore.getState())).toBe("closed");
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      closed: "terminate",
+      closure_stage: "completed",
+    });
+  });
+
+  it("adds an actionable inbox gate item for an open story author gate", () => {
+    useWorkspaceStore.setState({
+      sessionId: "session_story_gate",
+      stage: "author_confirm",
+      workspaceType: "story",
+      flowKind: "legacy",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+    });
+
+    const items = selectCockpitInbox(useWorkspaceStore.getState());
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: "gate:stage:author_confirm",
+      kind: "gate",
+      title: "门禁等待",
+      triage: false,
+      source: "gate",
+      gate: expect.objectContaining({ key: "stage:author_confirm" }),
+    });
+  });
+});

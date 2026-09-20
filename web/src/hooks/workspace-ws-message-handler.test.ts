@@ -156,6 +156,60 @@ describe("workspace websocket live stage_change gate prompt", () => {
       expect(gatePrompt?.metadata ?? {}).not.toHaveProperty("gate_kind");
     },
   );
+
+  // F-20：story/design 的 AuthorConfirm 即人工门——live stage_change 必须落门卡
+  // 条目（否则仅在 session_state 全量重建时才可见，门开瞬间无决策面）。
+  it.each([["story"], ["design"]])(
+    "builds the live author_confirm gate prompt for a %s session",
+    (workspaceType) => {
+      useWorkspaceStore.getState().setSessionState({
+        session_id: `session_live_${workspaceType}_author_gate`,
+        workspace_type: workspaceType,
+        stage: "author_run",
+        session_status: "running",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: null },
+      });
+
+      handleWorkspaceWsMessage(
+        { type: "stage_change", stage: "author_confirm" } as WsServerMessage,
+        handlerOptions(),
+      );
+
+      const gatePrompt = gatePromptEntry();
+      expect(gatePrompt).toBeDefined();
+      expect(gatePrompt).toMatchObject({ type: "gate_prompt" });
+      expect(gatePrompt?.metadata).toEqual(
+        expect.objectContaining({
+          gate_identity: "stage:author_confirm",
+          action_facade: "legacy",
+        }),
+      );
+    },
+  );
+
+  it("does not build a live author_confirm gate prompt for work_item_plan sessions", () => {
+    startLiveWorkItemPlanSession();
+
+    handleWorkspaceWsMessage(
+      { type: "stage_change", stage: "author_confirm" } as WsServerMessage,
+      handlerOptions(),
+    );
+
+    expect(gatePromptEntry()).toBeUndefined();
+  });
 });
 
 // usage 事件按 role 关联到对应 stream 气泡（usage-transparency 契约）
