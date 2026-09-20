@@ -211,6 +211,67 @@ pub fn probe_bwrap() -> Option<PathBuf> {
     Some(candidate)
 }
 
+/// Resolve the git directory paths that must additionally be bound
+/// read-write inside a writable-root sandbox for `git add`/`git commit` to
+/// work from the authorized root (F-17). A standard repository keeps its
+/// `.git` inside the root — already covered by the rw root bind, so nothing
+/// extra is returned; a linked worktree (`.git` pointing at
+/// `<repo>/.git/worktrees/<name>`) keeps both its git dir and common dir
+/// outside the root, and the common dir — an ancestor of the git dir — is
+/// returned so a single bind covers both. Non-git directories resolve to an
+/// empty list.
+///
+/// Safety note: a sandboxed coder can only rewrite the `.git` pointer to a
+/// location it can itself write — which is inside the authorized root and
+/// therefore filtered out — or to an already-valid git dir such as the main
+/// repository's, which this bind is meant to expose anyway; `rev-parse`
+/// fails on anything else, so the extra binds cannot be aimed at arbitrary
+/// host paths.
+pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
+    let Some(git) = resolve_trusted_binary("git") else {
+        return Vec::new();
+    };
+    let Ok(output) = std::process::Command::new(git)
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--absolute-git-dir", "--git-common-dir"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new(); // not a git repository
+    }
+    let mut outside: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let path = Path::new(line);
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            };
+            absolute.canonicalize().unwrap_or(absolute)
+        })
+        .filter(|path| !path.starts_with(root))
+        .collect();
+    outside.sort();
+    outside.dedup();
+    // The git dir of a linked worktree lives beneath its common dir, so the
+    // common dir bind alone covers both; drop paths covered by another.
+    outside
+        .iter()
+        .filter(|path| {
+            !outside
+                .iter()
+                .any(|other| other != *path && path.starts_with(other))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Validate that a path beneath `root` has no symlink in any existing prefix
 /// component (defense-in-depth before handing the literal path to a binary).
 /// A missing final component is tolerated (git paths may refer to deleted
@@ -255,13 +316,19 @@ pub fn validate_path_no_follow(root: &Path, rel: &Path) -> std::io::Result<()> {
 /// cwd. The authorized root is bound read-only by default; the coding
 /// (Executor) role passes `writable_root` so its worktree — whose contract
 /// includes the TDD write path and commit responsibility (F-17) — is bound
-/// read-write instead. Everything outside the authorized root stays
-/// read-only in both modes.
+/// read-write instead, together with any `writable_binds` paths resolved
+/// outside it (the git dir of a linked worktree). Everything else outside
+/// the authorized root stays read-only in both modes. The extra writable
+/// mounts are passed positionally and consumed exactly once at this single
+/// call site; grouping them into a struct would add indirection for no
+/// reuse.
+#[allow(clippy::too_many_arguments)]
 pub fn build_bwrap_args(
     root: &Path,
     cwd: &Path,
     cwd_fd: Option<RawFd>,
     writable_root: bool,
+    writable_binds: &[PathBuf],
     env: &BTreeMap<String, String>,
     binary: &Path,
     argv: &[String],
@@ -295,6 +362,18 @@ pub fn build_bwrap_args(
         "--clearenv",
     ] {
         command.push(OsString::from(value));
+    }
+    // Extra read-write mounts for the coding role (F-17): the git dirs of a
+    // linked worktree live outside the authorized root (`<repo>/.git/...`),
+    // so the rw root bind alone cannot make `git add`/`git commit` work —
+    // they are resolved by the caller and bound here at their own paths,
+    // after the read-only host root for the same shadowing reason. A path
+    // beneath /tmp also regains visibility lost to the private tmpfs.
+    for path in writable_binds {
+        let bind = path.as_os_str().to_str().expect("utf8 git path");
+        for value in ["--bind", bind, bind] {
+            command.push(OsString::from(value));
+        }
     }
     match cwd_fd {
         Some(fd) => {
@@ -405,6 +484,7 @@ mod tests {
             &cwd,
             Some(42),
             false,
+            &[],
             &env,
             &PathBuf::from("/usr/bin/cat"),
             &["file".to_string()],
@@ -459,6 +539,7 @@ mod tests {
             &cwd,
             Some(42),
             true,
+            &[],
             &env,
             &PathBuf::from("/usr/bin/git"),
             &["status".to_string()],
@@ -505,5 +586,114 @@ mod tests {
             assert!(text.contains(&flag.to_string()), "{flag} missing");
         }
         assert_eq!(text.last().map(String::as_str), Some("status"));
+    }
+
+    /// fix round 1(F-17/P1):linked worktree 的 gitdir/commondir 在授权根外,
+    /// 由 `writable_binds` 以 rw bind 挂进沙箱(root bind 之后、同样在只读
+    /// 宿主根之后)。
+    #[test]
+    fn bwrap_args_bind_extra_writable_git_paths_after_ro_host() {
+        let root = PathBuf::from("/tmp/root");
+        let cwd = PathBuf::from("/tmp/root/work");
+        let git_common = PathBuf::from("/repo/.git");
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), trusted_path_env());
+        let argv = build_bwrap_args(
+            &root,
+            &cwd,
+            Some(42),
+            true,
+            &[git_common.clone()],
+            &env,
+            &PathBuf::from("/usr/bin/git"),
+            &["status".to_string()],
+        );
+        let text = argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        // Exactly two rw binds: the root and the extra git path, both after
+        // the read-only host root.
+        let binds: Vec<usize> = text
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--bind")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(binds.len(), 2, "{text:?}");
+        let ro_host = text
+            .iter()
+            .position(|arg| arg == "--ro-bind")
+            .expect("host --ro-bind");
+        assert_eq!(text[ro_host + 1], "/");
+        for bind in &binds {
+            assert!(bind > &ro_host, "rw binds must follow --ro-bind / /");
+        }
+        assert_eq!(text[binds[0] + 1], "/tmp/root");
+        assert_eq!(text[binds[1] + 1], "/repo/.git");
+        assert_eq!(text[binds[1] + 2], "/repo/.git");
+        // Isolation boundary unchanged.
+        assert!(text.contains(&"--unshare-net".to_string()));
+        assert!(text.contains(&"--unshare-pid".to_string()));
+    }
+
+    /// resolve_writable_git_paths 三形态(真机 git):非 git 目录空、标准仓
+    /// 空(gitdir 在根内,由 rw root bind 覆盖)、linked worktree 返回根外
+    /// commondir 一条(gitdir 是其后代,一条 bind 覆盖两者)。
+    #[test]
+    fn resolve_writable_git_paths_covers_linked_worktree_plain_and_non_git() {
+        let base = tempfile::tempdir().expect("workspace");
+        let base = base.path().canonicalize().expect("canonical base");
+
+        // Non-git directory: nothing extra to write.
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).expect("mkdir plain");
+        assert!(
+            resolve_writable_git_paths(&plain).is_empty(),
+            "non-git root needs no extra binds"
+        );
+
+        // Standard repository: the git dir lives inside the root.
+        let main = base.join("main");
+        host_git(&["init", "-q", "main"], &base);
+        host_git(
+            &[
+                "-c",
+                "user.name=f17",
+                "-c",
+                "user.email=f17@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            &main,
+        );
+        assert!(
+            resolve_writable_git_paths(&main).is_empty(),
+            "plain repo gitdir is covered by the rw root bind"
+        );
+
+        // Linked worktree: only the out-of-root common dir is returned.
+        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
+        let wt = base.join("wt");
+        let wt = wt.canonicalize().expect("canonical worktree");
+        assert_eq!(
+            resolve_writable_git_paths(&wt),
+            vec![main.join(".git").canonicalize().expect("commondir")],
+        );
+    }
+
+    fn host_git(args: &[&str], cwd: &Path) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("host git");
+        assert!(status.success(), "host git {args:?} failed");
     }
 }

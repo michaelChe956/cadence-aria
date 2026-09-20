@@ -33,7 +33,7 @@ use self::grammar::{Binary, GrammarError, ParsedCommand, parse_command};
 use self::policy::{ClientAction, ClientServicePolicy, PolicyDecision};
 use self::sandbox::{
     canonical_path_of_fd, canonicalize_root, open_dir_no_follow, probe_bwrap,
-    resolve_trusted_binary, validate_path_no_follow,
+    resolve_trusted_binary, resolve_writable_git_paths, validate_path_no_follow,
 };
 use self::terminal::{TerminalCommand, TerminalError, TerminalIsolation, TerminalManager};
 
@@ -326,9 +326,22 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
         crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto => state
             .bwrap
             .clone()
-            .map(|bwrap| TerminalIsolation::Bubblewrap {
-                bwrap,
-                writable_root: matches!(state.policy.role, AdapterRole::Executor),
+            .map(|bwrap| {
+                // The coding (Executor) contract writes and commits inside
+                // its worktree; a linked worktree keeps its git dir outside
+                // the root, so those paths are resolved and bound with it
+                // (F-17). Every other role stays fully read-only.
+                let writable_root = matches!(state.policy.role, AdapterRole::Executor);
+                let writable_git_paths = if writable_root {
+                    resolve_writable_git_paths(&state.root)
+                } else {
+                    Vec::new()
+                };
+                TerminalIsolation::Bubblewrap {
+                    bwrap,
+                    writable_root,
+                    writable_git_paths,
+                }
             })
             .ok_or_else(|| {
                 ClientServiceError::Rejected(

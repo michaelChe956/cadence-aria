@@ -31,11 +31,13 @@ pub enum TerminalIsolation {
     /// mode of the authorized root (and the anchored cwd): the coding
     /// (Executor) role needs a read-write worktree to honour its TDD write
     /// path + commit responsibility (F-17), while every other role keeps the
-    /// read-only mount. Everything outside the authorized root stays
-    /// read-only either way.
+    /// read-only mount. `writable_git_paths` carries git dir paths resolved
+    /// outside the root (linked worktree) that are bound read-write with it.
+    /// Everything else outside the authorized root stays read-only.
     Bubblewrap {
         bwrap: PathBuf,
         writable_root: bool,
+        writable_git_paths: Vec<PathBuf>,
     },
     Unavailable,
 }
@@ -494,6 +496,7 @@ fn build_terminal_command(
         TerminalIsolation::Bubblewrap {
             bwrap,
             writable_root,
+            writable_git_paths,
         } => {
             let mut builder = Command::new(bwrap);
             let args = build_bwrap_args(
@@ -501,6 +504,7 @@ fn build_terminal_command(
                 &command.cwd,
                 anchor.map(AsRawFd::as_raw_fd),
                 *writable_root,
+                writable_git_paths,
                 env,
                 &command.binary,
                 &command.argv,
@@ -828,12 +832,33 @@ mod tests {
     // Executor 角色的授权根以 rw bind-mount 进入沙箱(宿主其余路径仍只
     // 读、网络/pid 隔离不变);其他角色保持只读挂载。真实 bwrap 端到端。
     #[cfg(unix)]
-    fn bwrap_isolation(writable_root: bool) -> Option<TerminalIsolation> {
+    fn bwrap_isolation(
+        writable_root: bool,
+        writable_git_paths: Vec<PathBuf>,
+    ) -> Option<TerminalIsolation> {
         use super::super::sandbox::probe_bwrap;
         probe_bwrap().map(|bwrap| TerminalIsolation::Bubblewrap {
             bwrap,
             writable_root,
+            writable_git_paths,
         })
+    }
+
+    #[cfg(unix)]
+    fn host_git(args: &[&str], cwd: &Path) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("host git");
+        assert!(
+            status.success(),
+            "host git {args:?} failed in {}",
+            cwd.display()
+        );
     }
 
     #[cfg(unix)]
@@ -863,15 +888,17 @@ mod tests {
         (result, output)
     }
 
-    /// 修前必红:只读挂载下该脚本死于 `index.lock: Read-only file system`。
+    /// 首轮红证据(标准仓形态):只读挂载下该脚本死于
+    /// `index.lock: Read-only file system`。
     #[cfg(unix)]
     #[tokio::test]
     async fn executor_writable_root_sandbox_allows_git_commit_inside_root() {
-        let Some(isolation) = bwrap_isolation(true) else {
-            return; // bubblewrap 不在时跳过真机隔离路径
-        };
+        use super::super::sandbox::resolve_writable_git_paths;
         let dir = tempfile::tempdir().expect("worktree");
         let root = dir.path().canonicalize().expect("canonical root");
+        let Some(isolation) = bwrap_isolation(true, resolve_writable_git_paths(&root)) else {
+            return; // bubblewrap 不在时跳过真机隔离路径
+        };
         let script = "git init -q \
                       && echo f17 > f17.txt \
                       && git add f17.txt \
@@ -889,14 +916,73 @@ mod tests {
         assert!(root.join("f17.txt").is_file());
     }
 
+    /// fix round 1 主证据(P1/P2,生产形态):aria coding attempt 的
+    /// worktree 是 git linked worktree——`.git` 是指针,gitdir/commondir
+    /// 位于授权根外 `<repo>/.git/worktrees/<name>`,rw root bind 覆盖不到
+    /// → git add/commit 仍死于 `index.lock: Read-only file system`
+    /// (attempt 544a1b51 现场形态)。修复 = 服务端 rev-parse 解析根外
+    /// git 路径(commondir 一条覆盖两者)随 rw root 一并 bind。
+    /// 绑定前必红。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn executor_writable_root_sandbox_allows_git_commit_in_linked_worktree() {
+        use super::super::sandbox::resolve_writable_git_paths;
+        let base = tempfile::tempdir().expect("workspace");
+        let base = base.path().canonicalize().expect("canonical base");
+        let main = base.join("main");
+        host_git(&["init", "-q", "main"], &base);
+        host_git(
+            &[
+                "-c",
+                "user.name=f17",
+                "-c",
+                "user.email=f17@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            &main,
+        );
+        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
+        let root = main.parent().unwrap().join("wt");
+        let root = root.canonicalize().expect("canonical worktree");
+        assert!(root.join(".git").is_file(), "linked worktree shape");
+        let git_paths = resolve_writable_git_paths(&root);
+        assert_eq!(
+            git_paths,
+            vec![main.join(".git").canonicalize().expect("commondir")],
+            "only the out-of-root common dir needs an extra rw bind"
+        );
+        let Some(isolation) = bwrap_isolation(true, git_paths) else {
+            return; // bubblewrap 不在时跳过真机隔离路径
+        };
+        let script = "echo f17 > f17.txt \
+                      && git add f17.txt \
+                      && git -c user.name=f17 -c user.email=f17@example.com commit -qm f17 \
+                      && echo WT_COMMIT_OK";
+        let (result, output) = run_bwrap_script(&root, isolation, script).await;
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "linked worktree: git add/commit must reach the out-of-root \
+             gitdir/commondir; output: {output}"
+        );
+        assert!(output.contains("WT_COMMIT_OK"), "{output}");
+        assert!(root.join("f17.txt").is_file());
+        host_git(&["log", "--oneline", "-1", "f17wt"], &main);
+    }
+
     /// 安全边界回归锁 1:非 Executor 挂载语义不变——授权根内写仍被拒。
     #[cfg(unix)]
     #[tokio::test]
     async fn read_only_root_sandbox_still_blocks_writes_inside_root() {
-        let Some(isolation) = bwrap_isolation(false) else {
+        let Some(isolation) = bwrap_isolation(false, Vec::new()) else {
             return;
         };
         let dir = tempfile::tempdir().expect("worktree");
+
         let root = dir.path().canonicalize().expect("canonical root");
         let (result, output) =
             run_bwrap_script(&root, isolation, "touch ro-probe.txt; echo done").await;
@@ -911,7 +997,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn writable_root_sandbox_keeps_host_outside_root_read_only() {
-        let Some(isolation) = bwrap_isolation(true) else {
+        let Some(isolation) = bwrap_isolation(true, Vec::new()) else {
             return;
         };
         let dir = tempfile::tempdir().expect("worktree");

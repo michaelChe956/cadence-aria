@@ -37,9 +37,35 @@ kimi coder（Executor）承包契约（TDD 写路径 + `write_policy.commit_resp
 
 ## 5. 变更文件
 
+
+
 - `src/cross_cutting/kimi_code_provider/client_services/sandbox.rs`（挂载构造+顺序修正+2 测试）
 - `src/cross_cutting/kimi_code_provider/client_services/terminal.rs`（isolation 字段+透传+真机三联测试）
 - `src/cross_cutting/kimi_code_provider/client_services/mod.rs`（isolation_for 角色感知+矩阵锁测试）
 - `openspec/changes/close-provider-validation/specs/kimi-acp-client-services/spec.md`（delta：终端 OS 级隔离 Requirement 角色感知修订）
 
 验收建议：v29 轮重跑 kimi coding attempt（issue_0286 口径），coder 终端内 `git add/commit` 应成功（Execution 事件可见），blocked 门掷骰面消失；到达 internal_pr_review_complete 即三键齐升级转正。
+
+## 6. fix round 1（k3 审 1×P1+1×P2）
+
+- **P1（生产形态未覆盖）**：aria coding attempt 的 worktree 是 git linked worktree（`.git` 为指针文件，指向授权根外 `<repo>/.git/worktrees/<name>`）——首轮 rw root bind 只覆盖授权根，gitdir/index/objects 仍在只读宿主根下 → `git add/commit` 仍死（真机复现：`fatal: Unable to create '<repo>/.git/worktrees/<name>/index.lock': Read-only file system`，即 attempt 544a1b51 现场死法）。
+- **P2（测试形态错）**：首轮主证据用 `git init` 建仓（标准 `.git` 在根内）——非生产形态。
+
+### 修复
+
+1. **`sandbox.rs` 新增 `resolve_writable_git_paths(root)`**：服务端以 `git rev-parse --absolute-git-dir --git-common-dir` 解析（trusted git、canonicalize）；过滤授权根内路径（标准仓 `.git` 在根内，rw root bind 已覆盖 → 空）；linked worktree 返回根外 commondir 一条（gitdir 是其后代，一条 bind 覆盖两者）；非 git 目录返回空。防指向论证：沙箱内 coder 只能把 `.git` 指针改写为它自己可写的位置（=授权根内 → 被过滤）或本就合法的主仓 gitdir（本 bind 的目标面）；其余形态 `rev-parse` 直接失败 → 无法把额外 bind 瞄准任意宿主路径。
+2. **`build_bwrap_args` 增加 `writable_binds: &[PathBuf]`**：在 rw root bind 之后（同样在 `--ro-bind / /` 之后）对每个路径追加 `--bind path path`。附带收益：`/tmp` 下的 gitdir 路径（被私有 tmpfs 遮蔽不可见）经 bind 恢复可见性。
+3. **`TerminalIsolation::Bubblewrap` 增加 `writable_git_paths: Vec<PathBuf>`**；`mod.rs` `isolation_for` 仅 Executor（writable_root）时解析填充，其他角色恒空——角色感知语义不变。
+
+### TDD 证据（fix round 1）
+
+- 红（bind 未挂载的 fake 阶段）：`executor_writable_root_sandbox_allows_git_commit_in_linked_worktree`（生产形态主证据：宿主 `git init main` + `git worktree add ../wt`，root=wt，git_paths 经真实 `resolve_writable_git_paths` 解析并断言 `== [main/.git]`）FAILED——沙箱内 `fatal: not a git repository: (null)`（测试 tempdir 在 /tmp 下，gitdir 指针的绝对路径被私有 tmpfs 遮蔽而不可达；生产 home 路径形态死法为 index.lock Read-only，同一根因两面）；`bwrap_args_bind_extra_writable_git_paths_after_ro_host` FAILED（argv 无额外 bind）。
+- 绿（实现后）：定向 `cargo test --locked --lib kimi_code_provider::client_services` **74 passed / 0 failed**；fmt clean；clippy 0 警告。
+- 新增测试 3 个：①linked worktree 主证据（P2 形态：worktree add 建仓 → 沙箱内 `git add+commit` exit 0 + `WT_COMMIT_OK` + 宿主 `git log f17wt` 可见——gitdir 经 commondir bind 可达且可写）；②`bwrap_args_bind_extra_writable_git_paths_after_ro_host`（恰两个 `--bind`：root+git 路径，均位于 `--ro-bind / /` 之后，git 三元组 `--bind /repo/.git /repo/.git`，隔离旗标不变）；③`resolve_writable_git_paths_covers_linked_worktree_plain_and_non_git`（非 git 空 / 标准仓空 / linked 返回根外 commondir 一条，真机 git）。
+- 既有首轮测试全部不动仍绿（标准仓主证据改用真实 resolve 填充，行为等价；两把安全边界回归锁同绿）。
+
+### 边界（fix round 1）
+
+- commondir bind 使沙箱可写面扩至主仓 `.git`（objects/refs 共享区）——coder commit 契约的必要面；其他 worktree 的共享 git 数据在同一 `.git` 下，可写性伴随（生产单 attempt 独立主仓，实际影响面=本仓）。
+- 生产 aria 形态 gitdir 位于 home（非 /tmp），可见性由 ro-bind / / 天然提供，bind 仅补可写性；/tmp 下测试形态 bind 同时补可见性（两形态均真机验证）。
+- fix round 1 变更文件：`sandbox.rs`（resolve+bind+2 测试）/ `terminal.rs`（isolation 字段+主证据测试）/ `mod.rs`（isolation_for 解析）。
