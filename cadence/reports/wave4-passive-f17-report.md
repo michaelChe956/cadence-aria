@@ -69,3 +69,21 @@ kimi coder（Executor）承包契约（TDD 写路径 + `write_policy.commit_resp
 - commondir bind 使沙箱可写面扩至主仓 `.git`（objects/refs 共享区）——coder commit 契约的必要面；其他 worktree 的共享 git 数据在同一 `.git` 下，可写性伴随（生产单 attempt 独立主仓，实际影响面=本仓）。
 - 生产 aria 形态 gitdir 位于 home（非 /tmp），可见性由 ro-bind / / 天然提供，bind 仅补可写性；/tmp 下测试形态 bind 同时补可见性（两形态均真机验证）。
 - fix round 1 变更文件：`sandbox.rs`（resolve+bind+2 测试）/ `terminal.rs`（isolation 字段+主证据测试）/ `mod.rs`（isolation_for 解析）。
+
+## 7. fix round 2（k3 审 1×P1——安全洞）
+
+**P1（bind 面可被引导）**：`isolation_for` 每条 terminal 命令重跑 `resolve_writable_git_paths`，而 root 在 Executor 沙箱内 rw——coder 可改写 `.git` 指针指向宿主上任一已存在的合法 git 仓（无需宿主写权，指针目标只需让 `rev-parse` 成功），下一条命令的 rev-parse 即解析到该仓 → 额外 rw bind 被瞄准（首轮「防指向论证」假设目标须为 coder 可写位置，漏掉了「已存在合法仓」这一类）。
+
+### 修复
+
+git bind 面在**构造期冻结**：`ClientServiceState` 新增 `writable_git_paths` 字段，`KimiClientServiceDispatcher::new` 时（root 由 Aria worktree 准备产出、coder 未接手，指针可信）经 `writable_git_paths_for(role, root)` 解析一次存入；`isolation_for` 只 `clone` 缓存，不再执行 `rev-parse`。角色判断保留（`writable_root` 由 policy.role 恒定求值，无漂移面）。
+
+### TDD 证据（fix round 2）
+
+- 红（isolation_for 仍每命令解析的中间态）：`isolation_git_binds_frozen_at_construction_survive_pointer_swap` FAILED——宿主 `git worktree add` 造真实形态（root=linked wt，构造期断言 `==[main/.git]`），改写 `.git` 指针指向另一合法仓 `evil/.git` 后再次 `isolation_for` 返回 `[evil/.git]`（bind 面漂移，安全洞精确复现：`left: [evil/.git] right: [main/.git]`）。
+- 绿（读缓存后）：定向 `cargo test --locked --lib kimi_code_provider::client_services` **75 passed / 0 failed**；fmt clean；clippy 0 警告。既有 74 测试（含 fix round 1 全部）不动仍绿。
+
+### 残余攻击面评估
+
+- 指针交换仅在「构造期之前」有意义——届时 root 尚未交给 coder，Aria worktree 准备流程产出可信；构造期之后任何 `.git` 改写不影响已冻结的 bind 面（沙箱内 git 仍按指针工作，但 rw bind 面恒定，改写只能让 coder 自己的 git 失效，无法扩大写面）。
+- `writable_root`（root 本身的 rw 挂载）不依赖 rev-parse，无同类漂移面。

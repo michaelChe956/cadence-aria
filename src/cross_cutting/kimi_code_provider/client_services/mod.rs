@@ -99,6 +99,12 @@ struct ClientServiceState {
     event_tx: mpsc::Sender<ProviderEvent>,
     terminal: TerminalManager,
     bwrap: Option<PathBuf>,
+    /// Extra read-write sandbox binds for the coding role, resolved ONCE at
+    /// construction — when the root is still Aria-prepared and untouched by
+    /// the coder. Re-resolving per terminal command would follow a
+    /// coder-rewritten `.git` pointer at an arbitrary valid host git dir and
+    /// aim the next extra rw bind at it (F-17 fix round 2).
+    writable_git_paths: Vec<PathBuf>,
     /// 会话私有清理 token：随引擎 run token（父）取消而取消；dispatcher Drop 时
     /// 只取消它，绝不反噬父 token——否则 kimi 正常完成后会 cancel 引擎 run，
     /// biased select 的 cancel 分支会吞掉已入队的 Completed 事件（真机 issue_0035）。
@@ -164,6 +170,10 @@ where
         cancel: CancellationToken,
     ) -> Self {
         let root = canonicalize_root(&working_dir).unwrap_or(working_dir);
+        // Freeze the git bind face before the coder can touch the root:
+        // per-command re-resolution would follow a swapped `.git` pointer
+        // (F-17 fix round 2).
+        let writable_git_paths = writable_git_paths_for(&role, &root);
         let bwrap = probe_bwrap();
         // Command output is served through `terminal/output`
         // request/response (see `handle_terminal_output`); kimi 0.38.0
@@ -179,6 +189,7 @@ where
             event_tx,
             terminal,
             bwrap,
+            writable_git_paths,
             cleanup_cancel: cancel.child_token(),
         });
 
@@ -320,6 +331,18 @@ async fn evaluate_policy(
         }
     }
 }
+/// Git paths to bind read-write alongside a writable root, resolved once at
+/// construction time — when the root is still Aria-prepared and untouched by
+/// the coder (F-17 fix round 2): re-resolving per terminal command would let
+/// a sandboxed coder rewrite the `.git` pointer at an arbitrary valid host
+/// git dir and aim the next extra rw bind at it.
+fn writable_git_paths_for(role: &AdapterRole, root: &Path) -> Vec<PathBuf> {
+    if matches!(role, AdapterRole::Executor) {
+        resolve_writable_git_paths(root)
+    } else {
+        Vec::new()
+    }
+}
 
 fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, ClientServiceError> {
     match state.permission_mode {
@@ -329,18 +352,16 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
             .map(|bwrap| {
                 // The coding (Executor) contract writes and commits inside
                 // its worktree; a linked worktree keeps its git dir outside
-                // the root, so those paths are resolved and bound with it
-                // (F-17). Every other role stays fully read-only.
+                // the root, so those paths are bound with it (F-17). The
+                // git bind face is frozen at construction — never
+                // re-resolved here: the coder can rewrite `.git` inside
+                // the writable root and aim a fresh resolution at any
+                // valid host git dir (F-17 fix round 2).
                 let writable_root = matches!(state.policy.role, AdapterRole::Executor);
-                let writable_git_paths = if writable_root {
-                    resolve_writable_git_paths(&state.root)
-                } else {
-                    Vec::new()
-                };
                 TerminalIsolation::Bubblewrap {
                     bwrap,
                     writable_root,
-                    writable_git_paths,
+                    writable_git_paths: state.writable_git_paths.clone(),
                 }
             })
             .ok_or_else(|| {
@@ -354,7 +375,6 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
         }
     }
 }
-
 /// Resolve a terminal cwd inside the authorized root (or the root itself),
 /// rejecting symlinks via `openat` + `O_NOFOLLOW` and returning the canonical
 /// path of the anchored directory fd. Absolute paths are tolerated when they
@@ -725,6 +745,7 @@ mod tests {
             event_tx,
             terminal: TerminalManager::new(),
             bwrap: None,
+            writable_git_paths: Vec::new(),
             cleanup_cancel: CancellationToken::new().child_token(),
         });
         (state, events)
@@ -989,7 +1010,7 @@ mod tests {
         let (event_tx, _events) = mpsc::channel(32);
         Arc::new(ClientServiceState {
             session_id: "client-service-test".to_string(),
-            root,
+            root: root.clone(),
             policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
             permission_mode: ProviderPermissionMode::Auto,
             bridge: Arc::new(ApprovalBridge::new(
@@ -999,20 +1020,21 @@ mod tests {
             event_tx,
             terminal: TerminalManager::new(),
             bwrap: None,
+            writable_git_paths: writable_git_paths_for(&AdapterRole::Executor, &root),
             cleanup_cancel: CancellationToken::new().child_token(),
         })
     }
 
     /// F-17:可写沙箱授权只发给 Executor(coder 契约:写路径+commit 责任);
     /// Orchestrator 的终端保持只读挂载语义。bwrap 路径仅作形状参数,
-    /// `isolation_for` 只探测 Some/None,不执行该二进制。
-    fn bwrap_state(role: AdapterRole) -> Arc<ClientServiceState> {
-        let dir = tempfile::tempdir().expect("dir");
+    /// `isolation_for` 只探测 Some/None,不执行该二进制。git bind 面在
+    /// 构造期解析一次(与 `ClientServiceState::new` 同款)。
+    fn bwrap_state_at(role: AdapterRole, root: PathBuf) -> Arc<ClientServiceState> {
         let (event_tx, _events) = mpsc::channel(32);
         Arc::new(ClientServiceState {
             session_id: "client-service-test".to_string(),
-            root: dir.path().canonicalize().expect("canonical root"),
-            policy: ClientServicePolicy::new(role, ProviderPermissionMode::Auto),
+            root: root.clone(),
+            policy: ClientServicePolicy::new(role.clone(), ProviderPermissionMode::Auto),
             permission_mode: ProviderPermissionMode::Auto,
             bridge: Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
@@ -1021,8 +1043,14 @@ mod tests {
             event_tx,
             terminal: TerminalManager::new(),
             bwrap: Some(PathBuf::from("/usr/bin/bwrap")),
+            writable_git_paths: writable_git_paths_for(&role, &root),
             cleanup_cancel: CancellationToken::new().child_token(),
         })
+    }
+
+    fn bwrap_state(role: AdapterRole) -> Arc<ClientServiceState> {
+        let dir = tempfile::tempdir().expect("dir");
+        bwrap_state_at(role, dir.path().canonicalize().expect("canonical root"))
     }
 
     #[tokio::test]
@@ -1041,6 +1069,84 @@ mod tests {
             ),
             TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
         }
+    }
+
+    /// fix round 2(F-17/k3 P1,安全洞):git bind 面在构造期冻结。root 在
+    /// Executor 沙箱内 rw,coder 可改写 `.git` 指针;若每条 terminal 命令
+    /// 重跑 rev-parse,后续命令的额外 rw bind 会被瞄准宿主任意合法 git 仓。
+    #[tokio::test]
+    async fn isolation_git_binds_frozen_at_construction_survive_pointer_swap() {
+        fn host_git(args: &[&str], cwd: &Path) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .expect("host git");
+            assert!(status.success(), "host git {args:?} failed");
+        }
+        let base = tempfile::tempdir().expect("workspace");
+        let base = base.path().canonicalize().expect("canonical base");
+        // Aria 准备的真实形态:主仓 + linked worktree(授权根)。
+        let main = base.join("main");
+        host_git(&["init", "-q", "main"], &base);
+        host_git(
+            &[
+                "-c",
+                "user.name=f17",
+                "-c",
+                "user.email=f17@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            &main,
+        );
+        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
+        let root = base.join("wt");
+        let root = root.canonicalize().expect("canonical worktree");
+        // 宿主上另一个合法 git 仓:coder 想让额外 rw bind 瞄准的目标。
+        host_git(&["init", "-q", "evil"], &base);
+        let evil_gitdir = base.join("evil").join(".git");
+
+        let state = bwrap_state_at(AdapterRole::Executor, root.clone());
+        let before = isolation_for(&state).expect("isolation before swap");
+        let TerminalIsolation::Bubblewrap {
+            writable_git_paths: before_paths,
+            ..
+        } = &before
+        else {
+            panic!("expected bubblewrap isolation");
+        };
+        assert_eq!(
+            before_paths,
+            &[main.join(".git").canonicalize().expect("commondir")]
+        );
+
+        // coder 在沙箱内改写 `.git` 指针(根内文件,rw 可写)指向 evil 仓。
+        std::fs::write(
+            root.join(".git"),
+            format!("gitdir: {}\n", evil_gitdir.display()),
+        )
+        .expect("swap pointer");
+
+        // 后续 terminal 命令的 bind 面不得漂移:构造期冻结。
+        let after = isolation_for(&state).expect("isolation after swap");
+        let TerminalIsolation::Bubblewrap {
+            writable_git_paths: after_paths,
+            ..
+        } = &after
+        else {
+            panic!("expected bubblewrap isolation");
+        };
+        assert_eq!(
+            after_paths, before_paths,
+            "git bind face must stay frozen at construction (F-17 fix round 2)"
+        );
     }
 
     #[tokio::test]
