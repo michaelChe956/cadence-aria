@@ -15,7 +15,7 @@ use crate::product::coding_attempt_store::{
     CreateGroupCodingAttemptInput,
 };
 use crate::product::coding_models::{
-    AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+    AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt,
     CodingExecutionUnitStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
     ReviewRequestOwnerKind,
 };
