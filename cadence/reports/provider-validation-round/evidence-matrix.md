@@ -45,6 +45,10 @@
 4. **coding 腿 60min 硬超时不足**：kimi 三角色链（3 WI×（Coder+CodeReviewer）+Internal Reviewer）在 60min 内未收束（WI-001/002 完成、WI-003 进行中被切断）。属预算面（README 记 `ARIA_CODING_HARD_TIMEOUT_MS` 可调），非缺陷；attempt 在服务端继续推进（自主驱动，不需要 driver 干预的证据：driver 断开后 WI-003 持续 running）。
 5. **runner pre-provider 间歇性死亡（v25 复发，死因不可考）**——2026-09-19 09:31 现场：attach 半启动重启→stage_gate_0010 过期后 ~135ms runner 死亡（零 provider 输出、零 role run），F-14 修复 fail-closed 转 awaiting_manual_recovery（**修复目的达成：不再静默死循环**——v24 同场景 gate 0006/0007/0008 空转对照）。死亡模式间歇（v24 06:15/06:21 死、06:28 活）。死因串不可观测：仅达 WS 客户端（09:31 attach 方=监控会话，帧不可回收）与服务器 tty（/dev/pts/1 无落盘）；durable 层无错误尾帧。定性：**F-14 拉起链修复后的残余早期流失败，待查**（后续轮需服务端日志通道，与 §5 wire 原文回填同款口径）。处置（controller 裁决 09:4x）=attempt 0556a410 批准 abort（两度人工分诊+两度 pre-provider 死+parked 无通道=价值耗尽）→ 09:41 abort 首次被 shared_worktree_dirty_manual_gate 拦（blocked_gate_0003：WI-003 未提交实现保全需要）→ stash push -u 保全（stash@{0}，CHECK-003 7/7 已验证，清单 `v25-worktree-dirty-inventory.txt`）→ 09:42:58 二次 abort 成功，durable 终态 **aborted**，共享 worktree 锁释放（current_active_work_item_id=null）。**同窗口死亡对后续轮重跑构成现实风险**（F-16 恢复通道缺失下，新 attempt 若再死同窗口即直接烧掉升级机会）。
 
+6. **计划腿结构化输出弯引号缺口（2026-09-20 wave2-2b，v27）**——kimi reviewer 原始 verdict=pass 但 nonce 属性用中文弯引号（`nonce=“86bc0a08”`）→ `missing_start_tag` → fallback needs_human（native_human_required）→ rep4 整腿 15min 报废。本轮经 takeover→typed confirm→Confirmed→typed advance 产品恢复面绕过（rep6-takeover/ 全链实录）。修复选项（解析器归一化/提示词加固）登记待后续轮。
+7. **F-17：kimi coder 承包契约 vs bwrap 只读终端沙箱系统性冲突（2026-09-20 wave2-2b，v27）**——kimi 终端跑在 `--ro-bind / /`+`--tmpfs /tmp`（sandbox.rs），终端内 worktree/gitdir 均不可写 → coder 契约（TDD 写路径+commit 责任）在终端内不可履行 → `git add` 报 index.lock Read-only → coder 判 plan defect → blocked 门人工分诊（attempt 544a1b51 两掷两中：gate_0001 Write×15 后 commit 死、gate_0002 零 Write 纯 Bash 全灭）。**修正 §1#5 定性**：v24「幻觉环境误报」实为同机制真实现象（宿主 git add 实测成功对照在档）。台账 F-17 段+wave2-2b-report.md §3。
+8. **F-18：coding runner 事件流单连接绑定、无广播（2026-09-20 wave2-2b，v27）**——runner 全部事件发进触发连接 mpsc；唯一消费者断开→runner 死 `coding_event_channel_closed`（本轮分诊脚本过早关连接实录+诊断尾帧捕获；§3#5「pre-provider 间歇死」同机制收敛）；外部恢复/分诊后 campaign 驱动重挂载永久失明（attach 后零事件实录）→产品内无「外部恢复+驱动接管」完整通路，本轮以自制单连接持久驱动 coding-drive.cjs 绕过。台账 F-18 段+wave2-2b-report.md §3。
+
 ## §4 验证轮时长与异常记录（WP2.5）
 
 | 跑 | 时长 | 结果 |
@@ -55,8 +59,10 @@
 | workitem rep3（interactive） | 2100s | hard_timeout：返修预算耗尽停 waiting_for_human（§3#3 游走） |
 | coding 腿（kimi，0556a410） | 3600s | driver 硬超时切断；服务端继续推进（§1#3-5） |
 | v25 续跑验证（0556a410 升级收口） | ~12min 观察+探测 | attempt 已被 09:31 未知 attach（监控会话嫌疑）触发半启动重启→runner pre-provider 死（§3#5）→awaiting_manual_recovery；wire 三探测全拒（F-16 登记）；controller 批准 abort：stash 保全+二次 abort 成功→终态 aborted（09:42:58）——**升级失败，维持受限登记**（kimi-coding/…0556a410…/v25-resume-{ws.jsonl,snapshot.json}+v25-retry-probe-ws.jsonl+v25-worktree-dirty-inventory.txt 在档） |
+| wave2-2b 重跑计划腿 rep4（auto） | 896s | stopped_needs_human：reviewer 原始 pass 但弯引号→missing_start_tag→needs_human（§3#6）；takeover 交互子会话 confirm→Confirmed→typed advance 打通，attempt 544a1b51 建立（kimi 三角色冻结） |
+| wave2-2b coding 腿（544a1b51） | run1 962s+分诊/恢复/接管 ~20min | run1 WI-001 coder（Write×15，18/18 测试过）报 commit 沙箱死→blocked_gate_0001→分诊放行（脚本过早关连接→runner 死 coding_event_channel_closed→AMR，§3#8）→F-16 recover_coding 一次成功（生产首验）→run2 纯 Bash 全灭→blocked_gate_0002→coding-drive.cjs 持久驱动接管（放行+run3 进行中）；终态以 rep6-takeover/coding-drive-summary-*.json 为准 |
 
-异常合计 5 项（§3）；服务端 09-19 07:23 由 controller 重建部署 v25（HEAD 4d097c1d，含 F-14 修复；本验证轮共用未再重启）；数据面操作累计=3 次生产 API（abort+DELETE 无效 attempt+0556a410 二段 abort）+1 次手动清自产 Failed advance record（备份在档）+1 次 controller 批准下的 worktree stash 保全（清单在档）。
+异常合计 8 项（§3，#6-8 为 2026-09-20 wave2-2b 新增）；服务端 09-20 08:36 由 controller 部署 v27（worktree HEAD 9e25c45c，含 770c1f71 补齐器/F-16 恢复通道 32dc4de8/F-15 预检；本验证轮共用未重启）；wave2-2b 数据面操作=takeover POST ×1+typed confirm/advance+gate_response 分诊 ×2+recover_coding ×1（全部留痕 kimi-coding/，无 DELETE、无服务端重启、无 git 提交）。
 
 ## §5 T2 矩阵回填素材（wire 证据）
 
