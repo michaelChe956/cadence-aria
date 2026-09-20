@@ -285,11 +285,7 @@ async fn idle_watchdog_aborts_silent_provider_run_with_diagnosable_failure() {
         tokio::task::yield_now().await;
     }
     assert!(
-        received
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|label| *label == "abort"),
+        received.lock().unwrap().contains(&"abort"),
         "看门狗必须向 provider 会话发送 Abort 命令，实际收到：{:?}",
         received.lock().unwrap()
     );
