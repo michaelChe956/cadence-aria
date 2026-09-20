@@ -80,7 +80,9 @@ async fn plan_non_approval_gate_fixture(
         session,
     );
     engine
-        .enter_work_item_plan_context_blocker(Some("请补充 WorkItemPlan Outline 所需上下文".to_string()))
+        .enter_work_item_plan_context_blocker(Some(
+            "请补充 WorkItemPlan Outline 所需上下文".to_string(),
+        ))
         .await;
     (root, lifecycle, engine, event_rx)
 }

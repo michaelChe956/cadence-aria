@@ -580,14 +580,14 @@ impl LifecycleStore {
     /// （request-change 修订后 repeated_fingerprint 门经 EnterHumanGate 保持
     /// Evaluate），confirm 是人工批准权威，在锁内判等通过后原子提升
     /// phase→Approval 再走既有 compile 链——compile 链三处 Approval 前置靠满足
-///
-/// F-21 fix round（controller 裁定）：terminate（Terminated）对 plan 会话
-///（SC 流）非终审门形态放行——context blocker 门（prepare 相位，plan_outline/
-/// authoring.rs enter_work_item_plan_context_blocker）与 author 连续 validate
-/// 失败门（generate 相位，decisions.rs）只置 stage+WaitingForHuman，不写快照
-/// 不提相位，WaitingForHuman 本身即这两门的 durable 开态证据；引擎
-/// close_human_gate 已在内存校验 stage==HumanConfirm 后才抵达本 CAS，矩阵
-/// HumanConfirm SC 臂放行 AbandonHumanGate。confirm（Running）前置一字不动。
+    ///
+    /// F-21 fix round（controller 裁定）：terminate（Terminated）对 plan 会话
+    ///（SC 流）非终审门形态放行——context blocker 门（prepare 相位，plan_outline/
+    /// authoring.rs enter_work_item_plan_context_blocker）与 author 连续 validate
+    /// 失败门（generate 相位，decisions.rs）只置 stage+WaitingForHuman，不写快照
+    /// 不提相位，WaitingForHuman 本身即这两门的 durable 开态证据；引擎
+    /// close_human_gate 已在内存校验 stage==HumanConfirm 后才抵达本 CAS，矩阵
+    /// HumanConfirm SC 臂放行 AbandonHumanGate。confirm（Running）前置一字不动。
     pub fn compare_and_save_human_gate_close(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -605,8 +605,7 @@ impl LifecycleStore {
         let relaxed_terminate = status == WorkspaceSessionStatus::Terminated
             && matches!(
                 expected.single_candidate_phase,
-                None
-                    | Some(crate::product::models::SingleCandidatePhase::Prepare)
+                None | Some(crate::product::models::SingleCandidatePhase::Prepare)
                     | Some(crate::product::models::SingleCandidatePhase::Generate)
             );
         if expected.status != WorkspaceSessionStatus::WaitingForHuman
