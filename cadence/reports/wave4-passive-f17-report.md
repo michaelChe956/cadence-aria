@@ -87,3 +87,22 @@ git bind 面在**构造期冻结**：`ClientServiceState` 新增 `writable_git_p
 
 - 指针交换仅在「构造期之前」有意义——届时 root 尚未交给 coder，Aria worktree 准备流程产出可信；构造期之后任何 `.git` 改写不影响已冻结的 bind 面（沙箱内 git 仍按指针工作，但 rw bind 面恒定，改写只能让 coder 自己的 git 失效，无法扩大写面）。
 - `writable_root`（root 本身的 rw 挂载）不依赖 rev-parse，无同类漂移面。
+
+## 8. fix round 3（k3 R2 审 1×P1——跨轮次洞）
+
+**P1（冻结的轮次边界）**：fix round 2 的冻结只保护单 dispatcher 生命周期——同 attempt 的 retry/rework 轮各起新 dispatcher、构造期重解析。coder 在第 N 轮改 `.git` 指针 → 第 N+1 轮构造期 `rev-parse` 解析到 evil 仓 → bind 面被瞄准（冻结对「第一次解析」本身无防护）。
+
+### 修复（controller 设计——往返校验）
+
+`resolve_writable_git_paths` 解析后做往返校验：合法 linked worktree 的 `<gitdir>/gitdir` 文件指回 `<root>/.git`（git 建链时写入的互指结构）；被改指的指针解析到的宿主 gitdir（标准仓无 `gitdir` 文件；别的 worktree 的 `gitdir` 文件指回它自己）都不会指回本 worktree。校验失败 → 返回空 `Vec`（安全降级：无额外 bind，coder 自己的 git 失效，但绝不能瞄准 evil）。另：gitdir 在根内而 commondir 在根外的异形链同样降级（非生产形态）。
+
+### TDD 证据（fix round 3）
+
+- 红：`resolve_writable_git_paths_degrades_on_swapped_pointer_across_rounds` FAILED——合法基线（构造期 `==[main/.git]`）后，`.git` 指到宿主另一标准仓 `evil/.git`，第 N+1 轮（新 dispatcher 构造期解析）返回 `[evil/.git]` 非空（跨轮洞精确复现）。
+- 绿（往返校验后）：定向 `cargo test --locked --lib kimi_code_provider::client_services` **76 passed / 0 failed**；fmt clean；clippy 0 警告。测试覆盖三形态：合法基线非空（校验通过）/ 指到标准仓降级空 / 指到同仓另一 worktree gitdir 降级空；fix round 1/2 全部既有测试（含真机 linked worktree commit 链、构造期冻结）不动仍绿。
+
+### 纵深合成（三轮叠加后的完整防线）
+
+1. 构造期冻结（fix round 2）：单 dispatcher 生命周期内 bind 面恒定。
+2. 往返校验（fix round 3）：新轮次构造期只接受「gitdir 文件互指本 worktree」的合法链，任何被改指针 → 空降级。
+3. 解析过滤（fix round 1）：根内路径不进额外 bind 面。

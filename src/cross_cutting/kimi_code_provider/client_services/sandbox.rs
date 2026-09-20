@@ -221,12 +221,14 @@ pub fn probe_bwrap() -> Option<PathBuf> {
 /// returned so a single bind covers both. Non-git directories resolve to an
 /// empty list.
 ///
-/// Safety note: a sandboxed coder can only rewrite the `.git` pointer to a
-/// location it can itself write — which is inside the authorized root and
-/// therefore filtered out — or to an already-valid git dir such as the main
-/// repository's, which this bind is meant to expose anyway; `rev-parse`
-/// fails on anything else, so the extra binds cannot be aimed at arbitrary
-/// host paths.
+/// Safety (round-trip validation, F-17 fix round 3): the git binds are
+/// frozen per dispatcher, but retry/rework rounds construct a fresh
+/// dispatcher — a coder that swapped the `.git` pointer in round N must not
+/// aim round N+1's fresh resolution at an arbitrary valid host git dir. A
+/// legitimate linked worktree's `<gitdir>/gitdir` file points back at
+/// `<root>/.git`; a swapped pointer resolves to a host git dir whose
+/// `gitdir` file does not. Validation failure degrades safely to an empty
+/// list — no extra bind, the coder's git simply stops working.
 pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
     let Some(git) = resolve_trusted_binary("git") else {
         return Vec::new();
@@ -242,7 +244,7 @@ pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
     if !output.status.success() {
         return Vec::new(); // not a git repository
     }
-    let mut outside: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+    let mut dirs: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -255,6 +257,41 @@ pub fn resolve_writable_git_paths(root: &Path) -> Vec<PathBuf> {
             };
             absolute.canonicalize().unwrap_or(absolute)
         })
+        .collect();
+    if dirs.len() != 2 {
+        return Vec::new(); // defensive: rev-parse always emits both lines
+    }
+    let common = dirs.pop().expect("common dir");
+    let gitdir = dirs.pop().expect("git dir");
+    if gitdir.starts_with(root) {
+        // Plain repository (git dir == common dir inside the root) needs no
+        // extra bind; a gitdir-inside/commondir-outside chain is not a
+        // production shape and degrades the same way.
+        return Vec::new();
+    }
+    // Round-trip validation (fix round 3): a legitimate linked worktree's
+    // `<gitdir>/gitdir` file points back at `<root>/.git`. A coder-swapped
+    // pointer resolves to a host git dir that does not point back here.
+    let points_back = std::fs::read_to_string(gitdir.join("gitdir"))
+        .ok()
+        .and_then(|content| {
+            let back = PathBuf::from(content.trim());
+            let back = if back.is_absolute() {
+                back
+            } else {
+                gitdir.join(back)
+            };
+            std::fs::canonicalize(&back)
+                .ok()
+                .zip(std::fs::canonicalize(root.join(".git")).ok())
+                .map(|(back, expected)| back == expected)
+        })
+        .unwrap_or(false);
+    if !points_back {
+        return Vec::new(); // safe degradation: no extra bind
+    }
+    let mut outside: Vec<PathBuf> = [gitdir, common]
+        .into_iter()
         .filter(|path| !path.starts_with(root))
         .collect();
     outside.sort();
@@ -685,6 +722,73 @@ mod tests {
         );
     }
 
+    /// fix round 3(F-17/k3 R2 P1,跨轮次洞):冻结只保护单 dispatcher
+    /// 生命周期,同 attempt 的 retry/rework 轮各起新 dispatcher 重解析
+    /// ——第 N 轮 coder 改 `.git` 指针→第 N+1 轮构造期解析到 evil 仓。
+    /// 往返校验:合法 linked worktree 的 `<gitdir>/gitdir` 文件指回
+    /// `<root>/.git`;被改指的指针解析到的宿主 gitdir 不指回——校验
+    /// 失败安全降级为空(无额外 bind,绝不瞄准 evil)。
+    #[test]
+    fn resolve_writable_git_paths_degrades_on_swapped_pointer_across_rounds() {
+        let base = tempfile::tempdir().expect("workspace");
+        let base = base.path().canonicalize().expect("canonical base");
+        let main = base.join("main");
+        host_git(&["init", "-q", "main"], &base);
+        host_git(
+            &[
+                "-c",
+                "user.name=f17",
+                "-c",
+                "user.email=f17@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            &main,
+        );
+        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
+        let root = base.join("wt");
+        let root = root.canonicalize().expect("canonical worktree");
+        // 合法基线:构造期解析非空(往返校验通过)。
+        assert_eq!(
+            resolve_writable_git_paths(&root),
+            vec![main.join(".git").canonicalize().expect("commondir")]
+        );
+
+        // 第 N 轮 coder 把 `.git` 指到宿主另一标准仓(无 gitdir 文件)。
+        host_git(&["init", "-q", "evil"], &base);
+        std::fs::write(
+            root.join(".git"),
+            format!("gitdir: {}\n", base.join("evil").join(".git").display()),
+        )
+        .expect("swap pointer at plain repo");
+        // 第 N+1 轮(新 dispatcher 构造期):必须为空,不得瞄准 evil。
+        assert!(
+            resolve_writable_git_paths(&root).is_empty(),
+            "swapped pointer at a plain repo must degrade to empty"
+        );
+
+        // 指到同仓另一 linked worktree 的 gitdir(其 gitdir 文件指回
+        // 它自己的 .git,不指回本 worktree)。
+        host_git(&["worktree", "add", "../evil_wt", "-b", "ev"], &main);
+        std::fs::write(
+            root.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                main.join(".git")
+                    .join("worktrees")
+                    .join("evil_wt")
+                    .display()
+            ),
+        )
+        .expect("swap pointer at another worktree gitdir");
+        assert!(
+            resolve_writable_git_paths(&root).is_empty(),
+            "swapped pointer at another worktree gitdir must degrade to empty"
+        );
+    }
     fn host_git(args: &[&str], cwd: &Path) {
         let status = std::process::Command::new("git")
             .args(args)
