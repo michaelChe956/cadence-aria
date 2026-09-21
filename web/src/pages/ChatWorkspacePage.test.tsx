@@ -577,12 +577,15 @@ describe("ChatWorkspacePage shell and content loading", () => {
 describe("ChatWorkspacePage dual track switch", () => {
   installChatWorkspacePageTestHooks();
 
-  function setWorkspaceType(workspaceType: "story" | "design" | "work_item_plan") {
+  function setWorkspaceType(
+    workspaceType: "story" | "design" | "work_item_plan",
+    sessionStatus: "open" | "confirmed" | "terminated" = "open",
+  ) {
     useWorkspaceStore.getState().setSessionState({
       session_id: "session_switch",
       workspace_type: workspaceType,
       stage: "prepare_context",
-      session_status: "open",
+      session_status: sessionStatus,
       flow_kind: "legacy",
       run_policy: "interactive",
       run_history: {
@@ -643,6 +646,38 @@ describe("ChatWorkspacePage dual track switch", () => {
 
     expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
     expect(screen.getByTestId("start-generation")).toBeInTheDocument();
+  });
+
+  // F-30 P2（f30-review-k3）：legacy 面终态滞留 prepare_context（长开 tab /
+  // session_state 未达窗口）时「开始生成」与 cockpit 面同款禁用+如实提示。
+  it.each([
+    ["confirmed", /会话已确认（终态）——重新生成请走修订流程或新建会话/],
+    ["terminated", /会话已终止（终态）——请新建会话/],
+  ] as const)(
+    "disables legacy start generation with an honest hint when the session is terminal (%s) but stuck in prepare_context",
+    (sessionStatus, hintPattern) => {
+      window.localStorage.setItem("aria.chat.cockpit", "legacy");
+      setWorkspaceType("work_item_plan", sessionStatus);
+
+      renderWorkspace();
+
+      expect(screen.getByTestId("start-generation")).toBeDisabled();
+      expect(
+        screen.getByTestId("start-generation-blocked-hint"),
+      ).toHaveTextContent(hintPattern);
+    },
+  );
+
+  it("keeps legacy start generation enabled for an open session in prepare_context", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item_plan", "open");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("start-generation")).toBeEnabled();
+    expect(
+      screen.queryByTestId("start-generation-blocked-hint"),
+    ).toBeNull();
   });
 
   it("renders a known session in the cockpit when cockpit is explicitly set", () => {

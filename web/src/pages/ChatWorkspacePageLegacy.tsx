@@ -92,6 +92,7 @@ export function LegacyChatWorkspacePage({
   const storeSessionId = useWorkspaceStore((state) => state.sessionId);
   const workspaceType = useWorkspaceStore((state) => state.workspaceType);
   const stage = useWorkspaceStore((state) => state.stage);
+  const sessionStatus = useWorkspaceStore((state) => state.sessionStatus);
   const gateActionBlockReason = useWorkspaceStore((state) =>
     state.stage === "human_confirm"
       ? gateActionBlockReasonForState(state)
@@ -155,6 +156,16 @@ export function LegacyChatWorkspacePage({
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
   const gateInputDisabled = inputDisabled || gateActionBlockReason !== null;
+  // F-30 P2（f30-review-k3）：legacy 面与 cockpit 面同款终态重跑守卫——终态会话
+  // （confirmed/terminated）即便滞留 prepare_context（session_state 未达窗口 /
+  // 长开 tab 残留），「开始生成」也禁用+就地如实提示（引擎守卫兜底，双面一致）。
+  const startGenerationBlockedByTerminalSession =
+    stage === "prepare_context" &&
+    (sessionStatus === "confirmed" || sessionStatus === "terminated");
+  const startGenerationBlockedHint =
+    sessionStatus === "terminated"
+      ? "会话已终止（终态）——请新建会话"
+      : "会话已确认（终态）——重新生成请走修订流程或新建会话";
   // spec-workbench-canvas-experience T4：面板可见性完全由 stage 驱动——
   // stage === "author_confirm" 且 story/design 时自动展开；userDismissed 仅为
   // 组件本地状态（输入聚焦 / 收起钮 / 采纳预填置 true），stage 重新进入
@@ -606,6 +617,12 @@ export function LegacyChatWorkspacePage({
                   }}
                   onSendContextNote={sendContextNote}
                   onStartGeneration={handleStartGeneration}
+                  startGenerationDisabled={startGenerationBlockedByTerminalSession}
+                  startGenerationDisabledHint={
+                    startGenerationBlockedByTerminalSession
+                      ? startGenerationBlockedHint
+                      : null
+                  }
                   hideStartGeneration={Boolean(recoverableInterruptedRun)}
                   onAbort={abort}
                 />
@@ -739,6 +756,12 @@ export function LegacyChatWorkspacePage({
                 disabled={gateInputDisabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
+                startGenerationDisabled={startGenerationBlockedByTerminalSession}
+                startGenerationDisabledHint={
+                  startGenerationBlockedByTerminalSession
+                    ? startGenerationBlockedHint
+                    : null
+                }
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
                 onAbort={abort}
               />
