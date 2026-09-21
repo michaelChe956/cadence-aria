@@ -9,7 +9,7 @@ import {
   RefreshCw,
   Bot,
 } from "lucide-react";
-import type { TimelineNode } from "../../state/workspace-ws-store";
+import type { TimelineNode, TimelineNodeDetail } from "../../state/workspace-ws-store";
 import {
   formatFlowElapsed,
   topologyTokenName,
@@ -27,6 +27,8 @@ interface TimelineNodeListProps {
   className?: string;
   variant?: "sidebar" | "flow";
   flowRows?: CockpitFlowRow[];
+  /** 节点详情（同源自 store 的 nodeDetails）：方块据此展示节点级 token 消耗，缺失即不展示。 */
+  nodeDetails?: Record<string, TimelineNodeDetail>;
 }
 
 export function TimelineNodeList({
@@ -37,6 +39,7 @@ export function TimelineNodeList({
   className = "",
   variant = "sidebar",
   flowRows,
+  nodeDetails,
 }: TimelineNodeListProps) {
   return (
     <nav
@@ -65,6 +68,7 @@ export function TimelineNodeList({
               selected={node.node_id === selectedNodeId}
               onSelect={() => onSelectNode(node.node_id)}
               flowRow={flowRows?.find((row) => row.node_id === node.node_id) ?? null}
+              nodeDetail={nodeDetails?.[node.node_id]}
             />
           ))}
         </div>
@@ -164,15 +168,18 @@ function TimelineFlowTile({
   selected,
   onSelect,
   flowRow,
+  nodeDetail,
 }: {
   node: TimelineNode;
   active: boolean;
   selected: boolean;
   onSelect: () => void;
   flowRow: CockpitFlowRow | null;
+  nodeDetail?: TimelineNodeDetail;
 }) {
   const title = displayTitleForNode(node);
   const stateLabel = flowRow ? FLOW_STATE_LABELS[flowRow.state] : node.status;
+  const tokenUsage = nodeTokenUsage(nodeDetail);
   const startedAt = clockTimeText(flowRow?.started_at ?? node.started_at);
   const completedAt = clockTimeText(node.completed_at);
   // 方块的时间读取取 flowRow（与执行流同源）；缺 flowRow 时回退节点自身的耗时。
@@ -191,6 +198,7 @@ function TimelineFlowTile({
     startedAt ? `开始 ${startedAt}` : null,
     completedAt ? `结束 ${completedAt}` : null,
     duration ? `耗时 ${duration}` : null,
+    tokenUsage?.detail ?? null,
     node.agent ? `Provider ${node.agent}` : null,
     node.round === null || node.round === undefined ? null : `Round ${node.round}`,
     node.summary?.trim() ? node.summary.trim() : null,
@@ -263,6 +271,15 @@ function TimelineFlowTile({
             {duration}
           </span>
         ) : null}
+        {tokenUsage ? (
+          <span
+            data-testid={`flow-tokens-${node.node_type}`}
+            aria-label={tokenUsage.detail}
+            className="aria-mono aria-num shrink-0 text-[10px] text-[var(--aria-ink-muted)]"
+          >
+            {tokenUsage.compact}
+          </span>
+        ) : null}
         <span
           data-testid={`flow-state-${node.node_type}`}
           className="ml-auto min-w-0 truncate text-[10px] text-[var(--aria-ink-muted)]"
@@ -272,6 +289,61 @@ function TimelineFlowTile({
       </span>
     </button>
   );
+}
+
+/** 节点级 token 消耗：方块上的紧凑读数 + hover 提示里的完整读数。 */
+interface NodeTokenUsage {
+  compact: string;
+  detail: string;
+}
+
+/**
+ * 从节点详情的执行事件里取最近一次 `usage` 负载（与实时链路 `parseUsagePayload` 的字段契约
+ * 一致）；没有该事件或负载非法时返回 null——不伪造 token 读数。
+ */
+function nodeTokenUsage(detail: TimelineNodeDetail | undefined): NodeTokenUsage | null {
+  const events = detail?.execution_events;
+  if (!events || events.length === 0) {
+    return null;
+  }
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind !== "usage" || typeof event.output !== "string" || event.output.length === 0) {
+      continue;
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(event.output) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const segments: { label: string; value: number }[] = [];
+    for (const [label, key] of [
+      ["输入", "input_tokens"],
+      ["输出", "output_tokens"],
+      ["缓存", "cache_read_tokens"],
+    ] as const) {
+      const raw = parsed[key];
+      if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+        segments.push({ label, value: raw });
+      }
+    }
+    if (segments.length === 0) {
+      return null;
+    }
+    return {
+      // 千位以上折算成 `1.2k`，与方块的小字号版面匹配。
+      compact: `↘${segments
+        .map(({ value }) =>
+          value < 1000 ? String(value) : `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`,
+        )
+        .join("/")}`,
+      detail: `Tokens ${segments
+        .map((segment) => `${segment.label} ${segment.value.toLocaleString("en-US")}`)
+        .join(" · ")}`,
+    };
+  }
+  return null;
 }
 
 /** 取当前步附近的一段拓扑窗口（窗口不移动时原样返回）。 */

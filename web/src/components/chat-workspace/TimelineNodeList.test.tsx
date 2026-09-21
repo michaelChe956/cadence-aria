@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { TimelineNode } from "../../state/workspace-ws-store";
+import type { ExecutionEvent, TimelineNode, TimelineNodeDetail } from "../../state/workspace-ws-store";
 import type { CockpitFlowState } from "../../state/workspace-cockpit-projection";
 import { TimelineNodeList } from "./TimelineNodeList";
 
@@ -117,6 +117,38 @@ function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
       review_rounds: 1,
     },
     ...overrides,
+  };
+}
+
+function nodeDetail(overrides: Partial<TimelineNodeDetail> = {}): TimelineNodeDetail {
+  return {
+    node_id: "node-flow-1",
+    session_id: "session-flow",
+    node_type: "author_run",
+    status: "active",
+    agent_role: "author",
+    provider: null,
+    messages: [],
+    streaming_content: "",
+    execution_events: [],
+    permission_events: [],
+    verdict: null,
+    artifact_ref: null,
+    is_revision: false,
+    base_artifact_ref: null,
+    started_at: new Date(2026, 8, 13, 0, 0, 0).toISOString(),
+    ended_at: null,
+    ...overrides,
+  };
+}
+
+function usageEvent(payload: Record<string, number>): ExecutionEvent {
+  return {
+    event_id: `usage-${JSON.stringify(payload)}`,
+    kind: "usage",
+    status: "completed",
+    title: "usage",
+    output: JSON.stringify(payload),
   };
 }
 
@@ -344,6 +376,61 @@ describe("TimelineNodeList flow variant", () => {
     // 点击语义不变：下钻到该节点（详情在下钻区域展开）。
     fireEvent.click(tile);
     expect(onSelectNode).toHaveBeenCalledWith("node-flow-1");
+  });
+
+  it("shows the node's token usage on the block and in the hover hint", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode, timelineNode({ node_id: "node-flow-2", node_type: "reviewer_run" })]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[...flowRows]}
+        nodeDetails={{
+          "node-flow-1": nodeDetail({
+            execution_events: [usageEvent({ input_tokens: 1_200, output_tokens: 300 })],
+          }),
+          // 有节点详情但没有 usage 事件 → 不得展示 token。
+          "node-flow-2": nodeDetail({ node_id: "node-flow-2", execution_events: [] }),
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("flow-tokens-author_run")).toHaveTextContent("↘1.2k/300");
+    expect(screen.getByTestId("timeline-node-author_run").getAttribute("title")).toContain(
+      "Tokens 输入 1,200 · 输出 300",
+    );
+    expect(screen.queryByTestId("flow-tokens-reviewer_run")).toBeNull();
+  });
+
+  it("reads the latest usage event and ignores payloads it cannot parse", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+        nodeDetails={{
+          "node-flow-1": nodeDetail({
+            execution_events: [
+              usageEvent({ input_tokens: 100, output_tokens: 100 }),
+              { ...usageEvent({}), output: "not-json" },
+              usageEvent({ input_tokens: 2_048, output_tokens: 4_096, cache_read_tokens: 500 }),
+              {
+                ...usageEvent({}),
+                kind: "provider",
+                output: JSON.stringify({ input_tokens: 9, output_tokens: 9 }),
+              },
+            ],
+          }),
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("flow-tokens-author_run")).toHaveTextContent("↘2k/4.1k/500");
   });
 
   it("keeps the mini topology bounded when the session has many nodes", () => {

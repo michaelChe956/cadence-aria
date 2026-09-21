@@ -930,6 +930,7 @@ export function ChatCockpitPage({
             onSelectNode={setDrilldownNodeId}
             variant="flow"
             flowRows={flowRows}
+            nodeDetails={selectedState?.nodeDetails ?? {}}
             className="border-0"
           />
         </section>

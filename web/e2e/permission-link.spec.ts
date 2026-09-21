@@ -35,8 +35,9 @@ test.describe("G. Permission 链路", () => {
     await page.getByRole("button", { name: "拒绝" }).click();
 
     await waitForStage(page, "准备中", 10_000);
+    // 自动执行流方块把失败态本地化为「失败」；保留原始英文匹配词，仅增补中文文案。
     await expect(page.getByTestId("timeline-node-author_run").first()).toContainText(
-      /failed|permission denied/i,
+      /failed|permission denied|失败/i,
     );
   });
 
