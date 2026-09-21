@@ -358,9 +358,12 @@ async fn single_candidate_completed_reopen_is_rejected_without_starting_or_runni
     )
     .await;
     let message = next_error_message(&mut outbound_rx).await;
+    // F-30：终态守卫先于 store 重臂拦截——错误码 SESSION_ALREADY_CONFIRMED 语义
+    // + 会话 id + 重跑出口指引，比旧 store Conflict 文案更可诊断（语义不变：
+    // 可见拒绝、不启动 provider、durable 零改写）。
     assert!(
-        message.contains("reopen SingleCandidate session rejected"),
-        "completed reopen must return a visible rejection: {message}"
+        message.contains("SESSION_ALREADY_CONFIRMED") && message.contains("新建会话"),
+        "completed reopen must return a visible terminal rejection: {message}"
     );
     assert!(
         !matches!(

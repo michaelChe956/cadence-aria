@@ -127,6 +127,130 @@ async fn start_generation_locks_provider_and_creates_node() {
     }
 }
 
+// F-30（v34 复验，标本 issue_0003/session_0008）：已确认终态会话上重跑
+// 「开始生成」此前走未定义路径——完整轮生成后挂零决策控件门、durable 停留
+// 旧状态、timeline 零新节点。入口必须明确拒绝：错误码 SESSION_ALREADY_CONFIRMED
+// 语义 + 可诊断消息（含 session id 与重跑出口指引），且不建节点、不推进状态机。
+#[tokio::test]
+async fn start_generation_rejects_confirmed_session_without_side_effects() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_start_generation_confirmed");
+    // from_record 口径（mappings.rs）：Confirmed 投影为 stage Completed。
+    session.session_status = crate::product::models::WorkspaceSessionStatus::Confirmed;
+    session.stage = WorkspaceStage::Completed;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    let snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    };
+
+    let err = engine
+        .start_generation(snapshot, false)
+        .await
+        .expect_err("confirmed terminal session must reject start_generation");
+
+    assert!(
+        err.contains("SESSION_ALREADY_CONFIRMED"),
+        "error should carry the terminal-state code, got: {err}"
+    );
+    assert!(
+        err.contains("sess_start_generation_confirmed"),
+        "error should name the session for diagnosis, got: {err}"
+    );
+    assert!(
+        err.contains("修订") && err.contains("新建会话"),
+        "error should honestly redirect reruns to revision/new session, got: {err}"
+    );
+    // 不建节点、不架门、不推进状态机、不留活动 run。
+    // 不建节点、不架门、不推进状态机、不留活动 run：initial_timeline 的
+    // 「准备上下文」节点原样保留（Active），无 StartGeneration 节点混入。
+    assert_eq!(engine.current_stage(), WorkspaceStage::Completed);
+    assert!(
+        engine
+            .timeline_nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::StartGeneration),
+        "no StartGeneration node may be appended for a terminal session"
+    );
+    assert!(
+        engine
+            .timeline_nodes
+            .iter()
+            .any(|node| node.status == TimelineNodeStatus::Active),
+        "the pre-existing prepare_context node must stay untouched (no gate, no closure)"
+    );
+    assert!(engine.active_run_id().is_none());
+}
+
+// F-30 同族：Terminated 终态同口径拒绝（错误码区分，重跑出口只有新会话）。
+#[tokio::test]
+async fn start_generation_rejects_terminated_session() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_start_generation_terminated");
+    session.session_status = crate::product::models::WorkspaceSessionStatus::Terminated;
+    session.stage = WorkspaceStage::Completed;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    let snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    };
+
+    let err = engine
+        .start_generation(snapshot, false)
+        .await
+        .expect_err("terminated terminal session must reject start_generation");
+
+    assert!(
+        err.contains("SESSION_TERMINATED"),
+        "error should carry the terminal-state code, got: {err}"
+    );
+    assert!(
+        err.contains("sess_start_generation_terminated"),
+        "error should name the session for diagnosis, got: {err}"
+    );
+    assert_eq!(engine.current_stage(), WorkspaceStage::Completed);
+    assert!(
+        engine
+            .timeline_nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::StartGeneration),
+        "no StartGeneration node may be appended for a terminal session"
+    );
+}
+
+// F-30 守卫边界：Failed 不是拦截对象——看门狗/编译失败后的显式重跑是既有
+// 语义（finish_failed_run 回 Open；SingleCandidate Failed 走 store 重臂，
+// 见 lifecycle_store workspace_single_candidate 显式重开用例）。
+#[tokio::test]
+async fn start_generation_still_allows_failed_session_rerun() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_start_generation_failed");
+    session.session_status = crate::product::models::WorkspaceSessionStatus::Failed;
+    session.stage = WorkspaceStage::PrepareContext;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    let snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    };
+
+    let (node, _) = engine
+        .start_generation(snapshot, false)
+        .await
+        .expect("failed session stays rerunnable");
+
+    assert_eq!(node.node_type, TimelineNodeType::StartGeneration);
+    assert_eq!(engine.current_stage(), WorkspaceStage::Running);
+}
+
 // 退役留档（T5/REQ-RET-02）：`reviewer_disabled_legacy_accept_enters_human_confirm_without_review_node` 直接驱动已删除的 legacy 决策面，
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

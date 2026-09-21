@@ -759,6 +759,27 @@ impl WorkspaceEngine {
         provider_config: ProviderConfigSnapshot,
         reviewer_enabled: bool,
     ) -> Result<(TimelineNode, WsOutMessage), String> {
+        // F-30（v34 复验 session_0008）：终态会话重跑走未定义路径——完整轮生成
+        // 后挂零决策控件门、durable 停留旧状态、timeline 零新节点。入口按
+        // session_status（真终态=Confirmed/Terminated）明确拒绝；Failed 不拦——
+        // 看门狗/编译失败后的显式重跑（含 SingleCandidate store 重臂）是既有语义。
+        // 守卫先于 SingleCandidate 重臂分支：Completed 单卡不再落 store 层的
+        // 通用 Conflict，而是拿到带 session id 与重跑出口的可诊断错误。
+        match self.session.session_status {
+            WorkspaceSessionStatus::Confirmed => {
+                return Err(format!(
+                    "SESSION_ALREADY_CONFIRMED: 会话 {} 已确认（终态），不能重新开始生成；重新生成请走修订流程或新建会话",
+                    self.session.session_id
+                ));
+            }
+            WorkspaceSessionStatus::Terminated => {
+                return Err(format!(
+                    "SESSION_TERMINATED: 会话 {} 已终止（终态），不能重新开始生成；请新建会话",
+                    self.session.session_id
+                ));
+            }
+            _ => {}
+        }
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
             let store = self
                 .lifecycle_store

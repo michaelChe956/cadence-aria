@@ -554,6 +554,16 @@ export function ChatCockpitPage({
     (state.humanGateClosure?.decision === "confirm" ||
       state.sessionStatus === "confirmed") &&
     state.stage !== "author_confirm";
+  // F-30（v34 复验 session_0008）：终态会话（confirmed/terminated）即便页面
+  // 还停在 prepare_context（session_state 未达窗口/长开 tab 残留），「开始生成」
+  // 也必须禁用+就地如实提示——终态重跑是未定义路径（重跑走修订流程或新建会话）。
+  const startGenerationBlockedByTerminalSession =
+    state.stage === "prepare_context" &&
+    (state.sessionStatus === "confirmed" || state.sessionStatus === "terminated");
+  const startGenerationBlockedHint =
+    state.sessionStatus === "terminated"
+      ? "会话已终止（终态）——请新建会话"
+      : "会话已确认（终态）——重新生成请走修订流程或新建会话";
   const handleTakeover = async (parentSessionId: string) => {
     const child = await takeoverWorkspaceSession(parentSessionId);
     useOperationAuditStore.getState().recordTakeoverLink(
@@ -1123,6 +1133,12 @@ export function ChatCockpitPage({
                 workItemPlanArtifact={state.workItemPlanArtifact}
                 disabled={workspaceWs.connectionStatus !== "connected"}
                 hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
+                startGenerationDisabled={startGenerationBlockedByTerminalSession}
+                startGenerationDisabledHint={
+                  startGenerationBlockedByTerminalSession
+                    ? startGenerationBlockedHint
+                    : null
+                }
                 onSendContextNote={workspaceWs.sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 onAbort={workspaceWs.abort}

@@ -32,6 +32,10 @@ interface ChatInputBarProps {
   onAbort: () => void;
   disabled?: boolean;
   hideStartGeneration?: boolean;
+  /** F-30（v34 复验 session_0008）：终态会话（confirmed/terminated）上禁用
+   * 「开始生成」并就地展示如实提示（重跑走修订流程或新建会话）。 */
+  startGenerationDisabled?: boolean;
+  startGenerationDisabledHint?: string | null;
   /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
   onInputFocus?: () => void;
   /** F-28（v33 复验 3）：STALE_DRIVER_LEASE 就地错误面——直出在生成动作区
@@ -59,6 +63,8 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   onAbort,
   disabled = false,
   hideStartGeneration = false,
+  startGenerationDisabled = false,
+  startGenerationDisabledHint = null,
   onInputFocus,
   staleLeaseNotice = null,
 }, ref) {
@@ -106,7 +112,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   }
 
   function handleStartGeneration() {
-    if (disabled) {
+    if (disabled || startGenerationDisabled) {
       return;
     }
     appendOptimisticEntry("start_generation", "开始生成");
@@ -177,12 +183,20 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
               data-testid="start-generation"
               type="button"
               onClick={handleStartGeneration}
-              disabled={disabled}
+              disabled={disabled || startGenerationDisabled}
               className="btn-primary h-9 disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
               开始生成
             </button>
+          ) : null}
+          {isPrepareContext && startGenerationDisabled ? (
+            <p
+              data-testid="start-generation-blocked-hint"
+              className="w-full text-right text-xs text-[var(--aria-ink-muted)]"
+            >
+              {startGenerationDisabledHint}
+            </p>
           ) : null}
         </div>
       </div>
