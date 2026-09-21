@@ -80,7 +80,8 @@ impl IntoResponse for ApiError {
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }
-            "repository_routing_target_missing"
+            "workspace_session_review_not_enabled"
+            | "repository_routing_target_missing"
             | "involved_repository_not_effective"
             | "change_order_repository_not_involved"
             | "change_order_duplicate_repository"

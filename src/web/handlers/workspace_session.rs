@@ -144,7 +144,7 @@ pub async fn workspace_session_confirm(
         Some(manager) => {
             let engine_handle = manager.engine();
             let mut engine = engine_handle.lock().await;
-            engine.http_confirm_disposition().await
+            engine.http_confirm_disposition(request.with_review).await
         }
         None => HttpConfirmDisposition::NotHandled,
     };
@@ -174,6 +174,17 @@ pub async fn workspace_session_confirm(
             return Ok(Json(workspace_session_dto(current)));
         }
         HttpConfirmDisposition::Finalize | HttpConfirmDisposition::NotHandled => {}
+        // F-31 纠正轮：用户显式要求送审但会话未启用 review——如实 4xx 拒绝，不静默定稿。
+        HttpConfirmDisposition::ReviewUnavailable => {
+            return Err(ApiError::runtime(
+                "workspace_session_review_not_enabled",
+                "review is not enabled for this workspace session; confirm without with_review to finalize",
+                json!({
+                    "workspace_session_id": session_id,
+                    "stage": workspace_stage_for_status(&session.status).as_str(),
+                }),
+            ));
+        }
     }
 
     // Blocker 2 修复：先 gate 后确认。confirm_workspace_entity 内部先跑 product 层
@@ -395,6 +406,7 @@ mod tests {
             Path(session_id.clone()),
             Json(WorkspaceSessionConfirmRequest {
                 confirmed_by: "user".to_string(),
+                with_review: false,
             }),
         )
         .await;

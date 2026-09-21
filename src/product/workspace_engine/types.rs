@@ -448,6 +448,9 @@ pub(crate) enum HttpConfirmDisposition {
     Finalize,
     /// 会话已是 Confirmed 终态：幂等返回，不重复写入。
     AlreadyConfirmed,
+    /// 用户显式要求送审（with_review=true）但会话未启用 review：端点必须如实 4xx
+    /// （workspace_session_review_not_enabled），不得静默按定稿处理。
+    ReviewUnavailable,
     /// 当前 stage 不得定稿（run/评审在途，或终态未 Confirmed）：端点返回 409。
     Rejected { stage: &'static str },
     /// 非 story/design 会话：端点维持既有 store-only 定稿通路。

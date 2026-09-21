@@ -918,6 +918,11 @@ pub struct WorkspaceSessionRunNextRequest {
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionConfirmRequest {
     pub confirmed_by: String,
+    /// F-31 纠正轮：用户是否选择「确认并送审」。缺省 false=直接定稿（F-31 v36 前的
+    /// 既有行为）；true=进入 Review（begin_review_after_author_confirm 路径）。review
+    /// 未启用的会话携带 true 时端点如实 4xx，不得静默按定稿。
+    #[serde(default)]
+    pub with_review: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

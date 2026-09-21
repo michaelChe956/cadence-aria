@@ -321,14 +321,16 @@ async fn story_terminate_store_cas_rejects_drifted_expected_record() {
     );
 }
 
-// F-31 fix round（k3 P1/P2）：HTTP confirm 端点的引擎裁决矩阵。引擎是 stage 的唯一权威——
-// 门态放行定稿，在途 stage（评审/生成/修订在途）拒收，已 Confirmed 终态幂等返回，非
-// story/design 不接管。CrossReview/Running 等评审在途 stage 在 it_core 面不可全覆盖：
+// F-31 fix round（k3 P1/P2；v36 纠正轮参数化）：HTTP confirm 端点的引擎裁决矩阵。引擎是
+// stage 的唯一权威——门态按用户意愿分流（with_review=false 定稿 / =true 且未启用则如实拒收），
+// 在途 stage（评审/生成/修订在途）拒收（在途守卫优先于送审请求），已 Confirmed 终态幂等返回，
+// 非 story/design 不接管。CrossReview/Running 等评审在途 stage 在 it_core 面不可全覆盖：
 // provider run 任务在整段 drive 里持引擎锁，HTTP 端点只能观测到 durable running
 //（见 tests/it_core/workspace_ws_integration/part_02.rs 的 CrossReview 测试），故该矩阵在此钉测。
 #[tokio::test]
 async fn http_confirm_disposition_matrix_follows_stage_authority() {
-    // 门态：AuthorConfirm（本轮无需评审）/ HumanConfirm / PrepareContext → 定稿
+    // 门态：AuthorConfirm / HumanConfirm / PrepareContext + 用户未要求送审（缺省
+    // with_review=false）→ 放行定稿（纠正轮：是否评审由用户选择，review 启用不再强制接管）。
     for stage in [
         WorkspaceStage::AuthorConfirm,
         WorkspaceStage::HumanConfirm,
@@ -338,13 +340,44 @@ async fn http_confirm_disposition_matrix_follows_stage_authority() {
             story_gate_fixture(WorkspaceType::Story).await;
         engine.session.stage = stage.clone();
         assert_eq!(
-            engine.http_confirm_disposition().await,
+            engine.http_confirm_disposition(false).await,
             HttpConfirmDisposition::Finalize,
-            "门态 {stage:?} 必须放行定稿"
+            "门态 {stage:?} + 未要求送审必须放行定稿"
         );
     }
 
-    // 在途 stage：一律拒收且零写入（评审不被绕过/不被改写）
+    // 纠正轮（引擎面红③）：显式 with_review=true + review 未启用（夹具 review_rounds=0）
+    // → 如实拒收（端点 4xx），不得静默按定稿；零写入。
+    for stage in [
+        WorkspaceStage::AuthorConfirm,
+        WorkspaceStage::HumanConfirm,
+        WorkspaceStage::PrepareContext,
+    ] {
+        let (_root, lifecycle, mut engine, _event_rx) =
+            story_gate_fixture(WorkspaceType::Story).await;
+        engine.session.stage = stage.clone();
+        assert_eq!(
+            engine.http_confirm_disposition(true).await,
+            HttpConfirmDisposition::ReviewUnavailable,
+            "with_review=true + review 未启用，门态 {stage:?} 必须如实拒收"
+        );
+        assert_eq!(engine.session().stage, stage, "拒收不得改写 stage");
+        assert_eq!(
+            engine.session().session_status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "拒收不得改写引擎状态"
+        );
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("durable story session");
+        assert_eq!(
+            durable.status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "拒收不得改写 durable 状态"
+        );
+    }
+
+    // 在途 stage：与送审意愿无关一律拒收且零写入（评审不被绕过/不被改写；在途守卫优先）。
     for stage in [
         WorkspaceStage::CrossReview,
         WorkspaceStage::Running,
@@ -355,11 +388,18 @@ async fn http_confirm_disposition_matrix_follows_stage_authority() {
             story_gate_fixture(WorkspaceType::Story).await;
         engine.session.stage = stage.clone();
         assert_eq!(
-            engine.http_confirm_disposition().await,
+            engine.http_confirm_disposition(false).await,
             HttpConfirmDisposition::Rejected {
                 stage: stage.as_str()
             },
             "在途 stage {stage:?} 必须拒收"
+        );
+        assert_eq!(
+            engine.http_confirm_disposition(true).await,
+            HttpConfirmDisposition::Rejected {
+                stage: stage.as_str()
+            },
+            "在途 stage {stage:?} 即便 with_review=true 也必须拒收"
         );
         assert_eq!(engine.session().stage, stage, "拒收不得改写 stage");
         assert_eq!(
@@ -382,12 +422,12 @@ async fn http_confirm_disposition_matrix_follows_stage_authority() {
     engine.session.stage = WorkspaceStage::Completed;
     engine.session.session_status = WorkspaceSessionStatus::Confirmed;
     assert_eq!(
-        engine.http_confirm_disposition().await,
+        engine.http_confirm_disposition(false).await,
         HttpConfirmDisposition::AlreadyConfirmed
     );
     engine.session.session_status = WorkspaceSessionStatus::Terminated;
     assert_eq!(
-        engine.http_confirm_disposition().await,
+        engine.http_confirm_disposition(false).await,
         HttpConfirmDisposition::Rejected { stage: "completed" },
         "未 Confirmed 的终态不得被确认改写"
     );
@@ -396,12 +436,15 @@ async fn http_confirm_disposition_matrix_follows_stage_authority() {
     let (_root, _lifecycle, mut engine, _event_rx) = story_gate_fixture(WorkspaceType::Story).await;
     engine.session.workspace_type = WorkspaceType::WorkItemPlan;
     assert_eq!(
-        engine.http_confirm_disposition().await,
+        engine.http_confirm_disposition(false).await,
         HttpConfirmDisposition::NotHandled
     );
 
-    // review 启用且本轮产物未评审：接管本轮（F-31 正向锚）——Fake reviewer 快速路径
-    //（ReviewerRun=Skipped + mark_latest_artifact_reviewed）落 HumanConfirm。
+    // review 启用且本轮产物未评审：送审与否由用户选择——
+    // ① with_review=false（未要求送审）→ Finalize 且零写入（纠正轮引擎面红①：review
+    //    启用不得强制接管）；
+    // ② with_review=true → 接管本轮（F-31 正向锚）——Fake reviewer 快速路径
+    //    （ReviewerRun=Skipped + mark_latest_artifact_reviewed）落 HumanConfirm。
     let (_root, lifecycle, mut engine, _event_rx) = story_gate_fixture(WorkspaceType::Story).await;
     engine.session.reviewer_enabled_at_start = Some(true);
     engine.session.stage = WorkspaceStage::AuthorConfirm;
@@ -422,9 +465,26 @@ async fn http_confirm_disposition_matrix_follows_stage_authority() {
             source_node_id: "timeline_node_001".to_string(),
         });
     assert_eq!(
-        engine.http_confirm_disposition().await,
+        engine.http_confirm_disposition(false).await,
+        HttpConfirmDisposition::Finalize,
+        "review 启用但用户未要求送审必须放行定稿"
+    );
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::AuthorConfirm,
+        "定稿裁决不得改写 stage"
+    );
+    assert!(
+        engine
+            .timeline_nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::ReviewerRun),
+        "定稿裁决不得创建评审节点"
+    );
+    assert_eq!(
+        engine.http_confirm_disposition(true).await,
         HttpConfirmDisposition::ReviewStarted,
-        "review 启用且本轮未评审必须接管本轮"
+        "review 启用且本轮未评审 + 用户显式送审必须接管本轮"
     );
     assert_eq!(
         engine.session().stage,

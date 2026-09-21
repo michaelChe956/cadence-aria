@@ -979,45 +979,55 @@ impl WorkspaceEngine {
         }
     }
 
-    /// 本轮 author 确认是否要先起评审（F-31 原分流判定，fix round 抽为独立谓词）。
+    /// 会话本轮是否启用评审（F-31 纠正轮：由强制接管判定拆出）。
     ///
-    /// 「review 启用」按被删实现的原始分流判定（`handle_author_decision` 的 Accept 臂）：
-    /// `reviewer_enabled_at_start` 为准——durable 记录的 `review_rounds` 恒 ≥1 且
-    /// `reviewer_provider` 恒 Some（创建配置校验 1..=5 + 默认 reviewer），二者只反映
-    /// 「选过哪个 reviewer」，不反映本次生成是否启用评审；重连后 from_record 恒 Some，
-    /// 只按有效态判定会误起评审。仅旧记录（None）退回有效态判定（与本文件
-    /// `ensure_reviewer_available_for_review_request` 同源的失真说明）。
-    ///
-    /// 「本轮尚未跑过」的持久化判据：评审完成恒 mark_latest_artifact_reviewed，而新一轮
-    /// author 产出（含 review 报告后的反馈修订）的 version reviewed_by 为空。无当前 version
-    /// （存量异常态）时维持既有定稿通路，不凭空起评审。
-    fn author_confirm_requires_review(&self) -> bool {
-        let review_enabled = match self.session.reviewer_enabled_at_start {
+    /// 按 `handle_author_decision` 被删实现的原始分流判定：`reviewer_enabled_at_start`
+    /// 为准——durable 记录的 `review_rounds` 恒 ≥1 且 `reviewer_provider` 恒 Some（创建
+    /// 配置校验 1..=5 + 默认 reviewer），二者只反映「选过哪个 reviewer」，不反映本次生成
+    /// 是否启用评审；重连后 from_record 恒 Some，只按有效态判定会误起评审。仅旧记录
+    /// （None）退回有效态判定（与本文件 `ensure_reviewer_available_for_review_request`
+    /// 同源的失真说明）。
+    fn review_enabled_for_session(&self) -> bool {
+        match self.session.reviewer_enabled_at_start {
             Some(enabled) => enabled,
             None => self.session.review_rounds > 0 && self.session.reviewer_provider.is_some(),
-        };
-        review_enabled
-            && self
-                .artifact_versions
-                .iter()
-                .rev()
-                .find(|version| version.is_current)
-                .is_some_and(|version| version.reviewed_by.is_none())
+        }
     }
 
-    /// HTTP confirm 端点的引擎裁决面（F-31 fix round，k3 P1/P2）。
+    /// 本轮产物是否尚未评审：「本轮尚未跑过」的持久化判据——评审完成恒
+    /// mark_latest_artifact_reviewed，而新一轮 author 产出（含 review 报告后的反馈修订）
+    /// 的 version reviewed_by 为空。无当前 version（存量异常态）时不视作待评审，
+    /// 不凭空起评审。
+    fn latest_artifact_unreviewed(&self) -> bool {
+        self.artifact_versions
+            .iter()
+            .rev()
+            .find(|version| version.is_current)
+            .is_some_and(|version| version.reviewed_by.is_none())
+    }
+
+    /// HTTP confirm 端点的引擎裁决面（F-31 fix round k3 P1/P2；v36 纠正轮参数化）。
     ///
     /// 端点不再自行判定「能否定稿」：引擎是 `stage` 的唯一权威，端点只按裁决做 durable 写
-    /// 与广播。story/design 的分流：
+    /// 与广播。story/design 的分流（`with_review` 缺省 false）：
     ///
-    /// - `AuthorConfirm` + 本轮未评审 → 接管本轮进 CrossReview（[`Self::begin_review_after_author_confirm`]）；
-    /// - 门态（`AuthorConfirm` 无需评审 / `HumanConfirm` / `PrepareContext`）→ 交端点定稿；
-    /// - 在途 stage（`CrossReview`/`Running`/`Revision`/`ReviewDecision`）→ **拒收**：端点此前
-    ///   对非 `AuthorConfirm` 一律落到 store-only 定稿，评审未回门就置 Confirmed，迟到 review
-    ///   报告再经 `route_review_report_to_author_confirm` 把已定稿会话拖回 AuthorConfirm
-    ///   （Running→Confirmed→WaitingForHuman，违反 F-30 终态口径）；
+    /// - 门态（`AuthorConfirm` / `HumanConfirm` / `PrepareContext`）+ `with_review=false` →
+    ///   交端点定稿——**是否送审由用户选择**，review 启用不再强制接管（v36 过度实现纠正）；
+    /// - `AuthorConfirm` + `with_review=true` + review 启用且本轮未评审 → 接管本轮进
+    ///   CrossReview（[`Self::begin_review_after_author_confirm`]）；本轮已评审（评审回门后
+    ///   的二次确认）或处 `HumanConfirm`（Fake 快速路径）/`PrepareContext`（F-25b 锚：生成
+    ///   前兼容确认面，无评审轮可言）→ 评审诉求已满足/不适用，回落定稿；
+    /// - 门态 + `with_review=true` + review 未启用 → [`HttpConfirmDisposition::ReviewUnavailable`]：
+    ///   如实 4xx 拒绝，不得静默按定稿（否则用户以为已送审而实际跳过评审）；
+    /// - 在途 stage（`CrossReview`/`Running`/`Revision`/`ReviewDecision`）→ **拒收**（与送审
+    ///   意愿无关，在途守卫优先）：端点此前对非 `AuthorConfirm` 一律落到 store-only 定稿，
+    ///   评审未回门就置 Confirmed，迟到 review 报告再经 `route_review_report_to_author_confirm`
+    ///   把已定稿会话拖回 AuthorConfirm（Running→Confirmed→WaitingForHuman，违反 F-30 终态口径）；
     /// - `Completed`：已 Confirmed 幂等返回，其余终态（terminated/failed/blocked）拒收。
-    pub(crate) async fn http_confirm_disposition(&mut self) -> HttpConfirmDisposition {
+    pub(crate) async fn http_confirm_disposition(
+        &mut self,
+        with_review: bool,
+    ) -> HttpConfirmDisposition {
         if !matches!(
             self.session.workspace_type,
             WorkspaceType::Story | WorkspaceType::Design
@@ -1026,14 +1036,21 @@ impl WorkspaceEngine {
         }
         let stage = self.session.stage.clone();
         match stage {
-            WorkspaceStage::AuthorConfirm if self.author_confirm_requires_review() => {
-                self.begin_review_after_author_confirm().await;
-                HttpConfirmDisposition::ReviewStarted
-            }
-            // PrepareContext：生成前的兼容确认面（F-25b 锚：HTTP confirm 恒可写 durable 定稿）。
             WorkspaceStage::AuthorConfirm
             | WorkspaceStage::HumanConfirm
-            | WorkspaceStage::PrepareContext => HttpConfirmDisposition::Finalize,
+            | WorkspaceStage::PrepareContext => {
+                if with_review && !self.review_enabled_for_session() {
+                    return HttpConfirmDisposition::ReviewUnavailable;
+                }
+                if with_review
+                    && stage == WorkspaceStage::AuthorConfirm
+                    && self.latest_artifact_unreviewed()
+                {
+                    self.begin_review_after_author_confirm().await;
+                    return HttpConfirmDisposition::ReviewStarted;
+                }
+                HttpConfirmDisposition::Finalize
+            }
             WorkspaceStage::Completed => {
                 if self.session.session_status == WorkspaceSessionStatus::Confirmed {
                     HttpConfirmDisposition::AlreadyConfirmed
