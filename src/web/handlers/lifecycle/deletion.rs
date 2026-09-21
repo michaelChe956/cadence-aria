@@ -69,14 +69,8 @@ pub async fn delete_work_item_plan(
     // 旧 manager。失败路径驱逐安全：磁盘记录尚存时，下次 attach 从磁盘重建 manager。
     let cleanup = async {
         for work_item_id in &plan.work_item_ids {
-            delete_work_item_with_cleanup(
-                &app_paths,
-                &store,
-                &project_id,
-                &issue_id,
-                work_item_id,
-            )
-            .await?;
+            delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, work_item_id)
+                .await?;
         }
         store
             .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)

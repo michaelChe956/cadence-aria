@@ -329,12 +329,9 @@ async fn request_revision_outside_author_confirm_gate_is_rejected() {
     send_json(&mut ws, &WsInMessage::Ping).await;
     let mut pong = false;
     for _ in 0..20 {
-        match recv_json(&mut ws).await {
-            WsOutMessage::Pong => {
-                pong = true;
-                break;
-            }
-            _ => {}
+        if let WsOutMessage::Pong = recv_json(&mut ws).await {
+            pong = true;
+            break;
         }
     }
     assert!(
