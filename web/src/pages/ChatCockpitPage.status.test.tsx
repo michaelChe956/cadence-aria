@@ -326,6 +326,58 @@ describe("cockpit generation status identity and boundaries", () => {
       expect(status).toHaveTextContent("已用 4:51");
     },
   );
+  // #4：会话完成（stage=completed/session confirmed）后引擎落「流程完成」标记
+  // 节点（completed_at/duration_ms 均空）——状态行与执行流行都不得再随墙钟计时。
+  it("freezes every visible timer once the session completes (#4)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-21T10:00:00Z"));
+      const workspaceWs = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        providerStatus: "starting",
+        stage: "completed",
+        sessionStatus: "confirmed",
+        activeNodeId: "node-6",
+        timelineNodes: [
+          timelineNode({
+            node_id: "author-1",
+            node_type: "author_run",
+            status: "completed",
+            started_at: new Date("2026-09-21T09:40:00Z").toISOString(),
+            completed_at: new Date("2026-09-21T09:50:00Z").toISOString(),
+          }),
+          timelineNode({
+            node_id: "node-6",
+            node_type: "completed",
+            title: "流程完成",
+            status: "completed",
+            started_at: new Date("2026-09-21T10:00:00Z").toISOString(),
+            completed_at: null,
+            duration_ms: null,
+          }),
+        ],
+      });
+
+      renderCockpitWith(workspaceWs);
+
+      const status = screen.getByTestId("cockpit-generation-status");
+      expect(status).toHaveTextContent("生成完成");
+      expect(screen.getByTestId("flow-elapsed-completed")).toHaveTextContent(/^0s$/);
+
+      act(() => {
+        vi.advanceTimersByTime(10 * 60_000);
+      });
+
+      // 状态行不得出现随墙钟增长的「已用」段。
+      expect(status).toHaveTextContent("生成完成");
+      expect(status).not.toHaveTextContent("已用");
+      // 完成节点冻结为 0；已完成 author 行冻结在 completed_at−started_at。
+      expect(screen.getByTestId("flow-elapsed-completed")).toHaveTextContent(/^0s$/);
+      expect(screen.getByTestId("flow-elapsed-author_run")).toHaveTextContent(/^10m0s$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
   it("ticks the elapsed time so silent rows stay honest", () => {

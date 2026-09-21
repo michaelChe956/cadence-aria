@@ -26,6 +26,11 @@ interface ChatInputBarProps {
   activeNodeType?: string | null;
   workItemPlanArtifact?: WorkItemPlanArtifactPayload | null;
   onSendContextNote: (content: string) => void;
+  /** v38 复验 #2/#3（恢复 C3 前原意）：story/design AuthorConfirm 门的反馈
+   * 修订发送通道——宿主（story/design 会话）接线时 author_confirm 输入+「发送
+   * 反馈」可用，提交即 request_revision；返回 false 表示未发出（如断线），
+   * 输入保留不落乐观条目。WorkItemPlan 门/未接线时该阶段保持只读呈现。 */
+  onSendRevisionFeedback?: (feedback: string) => boolean;
   onStartGeneration: () => void;
   // L2 退役（T5/REQ-RET-02）：staged/author 决策回调（outline 确认/生成模式/
   // outline 返修/draft/batch/author）随 wire 消息族删除——对应按钮分支退役。
@@ -68,6 +73,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   activeNodeType = null,
   workItemPlanArtifact = null,
   onSendContextNote,
+  onSendRevisionFeedback,
   onStartGeneration,
   onAbort,
   disabled = false,
@@ -91,10 +97,16 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   const isBusy = BUSY_STAGES.has(stage);
   // spec-design-dialog-revision T8：author_confirm 反馈输入开放（原为禁用）；
   // 发送仍走「发送反馈」按钮而非表单提交。
+  // v38 复验 #2/#3：story/design 宿主接线修订回调后，author_confirm 门上
+  // 「发送反馈」恢复可用（提交即 request_revision）；未接线（WorkItemPlan 门/
+  // 旧页面）时维持只读呈现，不发不误发。
   const inputDisabled =
     disabled || isHumanConfirm || isBusy || stage === "completed";
-  const canSend = !inputDisabled && isPrepareContext && trimmedInput.length > 0;
-  const showSend = isPrepareContext;
+  const canSendRevision =
+    isAuthorConfirm && onSendRevisionFeedback !== undefined && !inputDisabled;
+  const canSend =
+    !inputDisabled && trimmedInput.length > 0 && (isPrepareContext || canSendRevision);
+  const showSend = isPrepareContext || canSendRevision;
   const draftPayload =
     workItemPlanArtifact?.type === "draft_candidate" ? workItemPlanArtifact.payload : null;
   const batchPayload =
@@ -115,9 +127,17 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     if (!canSend) {
       return;
     }
-    appendOptimisticEntry("context_note", trimmedInput);
-    onSendContextNote(trimmedInput);
-    setInput("");
+    if (isPrepareContext) {
+      appendOptimisticEntry("context_note", trimmedInput);
+      onSendContextNote(trimmedInput);
+      setInput("");
+      return;
+    }
+    // v38 #2/#3：门上反馈修订——发出才算消耗（断线 false 保留输入，反馈不丢）。
+    if (onSendRevisionFeedback?.(trimmedInput) !== false) {
+      appendOptimisticEntry("context_note", trimmedInput);
+      setInput("");
+    }
   }
 
   function handleStartGeneration() {
@@ -184,13 +204,13 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           ) : null}
           {showSend ? (
             <button
-              data-testid="send-context-note"
+              data-testid={canSendRevision ? "send-revision-feedback" : "send-context-note"}
               type="submit"
               disabled={!canSend}
               className="btn-secondary h-9 disabled:opacity-50"
             >
               <Send className="h-4 w-4" />
-              发送
+              {canSendRevision ? "发送反馈" : "发送"}
             </button>
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：staged/author 决策按钮分支随消息族删除。 */}

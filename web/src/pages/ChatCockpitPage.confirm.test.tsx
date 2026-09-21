@@ -147,6 +147,52 @@ describe("ChatCockpitPage", () => {
       );
     });
 
+    // v38 复验 #2/#3：story/design AuthorConfirm 的反馈修订发送链——输入框
+    // （「采纳 Review 意见」预填落点）+「发送反馈」→ workspaceWs.sendRequestRevision
+    // 携带反馈全文；WorkItemPlan 门不得接线该通道。
+    it("sends revision feedback over request_revision from the input bar at story author confirm", async () => {
+      const user = userEvent.setup();
+      const workspaceWs = mockWorkspaceWs({
+        sendRequestRevision: vi.fn(() => true),
+      });
+      useWorkspaceStore.setState({
+        stage: "author_confirm",
+        workspaceType: "story",
+      });
+
+      renderCockpitWith(workspaceWs);
+      const input = screen.getByTestId("context-note-input");
+      await user.type(input, "按以下 review 意见修订：第二段缺少冲突");
+      await user.click(screen.getByRole("button", { name: "发送反馈" }));
+
+      expect(workspaceWs.sendRequestRevision).toHaveBeenCalledWith(
+        "按以下 review 意见修订：第二段缺少冲突",
+      );
+      expect(useWorkspaceStore.getState().chatEntries).toEqual([
+        expect.objectContaining({
+          type: "context_note",
+          role: "user",
+          content: "按以下 review 意见修订：第二段缺少冲突",
+        }),
+      ]);
+      expect(input).toHaveValue("");
+    });
+
+    it("does not wire the revision channel for work item plan gates", () => {
+      const workspaceWs = mockWorkspaceWs({
+        sendRequestRevision: vi.fn(() => true),
+      });
+      useWorkspaceStore.setState({
+        stage: "author_confirm",
+        workspaceType: "work_item_plan",
+      });
+
+      renderCockpitWith(workspaceWs);
+      expect(screen.getByTestId("context-note-input")).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "发送反馈" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+    });
+
     it("keeps the conversation tab for non story/design sessions", () => {
       useWorkspaceStore.setState({ stage: "author_confirm", workspaceType: "work_item_plan" });
 

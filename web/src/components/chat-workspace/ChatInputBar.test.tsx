@@ -118,6 +118,83 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
   });
 
+  // v38 复验 #2/#3（恢复 C3 前原意）：story/design AuthorConfirm 门的反馈修订
+  // 发送通道——宿主传入 onSendRevisionFeedback 时输入+发送可用，提交走修订
+  // 回调（不再走 context_note），乐观条目落对话流；未传入（如 WorkItemPlan
+  // 门或宿主不接线）时保持只读呈现、无发送钮。
+  it("sends revision feedback at author confirm when the host wires the channel", () => {
+    const onSendRevisionFeedback = vi.fn(() => true);
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        onSendRevisionFeedback={onSendRevisionFeedback}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    expect(input).toBeEnabled();
+    fireEvent.change(input, {
+      target: { value: "按以下 review 意见修订：\n\n第二段缺少冲突" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+
+    expect(onSendRevisionFeedback).toHaveBeenCalledWith(
+      "按以下 review 意见修订：\n\n第二段缺少冲突",
+    );
+    expect(input).toHaveValue("");
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "context_note",
+        role: "user",
+        content: "按以下 review 意见修订：\n\n第二段缺少冲突",
+      }),
+    ]);
+  });
+
+  it("keeps the author confirm input read-only without a host revision channel", () => {
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "不该有发送通道" },
+    });
+    expect(screen.queryByRole("button", { name: "发送反馈" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+  });
+
+  it("blocks revision feedback send on empty input or failed dispatch", () => {
+    const onSendRevisionFeedback = vi.fn(() => false);
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        onSendRevisionFeedback={onSendRevisionFeedback}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    // 空输入：发送反馈不可点。
+    expect(screen.getByRole("button", { name: "发送反馈" })).toBeDisabled();
+    // 发送失败（宿主返回 false）：反馈不丢——输入保留、不落乐观条目。
+    fireEvent.change(input, { target: { value: "断线时不能丢反馈" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+    expect(onSendRevisionFeedback).toHaveBeenCalledWith("断线时不能丢反馈");
+    expect(input).toHaveValue("断线时不能丢反馈");
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([]);
+  });
+
   // F-28（v33 复验 3）：STALE_DRIVER_LEASE 就地错误面在生成动作区直出——
   // 传入 notice 即渲染「连接租约已过期」文案与二次确认重接管；宿主不传则不渲染。
   it("renders the stale-lease notice with a confirm-twice retake beside the action buttons (F-28)", () => {

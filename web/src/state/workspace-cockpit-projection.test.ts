@@ -496,6 +496,47 @@ describe("workspace cockpit execution flow projection", () => {
     expect(rows[1]).toMatchObject({ index: 2, total: 2, elapsed_ms: 90_000 });
     expect(rows[0]?.started_at).toBe("2026-09-13T00:00:00Z");
   });
+  // #4：引擎 create_timeline_node 以终态 status 直接落「流程完成」标记节点，
+  // 不带 completed_at/duration_ms——终态行不得拿墙钟续算，计时冻结。
+  it("freezes elapsed for terminal nodes lacking completion facts instead of ticking (#4)", () => {
+    const store = useWorkspaceStore.getState();
+    store.setTimelineNodesForTest([
+      timelineNode({
+        node_id: "n1",
+        node_type: "author_run",
+        status: "completed",
+        started_at: "2026-09-21T09:40:00Z",
+        completed_at: "2026-09-21T09:50:00Z",
+      }),
+      timelineNode({
+        node_id: "n2",
+        node_type: "completed",
+        status: "completed",
+        started_at: "2026-09-21T10:00:00Z",
+        completed_at: null,
+        duration_ms: null,
+      }),
+      timelineNode({
+        node_id: "n3",
+        node_type: "author_run",
+        status: "active",
+        started_at: "2026-09-21T10:00:00Z",
+      }),
+    ]);
+
+    const early = selectCockpitFlow(useWorkspaceStore.getState(), Date.parse("2026-09-21T10:01:00Z"));
+    const late = selectCockpitFlow(useWorkspaceStore.getState(), Date.parse("2026-09-21T10:11:00Z"));
+
+    // 完成事实齐备：冻结在 completed_at−started_at，不随墙钟变化。
+    expect(early[0]).toMatchObject({ elapsed_ms: 10 * 60_000 });
+    expect(late[0]).toMatchObject({ elapsed_ms: 10 * 60_000 });
+    // 「流程完成」标记节点无结束事实：冻结为 0，不得继续计时。
+    expect(early[1]).toMatchObject({ elapsed_ms: 0 });
+    expect(late[1]).toMatchObject({ elapsed_ms: 0 });
+    // 回归：进行中节点照常随墙钟递增。
+    expect(early[2]).toMatchObject({ elapsed_ms: 60_000 });
+    expect(late[2]).toMatchObject({ elapsed_ms: 11 * 60_000 });
+  });
 
   it("formats elapsed durations for display", () => {
     expect(formatFlowElapsed(0)).toBe("0s");

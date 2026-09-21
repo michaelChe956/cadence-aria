@@ -452,6 +452,15 @@ export function flowElapsedMs(node: TimelineNode, nowMs: number): number {
   if (Number.isNaN(started)) {
     return 0;
   }
+  // #4：终态节点缺 completed_at/duration_ms（引擎 create_timeline_node 直接以终态
+  // status 落「流程完成」标记节点，不带结束字段）时，不得拿墙钟续算——冻结为
+  // 零时长标记，对齐 append_completed_timeline_event 的 duration_ms=0 口径。
+  if (
+    node.completed_at == null &&
+    (node.status === "completed" || node.status === "failed" || node.status === "skipped")
+  ) {
+    return 0;
+  }
   const ended = node.completed_at ? Date.parse(node.completed_at) : nowMs;
   if (Number.isNaN(ended)) {
     return 0;

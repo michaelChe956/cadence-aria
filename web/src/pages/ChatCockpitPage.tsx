@@ -372,6 +372,33 @@ export function ChatCockpitPage({
     }
     return workspaceWs.sendConfirmGate();
   }, [confirmStoryAuthorGate, workspaceWs.sendConfirmGate]);
+
+  // v38 复验 #2/#3（恢复 C3 前原意）：story/design AuthorConfirm 门的反馈修订
+  // 发送通道——「采纳 Review 意见」预填（或手输）后经「发送反馈」提交即
+  // request_revision（服务端进入 Revision 并由作者按反馈重写，完成后回门）。
+  // 审计与 confirm 同源（operation=feedback）；仅 story/design 会话接线，
+  // WorkItemPlan 门（plan-repair 语义）不经过本回调。
+  const sendRevisionFeedback = useCallback((feedback: string): boolean => {
+    const current = useWorkspaceStore.getState();
+    if (
+      !isStoryDesignAuthorConfirm(current) ||
+      gateActionBlockReason(current) !== null
+    ) {
+      return false;
+    }
+    const sent = workspaceWs.sendRequestRevision(feedback);
+    if (sent) {
+      useOperationAuditStore.getState().record({
+        sessionId: current.sessionId ?? sessionId,
+        gateId: selectGateProjection(current)?.key ?? null,
+        operation: "feedback",
+        source: "chat",
+        outcome: "sent",
+        detail: feedback,
+      });
+    }
+    return sent;
+  }, [sessionId, workspaceWs.sendRequestRevision]);
   const actions = useMemo(
     () =>
       createCockpitActionFacade({
@@ -1026,6 +1053,11 @@ export function ChatCockpitPage({
                   : null
               }
               onSendContextNote={workspaceWs.sendContextNote}
+              onSendRevisionFeedback={
+                state.workspaceType === "story" || state.workspaceType === "design"
+                  ? sendRevisionFeedback
+                  : undefined
+              }
               onStartGeneration={handleStartGeneration}
               onAbort={workspaceWs.abort}
               hardErrorNotice={hardErrorNotice}

@@ -614,16 +614,36 @@ async fn handle_workspace_inbound_message_inner(
                     }
                 }
             } else {
-                // L2 退役收口：非 WorkItemPlan 会话的 RequestChange 桥接随
-                // HumanConfirm 消息族删除（wp5-attribution-table.md §2
-                // RequestRevision 行）——保留通道仅服务 WorkItemPlan plan-repair。
-                let err = WsOutMessage::ProtocolError {
-                    code: "REQUEST_REVISION_WORKSPACE_INVALID".to_string(),
-                    message: "request_revision is only supported for work item plan workspaces"
-                        .to_string(),
-                    context: None,
+                // v38 复验 #2/#3（恢复 C3 前原意）：story/design 门上的反馈修订
+                // 通道——L2 退役时随 HumanConfirm 消息族一并收口为协议错误，
+                // 现按 workspace_type 分流恢复：story/design → 引擎进入 Revision
+                // 阶段并发起修订 run（作者按反馈重写，完成后回门）；WorkItemPlan
+                // plan-repair 链不受影响。非 story/design 的门外语义由引擎守卫
+                // 拒绝（阶段矩阵已限定 author_confirm + 非 SC 流）。
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .request_story_design_revision(feedback_text.clone())
+                        .await
                 };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
+                match result {
+                    Ok(()) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::Revision,
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Err(message) => {
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                }
             }
         }
         // 退役留档（T5/REQ-RET-02 L2）：HumanConfirm 消息族已删除（必删集）——

@@ -1065,4 +1065,67 @@ impl WorkspaceEngine {
             },
         }
     }
+
+    /// v38 复验 #2/#3（恢复 C3 前原意，spec-design-dialog-revision T3 `Revise`
+    /// 语义重承载）：story/design 在 AuthorConfirm 门上提交修订意见——完成门
+    /// 节点、记录反馈、进入 Revision 阶段并创建修订节点；修订 run 由 handler 层
+    /// 发起（`ProviderRunKind::Revision` → `drive_revision_session`），完成后经
+    /// provider_drive 完成路径回 AuthorConfirm 门（可再评审/确认定稿）。
+    ///
+    /// - I-1（T5）：post-review 新反馈提交时清空 review verdict，使
+    ///   `is_author_feedback_revision` 分流谓词成立（pending 存在且无 verdict），
+    ///   修订 prompt 走 author 反馈修订专用增量 prompt 而非 reviewer 返修 prompt；
+    /// - T7 fix1（Finding-A）：反馈全文落盘修订节点 detail（NodeDetail.
+    ///   revision_feedback）——断线重连后 new_persistent 重建 engine 丢失内存态
+    ///   pending_revision_context（不在 WorkspaceSessionRecord），retry 臂从该
+    ///   字段重建才能走 author 反馈 prompt 分支。
+    pub(crate) async fn request_story_design_revision(
+        &mut self,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        if self.session.stage != WorkspaceStage::AuthorConfirm {
+            return Err(
+                "request_revision is only available during author_confirm stage".to_string(),
+            );
+        }
+        if !matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        ) {
+            return Err(
+                "request_revision for non-work-item-plan workspaces is only supported by story/design"
+                    .to_string(),
+            );
+        }
+        let Some(trimmed) = feedback
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return Err("revise feedback must not be empty".to_string());
+        };
+        let trimmed = trimmed.to_string();
+        self.complete_active_node(Some("用户提交反馈，进入修订".to_string()))
+            .await;
+        self.pending_revision_context = Some(trimmed.clone());
+        self.latest_review_verdict = None;
+        self.transition_stage(WorkspaceStage::Revision).await;
+        let revision_node_id = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::Revision,
+                agent: Some(self.session.author_provider.clone()),
+                stage: WorkspaceStage::Revision,
+                round: None,
+                title: "反馈修订".to_string(),
+                summary: Some(trimmed.clone()),
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        let _ = self
+            .update_node_detail(&revision_node_id, |detail| {
+                detail.revision_feedback = Some(trimmed.clone());
+            })
+            .await;
+        Ok(())
+    }
 }

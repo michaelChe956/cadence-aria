@@ -134,17 +134,30 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
             )
         }
         // L2 退役后 author_confirm 的 legacy 逐段/author 决策消息已删除
-        //（REQ-RET-02）；RequestRevision 的 WorkItemPlan 放行特例在 socket
-        // 层（author_confirm + WorkItemPlan），此处不重复。
+        //（REQ-RET-02）；RequestRevision 的 WorkItemPlan（SC 流）放行特例在
+        // socket 层（author_confirm + WorkItemPlan），此处不重复。
         // F-18（w2c 实测矩阵）：story/design 会话（legacy 流）恒停本门，
         // typed abandon 在此放行补 terminate 通路（approve 走 HTTP confirm
         // 端点，Confirm 帧继续不放行）；WorkItemPlan 语义边界由引擎
         // handle_human_gate_termination 的 story 门分流守卫承接。
+        // v38 复验 #2/#3（恢复 C3 前原意）：story/design 门上的反馈修订通道
+        //——非 SC 流放行 RequestRevision（引擎按 workspace_type 分流进 Revision
+        // run；WorkItemPlan plan-repair 链不受影响）；SC 流保持不放行（SC 门
+        // 关门=typed 三命令）。
         WorkspaceStage::AuthorConfirm => {
-            matches!(
-                msg,
-                WsInMessage::Abort | WsInMessage::AbandonHumanGate { .. }
-            )
+            if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                matches!(
+                    msg,
+                    WsInMessage::Abort | WsInMessage::AbandonHumanGate { .. }
+                )
+            } else {
+                matches!(
+                    msg,
+                    WsInMessage::Abort
+                        | WsInMessage::AbandonHumanGate { .. }
+                        | WsInMessage::RequestRevision { .. }
+                )
+            }
         }
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
@@ -292,6 +305,7 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
 mod tests {
     use super::*;
     use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    use crate::web::workspace_ws_types::StructuredFeedback;
 
     #[test]
     fn retired_legacy_decision_wire_names_are_recognized_for_stage_specific_rejection() {
@@ -334,5 +348,72 @@ mod tests {
             &confirm,
             &WorkspaceStage::ReviewDecision,
         ));
+    }
+
+    fn revision_feedback_message() -> WsInMessage {
+        WsInMessage::RequestRevision {
+            feedback: StructuredFeedback {
+                feedback_types: vec!["revision".to_string()],
+                description: "按以下 review 意见修订：第二段缺少冲突".to_string(),
+                target_artifact_version: None,
+            },
+        }
+    }
+
+    /// v38 复验 #2/#3（恢复 C3 前原意）：story/design（legacy 流）在 AuthorConfirm
+    /// 门上提交修订意见——矩阵放行 RequestRevision；SC 流保持不放行（SC 门关门=
+    /// typed 三命令）；其余消息维持仅 Abort/AbandonHumanGate 禁令（F-20 confirm
+    /// 帧仍拒收）；修订请求也仅限门阶段。
+    #[test]
+    fn author_confirm_allows_request_revision_for_legacy_flow_only() {
+        let revision = revision_feedback_message();
+        assert!(
+            is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::Legacy,
+                &revision,
+                &WorkspaceStage::AuthorConfirm,
+            ),
+            "story/design legacy 流的 AuthorConfirm 门必须放行 RequestRevision"
+        );
+        assert!(
+            !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &revision,
+                &WorkspaceStage::AuthorConfirm,
+            ),
+            "SC 流 AuthorConfirm 不放行 RequestRevision（SC 门关门=typed 三命令）"
+        );
+        for invalid in [
+            WsInMessage::Confirm,
+            WsInMessage::Advance {
+                command_id: "cmd_1".to_string(),
+            },
+            WsInMessage::HumanGateFeedback {
+                command_id: "cmd_1".to_string(),
+                feedback: "补充异常场景".to_string(),
+            },
+        ] {
+            assert!(
+                !is_message_valid_for_stage_with_flow(
+                    WorkItemPlanFlowKind::Legacy,
+                    &invalid,
+                    &WorkspaceStage::AuthorConfirm,
+                ),
+                "AuthorConfirm 其余消息禁令不因修订通道放开而松动: {:?}",
+                invalid
+            );
+        }
+        assert!(
+            !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::Legacy,
+                &revision,
+                &WorkspaceStage::PrepareContext,
+            ) && !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::Legacy,
+                &revision,
+                &WorkspaceStage::Revision,
+            ),
+            "RequestRevision 仅在门阶段（AuthorConfirm）放行"
+        );
     }
 }
