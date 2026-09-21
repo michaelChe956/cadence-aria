@@ -1,4 +1,4 @@
-import { Settings, X } from "lucide-react";
+import { ChevronDown, Settings, X } from "lucide-react";
 import { useEffect, useRef, useState, type JSX } from "react";
 import type { CockpitSettings, CockpitStopPoint } from "../../state/cockpit-settings";
 
@@ -94,13 +94,13 @@ export function CockpitSettingsDialog({
         <div className="space-y-5 rounded-xl bg-[var(--aria-panel-muted)] p-4">
           <fieldset>
             <legend className="text-sm font-semibold text-[var(--aria-ink)]">提醒层级</legend>
-            <div className="mt-2.5 grid gap-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 sm:grid-cols-3">
-              <Toggle
+            <div className="mt-2.5 grid gap-1.5 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-2.5">
+              <CheckboxRow
                 label="声音提醒"
                 checked={settings.soundEnabled}
                 onChange={(checked) => update({ soundEnabled: checked })}
               />
-              <Toggle
+              <CheckboxRow
                 label="系统通知"
                 checked={settings.systemNotificationsEnabled}
                 onChange={(checked) => {
@@ -110,7 +110,7 @@ export function CockpitSettingsDialog({
                   }
                 }}
               />
-              <Toggle
+              <CheckboxRow
                 label="标题 emoji"
                 checked={settings.titleEmojiEnabled}
                 onChange={(checked) => update({ titleEmojiEnabled: checked })}
@@ -201,26 +201,21 @@ export function CockpitSettingsDialog({
 
           <fieldset>
             <legend className="text-sm font-semibold text-[var(--aria-ink)]">自动推进停点</legend>
-            <div className="mt-2.5 grid gap-2 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 sm:grid-cols-3">
-              {STOP_POINT_OPTIONS.map((option) => {
-                const checked = settings.stopPoints.includes(option.value);
-                return (
-                  <label key={option.value} className="flex min-h-11 items-center gap-2 text-sm text-[var(--aria-ink)]">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() =>
-                        update({
-                          stopPoints: checked
-                            ? settings.stopPoints.filter((point) => point !== option.value)
-                            : [...settings.stopPoints, option.value],
-                        })
-                      }
-                    />
-                    {option.label}
-                  </label>
-                );
-              })}
+            <div className="mt-2.5 grid gap-1.5 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-2.5 sm:grid-cols-3">
+              {STOP_POINT_OPTIONS.map((option) => (
+                <CheckboxRow
+                  key={option.value}
+                  label={option.label}
+                  checked={settings.stopPoints.includes(option.value)}
+                  onChange={(checked) =>
+                    update({
+                      stopPoints: checked
+                        ? [...settings.stopPoints, option.value]
+                        : settings.stopPoints.filter((point) => point !== option.value),
+                    })
+                  }
+                />
+              ))}
             </div>
           </fieldset>
         </div>
@@ -239,7 +234,7 @@ export function CockpitSettingsDialog({
   );
 }
 
-function Toggle({
+function CheckboxRow({
   label,
   checked,
   onChange,
@@ -249,14 +244,15 @@ function Toggle({
   onChange(checked: boolean): void;
 }) {
   return (
-    <label className="flex min-h-11 items-center justify-between gap-2 text-sm text-[var(--aria-ink)]">
-      {label}
+    <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm text-[var(--aria-ink)] transition-colors duration-200 hover:bg-[var(--aria-panel-subtle)]">
       <input
         type="checkbox"
         aria-label={label}
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
+        className="h-5 w-5 shrink-0 cursor-pointer accent-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
       />
+      <span className="min-w-0 flex-1">{label}</span>
     </label>
   );
 }
@@ -273,20 +269,26 @@ function SettingsSelect({
   onChange(value: string): void;
 }) {
   return (
-    <label className="block text-sm font-semibold text-[var(--aria-ink)]">
-      {label}
-      <select
-        aria-label={label}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="mt-1 block h-11 w-full rounded-lg border border-[var(--aria-line)] bg-white px-3 text-sm font-normal text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+    <label className="block">
+      <span className="block text-sm font-semibold text-[var(--aria-ink)]">{label}</span>
+      <span className="relative mt-1.5 block">
+        <select
+          aria-label={label}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="h-11 w-full cursor-pointer appearance-none rounded-lg border border-[var(--aria-line-strong)] bg-white pl-3 pr-10 text-sm font-normal text-[var(--aria-ink)] shadow-sm transition-colors duration-200 hover:border-[var(--aria-primary)] focus-visible:border-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-1"
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <ChevronDown
+          aria-hidden="true"
+          className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--aria-ink-muted)]"
+        />
+      </span>
     </label>
   );
 }

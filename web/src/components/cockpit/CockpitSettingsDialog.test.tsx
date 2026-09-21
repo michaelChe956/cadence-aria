@@ -63,6 +63,70 @@ describe("CockpitSettingsDialog", () => {
     );
   });
 
+  it("lays each reminder-layer checkbox left of its label inside a full-row hit area", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <CockpitSettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={settings()}
+        onChange={onChange}
+      />,
+    );
+
+    const checkbox = screen.getByLabelText("声音提醒");
+    const labelText = screen.getByText("声音提醒");
+    expect(
+      checkbox.compareDocumentPosition(labelText) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await user.click(screen.getByText("标题 emoji"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ titleEmojiEnabled: false }),
+    );
+  });
+
+  it("toggles an autopilot stop point by clicking its row label", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <CockpitSettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={settings({ stopPoints: ["human_gate"] })}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByText("硬错误"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ stopPoints: ["human_gate", "hard_error"] }),
+    );
+  });
+
+  it("renders one decorative chevron per select, hidden from assistive tech", () => {
+    render(
+      <CockpitSettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={settings()}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const selects = screen.getAllByRole("combobox");
+    expect(selects).toHaveLength(6);
+    for (const select of selects) {
+      const field = select.closest("label");
+      expect(field).not.toBeNull();
+      expect(field?.querySelectorAll("svg[aria-hidden='true']")).toHaveLength(1);
+    }
+  });
+
   it("shows denied notification recovery guidance while retaining page layers", () => {
     NotificationMock.permission = "denied";
     render(
