@@ -4,14 +4,6 @@ use std::path::{Path, PathBuf};
 const MAX_PRODUCT_CODE_LINES: usize = 1200;
 const SCAN_ROOTS: &[&str] = &["src", "tests", "web/src"];
 const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx"];
-/// 祖父条款（2026-09-21 登记，待用户裁决拆分 vs 调阈值）：历史批次遗留超限，
-/// 上限锁定为登记日行数——豁免放松的是「是否超 1200」，不放松「不得继续增长」。
-const GRANDFATHERED: &[(&str, usize)] = &[
-    ("src/cross_cutting/codex_provider/tests/mod.rs", 1283),
-    ("src/cross_cutting/kimi_code_provider/client_services/mod.rs", 1289),
-    ("src/web/workspace_session/manager.rs", 1310),
-    ("tests/it_web/web_lifecycle_api/part_02.rs", 1335),
-];
 
 #[test]
 fn product_source_and_test_files_stay_under_line_limit() {
@@ -53,15 +45,9 @@ fn collect_oversized_files(path: &Path, repo_root: &Path, oversized: &mut Vec<St
         return;
     };
     let line_count = content.lines().count();
-    let relative = path.strip_prefix(repo_root).unwrap_or(path);
-    let relative_str = relative.display().to_string();
-    let effective_limit = GRANDFATHERED
-        .iter()
-        .find(|(exempt, _)| *exempt == relative_str)
-        .map(|(_, limit)| *limit)
-        .unwrap_or(MAX_PRODUCT_CODE_LINES);
-    if line_count > effective_limit {
-        oversized.push(format!("{relative_str}: {line_count} 行"));
+    if line_count > MAX_PRODUCT_CODE_LINES {
+        let relative = path.strip_prefix(repo_root).unwrap_or(path);
+        oversized.push(format!("{}: {line_count} 行", relative.display()));
     }
 }
 
