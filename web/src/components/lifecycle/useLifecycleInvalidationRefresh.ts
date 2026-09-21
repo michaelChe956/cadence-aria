@@ -59,6 +59,10 @@ export function useLifecycleInvalidationRefresh({
         existing.issue,
       );
       if (!isLatestRefresh(requestId)) {
+        // 另一 invalidation（含不同 issue）已抢先 bump 全局 requestId：本 issue 的
+        // 新数据不能丢弃——重驱动定向刷新（自身会重新 bump 成为最新），不改全量
+        // refresh 的互斥语义（k3 fix round 1）。
+        void refreshInvalidatedIssue(issueId);
         return;
       }
       setLifecycles((previous) =>

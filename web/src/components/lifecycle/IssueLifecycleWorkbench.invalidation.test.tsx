@@ -7,6 +7,7 @@ import {
 } from "../../state/lifecycle-workbench-store";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 import {
+  deferred,
   lifecycleFetch,
   type LifecycleFetchMock,
 } from "./IssueLifecycleWorkbench.test-utils";
@@ -121,6 +122,77 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
         type: "lifecycle-invalidated",
         issueId: "issue_0001",
       });
+    });
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("lifecycle-card-story_spec")).getByText(
+          "confirmed",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("re-drives the targeted refresh when a concurrent invalidation supersedes it (F-29 fix round 1)", async () => {
+    vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel);
+    const baseFetch = lifecycleFetch({
+      storyDraftInitially: true,
+      sharedLifecycleIdsAcrossIssues: true,
+    });
+    // 挂起 issue_0001 的 lifecycle GET（初始加载放行），制造 X 回写被 Y 抢先的窗口。
+    let deferIssueOneLifecycle = false;
+    const pendingIssueOneFetches: Array<{
+      url: string;
+      resolve: (response: Response) => void;
+    }> = [];
+    const fetchMock: LifecycleFetchMock = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (
+        deferIssueOneLifecycle &&
+        url.includes("/api/issues/issue_0001/lifecycle")
+      ) {
+        const deferredResponse = deferred<Response>();
+        pendingIssueOneFetches.push({
+          url,
+          resolve: deferredResponse.resolve,
+        });
+        return deferredResponse.promise;
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<IssueLifecycleWorkbench />);
+
+    await switchToStoryStage();
+    expect(
+      within(screen.getByTestId("lifecycle-card-story_spec")).getByText("draft"),
+    ).toBeInTheDocument();
+
+    // 服务端已确认 issue_0001 的 story（durable 投影 draft→confirmed）。
+    await baseFetch("/api/workspace-sessions/workspace_session_issue_0001_story/confirm", {
+      method: "POST",
+    });
+
+    deferIssueOneLifecycle = true;
+    act(() => {
+      notifyLifecycleInvalidated("issue_0001");
+    });
+    // X 在途期间，另一 issue Y 的 invalidation 抢先 bump 全局 requestId 并先落地。
+    act(() => {
+      notifyLifecycleInvalidated("issue_0002");
+    });
+    expect(pendingIssueOneFetches.length).toBe(1);
+
+    // X 的 GET 返回新数据——被 Y 抢先后必须重驱动本 issue 定向刷新，而不是丢弃。
+    const issueOneUrl = pendingIssueOneFetches[0]!.url;
+    await act(async () => {
+      pendingIssueOneFetches[0]!.resolve(await baseFetch(issueOneUrl));
+    });
+    await waitFor(() => {
+      expect(pendingIssueOneFetches.length).toBe(2);
+    });
+    await act(async () => {
+      pendingIssueOneFetches[1]!.resolve(await baseFetch(issueOneUrl));
     });
 
     await waitFor(() => {
