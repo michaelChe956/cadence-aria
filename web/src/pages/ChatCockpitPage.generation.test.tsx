@@ -556,4 +556,71 @@ describe("ChatCockpitPage", () => {
     expect(abort).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "开始生成" })).toBeNull();
   });
+
+  // F-28（v33 复验 3）：start_generation 被仲裁层 STALE_DRIVER_LEASE 拒收后仅落
+  // 左侧收件箱 hard_error 条目（远离视线），用户在生成按钮旁得不到任何反馈。
+  // 就地错误面必须直出在生成动作区（不受收件箱 actionable 条件限制），
+  // 且重接管保留 ConfirmTwiceButton 二次确认（复用 F-11 sendHello 回调链）。
+  it("shows the stale-lease inline error beside the start generation button and retakes via confirm-twice (F-28)", async () => {
+    const user = userEvent.setup();
+    const sendHello = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendHello, connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "STALE_DRIVER_LEASE",
+        message: "driver connection no longer holds the lease for write message start_generation",
+      },
+      activeNodeId: "node-1",
+      timelineNodes: [timelineNode({ node_id: "node-1" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    const inputBar = screen.getByTestId("chat-input-bar");
+    expect(within(inputBar).getByRole("alert")).toHaveTextContent(/连接租约已过期/);
+    expect(
+      within(inputBar).getByRole("button", { name: "开始生成" }),
+    ).toBeInTheDocument();
+
+    await user.click(within(inputBar).getByRole("button", { name: "重新接管" }));
+    expect(sendHello).not.toHaveBeenCalled();
+
+    await user.click(within(inputBar).getByRole("button", { name: "确认重新接管" }));
+    expect(sendHello).toHaveBeenCalledWith("session_001", "node-1");
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(within(inputBar).queryByRole("alert")).toBeNull();
+  });
+
+  it("clears the stale-lease inline error once the protocol error is externally cleared (F-28)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "STALE_DRIVER_LEASE",
+        message: "driver connection no longer holds the lease",
+      },
+    });
+
+    renderCockpit();
+    expect(screen.getByTestId("chat-input-bar")).toHaveTextContent(/连接租约已过期/);
+
+    act(() => {
+      useWorkspaceStore.getState().setProtocolError(null);
+    });
+
+    expect(screen.queryByText(/连接租约已过期/)).toBeNull();
+  });
+
+  it("does not surface the stale-lease inline error for other protocol codes (F-28)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: { code: "OTHER_PROTOCOL_CODE", message: "unrelated hard error" },
+    });
+
+    renderCockpit();
+
+    expect(screen.queryByText(/连接租约已过期/)).toBeNull();
+  });
 });

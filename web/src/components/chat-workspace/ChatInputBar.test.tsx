@@ -118,6 +118,47 @@ describe("ChatInputBar", () => {
     expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
   });
 
+  // F-28（v33 复验 3）：STALE_DRIVER_LEASE 就地错误面在生成动作区直出——
+  // 传入 notice 即渲染「连接租约已过期」文案与二次确认重接管；宿主不传则不渲染。
+  it("renders the stale-lease notice with a confirm-twice retake beside the action buttons (F-28)", () => {
+    const onRetakeLease = vi.fn();
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        staleLeaseNotice={{
+          message: "driver connection no longer holds the lease",
+          onRetakeLease,
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/连接租约已过期/);
+    expect(screen.getByRole("button", { name: "开始生成" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新接管" }));
+    expect(onRetakeLease).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认重新接管" }));
+    expect(onRetakeLease).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders no stale-lease notice without the host-provided notice (F-28)", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/连接租约已过期/)).toBeNull();
+  });
+
   // 退役留档（T5/REQ-RET-02）：`keeps the author confirm input usable when the host provides a decision callback` 驱动已删除的 legacy 决策发送面，
   // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 });

@@ -18,6 +18,7 @@ import type {
 } from "../../api/types";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 import type { ChatEntry, ChatEntryType } from "../../state/chat-entries";
+import { ConfirmTwiceButton } from "./cockpit/ConfirmTwiceButton";
 import { DraftValidationFailureNotice } from "../workspace/DraftValidationFailureNotice";
 
 interface ChatInputBarProps {
@@ -33,6 +34,9 @@ interface ChatInputBarProps {
   hideStartGeneration?: boolean;
   /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
   onInputFocus?: () => void;
+  /** F-28（v33 复验 3）：STALE_DRIVER_LEASE 就地错误面——直出在生成动作区
+   * （不受收件箱 actionable 条件限制），重接管复用 F-11 二次确认回调链。 */
+  staleLeaseNotice?: { message: string; onRetakeLease: () => void } | null;
 }
 
 /**
@@ -56,6 +60,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   disabled = false,
   hideStartGeneration = false,
   onInputFocus,
+  staleLeaseNotice = null,
 }, ref) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -125,6 +130,24 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           placeholder={placeholderForStage(stage, activeNodeType)}
           className="min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         />
+        {/* F-28：丢租约后就地错误面紧贴动作按钮行——收件箱条目远离视线导致
+            零反馈；重接管复用 F-11 的 ConfirmTwiceButton 二次确认纪律。 */}
+        {staleLeaseNotice ? (
+          <div
+            data-testid="stale-lease-notice"
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2"
+          >
+            <span className="text-xs font-semibold text-red-700">
+              连接租约已过期——本连接的写操作已被拒绝（STALE_DRIVER_LEASE）：{staleLeaseNotice.message}
+            </span>
+            <ConfirmTwiceButton
+              label="重新接管"
+              confirmLabel="确认重新接管"
+              onConfirm={staleLeaseNotice.onRetakeLease}
+            />
+          </div>
+        ) : null}
         <div className="flex flex-wrap justify-end gap-2">
           {isBusy ? (
             <button

@@ -628,6 +628,13 @@ export function ChatCockpitPage({
     workspaceWs.sendHello(sessionId, lastSeenNodeId);
     current.setProtocolError(null);
   }, [sessionId, workspaceWs.sendHello]);
+  // F-28（v33 复验 3）：丢租约后 start_generation 被仲裁层拒收，错误面必须直出
+  // 在生成动作区（按钮旁）——仅落收件箱 hard_error 条目时用户视线不在左侧，
+  // 感知为零。重接管复用上面 F-11 的 handleRetakeLease（确认后 sendHello）。
+  const staleLeaseNotice =
+    isCurrentSession && state.protocolError?.code === STALE_DRIVER_LEASE_CODE
+      ? { message: state.protocolError.message, onRetakeLease: handleRetakeLease }
+      : null;
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const takeoverButtonRef = useRef<ConfirmTwiceButtonHandle | null>(null);
   const takeoverTargetSessionId = useMemo(
@@ -1115,6 +1122,7 @@ export function ChatCockpitPage({
                 onSendContextNote={workspaceWs.sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 onAbort={workspaceWs.abort}
+                staleLeaseNotice={staleLeaseNotice}
               />
             ) : null}
             {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
