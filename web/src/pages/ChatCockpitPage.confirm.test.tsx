@@ -291,6 +291,8 @@ describe("ChatCockpitPage", () => {
       },
     );
 
+    // F-31 直接定稿分支：review 未启用（或本轮产物已评审）时 confirm 响应
+    // status=confirmed——维持既有乐观收敛行为。
     it("wires confirm to the HTTP confirm endpoint and never the WS confirm frame", async () => {
       const user = userEvent.setup();
       const fetchMock = vi.fn().mockResolvedValue({
@@ -341,6 +343,81 @@ describe("ChatCockpitPage", () => {
       ).toBeNull();
       // F-29：confirm 响应携带 issue_id——invalidation 按 issue 精确通知。
       expect(invalidations).toEqual(["issue_0001"]);
+      unsubscribe();
+    });
+
+    // F-31 评审接管分支：review 启用的 story/design 会话确认后由服务端接管进入
+    // CrossReview——confirm 响应 status=running（非 confirmed）。此时前端不得乐观置
+    // confirmed，否则评审期间露出已定稿 UI（F-25b 类误显）；权威态由 session_state
+    // 广播收敛。对照上一例的直接定稿分支。
+    it("keeps the session unconfirmed when the confirm response hands the round to review", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            workspace_session_id: "session_001",
+            issue_id: "issue_0001",
+            status: "running",
+          }),
+      } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      authorConfirmSession("story");
+      renderCockpitWith(mockWorkspaceWs());
+      const invalidations: string[] = [];
+      const unsubscribe = subscribeToLifecycleInvalidation((event) =>
+        invalidations.push(event.issueId),
+      );
+
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+      );
+
+      // F-29 通知落地即 .then 已跑完（评审接管分支同样刷新 durable 投影）。
+      await waitFor(() => expect(invalidations).toEqual(["issue_0001"]));
+      // 不乐观置 confirmed：评审在途，决策面等 session_state 关门。
+      expect(useWorkspaceStore.getState().sessionStatus).toBe("waiting_for_human");
+      expect(
+        within(screen.getByTestId("cockpit-inbox")).getByText("门禁等待"),
+      ).toBeVisible();
+      expect(screen.getByRole("button", { name: "确认产物" })).toBeEnabled();
+
+      // F-25b 广播收敛：评审在途的权威态到达 → 门关闭。
+      act(() => {
+        useWorkspaceStore.getState().setSessionState({
+          session_id: "session_001",
+          workspace_type: "story",
+          stage: "cross_review",
+          superpowers_enabled: false,
+          openspec_enabled: false,
+          messages: [],
+          checkpoints: [],
+          artifact: null,
+          providers: { author: "pi", reviewer: "codex" },
+          timeline_nodes: [],
+          active_node_id: null,
+          artifact_versions: [],
+          timeline_node_details: {},
+          active_run_id: null,
+          human_presentation_revisions: [],
+          session_status: "running",
+          flow_kind: "legacy",
+          run_policy: "interactive",
+          run_history: {
+            seen_fingerprints: [],
+            repairs_used: 0,
+            manual_repairs_used: 0,
+            transitions_used: 0,
+            initial_review_count: 0,
+            verification_review_count: 0,
+          },
+        });
+      });
+      expect(useWorkspaceStore.getState().sessionStatus).toBe("running");
+      expect(
+        within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待"),
+      ).toBeNull();
       unsubscribe();
     });
 

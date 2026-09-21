@@ -474,8 +474,9 @@ export function ChatCockpitPage({
     setJumpEntryId(entryId);
   }, []);
   // F-20（wave2-f18-report §5）：story/design AuthorConfirm 的 approve 设计通路是
-  // HTTP confirm 端点——WS confirm 帧在该阶段被矩阵拒收。200 后乐观置 confirmed
-  // 收敛决策面（投影层按 confirmed 关门），权威状态以服务端 session_state 广播为准。
+  // HTTP confirm 端点——WS confirm 帧在该阶段被矩阵拒收。响应落定稿时乐观置
+  // confirmed 收敛决策面（投影层按 confirmed 关门）；F-31 起服务端可能接管本轮进入
+  // CrossReview（响应未定稿），此时不得乐观收敛，权威状态以服务端 session_state 广播为准。
   const confirmStoryAuthorGate = useCallback((): boolean => {
     const current = useWorkspaceStore.getState();
     const targetSessionId = current.sessionId;
@@ -493,7 +494,13 @@ export function ChatCockpitPage({
     void confirmWorkspaceSession(targetSessionId)
       .then((session) => {
         useOperationAuditStore.getState().markCompleted(auditRecordId);
-        useWorkspaceStore.getState().setSessionStatus("confirmed");
+        // F-31 前端收口：review 启用的 story/design 会话确认后由服务端接管进入
+        // CrossReview——confirm 响应 status=running（评审在途），此时乐观置
+        // confirmed 会在评审期间露出已定稿 UI（F-25b 类误显），且与随后的
+        // session_state 广播打架。仅响应确实落定稿才收敛，其余交 F-25b 广播驱动。
+        if (session.status === "confirmed") {
+          useWorkspaceStore.getState().setSessionStatus("confirmed");
+        }
         // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
         // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
         notifyLifecycleInvalidated(session.issue_id);
