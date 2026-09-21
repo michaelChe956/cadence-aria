@@ -717,6 +717,74 @@ describe("useWorkspaceWs timeline state", () => {
       }),
     ]);
   });
+  // v38 复验 #1（重复「Review Round 1」卡）wire 序列复现：活跃 run 期间重连，服务端
+  // 初帧/重订阅把 snapshot 基线压到补发窗口首事件之前（attachment.rs）——前端对
+  // session_state 无条件接受并把 event_seq 基线拉低，随后补发窗口里的
+  // timeline_node_created 重叠帧（seq 高于被压低的基线）通过 seq 去重。若
+  // addTimelineNode 盲 push，同一 reviewer_run 双写，timeline 渲染两张相同卡片。
+  it("does not duplicate a reviewer node when the replayed created frame passes the seq gate", () => {
+    const harness = renderWorkspaceHook();
+    const reviewerRun = {
+      node_id: "timeline_node_004",
+      node_type: "reviewer_run",
+      agent: "codex",
+      stage: "cross_review",
+      round: 1,
+      status: "active",
+      title: "Review Round 1",
+      summary: null,
+      started_at: "2026-09-05T21:30:00Z",
+      completed_at: null,
+      duration_ms: null,
+      artifact_ref: "artifact_current",
+      provider_config_snapshot: {
+        author: "claude_code",
+        reviewer: "codex",
+        review_rounds: 1,
+      },
+    };
+
+    act(() => {
+      // 重连初帧：snapshot 基线被压低（event_seq=3），节点已随快照落列表
+      harness.ws.receive({
+        type: "session_state",
+        event_seq: 3,
+        session_id: "session_001",
+        workspace_type: "story",
+        stage: "cross_review",
+        session_status: "open",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [reviewerRun],
+        active_node_id: "timeline_node_004",
+        timeline_node_details: {},
+        timeline_node_summaries: {},
+      });
+      // 补发窗口重叠帧：seq=4 > 被压低的基线 3 → 通过前端 seq 去重
+      harness.ws.receive({
+        type: "timeline_node_created",
+        event_seq: 4,
+        node: reviewerRun,
+      });
+    });
+
+    const nodes = useWorkspaceStore.getState().timelineNodes;
+    expect(nodes.filter((node) => node.node_id === "timeline_node_004")).toHaveLength(1);
+    expect(nodes).toHaveLength(1);
+  });
+
 
   // 退役留档（T5/REQ-RET-02）：`sends review decision responses when connected` 驱动已删除的 legacy 决策发送面，
   // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。

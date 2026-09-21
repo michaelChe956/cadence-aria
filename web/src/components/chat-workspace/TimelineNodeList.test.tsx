@@ -459,4 +459,41 @@ describe("TimelineNodeList flow variant", () => {
     ).toHaveLength(1);
     expect(dots.at(-1)?.getAttribute("style")).toContain("aria-topo-edge-active");
   });
+
+  // v38 复验 #1：数据面仅 1 个 reviewer_run 节点却渲染两张「Review Round 1」卡。
+  // 根因在 store 的 addTimelineNode 盲 push（重连补发窗口重放 created 帧，见
+  // workspace-ws-store.test.ts 重放幂等用例）；组件层另按 node_id 去重做防御：
+  // 即便上游再引入重复帧（observer 快照、未来新链路），同一 node_id 只渲染一张卡。
+  it("renders a node_id once when the input contains replayed duplicate frames", () => {
+    const reviewerRun = timelineNode({
+      node_id: "timeline_node_004",
+      node_type: "reviewer_run",
+      stage: "cross_review",
+      round: 1,
+      title: "Review Round 1",
+      status: "active",
+    });
+    const { unmount } = render(
+      <TimelineNodeList
+        nodes={[reviewerRun, { ...reviewerRun }]}
+        activeNodeId="timeline_node_004"
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+      />,
+    );
+
+    expect(screen.getAllByTestId("timeline-node-reviewer_run")).toHaveLength(1);
+    unmount();
+
+    render(
+      <TimelineNodeList
+        nodes={[reviewerRun, { ...reviewerRun }]}
+        activeNodeId="timeline_node_004"
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByTestId("timeline-node-reviewer_run")).toHaveLength(1);
+  });
 });

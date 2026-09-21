@@ -768,6 +768,16 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set((prev) => failPendingHumanPresentationSaves(prev, message)),
   addTimelineNode: (node) =>
     set((prev) => {
+      // v38 复验 #1（重复「Review Round 1」卡）：活跃 run 期间重连/初帧 attach，服务端把
+      // snapshot 基线压到补发窗口首事件之前并重发窗口帧（attachment.rs 的
+      // activate_attachment_with_initial_frames / journal.rs 的 active_run_window），窗口内
+      // 含客户端已消化的 timeline_node_created 重叠帧；前端对 session_state 无条件拉低
+      // event_seq 基线（useWorkspaceWs.ts），重叠 created 帧必然通过 seq 去重到达这里。
+      // 因此按 node_id 幂等：节点已在列表即忽略追加（首写优先——已有节点可能是快照终态
+      // 或已吸收 update 帧，重放的初态 created 不得回退它），active/selected 亦不动。
+      if (prev.timelineNodes.some((existing) => existing.node_id === node.node_id)) {
+        return prev;
+      }
       const retrySourceNodeId = node.retry?.retry_of_node_id ?? null;
       const streamBuffers = { ...prev.streamBuffers };
       if (retrySourceNodeId) {

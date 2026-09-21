@@ -41,6 +41,12 @@ export function TimelineNodeList({
   flowRows,
   nodeDetails,
 }: TimelineNodeListProps) {
+  // v38 复验 #1 防御：重连补发窗口可能把同一节点的 created 帧重复送进数组
+  //（store 的 addTimelineNode 已按 node_id 幂等兜底；此处再按 node_id 去重，
+  // 首次出现位置优先——同一 node_id 只渲染一张卡，避免 React 同 key 双渲染）。
+  const uniqueNodes = nodes.filter(
+    (node, index) => nodes.findIndex((candidate) => candidate.node_id === node.node_id) === index,
+  );
   return (
     <nav
       aria-label="Timeline 节点"
@@ -49,7 +55,7 @@ export function TimelineNodeList({
         variant === "flow" ? "p-2" : "p-3"
       } ${className}`}
     >
-      {nodes.length === 0 ? (
+      {uniqueNodes.length === 0 ? (
         <div className="rounded-md border border-[var(--aria-line)] bg-white p-3 text-sm text-[var(--aria-ink-muted)]">
           暂无 Timeline 节点
         </div>
@@ -58,7 +64,7 @@ export function TimelineNodeList({
         // 完整信息由 hover 提示（title）与点击下钻的详情面承载。
         // （testid「timeline-flow-grid」为既有契约名，沿用不改。）
         <div data-testid="timeline-flow-grid" className="flex flex-col gap-1.5">
-          {nodes.map((node) => (
+          {uniqueNodes.map((node) => (
             <TimelineFlowTile
               key={node.node_id}
               node={node}
@@ -72,7 +78,7 @@ export function TimelineNodeList({
         </div>
       ) : (
         <div className="space-y-2">
-          {nodes.map((node) => (
+          {uniqueNodes.map((node) => (
             <TimelineNodeButton
               key={node.node_id}
               node={node}
