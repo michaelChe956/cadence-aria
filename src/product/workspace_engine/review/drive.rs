@@ -8,10 +8,9 @@ use crate::product::logical_codebase::{
     SessionLaunchRequest, SessionPolicyAction,
 };
 use crate::product::workspace_engine::provider_drive::{
-    PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT,
+    PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT, PendingChoiceRequests,
 };
 use crate::product::workspace_engine::types::ReviewProviderRunFailure;
-use std::collections::HashSet;
 
 impl WorkspaceEngine {
     pub async fn drive_review_session(
@@ -631,7 +630,11 @@ impl WorkspaceEngine {
         let choice_wait_timer =
             tokio::time::sleep_until(tokio::time::Instant::now() + choice_wait_timeout);
         tokio::pin!(choice_wait_timer);
-        let mut pending_choice_ids: HashSet<String> = HashSet::new();
+        // F-27R3：挂起集经 PendingChoiceRequests 镜像到进程级登记簿（对照主驱动
+        // provider_drive 先例；review run 独立 guard——每次 once 调用即一个
+        // provider 会话 run，Drop 只摘本 run 登记的 id）。session_state 全量投影
+        // 据此补挂 review 驱动挂起的 choice 卡。
+        let mut pending_choice_ids = PendingChoiceRequests::new(&self.session.session_id);
 
         while events_open {
             tokio::select! {
@@ -677,16 +680,17 @@ impl WorkspaceEngine {
                 if !pending_choice_ids.is_empty() =>
                 {
                     // F-22/F-19b：reviewer choice 卡丢失/无人应答超界。
+                    let pending_ids: Vec<&str> = pending_choice_ids.ids();
                     eprintln!(
                         "[aria-cancellation] workspace review_drive choice_wait_timeout trigger=provider_choice_wait_timeout session_id={} role=reviewer agent={reviewer:?} pending={:?} timeout_secs={}",
                         self.session.session_id,
-                        pending_choice_ids,
+                        pending_ids,
                         choice_wait_timeout.as_secs()
                     );
                     let message = format!(
                         "provider_choice_wait_timeout: 等待用户选择应答超过 {} 秒（choice 卡未达用户或无人应答，pending={:?}），运行已中止；可重新开始生成",
                         choice_wait_timeout.as_secs(),
-                        pending_choice_ids
+                        pending_ids
                     );
                     let _ = session.commands.send(ProviderCommand::Abort).await;
                     cancel.cancel();
@@ -757,7 +761,15 @@ impl WorkspaceEngine {
                             answers,
                         }) => {
                             // F-22/F-19b：choice 应答到达——解除 pending 等待界。
-                            pending_choice_ids.remove(&id);
+                            // F-27R3：应答命中挂起 choice（登记簿同步摘除）——通知
+                            // Web runtime 广播全量 session_state 收敛已答卡（对照主
+                            // 驱动先例）。
+                            if pending_choice_ids.remove(&id).is_some() {
+                                let _ = self
+                                    .event_tx
+                                    .send(EngineEvent::ChoicePendingChanged)
+                                    .await;
+                            }
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
                             eprintln!(
@@ -870,7 +882,9 @@ impl WorkspaceEngine {
                         ProviderEvent::ChoiceRequest(request) => {
                             // F-22/F-19b：pending 由空转非空时起算/重置等待界。
                             let choice_wait_started = pending_choice_ids.is_empty();
-                            pending_choice_ids.insert(request.id.clone());
+                            // F-27R3：登记进程级挂起集（三驱动统一登记簿，全量
+                            // ChoiceRequestData）——session_state 投影经登记簿携带本卡。
+                            pending_choice_ids.insert(request.clone());
                             if choice_wait_started {
                                 choice_wait_timer
                                     .as_mut()

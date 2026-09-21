@@ -47,6 +47,10 @@ impl WorkspaceEngine {
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
         let mut display_filter = StructuredOutputDisplayFilter::new();
+        // F-27R3：挂起集经 PendingChoiceRequests 镜像到进程级登记簿（对照主驱动
+        // provider_drive 先例）——session_state 全量投影据此补挂本子驱动挂起的
+        // choice 卡；guard Drop（本函数任意出口）只摘本 run 登记的 id，防泄漏。
+        let mut pending_choice_requests = PendingChoiceRequests::new(&self.session.session_id);
 
         while events_open {
             tokio::select! {
@@ -108,6 +112,15 @@ impl WorkspaceEngine {
                             free_text,
                             answers,
                         }) => {
+                            // F-27R3：应答命中挂起 choice（登记簿同步摘除）——
+                            // 通知 Web runtime 广播全量 session_state 收敛已答卡
+                            //（对照主驱动先例）。
+                            if pending_choice_requests.remove(&id).is_some() {
+                                let _ = self
+                                    .event_tx
+                                    .send(EngineEvent::ChoicePendingChanged)
+                                    .await;
+                            }
                             if session.commands.send(ProviderCommand::ChoiceResponse {
                                 id,
                                 selected_option_ids,
@@ -179,6 +192,9 @@ impl WorkspaceEngine {
                         }
                         ProviderEvent::ChoiceRequest(request) => {
                             let questions = request.effective_questions();
+                            // F-27R3：登记进程级挂起集（三驱动统一登记簿）——
+                            // session_state 投影经登记簿携带本卡。
+                            pending_choice_requests.insert(request.clone());
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {

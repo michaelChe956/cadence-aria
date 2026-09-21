@@ -13,7 +13,7 @@ use crate::product::workspace_engine::aggregate_output_parser::{
     parse_design_aggregate_output, parse_story_aggregate_output,
 };
 use choice_audit::ChoiceResponseAuditInput;
-use pending_choices::PendingChoiceRequests;
+pub(crate) use pending_choices::PendingChoiceRequests;
 pub(crate) use pending_choices::pending_choice_requests_snapshot;
 pub(crate) use watchdog::{PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT};
 

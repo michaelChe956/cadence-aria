@@ -352,12 +352,7 @@ async fn workspace_ws_cursor_reconnect_replays_pending_choice_after_replay_windo
         },
     )
     .await;
-    let choice = loop {
-        let message = recv_json_value(&mut ws).await;
-        if message["type"] == "choice_request" {
-            break message;
-        }
-    };
+    let choice = recv_until_type(&mut ws, "choice_request").await;
     let cursor = choice["event_seq"].as_u64().expect("choice event seq");
     let choice_id = choice["id"].as_str().expect("choice id").to_string();
 
@@ -375,13 +370,8 @@ async fn workspace_ws_cursor_reconnect_replays_pending_choice_after_replay_windo
     // F-27R2：choice_request 入 journal 后随即追加 session_state 广播帧
     // （seq 更大）——cursor 回放先吐该帧，再补发挂起门卡。扫描到
     // choice_request 为止，补发契约（REQ-WCR-04）不变。
-    let replayed_choice = loop {
-        let message = recv_json_value(&mut ws2).await;
-        if message["type"] == "choice_request" {
-            break message;
-        }
-    };
-    assert_eq!(replayed_choice["id"], choice_id);
+    let replayed_choice = recv_until_type(&mut ws2, "choice_request").await;
+    assert_eq!(replayed_choice["id"], json!(choice_id));
     assert!(
         replayed_choice.get("event_seq").is_none(),
         "重发门卡不属于 journal 回放事件，不能干扰 cursor 去重"

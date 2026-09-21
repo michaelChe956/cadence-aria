@@ -631,3 +631,267 @@ async fn workspace_ws_choice_answer_broadcasts_session_state_without_answered_pe
     drop(primary);
     server.abort();
 }
+
+// ---------------------------------------------------------------------------
+// F-27R3（f27r2-review-k3 P1 回归修复）：三驱动统一 PendingChoiceRequests
+// 登记簿——plan 子驱动与 review 驱动投影锚
+// ---------------------------------------------------------------------------
+
+const CHOICE_PLAN_SUBDRIVE_PENDING_ID: &str = "choice_plan_subdrive_r3_001";
+const CHOICE_REVIEW_DRIVE_PENDING_ID: &str = "choice_review_drive_r3_001";
+
+/// F-27R3 plan 子驱动锚（k3 方案 a）：WorkItemPlan（Legacy 流）会话
+/// StartGeneration 走 provider_drive/work_item_plan.rs 子驱动，其挂起
+/// provider choice 与主驱动同源——choice_request 帧后确定性追加的
+/// session_state 广播必须携带该 choice（pending_choice_requests 投影经
+/// 进程级登记簿）。修复前该驱动不经登记簿，投影不含此卡：前端对账
+/// （rebuildChatEntries）挂载即抹除且永不补回，最终 900s choice_wait_timeout。
+#[tokio::test]
+async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let plan = lifecycle
+        .create_issue_work_item_plan(
+            cadence_aria::product::lifecycle_store::CreateIssueWorkItemPlanInput {
+                id: Some("issue_work_item_plan_r3_legacy".to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: vec![],
+                source_design_spec_ids: vec![],
+                options: cadence_aria::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: cadence_aria::product::models::IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec![],
+                repository_profile_ref: None,
+                verification_plan_ids: vec![],
+                dependency_graph: vec![],
+                created_from_provider_run: None,
+                validator_findings: vec![],
+            },
+        )
+        .expect("create plan");
+    let session = lifecycle
+        .create_workspace_session(
+            cadence_aria::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: plan.id,
+                workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: ProviderName::Fake,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(
+                    cadence_aria::product::lifecycle_store::WorkItemPlanSessionOptions {
+                        flow_kind:
+                            cadence_aria::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+                        run_policy:
+                            cadence_aria::product::work_item_plan_policy::RunPolicy::Interactive,
+                        rollout_snapshot: true,
+                    },
+                ),
+            },
+        )
+        .expect("create legacy plan session");
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ChoiceHangingBroadcastProvider {
+            choice_id: CHOICE_PLAN_SUBDRIVE_PENDING_ID,
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/{}/ws", session.id);
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: None,
+                review_rounds: 0,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let choice_frame = recv_until_type(&mut ws, "choice_request").await;
+    assert_eq!(choice_frame["id"], json!(CHOICE_PLAN_SUBDRIVE_PENDING_ID));
+    let state = recv_until_type(&mut ws, "session_state").await;
+    let pending = state["pending_choice_requests"].as_array().expect(
+        "plan 子驱动挂起 choice 后必须广播带 pending_choice_requests 的 session_state",
+    );
+    assert!(
+        pending
+            .iter()
+            .any(|entry| entry["id"] == json!(CHOICE_PLAN_SUBDRIVE_PENDING_ID)),
+        "广播 session_state 必须携带 plan 子驱动挂起的 choice（三驱动统一登记簿）：{state}"
+    );
+
+    drop(ws);
+    server.abort();
+}
+
+/// F-27R3 review 驱动锚（k3 方案 a）：断线中止的 review 经
+/// RetryInterruptedRun 重启后由 review/drive.rs 驱动 reviewer 会话，其挂起
+/// provider choice 同样必须进 session_state 投影（此前仅本地 HashSet，
+/// 投影恒不含——同 plan 子驱动回归面）。
+#[tokio::test]
+async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    // 会话手术：author 产物已落盘（artifact 版本指向 author 节点）、reviewer
+    // 节点断线中止（Failed + 紧随 AbortedByDisconnect）——构成
+    // recoverable_shared_review 可恢复现场，RetryInterruptedRun 重启 review。
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let now = chrono::Utc::now().to_rfc3339();
+    let stage_cross_review = cadence_aria::web::workspace_ws_types::WorkspaceStage::CrossReview;
+    let stage_running = cadence_aria::web::workspace_ws_types::WorkspaceStage::Running;
+    let stage_prepare_context =
+        cadence_aria::web::workspace_ws_types::WorkspaceStage::PrepareContext;
+    let snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Fake,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+    };
+    lifecycle
+        .save_timeline_nodes(
+            "workspace_session_0001",
+            &[
+                cadence_aria::web::workspace_ws_types::TimelineNode {
+                    node_id: "author_run_review_r3".to_string(),
+                    node_type: TimelineNodeType::AuthorRun,
+                    agent: Some(ProviderName::Fake),
+                    stage: stage_running,
+                    round: None,
+                    status: TimelineNodeStatus::Completed,
+                    title: "Author Run".to_string(),
+                    summary: Some("生成完成".to_string()),
+                    started_at: now.clone(),
+                    completed_at: Some(now.clone()),
+                    duration_ms: None,
+                    artifact_ref: None,
+                    provider_config_snapshot: snapshot.clone(),
+                    retry: None,
+                },
+                cadence_aria::web::workspace_ws_types::TimelineNode {
+                    node_id: "review_run_r3".to_string(),
+                    node_type: TimelineNodeType::ReviewerRun,
+                    agent: Some(ProviderName::Fake),
+                    stage: stage_cross_review,
+                    round: Some(1),
+                    status: TimelineNodeStatus::Failed,
+                    title: "Review Round 1".to_string(),
+                    summary: Some("连接断开，运行已中止".to_string()),
+                    started_at: now.clone(),
+                    completed_at: Some(now.clone()),
+                    duration_ms: None,
+                    artifact_ref: None,
+                    provider_config_snapshot: snapshot.clone(),
+                    retry: None,
+                },
+                cadence_aria::web::workspace_ws_types::TimelineNode {
+                    node_id: "abort_review_r3".to_string(),
+                    node_type: TimelineNodeType::AbortedByDisconnect,
+                    agent: None,
+                    stage: stage_prepare_context,
+                    round: None,
+                    status: TimelineNodeStatus::Completed,
+                    title: "连接断开".to_string(),
+                    summary: None,
+                    started_at: now.clone(),
+                    completed_at: Some(now.clone()),
+                    duration_ms: None,
+                    artifact_ref: None,
+                    provider_config_snapshot: snapshot,
+                    retry: None,
+                },
+            ],
+        )
+        .expect("save review-retry timeline");
+    lifecycle
+        .append_artifact_version(
+            "workspace_session_0001",
+            ArtifactVersion {
+                version: 1,
+                payload: ArtifactPayload::Markdown {
+                    markdown: VALID_STORY_SPEC.to_string(),
+                    diff: None,
+                },
+                generated_by: ProviderName::Fake,
+                reviewed_by: None,
+                review_verdict: None,
+                confirmed_by: None,
+                is_current: true,
+                created_at: now,
+                source_node_id: "author_run_review_r3".to_string(),
+            },
+        )
+        .expect("append artifact version");
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ChoiceHangingBroadcastProvider {
+            choice_id: CHOICE_REVIEW_DRIVE_PENDING_ID,
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::RetryInterruptedRun {
+            failed_node_id: "review_run_r3".to_string(),
+        },
+    )
+    .await;
+
+    let choice_frame = recv_until_type(&mut ws, "choice_request").await;
+    assert_eq!(choice_frame["id"], json!(CHOICE_REVIEW_DRIVE_PENDING_ID));
+    let state = recv_until_type(&mut ws, "session_state").await;
+    let pending = state["pending_choice_requests"].as_array().expect(
+        "review 驱动挂起 choice 后必须广播带 pending_choice_requests 的 session_state",
+    );
+    assert!(
+        pending
+            .iter()
+            .any(|entry| entry["id"] == json!(CHOICE_REVIEW_DRIVE_PENDING_ID)),
+        "广播 session_state 必须携带 review 驱动挂起的 choice（三驱动统一登记簿）：{state}"
+    );
+
+    drop(ws);
+    server.abort();
+}
