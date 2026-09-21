@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, ClipboardCopy, GitBranch, History, Radio } from "lucide-react";
+import { Check, ClipboardCopy, GitBranch, Radio } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
 import { confirmWorkspaceSession, takeoverWorkspaceSession } from "../api/client";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
@@ -28,6 +28,8 @@ import {
   useCockpitSettings,
   useCockpitShellInbox,
 } from "../components/cockpit/CockpitShell";
+import { CockpitInboxDrawer } from "../components/cockpit/CockpitInboxDrawer";
+import { CockpitPageHeader } from "../components/cockpit/CockpitPageHeader";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
 import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
@@ -277,6 +279,7 @@ export function ChatCockpitPage({
     sendAdvance: workspaceWs.sendAdvance,
   });
   const [takeoverSessionId, setTakeoverSessionId] = useState<string | null>(null);
+  const [inboxDrawerOpen, setInboxDrawerOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditTarget, setAuditTarget] = useState<OperationAuditTarget | null>(null);
   const auditRecords = useOperationAuditStore((audit) => audit.records);
@@ -812,45 +815,19 @@ export function ChatCockpitPage({
       data-testid="cockpit-page"
       className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
     >
-      <header className="flex min-h-11 items-center gap-2 border-b border-[var(--aria-line)] px-3 py-1">
-        <button
-          type="button"
-          onClick={onBack}
-          className="btn-secondary h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-        >
-          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          返回
-        </button>
-        {parentSessionId !== null && parentSessionId !== sessionId ? (
-          <button
-            type="button"
-            onClick={() => onOpenSession(parentSessionId)}
-            className="btn-secondary h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-          >
-            返回父会话
-          </button>
-        ) : null}
-        <span className="aria-mono text-xs text-[var(--aria-ink-muted)]">{sessionId}</span>
-        <span className="text-xs text-[var(--aria-ink-muted)]">{watchWindow}</span>
-        <button
-          type="button"
-          aria-label="操作审计"
-          onClick={openAudit}
-          className="inline-flex min-h-11 items-center gap-1 rounded-md px-3 text-xs font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-        >
-          <History aria-hidden="true" className="h-4 w-4" />
-          操作审计
-        </button>
-        {canManualAdvance ? (
-          <button
-            type="button"
-            onClick={actions.advance}
-            className="inline-flex min-h-11 items-center rounded-md border border-[var(--aria-line-strong)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-          >
-            手动推进
-          </button>
-        ) : null}
-      </header>
+      <CockpitPageHeader
+        sessionId={sessionId}
+        watchWindow={watchWindow}
+        parentSessionId={parentSessionId}
+        onBack={onBack}
+        onOpenSession={onOpenSession}
+        onOpenAudit={openAudit}
+        canManualAdvance={canManualAdvance}
+        onAdvance={actions.advance}
+        inboxCount={observedInbox.length}
+        inboxOpen={inboxDrawerOpen}
+        onToggleInbox={() => setInboxDrawerOpen((open) => !open)}
+      />
       {isCurrentSession ? (
         <DisconnectBanner
           isReconnecting={workspaceWs.isReconnecting}
@@ -903,274 +880,276 @@ export function ChatCockpitPage({
         </div>
       ) : null}
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 lg:grid-cols-[20rem_minmax(0,1fr)]">
-        <div className="flex min-h-0 flex-col gap-2">
-          <BulkConfirmReport />
-          <CockpitInbox
-            items={observedInbox}
-            actions={actions}
-            onTakeover={handleTakeover}
-            onRetry={handleRetry}
-            onRetakeLease={handleRetakeLease}
-            actionableSessionId={sessionId}
-            takeoverButtonRef={takeoverButtonRef}
-            onBulkConfirm={handleBulkConfirm}
-            emptyHint={inboxEmptyHint}
-            artifactVersions={selectedState?.artifactVersions}
-            latestReviewSummary={latestReviewReport ?? null}
-            repairReservation={state.repairReservation}
-          />
-        </div>
-
-        <div className="grid min-h-0 grid-rows-[minmax(0,1.1fr)_minmax(0,1fr)] gap-2">
-          <section
-            data-testid="cockpit-execution-flow"
-            aria-label="自动执行流"
-            className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
-          >
-            <div className="flex items-center justify-between gap-2 px-3 py-2">
-              <p
-                data-testid="cockpit-generation-status"
-                role="status"
-                className="text-xs text-[var(--aria-ink-muted)]"
-              >
-                {generationStatusText(
-                  isEmptyUnstarted ? "not_started" : statusState.providerStatus,
-                  statusState.stage,
-                  runningContext,
-                  terminalContext,
-                )}
-              </p>
-              <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
-              <button
-                type="button"
-                data-testid="cockpit-protocol-diagnostic-count"
-                onClick={() => setDrilldownNodeId(selectedState?.activeNodeId ?? null)}
-                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-              >
-                诊断 {selectedState?.protocolDiagnostics.length ?? 0}
-              </button>
-            </div>
-            <TimelineNodeList
-              nodes={selectedState?.timelineNodes ?? []}
-              // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。
-              activeNodeId={drilldownNodeId ?? selectedState?.activeNodeId ?? null}
-              selectedNodeId={drilldownNodeId}
-              onSelectNode={setDrilldownNodeId}
-              variant="flow"
-              flowRows={flowRows}
-              className="border-0"
-            />
-          </section>
-
-          <section
-            data-testid="cockpit-conversation-flow"
-            aria-label="下钻对话流"
-            className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
-          >
-            <div className="flex min-w-0 items-center gap-2 px-3 py-2">
-              <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
-              {canConfigureProviders ? (
-                <>
-                  <ProviderConfigDialogButton
-                    providers={state.providers}
-                    editable={true}
-                    onSelectProvider={(role, provider) =>
-                      workspaceWs.selectProvider(role, provider)
-                    }
-                    reviewerEnabled={state.reviewerEnabled}
-                    onToggleReviewer={(enabled) =>
-                      useWorkspaceStore.setState({ reviewerEnabled: enabled })
-                    }
-                    permissionModes={state.permissionModes}
-                    onPermissionModeSelect={(role, mode) =>
-                      useWorkspaceStore.getState().setPermissionMode(role, mode)
-                    }
-                    rounds={state.reviewRounds}
-                    onChangeRounds={(rounds) =>
-                      useWorkspaceStore.setState({
-                        reviewRounds: clampReviewRounds(rounds),
-                      })
-                    }
-                  />
-                  <button
-                    type="button"
-                    data-testid="save-provider-defaults"
-                    onClick={handleSaveProviderDefaults}
-                    className="btn-secondary h-9"
-                  >
-                    设为默认
-                  </button>
-                  {defaultsSavedAt !== null ? (
-                    <span role="status" className="text-xs text-[var(--aria-ink-muted)]">
-                      已设为默认
-                    </span>
-                  ) : null}
-                </>
-              ) : (
-                <span className="text-xs text-[var(--aria-ink-muted)]">
-                  {providerSummary}
-                </span>
+      {/* 主区：对话流是主区域（grow 2），执行流退居次区（grow 1）；待处理不再占据
+          20rem 侧栏，改由页头入口打开的右侧抽屉承载（UI-A）。 */}
+      <main
+        data-testid="cockpit-main-region"
+        className="flex min-h-0 flex-1 flex-col gap-2 p-2"
+      >
+        <BulkConfirmReport />
+        <section
+          data-testid="cockpit-execution-flow"
+          aria-label="自动执行流"
+          className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+        >
+          <div className="flex items-center justify-between gap-2 px-3 py-2">
+            <p
+              data-testid="cockpit-generation-status"
+              role="status"
+              className="text-xs text-[var(--aria-ink-muted)]"
+            >
+              {generationStatusText(
+                isEmptyUnstarted ? "not_started" : statusState.providerStatus,
+                statusState.stage,
+                runningContext,
+                terminalContext,
               )}
-              {isArtifactReviewSession || isPlanApprovalSession ? (
-                <div
-                  role="tablist"
-                  aria-label="下钻视图"
-                  className="ml-auto flex items-center gap-1"
+            </p>
+            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
+            <button
+              type="button"
+              data-testid="cockpit-protocol-diagnostic-count"
+              onClick={() => setDrilldownNodeId(selectedState?.activeNodeId ?? null)}
+              className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            >
+              诊断 {selectedState?.protocolDiagnostics.length ?? 0}
+            </button>
+          </div>
+          <TimelineNodeList
+            nodes={selectedState?.timelineNodes ?? []}
+            // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。
+            activeNodeId={drilldownNodeId ?? selectedState?.activeNodeId ?? null}
+            selectedNodeId={drilldownNodeId}
+            onSelectNode={setDrilldownNodeId}
+            variant="flow"
+            flowRows={flowRows}
+            className="border-0"
+          />
+        </section>
+
+        <section
+          data-testid="cockpit-conversation-flow"
+          aria-label="下钻对话流"
+          className="grid min-h-0 flex-[2] grid-rows-[auto_minmax(0,1fr)_auto_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+        >
+          <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
+            {canConfigureProviders ? (
+              <>
+                <ProviderConfigDialogButton
+                  providers={state.providers}
+                  editable={true}
+                  onSelectProvider={(role, provider) =>
+                    workspaceWs.selectProvider(role, provider)
+                  }
+                  reviewerEnabled={state.reviewerEnabled}
+                  onToggleReviewer={(enabled) =>
+                    useWorkspaceStore.setState({ reviewerEnabled: enabled })
+                  }
+                  permissionModes={state.permissionModes}
+                  onPermissionModeSelect={(role, mode) =>
+                    useWorkspaceStore.getState().setPermissionMode(role, mode)
+                  }
+                  rounds={state.reviewRounds}
+                  onChangeRounds={(rounds) =>
+                    useWorkspaceStore.setState({
+                      reviewRounds: clampReviewRounds(rounds),
+                    })
+                  }
+                />
+                <button
+                  type="button"
+                  data-testid="save-provider-defaults"
+                  onClick={handleSaveProviderDefaults}
+                  className="btn-secondary h-9"
                 >
+                  设为默认
+                </button>
+                {defaultsSavedAt !== null ? (
+                  <span role="status" className="text-xs text-[var(--aria-ink-muted)]">
+                    已设为默认
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="text-xs text-[var(--aria-ink-muted)]">
+                {providerSummary}
+              </span>
+            )}
+            {isArtifactReviewSession || isPlanApprovalSession ? (
+              <div
+                role="tablist"
+                aria-label="下钻视图"
+                className="ml-auto flex items-center gap-1"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={drilldownView === "conversation"}
+                  data-testid="cockpit-conversation-tab"
+                  onClick={() => setDrilldownView("conversation")}
+                  className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                >
+                  对话流
+                </button>
+                {isArtifactReviewSession ? (
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={drilldownView === "conversation"}
-                    data-testid="cockpit-conversation-tab"
-                    onClick={() => setDrilldownView("conversation")}
+                    aria-selected={drilldownView === "artifact"}
+                    data-testid="cockpit-artifact-review-tab"
+                    onClick={() => setDrilldownView("artifact")}
                     className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                   >
-                    对话流
+                    产物审核
                   </button>
-                  {isArtifactReviewSession ? (
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={drilldownView === "artifact"}
-                      data-testid="cockpit-artifact-review-tab"
-                      onClick={() => setDrilldownView("artifact")}
-                      className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                    >
-                      产物审核
-                    </button>
-                  ) : null}
-                  {isPlanApprovalSession ? (
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={drilldownView === "plan"}
-                      data-testid="cockpit-plan-approval-tab"
-                      onClick={() => setDrilldownView("plan")}
-                      className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-                    >
-                      计划审批
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            {drilldownView === "artifact" && isArtifactReviewSession ? (
-              <ArtifactReviewPanel
-                artifactVersions={selectedState?.artifactVersions ?? []}
-                artifact={selectedState?.artifact ?? null}
-                sessionId={isCurrentSession ? sessionId : null}
-                artifactContentCache={artifactContentCacheValues}
-                loadArtifactVersion={loadVersionMarkdown}
-                onCacheArtifactContent={cacheVersionMarkdown}
-                changelogSummary={changelogSummary}
-                onClose={() => setDrilldownView("conversation")}
-                actions={
-                  isCurrentSession &&
-                  state.stage === "author_confirm" &&
-                  gateActionBlockReason(state) === null ? (
-                    <>
-                      {latestReviewReport ? (
-                        <button
-                          type="button"
-                          className="btn-secondary h-9"
-                          onClick={() => {
-                            chatInputRef.current?.prefill(
-                              `按以下 review 意见修订：\n\n${latestReviewReport}`,
-                            );
-                            setDrilldownView("conversation");
-                          }}
-                        >
-                          <ClipboardCopy className="h-4 w-4" /> 采纳 Review 意见
-                        </button>
-                      ) : null}
-                      {/* F-18/F-20 决策面（对照门卡/收件箱先例）：确认=门面 confirm
-                          （story/design author 门经 routeGateConfirm 走 HTTP confirm
-                          端点）；终止=门面 terminate（WS abandon_human_gate）+二次确认。 */}
+                ) : null}
+                {isPlanApprovalSession ? (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={drilldownView === "plan"}
+                    data-testid="cockpit-plan-approval-tab"
+                    onClick={() => setDrilldownView("plan")}
+                    className="inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                  >
+                    计划审批
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {drilldownView === "artifact" && isArtifactReviewSession ? (
+            <ArtifactReviewPanel
+              artifactVersions={selectedState?.artifactVersions ?? []}
+              artifact={selectedState?.artifact ?? null}
+              sessionId={isCurrentSession ? sessionId : null}
+              artifactContentCache={artifactContentCacheValues}
+              loadArtifactVersion={loadVersionMarkdown}
+              onCacheArtifactContent={cacheVersionMarkdown}
+              changelogSummary={changelogSummary}
+              onClose={() => setDrilldownView("conversation")}
+              actions={
+                isCurrentSession &&
+                state.stage === "author_confirm" &&
+                gateActionBlockReason(state) === null ? (
+                  <>
+                    {latestReviewReport ? (
                       <button
                         type="button"
-                        className="btn-primary h-9"
-                        onClick={() => actions.confirm()}
+                        className="btn-secondary h-9"
+                        onClick={() => {
+                          chatInputRef.current?.prefill(
+                            `按以下 review 意见修订：\n\n${latestReviewReport}`,
+                          );
+                          setDrilldownView("conversation");
+                        }}
                       >
-                        <Check className="h-4 w-4" aria-hidden="true" /> 确认产物
+                        <ClipboardCopy className="h-4 w-4" /> 采纳 Review 意见
                       </button>
-                      <ConfirmTwiceButton
-                        label="终止"
-                        confirmLabel="确认终止"
-                        onConfirm={actions.terminate}
-                      />
-                    </>
-                  ) : undefined
-                }
-                className="min-h-0"
-              />
-            ) : drilldownView === "plan" && isPlanApprovalSession ? (
-              <PlanApprovalPanel
-                key={selectedSessionId}
-                sessionId={selectedSessionId}
-                state={selectedState ?? state}
-                onJumpToEntry={handleJumpToEntry}
-                artifactContentCache={artifactContentCacheValues}
-                loadVersionMarkdown={loadVersionMarkdown}
-                onCacheVersionMarkdown={cacheVersionMarkdown}
-              />
-            ) : (
-              <ChatEntryList
-                ref={chatListRef}
-                entries={selectedState?.chatEntries ?? []}
-                actions={takeoverSessionId === null ? actions : undefined}
-                onPermissionResponse={
-                  takeoverSessionId === null ? handlePermissionResponse : undefined
-                }
-                onChoiceResponse={takeoverSessionId === null ? handleChoiceResponse : undefined}
-                contentCache={contentCacheValues}
-                loadContent={loadContent}
-                onCacheContent={cacheContent}
-                sessionId={selectedSessionId}
-                testId="cockpit-conversation-flow-list"
-              />
-            )}
-            {takeoverSessionId === null && state.streamBuffers[state.activeNodeId ?? ""]?.chunks.length ? (
-              <StreamingConversationBlock
-                content={state.streamBuffers[state.activeNodeId ?? ""]?.chunks.join("") ?? ""}
-                role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
-              />
-            ) : null}
-            {/* F-19（cadence/notes 2026-09-19 阶段4监控）：生成/评审/修订期必须
-                暴露中止入口——此前仅 prepare_context/author_confirm 渲染输入条，
-                codex run 楔死 27min 期间页面无任何脱困控件。矩阵
-                （workspace_ws_handler/protocol.rs Running/CrossReview/Revision 臂）
-                均已放行 WsInMessage::Abort；ChatInputBar 的 BUSY_STAGES 自带
-                禁输入+仅中止钮形态。 */}
-            {isCurrentSession &&
-            (state.stage === "prepare_context" ||
-              state.stage === "author_confirm" ||
-              state.stage === "running" ||
-              state.stage === "cross_review" ||
-              state.stage === "revision") ? (
-              <ChatInputBar
-                ref={chatInputRef}
-                stage={state.stage}
-                activeNodeType={activeNode?.node_type ?? null}
-                workItemPlanArtifact={state.workItemPlanArtifact}
-                disabled={workspaceWs.connectionStatus !== "connected"}
-                hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
-                startGenerationDisabled={startGenerationBlockedByTerminalSession}
-                startGenerationDisabledHint={
-                  startGenerationBlockedByTerminalSession
-                    ? startGenerationBlockedHint
-                    : null
-                }
-                onSendContextNote={workspaceWs.sendContextNote}
-                onStartGeneration={handleStartGeneration}
-                onAbort={workspaceWs.abort}
-                hardErrorNotice={hardErrorNotice}
-              />
-            ) : null}
-            {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
-          </section>
-        </div>
+                    ) : null}
+                    {/* F-18/F-20 决策面（对照门卡/收件箱先例）：确认=门面 confirm
+                        （story/design author 门经 routeGateConfirm 走 HTTP confirm
+                        端点）；终止=门面 terminate（WS abandon_human_gate）+二次确认。 */}
+                    <button
+                      type="button"
+                      className="btn-primary h-9"
+                      onClick={() => actions.confirm()}
+                    >
+                      <Check className="h-4 w-4" aria-hidden="true" /> 确认产物
+                    </button>
+                    <ConfirmTwiceButton
+                      label="终止"
+                      confirmLabel="确认终止"
+                      onConfirm={actions.terminate}
+                    />
+                  </>
+                ) : undefined
+              }
+              className="min-h-0"
+            />
+          ) : drilldownView === "plan" && isPlanApprovalSession ? (
+            <PlanApprovalPanel
+              key={selectedSessionId}
+              sessionId={selectedSessionId}
+              state={selectedState ?? state}
+              onJumpToEntry={handleJumpToEntry}
+              artifactContentCache={artifactContentCacheValues}
+              loadVersionMarkdown={loadVersionMarkdown}
+              onCacheVersionMarkdown={cacheVersionMarkdown}
+            />
+          ) : (
+            <ChatEntryList
+              ref={chatListRef}
+              entries={selectedState?.chatEntries ?? []}
+              actions={takeoverSessionId === null ? actions : undefined}
+              onPermissionResponse={
+                takeoverSessionId === null ? handlePermissionResponse : undefined
+              }
+              onChoiceResponse={takeoverSessionId === null ? handleChoiceResponse : undefined}
+              contentCache={contentCacheValues}
+              loadContent={loadContent}
+              onCacheContent={cacheContent}
+              sessionId={selectedSessionId}
+              testId="cockpit-conversation-flow-list"
+            />
+          )}
+          {takeoverSessionId === null && state.streamBuffers[state.activeNodeId ?? ""]?.chunks.length ? (
+            <StreamingConversationBlock
+              content={state.streamBuffers[state.activeNodeId ?? ""]?.chunks.join("") ?? ""}
+              role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
+            />
+          ) : null}
+          {/* F-19（cadence/notes 2026-09-19 阶段4监控）：生成/评审/修订期必须
+              暴露中止入口——此前仅 prepare_context/author_confirm 渲染输入条，
+              codex run 楔死 27min 期间页面无任何脱困控件。矩阵
+              （workspace_ws_handler/protocol.rs Running/CrossReview/Revision 臂）
+              均已放行 WsInMessage::Abort；ChatInputBar 的 BUSY_STAGES 自带
+              禁输入+仅中止钮形态。 */}
+          {isCurrentSession &&
+          (state.stage === "prepare_context" ||
+            state.stage === "author_confirm" ||
+            state.stage === "running" ||
+            state.stage === "cross_review" ||
+            state.stage === "revision") ? (
+            <ChatInputBar
+              ref={chatInputRef}
+              stage={state.stage}
+              activeNodeType={activeNode?.node_type ?? null}
+              workItemPlanArtifact={state.workItemPlanArtifact}
+              disabled={workspaceWs.connectionStatus !== "connected"}
+              hideStartGeneration={Boolean(state.recoverableInterruptedRun)}
+              startGenerationDisabled={startGenerationBlockedByTerminalSession}
+              startGenerationDisabledHint={
+                startGenerationBlockedByTerminalSession
+                  ? startGenerationBlockedHint
+                  : null
+              }
+              onSendContextNote={workspaceWs.sendContextNote}
+              onStartGeneration={handleStartGeneration}
+              onAbort={workspaceWs.abort}
+              hardErrorNotice={hardErrorNotice}
+            />
+          ) : null}
+          {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
+        </section>
       </main>
+      <CockpitInboxDrawer open={inboxDrawerOpen} onClose={() => setInboxDrawerOpen(false)}>
+        <CockpitInbox
+          items={observedInbox}
+          actions={actions}
+          onTakeover={handleTakeover}
+          onRetry={handleRetry}
+          onRetakeLease={handleRetakeLease}
+          actionableSessionId={sessionId}
+          takeoverButtonRef={takeoverButtonRef}
+          onBulkConfirm={handleBulkConfirm}
+          emptyHint={inboxEmptyHint}
+          artifactVersions={selectedState?.artifactVersions}
+          latestReviewSummary={latestReviewReport ?? null}
+          repairReservation={state.repairReservation}
+        />
+      </CockpitInboxDrawer>
     </div>
   );
 }

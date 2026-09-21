@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readCockpitSettings } from "../../state/cockpit-settings";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
 import { CockpitInbox } from "../chat-workspace/cockpit/CockpitInbox";
-import { CockpitShell } from "./CockpitShell";
+import { CockpitShell, useCockpitSettingsSlotRef } from "./CockpitShell";
 import { useWorkspaceSessionObservers } from "../../hooks/useWorkspaceSessionObservers";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 
@@ -85,6 +85,21 @@ function renderShell({
       onGoToInbox={onGoToInbox}
     />,
   );
+}
+
+function stubEmptyObservers() {
+  mockedUseWorkspaceSessionObservers.mockReturnValue({
+    records: [],
+    inbox: [],
+    countedInbox: [],
+    watchedSessionIds: [],
+    watchSession: vi.fn(),
+  });
+}
+
+function HeaderSlotProbe() {
+  const slotRef = useCockpitSettingsSlotRef();
+  return <div data-testid="page-header-slot" ref={slotRef} />;
 }
 
 describe("CockpitShell", () => {
@@ -258,5 +273,40 @@ describe("CockpitShell", () => {
     await vi.advanceTimersByTimeAsync(30_000);
 
     expect(notificationTitles).toEqual(["aria：需要处理"]);
+  });
+
+  it("renders the settings trigger into the page-provided header slot instead of a fixed overlay", () => {
+    stubEmptyObservers();
+
+    render(
+      <CockpitShell>
+        <HeaderSlotProbe />
+      </CockpitShell>,
+    );
+
+    const trigger = screen.getByTestId("cockpit-settings-trigger");
+    expect(screen.getByTestId("page-header-slot")).toContainElement(trigger);
+    expect(trigger.className).not.toContain("fixed");
+    expect(screen.queryByTestId("cockpit-settings-fallback")).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "驾驶舱设置" })).toBeInTheDocument();
+  });
+
+  it("keeps the settings trigger reachable through the fallback overlay without a page slot", () => {
+    stubEmptyObservers();
+
+    render(
+      <CockpitShell>
+        <span>页面内容</span>
+      </CockpitShell>,
+    );
+
+    const fallback = screen.getByTestId("cockpit-settings-fallback");
+    expect(fallback).toContainElement(screen.getByTestId("cockpit-settings-trigger"));
+    // 兜底入口必须让位：落在页面顶栏之下，且 z 序低于抽屉/浮层（spec 抽屉 z-50）。
+    expect(fallback.className).toContain("top-16");
+    expect(fallback.className).toContain("z-40");
+    expect(fallback.className).not.toContain("z-[100]");
   });
 });

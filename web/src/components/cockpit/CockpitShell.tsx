@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { JSX } from "react";
+import { createPortal } from "react-dom";
 import { Settings } from "lucide-react";
 import {
   useWorkspaceSessionObservers,
@@ -33,6 +34,8 @@ type CockpitShellContextValue = {
   notificationGuidance: NotificationGuidance;
   settings: CockpitSettings;
   watchSession(sessionId: string): void;
+  /** 页面顶栏登记设置入口宿主节点；未登记时 shell 兜底浮层渲染入口。 */
+  registerSettingsSlot(node: HTMLElement | null): void;
 };
 
 const CockpitShellContext = createContext<CockpitShellContextValue | null>(null);
@@ -72,6 +75,14 @@ export function useCockpitNotificationGuidance(): NotificationGuidance {
 export function useCockpitSettings(): CockpitSettings {
   return useContext(CockpitShellContext)?.settings ?? readCockpitSettings();
 }
+
+/**
+ * 页面顶栏把「驾驶舱设置」入口挂到自己的布局里（如 cockpit 页头右侧），
+ * 入口不再以 fixed 浮层压住 spec 抽屉等内容；登记后 shell 用 portal 注入宿主。
+ */
+export function useCockpitSettingsSlotRef(): (node: HTMLElement | null) => void {
+  return useContext(CockpitShellContext)?.registerSettingsSlot ?? (() => undefined);
+}
 export function CockpitShell({
   children,
   onGoToInbox,
@@ -81,6 +92,7 @@ export function CockpitShell({
 }): JSX.Element {
   const [settings, setSettings] = useState<CockpitSettings>(() => readCockpitSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSlot, setSettingsSlot] = useState<HTMLElement | null>(null);
   const currentSessionId = useWorkspaceStore((state) => state.sessionId);
   const currentSessionState = useWorkspaceStore();
   const [pulseItemIds, setPulseItemIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -210,8 +222,29 @@ export function CockpitShell({
     setSettings(nextSettings);
   }, []);
   const contextValue = useMemo<CockpitShellContextValue>(
-    () => ({ inbox, records, pulseItemIds, notificationGuidance, settings, watchSession }),
+    () => ({
+      inbox,
+      records,
+      pulseItemIds,
+      notificationGuidance,
+      settings,
+      watchSession,
+      registerSettingsSlot: setSettingsSlot,
+    }),
     [inbox, notificationGuidance, pulseItemIds, records, settings, watchSession],
+  );
+  // 入口默认由 shell 兜底浮层渲染；页面登记顶栏宿主后改由 portal 注入宿主，
+  // 避免 fixed 浮层压住 spec 抽屉（Artifact 审核/计划审批面板）。
+  const settingsTrigger = (
+    <button
+      type="button"
+      data-testid="cockpit-settings-trigger"
+      aria-label="驾驶舱设置"
+      onClick={() => setSettingsOpen(true)}
+      className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] shadow-md transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+    >
+      <Settings aria-hidden="true" className="h-4 w-4" />
+    </button>
   );
 
   return (
@@ -235,21 +268,21 @@ export function CockpitShell({
         {toast ? (
           <div
             role="status"
-            className="fixed right-4 top-16 z-[100] max-w-sm rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-4 py-3 text-sm font-semibold text-[var(--aria-ink)] shadow-lg"
+            className="fixed right-4 top-28 z-[100] max-w-sm rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-4 py-3 text-sm font-semibold text-[var(--aria-ink)] shadow-lg"
           >
             需要处理：{toast.title}
           </div>
         ) : null}
-        <header className="fixed right-4 top-4 z-[100]">
-          <button
-            type="button"
-            aria-label="驾驶舱设置"
-            onClick={() => setSettingsOpen(true)}
-            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] shadow-md transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
-          >
-            <Settings aria-hidden="true" className="h-4 w-4" />
-          </button>
-        </header>
+        {settingsSlot === null ? (
+          // 无页面宿主时的兜底入口：落在页面自身顶栏（约 44px）之下，且 z 序低于抽屉/
+          // 浮层（lifecycle spec 抽屉 z-50、升级提醒 z-100、弹窗 z-110）——既不压页面
+          // 顶栏控件，也不会挡住 spec 抽屉（UI-A）。
+          <div data-testid="cockpit-settings-fallback" className="fixed right-4 top-16 z-40">
+            {settingsTrigger}
+          </div>
+        ) : (
+          createPortal(settingsTrigger, settingsSlot)
+        )}
         <CockpitSettingsDialog
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}

@@ -88,6 +88,7 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitSessionWatch: () => watchSession,
   useCockpitSettings: () => readCockpitSettings(),
   useCockpitObservedRecords: () => cockpitObservedRecords,
+  useCockpitSettingsSlotRef: () => () => undefined,
 }));
 
 describe("ChatCockpitPage", () => {
