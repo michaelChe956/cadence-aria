@@ -11,13 +11,13 @@
 - 前端乐观 `setSessionStatus("confirmed")` 只覆盖发请求的 tab；其他 tab / takeover 视图 / 重连连接读到的仍是旧投影——会话页动作条与门卡停在「等待确认产物」。
 
 ### 修法（对照 F-09 HumanGateOpened 广播先例 a1a479a1）
-1. `WorkspaceEngine::apply_external_confirm_record`（session_state.rs）：以 durable record 同步引擎内存投影——`session_status`、`human_gate_snapshot`（Confirmed 时 durable 已清空）、尾部新增消息（确认审计行，按 `msg_{:03}` 连续编号补登）。
+1. `WorkspaceEngine::apply_external_confirm_record`（session_state.rs）：以 durable record 同步引擎内存投影——`session_status`、`stage`（fix round 1，k3 审 1×P2：经 `workspace_stage_for_status` 与 from_record 同口径收敛，Confirmed→Completed，否则已连接 tab 收到 confirmed+author_confirm 组合、重连 tab 却看到 completed，两投影互相矛盾）、`human_gate_snapshot`（Confirmed 时 durable 已清空）、尾部新增消息（确认审计行，按 `msg_{:03}` 连续编号补登）。
 2. `WorkspaceSessionManager::broadcast_http_confirm`（router.rs）：锁 engine 同步后调用既有 `broadcast_current_session_state()`——广播全量 session_state 给全部 attachment，同时入 journal（后续 cursor 回放同样取到 confirmed 态）。
 3. `workspace_session_confirm` handler：durable 写完成后经 `state.workspace_sessions.get()` 取运行期 manager（无 manager 时零副作用跳过），广播后返回 DTO。
 
 ### TDD
 - 红测：`it_core/workspace_ws_integration/part_07.rs::http_confirm_broadcasts_confirmed_session_state_to_connected_ws`——修复前 confirm 后 WS 零帧（post-confirm frame timeout）。
-- 绿测断言：真实 WS 连接（TCP server + tokio-tungstenite）吸收初帧（非 confirmed 基线）→ 同 state `app.oneshot` 发 HTTP confirm → WS 收到 `session_state` 帧且 `session_status == "confirmed"`，且 `messages` 含「确认当前 Workspace 产物」审计行。
+- 绿测断言：真实 WS 连接（TCP server + tokio-tungstenite）吸收初帧（非 confirmed 基线）→ 同 state `app.oneshot` 发 HTTP confirm → WS 收到 `session_state` 帧且 `session_status == "confirmed"`、`stage == "completed"`（fix round 1 补），且 `messages` 含「确认当前 Workspace 产物」审计行。
 
 ## F-26b：review 生命周期不可见
 

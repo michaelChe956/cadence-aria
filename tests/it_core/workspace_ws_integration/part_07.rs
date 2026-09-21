@@ -240,6 +240,14 @@ async fn http_confirm_broadcasts_confirmed_session_state_to_connected_ws() {
     let frame = confirmed_frame.expect(
         "HTTP confirm must broadcast a session_state frame with session_status=confirmed to the connected WS",
     );
+    // fix round 1（k3 P2）：stage 必须随 status 一致收敛——Confirmed 会话的内存
+    // stage 同步为 completed（与 from_record→workspace_stage_for_status 投影一致），
+    // 否则已连接 tab 收到 confirmed+author_confirm 组合而重连 tab 看到 completed，
+    // 两 tab 投影互相矛盾。
+    assert_eq!(
+        frame["stage"], "completed",
+        "confirmed session_state must carry stage=completed"
+    );
     // 审计消息同样随帧投影（其他 tab 无需 reload 即可看到确认审计行）。
     assert!(
         frame["messages"]

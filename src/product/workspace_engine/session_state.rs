@@ -524,9 +524,12 @@ impl WorkspaceEngine {
     /// F-25b：HTTP confirm（handler 层直写 durable）后的内存同步面。AuthorConfirm/
     /// HumanConfirm 静止态引擎内存与 durable 一致，唯一差异是该外部写入：按 record
     /// 同步 session_status/门快照并补登尾部新增消息（确认审计行），使随后的全量
-    /// session_state 广播携带 confirmed 投影而不是旧内存态。
     pub(crate) fn apply_external_confirm_record(&mut self, record: &WorkspaceSessionRecord) {
         self.session.session_status = record.status.clone();
+        // fix round 1（k3 P2）：stage 随 status 一致收敛——与 from_record 的
+        // workspace_stage_for_status 投影同口径（Confirmed→Completed），否则广播
+        // confirmed+author_confirm 组合与重连 tab 的 durable 投影互相矛盾。
+        self.session.stage = workspace_stage_for_status(&record.status);
         self.session.human_gate_snapshot = record.human_gate_snapshot.clone();
         let in_memory_len = self.session.messages.len();
         let durable_len = record.messages.len();
