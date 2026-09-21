@@ -348,7 +348,17 @@ export function ChatCockpitPage({
           typeof error === "object" && error !== null && "code" in error
             ? String(error.code)
             : "http_confirm_failed";
+        const message =
+          error instanceof Error && error.message !== ""
+            ? error.message
+            : "确认请求被服务端拒绝";
         useOperationAuditStore.getState().markRejected(auditRecordId, code);
+        // k3 P3（F-31 纠偏复审）：拒收不得零反馈（F-28 同类）——legacy 会话
+        // reviewer_enabled_at_start=None 时前端 reviewerEnabled 缺省 true，
+        // 「确认并评审」会撞后端如实 4xx（workspace_session_review_not_enabled）。
+        // 复用 F-28 hard-error-notice 面（ChatInputBar 在 author_confirm 渲染）
+        // 就地亮出错误码+语义，决策面保持敞开供改点「确认定稿」。
+        useWorkspaceStore.getState().setProtocolError({ code, message });
       });
     return true;
   }, []);

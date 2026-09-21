@@ -520,6 +520,40 @@ describe("ChatCockpitPage", () => {
       ).toBeEnabled();
     });
 
+    // k3 P3（F-31 纠偏复审）：legacy 会话 reviewer_enabled_at_start=None 时前端
+    // reviewerEnabled 缺省 true，「确认并评审」可能撞后端如实 4xx
+    // （workspace_session_review_not_enabled）——拒收不能零反馈（F-28 同类），
+    // 复用 hard-error-notice 面就地亮出错误码+语义，决策面保持可重试。
+    it("shows a visible error notice when confirm-with-review is rejected by the server", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: "Unprocessable Entity",
+        json: async () => ({
+          code: "workspace_session_review_not_enabled",
+          message:
+            "review is not enabled for this workspace session; confirm without with_review to finalize",
+          details: {},
+        }),
+      } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      authorConfirmSession("story", { reviewerEnabled: true });
+      renderCockpitWith(mockWorkspaceWs());
+
+      await user.click(screen.getByRole("button", { name: "确认并评审" }));
+
+      const notice = await screen.findByTestId("hard-error-notice");
+      expect(notice).toHaveAttribute("role", "alert");
+      expect(notice).toHaveTextContent("workspace_session_review_not_enabled");
+      expect(notice).toHaveTextContent(
+        "review is not enabled for this workspace session",
+      );
+      // 失败不收敛：决策面保持敞开，可改点「确认定稿」。
+      expect(useWorkspaceStore.getState().sessionStatus).toBe("waiting_for_human");
+      expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
+    });
+
     it("wires terminate through ConfirmTwice to the WS abandon_human_gate sender", async () => {
       const user = userEvent.setup();
       authorConfirmSession("story");
