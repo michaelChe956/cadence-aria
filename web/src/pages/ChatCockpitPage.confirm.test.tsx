@@ -1,6 +1,7 @@
 import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
+import { subscribeToLifecycleInvalidation } from "../state/lifecycle-workbench-store";
 import type { TakeoverResponse } from "../api/types";
 import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -294,12 +295,22 @@ describe("ChatCockpitPage", () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({ workspace_session_id: "session_001", status: "confirmed" }),
+        text: async () =>
+          JSON.stringify({
+            workspace_session_id: "session_001",
+            issue_id: "issue_0001",
+            status: "confirmed",
+          }),
       } as unknown as Response);
       vi.stubGlobal("fetch", fetchMock);
       authorConfirmSession("story");
       const workspaceWs = mockWorkspaceWs();
       renderCockpitWith(workspaceWs);
+      // F-29：confirm 成功应通知 lifecycle invalidation（同页 workbench + 跨 tab）。
+      const invalidations: string[] = [];
+      const unsubscribe = subscribeToLifecycleInvalidation((event) => {
+        invalidations.push(event.issueId);
+      });
 
       await user.click(
         within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
@@ -327,6 +338,9 @@ describe("ChatCockpitPage", () => {
       expect(
         within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待"),
       ).toBeNull();
+      // F-29：confirm 响应携带 issue_id——invalidation 按 issue 精确通知。
+      expect(invalidations).toEqual(["issue_0001"]);
+      unsubscribe();
     });
 
     it("keeps the decision surface open when the HTTP confirm call fails", async () => {

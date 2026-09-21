@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, ClipboardCopy, GitBranch, History, Radio } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
 import { confirmWorkspaceSession, takeoverWorkspaceSession } from "../api/client";
+import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
   ChatEntryList,
@@ -479,9 +480,12 @@ export function ChatCockpitPage({
       detail: "http-confirm",
     });
     void confirmWorkspaceSession(targetSessionId)
-      .then(() => {
+      .then((session) => {
         useOperationAuditStore.getState().markCompleted(auditRecordId);
         useWorkspaceStore.getState().setSessionStatus("confirmed");
+        // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
+        // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
+        notifyLifecycleInvalidated(session.issue_id);
       })
       .catch((error: unknown) => {
         const code =

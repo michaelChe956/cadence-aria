@@ -14,6 +14,7 @@ import type {
 } from "../api/types";
 import { GroupFinalReadinessPanel } from "../components/coding-workspace/GroupFinalReadinessPanel";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import { errorMessage } from "./CodingWorkspaceControls";
 
 export function ReviewPanel() {
@@ -310,6 +311,9 @@ export function PrepareExecutionPlanPanel({
     onError(null);
     try {
       const updated = await confirmWorkItemExecutionPlan(requestAddress);
+      // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
+      // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
+      notifyLifecycleInvalidated(requestAddress.issueId);
       if (
         isCurrentRequest(requestAddressKey, requestGeneration) &&
         codingWorkspaceStoreMatchesAddress(requestAddress)

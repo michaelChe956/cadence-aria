@@ -278,3 +278,88 @@ export const useLifecycleWorkbenchStore = create<
     set({ focusedEntityKey: entityKey, isDrawerOpen: true }),
   closeDrawer: () => set({ focusedEntityKey: null, isDrawerOpen: false }),
 }));
+
+// ---------------------------------------------------------------------------
+// F-29：lifecycle invalidation 总线
+// ---------------------------------------------------------------------------
+// HTTP confirm（story/design AuthorConfirm、Work Item 执行计划）成功后，服务端
+// durable 投影已变化，但 Workbench 的 lifecycles 是 REST 一次性拉取——这里提供
+// 进程内 + 跨 tab 的失效通知：confirm 调用点 notifyLifecycleInvalidated(issueId)，
+// Workbench 订阅后定向刷新对应 issue 的 lifecycle。同页走进程内监听器
+// （BroadcastChannel 不回环到发送方自身），跨 tab 走 'lifecycle-invalidated'
+// 频道。环境无 BroadcastChannel 时自动降级为仅同页生效（不引入新库）。
+
+export type LifecycleInvalidationEvent = { issueId: string };
+
+type LifecycleInvalidationMessage = {
+  type: "lifecycle-invalidated";
+  issueId: string;
+};
+
+const LIFECYCLE_INVALIDATION_CHANNEL_NAME = "lifecycle-invalidated";
+
+const lifecycleInvalidationListeners = new Set<
+  (event: LifecycleInvalidationEvent) => void
+>();
+let lifecycleInvalidationChannel: BroadcastChannel | null = null;
+
+function dispatchLifecycleInvalidation(event: LifecycleInvalidationEvent): void {
+  for (const listener of [...lifecycleInvalidationListeners]) {
+    listener(event);
+  }
+}
+
+function ensureLifecycleInvalidationChannel(): BroadcastChannel | null {
+  if (lifecycleInvalidationChannel) {
+    return lifecycleInvalidationChannel;
+  }
+  if (typeof BroadcastChannel === "undefined") {
+    return null;
+  }
+  const channel = new BroadcastChannel(LIFECYCLE_INVALIDATION_CHANNEL_NAME);
+  channel.onmessage = (event: MessageEvent<LifecycleInvalidationMessage>) => {
+    const data = event.data;
+    if (
+      data &&
+      data.type === LIFECYCLE_INVALIDATION_CHANNEL_NAME &&
+      typeof data.issueId === "string"
+    ) {
+      dispatchLifecycleInvalidation({ issueId: data.issueId });
+    }
+  };
+  lifecycleInvalidationChannel = channel;
+  return channel;
+}
+
+function releaseLifecycleInvalidationChannelIfIdle(): void {
+  if (lifecycleInvalidationListeners.size > 0) {
+    return;
+  }
+  lifecycleInvalidationChannel?.close();
+  lifecycleInvalidationChannel = null;
+}
+
+/** confirm 成功后通知 lifecycle 失效（同页立即派发 + 跨 tab 广播）。 */
+export function notifyLifecycleInvalidated(issueId: string): void {
+  dispatchLifecycleInvalidation({ issueId });
+  try {
+    ensureLifecycleInvalidationChannel()?.postMessage({
+      type: LIFECYCLE_INVALIDATION_CHANNEL_NAME,
+      issueId,
+    } satisfies LifecycleInvalidationMessage);
+  } catch {
+    // 跨 tab 广播失败（如受限环境抛错）不影响同页刷新——静默降级。
+  }
+}
+
+/** 订阅 lifecycle 失效事件；返回取消订阅函数（最后一个订阅者退出时关闭频道）。 */
+export function subscribeToLifecycleInvalidation(
+  listener: (event: LifecycleInvalidationEvent) => void,
+): () => void {
+  lifecycleInvalidationListeners.add(listener);
+  ensureLifecycleInvalidationChannel();
+  return () => {
+    lifecycleInvalidationListeners.delete(listener);
+    releaseLifecycleInvalidationChannelIfIdle();
+  };
+}

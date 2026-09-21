@@ -1,4 +1,4 @@
-import { beforeEach, vi } from "vitest";
+import { beforeEach, vi, type Mock } from "vitest";
 import type {
   AggregateIndexActiveResponse,
   AggregateInitializationOperationSnapshot,
@@ -35,6 +35,11 @@ export function installIssueLifecycleWorkbenchTestHooks() {
     });
   });
 }
+
+// lifecycleFetch 的 mock fetch 契约（F-29 测试按命名类型引用，不用 ReturnType 推导）。
+export type LifecycleFetchMock = Mock<
+  (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+>;
 
 export function lifecycleFetch(options?: {
   duplicateCardIds?: boolean;
@@ -88,7 +93,10 @@ export function lifecycleFetch(options?: {
   workItemRepositoryGroups?: Array<Record<string, unknown>>;
   // Task 6：构造“有 story 无 design”的阶段 fixture（默认阶段应落在 design）。
   emptyDesignSpecs?: boolean;
-}) {
+  // F-29：初始 story 处于 draft（confirm 后 fake server 会把 durable 投影落成
+  // confirmed，供 invalidation 刷新测试观察 draft→confirmed 的卡片状态迁移）。
+  storyDraftInitially?: boolean;
+}): LifecycleFetchMock {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
   ];
@@ -211,6 +219,11 @@ export function lifecycleFetch(options?: {
         );
     if (options?.emptyDesignSpecs) {
       initial.design_specs = [];
+    }
+    if (options?.storyDraftInitially) {
+      for (const story of initial.story_specs) {
+        story.confirmation_status = "draft";
+      }
     }
     lifecycleByIssue.set(issueId, initial);
     return initial;
