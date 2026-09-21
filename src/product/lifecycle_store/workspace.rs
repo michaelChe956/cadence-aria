@@ -1015,6 +1015,11 @@ impl LifecycleStore {
             })
         {
             remove_dir_all_if_exists(&timeline_root.join(&session.id))?;
+            // session 附属目录（checkpoints 等）与 flock lock 文件必须一并清理：
+            // 残留 checkpoint 会被复用同 id 的新会话读到（v37 story spec 删除后
+            // 重新生成仍呈旧状态）。lock 清理先例见 delete_issue_shared_worktree。
+            remove_dir_all_if_exists(&sessions_root.join(&session.id))?;
+            remove_file_if_exists(&sessions_root.join(format!(".{}.json.lock", session.id)))?;
             remove_file_if_exists(&sessions_root.join(format!("{}.json", session.id)))?;
         }
         Ok(())

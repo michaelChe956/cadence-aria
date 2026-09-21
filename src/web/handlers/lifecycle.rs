@@ -18,7 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 mod deletion;
 mod preflight;
 
-pub use deletion::{delete_work_item, delete_work_item_plan};
+pub use deletion::{
+    delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,
+};
 use preflight::{
     SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
     preflight_single_repository_candidate,
@@ -792,28 +794,6 @@ fn mark_single_candidate_prepare_failure(
     let _ =
         lifecycle.append_workspace_message(session_id, "system".to_string(), message.to_string());
     let _ = lifecycle.update_workspace_session_status(session_id, WorkspaceSessionStatus::Failed);
-}
-
-pub async fn delete_story_spec(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, story_spec_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = LifecycleStore::new(product_app_paths(&state));
-    store
-        .delete_story_spec(&project_id, &issue_id, &story_spec_id)
-        .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
-}
-
-pub async fn delete_design_spec(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, design_spec_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = LifecycleStore::new(product_app_paths(&state));
-    store
-        .delete_design_spec(&project_id, &issue_id, &design_spec_id)
-        .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
 }
 
 pub async fn confirm_gate(

@@ -121,8 +121,12 @@ impl WorkspaceSessionRegistry {
         true
     }
 
-    /// 仅供单元测试验证幂等移除。
+    /// 无条件移除 session 的 registry 条目（幂等）。生产用途：实体删除 handler 在
+    /// 磁盘级联删除后驱逐内存 manager，避免同 id 复用时 WS 命中旧运行时状态。
+    /// 活动连接持有的旧 manager 由其 Arc 继续维持，不会影响新连接建新 manager。
     pub async fn remove(&self, session_id: &str) {
+        let creation_lock = self.creation_lock(session_id).await;
+        let _creation_guard = creation_lock.lock().await;
         self.sessions.lock().await.remove(session_id);
         self.creating.lock().await.remove(session_id);
     }

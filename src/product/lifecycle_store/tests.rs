@@ -401,6 +401,21 @@ fn delete_story_spec_removes_record_versions_session_and_timeline() {
         .unwrap();
     let session = create_session(&store, &story.id, WorkspaceType::Story);
     store.save_timeline_nodes(&session.id, &[]).unwrap();
+    // v37 issue_0001 数据面：session json / timeline / versions 被级联删除，但
+    // `workspace-sessions/<sid>/`（checkpoints）与 `.<sid>.json.lock` 残留——重新
+    // 生成复用同 id session 时旧 checkpoint 被新会话读到。
+    let sessions_root = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions");
+    let checkpoint_dir = sessions_root.join(&session.id).join("checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).unwrap();
+    std::fs::write(
+        checkpoint_dir.join("cp_001.json"),
+        r#"{"id":"cp_001","session_id":"session","message_index":7,"artifact_snapshot":null,"stage":"author_confirm","created_at":"2026-09-21T12:22:09Z"}"#,
+    )
+    .unwrap();
+    std::fs::write(sessions_root.join(format!(".{}.json.lock", session.id)), "").unwrap();
     let versions_root = store.versions_root(PROJECT_ID, ISSUE_ID, &story.id);
     let timeline_root = store
         .workspace_timeline_root_for_session(&session.id)
@@ -415,6 +430,12 @@ fn delete_story_spec_removes_record_versions_session_and_timeline() {
             .list_story_specs(PROJECT_ID, ISSUE_ID)
             .unwrap()
             .is_empty()
+    );
+    assert!(!sessions_root.join(&session.id).exists());
+    assert!(
+        !sessions_root
+            .join(format!(".{}.json.lock", session.id))
+            .exists()
     );
     assert!(
         store

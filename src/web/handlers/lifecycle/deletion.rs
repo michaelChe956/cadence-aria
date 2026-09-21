@@ -6,8 +6,15 @@ pub async fn delete_work_item(
 ) -> ApiResult<Json<serde_json::Value>> {
     let app_paths = product_app_paths(&state);
     let store = LifecycleStore::new(app_paths.clone());
+    let session_ids = workspace_session_ids_for_entities(
+        &store,
+        &project_id,
+        &issue_id,
+        std::slice::from_ref(&work_item_id),
+    )?;
     delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, &work_item_id)
         .await?;
+    evict_workspace_session_managers(&state, &session_ids).await;
     Ok(Json(json!({"status":"deleted"})))
 }
 
@@ -20,6 +27,11 @@ pub async fn delete_work_item_plan(
     let plan = store
         .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?;
+    // plan 级删除会连带下属 work item：连同其 session 的内存 manager 一并驱逐。
+    let mut entity_ids = vec![plan_id.clone()];
+    entity_ids.extend(plan.work_item_ids.iter().cloned());
+    let session_ids =
+        workspace_session_ids_for_entities(&store, &project_id, &issue_id, &entity_ids)?;
     if let Some(lineage) = schema_v2_plan_lineage(&app_paths, &project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?
     {
@@ -32,6 +44,7 @@ pub async fn delete_work_item_plan(
             &lineage,
         )
         .await?;
+        evict_workspace_session_managers(&state, &session_ids).await;
         return Ok(Json(json!({"status":"deleted"})));
     }
     // legacy plan 级门禁：存在 group coding attempt 则拒绝（与 schema v2 路径语义一致）。
@@ -54,7 +67,71 @@ pub async fn delete_work_item_plan(
         .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?;
     purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)?;
+    evict_workspace_session_managers(&state, &session_ids).await;
     Ok(Json(json!({"status":"deleted"})))
+}
+
+pub async fn delete_story_spec(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, story_spec_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = LifecycleStore::new(product_app_paths(&state));
+    let session_ids = workspace_session_ids_for_entities(
+        &store,
+        &project_id,
+        &issue_id,
+        std::slice::from_ref(&story_spec_id),
+    )?;
+    store
+        .delete_story_spec(&project_id, &issue_id, &story_spec_id)
+        .map_err(product_store_api_error)?;
+    evict_workspace_session_managers(&state, &session_ids).await;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
+pub async fn delete_design_spec(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, design_spec_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = LifecycleStore::new(product_app_paths(&state));
+    let session_ids = workspace_session_ids_for_entities(
+        &store,
+        &project_id,
+        &issue_id,
+        std::slice::from_ref(&design_spec_id),
+    )?;
+    store
+        .delete_design_spec(&project_id, &issue_id, &design_spec_id)
+        .map_err(product_store_api_error)?;
+    evict_workspace_session_managers(&state, &session_ids).await;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
+/// 收集 issue 下绑定到指定实体集合的 workspace session id。必须在磁盘删除前调用：
+/// 删除后 `list_workspace_sessions` 已读不到这些记录。
+fn workspace_session_ids_for_entities(
+    store: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    entity_ids: &[String],
+) -> ApiResult<Vec<String>> {
+    Ok(store
+        .list_workspace_sessions(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|session| entity_ids.contains(&session.entity_id))
+        .map(|session| session.id)
+        .collect())
+}
+
+/// 删除实体后驱逐其 workspace session 的内存 manager。registry 命中即复用
+/// （socket.rs `get_or_create_and_attach` 不回读磁盘）：不驱逐则重新生成复用同 id
+/// session 时，WS 会把删除前的旧 engine 状态（messages/artifact/stage）原样发给
+/// 前端（v37 反馈 #3：story spec 删不掉、重新生成仍旧错误态）。
+async fn evict_workspace_session_managers(state: &WebAppState, session_ids: &[String]) {
+    for session_id in session_ids {
+        state.workspace_sessions.remove(session_id).await;
+    }
 }
 
 /// 清理 plan store 中该 plan 的 draft、compile transaction 与 outline context index。
