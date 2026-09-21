@@ -434,6 +434,26 @@ pub enum WorkspaceConfirmOutcome {
     None,
 }
 
+/// HTTP confirm 端点的引擎裁决结果（F-31 fix round，k3 P1/P2）。
+///
+/// 端点不再自行判定「能否定稿」：引擎是 `stage` 的唯一权威，端点只按裁决做 durable 写与广播。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HttpConfirmDisposition {
+    /// 已接管本轮：进入 CrossReview 并申请 `ReviewOnly` run（Fake reviewer 的 Skipped
+    /// 快速路径落 HumanConfirm）。端点不得定稿，权威状态以广播的 session_state 收敛。
+    ReviewStarted,
+    /// 引擎判定本轮定稿：端点完成 durable 写（含类型化 confirm gate 错误面）后调用
+    /// `WorkspaceEngine::commit_finalize_artifact` 收敛引擎面（产物 confirmed_by /
+    /// 在途节点 / 终态 stage / Completed 节点）。
+    Finalize,
+    /// 会话已是 Confirmed 终态：幂等返回，不重复写入。
+    AlreadyConfirmed,
+    /// 当前 stage 不得定稿（run/评审在途，或终态未 Confirmed）：端点返回 409。
+    Rejected { stage: &'static str },
+    /// 非 story/design 会话：端点维持既有 store-only 定稿通路。
+    NotHandled,
+}
+
 // 退役留档（T5/REQ-RET-02）：AuthorDecisionOutcome 随 handle_author_decision/
 // handle_work_item_plan_outline_decision 删除（wire 唯一入口已退役）。
 

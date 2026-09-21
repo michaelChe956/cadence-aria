@@ -51,6 +51,7 @@ impl IntoResponse for ApiError {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
             "checkpoint_unsafe_dirty_worktree"
             | "workspace_session_ambiguous"
+            | "workspace_session_confirm_not_allowed"
             | "workspace_session_takeover_not_allowed" => StatusCode::CONFLICT,
             "coding_attempt_active"
             | "coding_attempt_ambiguous"

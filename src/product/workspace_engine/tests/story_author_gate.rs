@@ -320,3 +320,126 @@ async fn story_terminate_store_cas_rejects_drifted_expected_record() {
         "CAS 失配路径零写入"
     );
 }
+
+// F-31 fix round（k3 P1/P2）：HTTP confirm 端点的引擎裁决矩阵。引擎是 stage 的唯一权威——
+// 门态放行定稿，在途 stage（评审/生成/修订在途）拒收，已 Confirmed 终态幂等返回，非
+// story/design 不接管。CrossReview/Running 等评审在途 stage 在 it_core 面不可全覆盖：
+// provider run 任务在整段 drive 里持引擎锁，HTTP 端点只能观测到 durable running
+//（见 tests/it_core/workspace_ws_integration/part_02.rs 的 CrossReview 测试），故该矩阵在此钉测。
+#[tokio::test]
+async fn http_confirm_disposition_matrix_follows_stage_authority() {
+    // 门态：AuthorConfirm（本轮无需评审）/ HumanConfirm / PrepareContext → 定稿
+    for stage in [
+        WorkspaceStage::AuthorConfirm,
+        WorkspaceStage::HumanConfirm,
+        WorkspaceStage::PrepareContext,
+    ] {
+        let (_root, _lifecycle, mut engine, _event_rx) =
+            story_gate_fixture(WorkspaceType::Story).await;
+        engine.session.stage = stage.clone();
+        assert_eq!(
+            engine.http_confirm_disposition().await,
+            HttpConfirmDisposition::Finalize,
+            "门态 {stage:?} 必须放行定稿"
+        );
+    }
+
+    // 在途 stage：一律拒收且零写入（评审不被绕过/不被改写）
+    for stage in [
+        WorkspaceStage::CrossReview,
+        WorkspaceStage::Running,
+        WorkspaceStage::Revision,
+        WorkspaceStage::ReviewDecision,
+    ] {
+        let (_root, lifecycle, mut engine, _event_rx) =
+            story_gate_fixture(WorkspaceType::Story).await;
+        engine.session.stage = stage.clone();
+        assert_eq!(
+            engine.http_confirm_disposition().await,
+            HttpConfirmDisposition::Rejected {
+                stage: stage.as_str()
+            },
+            "在途 stage {stage:?} 必须拒收"
+        );
+        assert_eq!(engine.session().stage, stage, "拒收不得改写 stage");
+        assert_eq!(
+            engine.session().session_status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "拒收不得改写引擎状态"
+        );
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("durable story session");
+        assert_eq!(
+            durable.status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "拒收不得改写 durable 状态"
+        );
+    }
+
+    // 终态：已 Confirmed 幂等返回；未 Confirmed 的终态（terminated/failed/blocked）拒收
+    let (_root, _lifecycle, mut engine, _event_rx) = story_gate_fixture(WorkspaceType::Story).await;
+    engine.session.stage = WorkspaceStage::Completed;
+    engine.session.session_status = WorkspaceSessionStatus::Confirmed;
+    assert_eq!(
+        engine.http_confirm_disposition().await,
+        HttpConfirmDisposition::AlreadyConfirmed
+    );
+    engine.session.session_status = WorkspaceSessionStatus::Terminated;
+    assert_eq!(
+        engine.http_confirm_disposition().await,
+        HttpConfirmDisposition::Rejected { stage: "completed" },
+        "未 Confirmed 的终态不得被确认改写"
+    );
+
+    // 非 story/design：不接管（端点维持既有 store-only 通路）
+    let (_root, _lifecycle, mut engine, _event_rx) = story_gate_fixture(WorkspaceType::Story).await;
+    engine.session.workspace_type = WorkspaceType::WorkItemPlan;
+    assert_eq!(
+        engine.http_confirm_disposition().await,
+        HttpConfirmDisposition::NotHandled
+    );
+
+    // review 启用且本轮产物未评审：接管本轮（F-31 正向锚）——Fake reviewer 快速路径
+    //（ReviewerRun=Skipped + mark_latest_artifact_reviewed）落 HumanConfirm。
+    let (_root, lifecycle, mut engine, _event_rx) = story_gate_fixture(WorkspaceType::Story).await;
+    engine.session.reviewer_enabled_at_start = Some(true);
+    engine.session.stage = WorkspaceStage::AuthorConfirm;
+    engine
+        .artifact_versions
+        .push(crate::web::workspace_ws_types::ArtifactVersion {
+            version: 1,
+            payload: crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+                markdown: "# Story Spec\n".to_string(),
+                diff: None,
+            },
+            generated_by: ProviderName::Fake,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: "2026-09-21T00:00:00Z".to_string(),
+            source_node_id: "timeline_node_001".to_string(),
+        });
+    assert_eq!(
+        engine.http_confirm_disposition().await,
+        HttpConfirmDisposition::ReviewStarted,
+        "review 启用且本轮未评审必须接管本轮"
+    );
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::HumanConfirm,
+        "Fake reviewer 快速路径落人工确认门"
+    );
+    assert!(
+        engine.timeline_nodes.iter().any(|node| {
+            node.node_type == TimelineNodeType::ReviewerRun
+                && node.status == TimelineNodeStatus::Skipped
+        }),
+        "Fake reviewer 快速路径必须留 Skipped 评审节点"
+    );
+    let durable = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("durable story session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::WaitingForHuman);
+}

@@ -64,10 +64,22 @@ impl WorkspaceEngine {
         }
     }
 
-    /// 定稿当前产物：标记人工确认、落库 Confirmed、进入 Completed 阶段并建 Completed 节点。
+    /// 定稿当前产物：先过 confirm gate，再提交定稿（[`Self::commit_finalize_artifact`]）。
     /// 由 HumanConfirm::Confirm 分支（handle_confirm）与 AuthorDecision::AcceptFinalize 共用。
     pub(crate) async fn finalize_current_artifact(&mut self, summary: &str) -> Result<(), String> {
         self.validate_confirm_aggregate_spec_gate()?;
+        self.commit_finalize_artifact(summary).await;
+        Ok(())
+    }
+
+    /// 定稿提交面（gate 已过）：完成在途节点、标记最新产物人工确认、durable 落 Confirmed、
+    /// 终态 stage 与 Completed 节点。
+    ///
+    /// HTTP confirm 端点在自己的 durable 写（带 `ConfirmAggregateGateError` → 4xx/404 映射的
+    /// gate）之后复用本方法，避免第二实现让引擎停在门态（F-31 fix round k3 P2：Fake reviewer
+    /// 快速路径的二次确认此前走 store-only 定稿，缺 `mark_latest_artifact_confirmed`、
+    /// Completed 节点与终态 stage——durable 时间线与引擎投影分叉）。
+    pub(crate) async fn commit_finalize_artifact(&mut self, summary: &str) {
         self.complete_active_node(Some(summary.to_string())).await;
         self.mark_latest_artifact_confirmed(Some("human".to_string()));
         if let Some(store) = &self.lifecycle_store {
@@ -109,7 +121,6 @@ impl WorkspaceEngine {
                 status: TimelineNodeStatus::Completed,
             })
             .await;
-        Ok(())
     }
 
     // 退役留档（T5/REQ-RET-02）：legacy 决策引擎面随消息族删除——

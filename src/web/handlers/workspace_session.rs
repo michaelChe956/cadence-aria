@@ -2,6 +2,7 @@ use super::dto::*;
 use super::lifecycle::confirm_workspace_entity;
 use super::support::*;
 use super::*;
+use crate::product::workspace_engine::{HttpConfirmDisposition, workspace_stage_for_status};
 
 pub async fn workspace_session_message(
     State(state): State<WebAppState>,
@@ -97,27 +98,84 @@ pub async fn workspace_session_confirm(
     let session = lifecycle
         .get_workspace_session(&session_id)
         .map_err(product_store_api_error)?;
-    // F-31：story/design 的 AuthorConfirm 门确认面就是本端点（WS confirm 帧被 stage 矩阵
-    // 拒收），C3-T5 删除 handle_author_decision 时连带删掉了「确认后触发 review」，F-20
-    // 只补偿了确认通道。故落 Confirmed 前先问引擎处置意见：review 启用且本轮产物尚未评审
-    // 时，本轮交由引擎进入 CrossReview 并申请 ReviewOnly run，定稿留给 review 报告回门后
-    // 的下一次确认。活引擎缺席（无连接）时退回既有通路——无 run 可驱动，不能只落 stage。
-    if let Some(manager) = state.workspace_sessions.get(&session_id).await {
-        let started_review = {
+    let manager = state.workspace_sessions.get(&session_id).await;
+
+    // ── F-31 fix round（k3 P1）：在途守卫 ──────────────────────────────────
+    // story/design 的 durable `running` 只有一个写点——F-31 的评审启动
+    // （`begin_review_after_author_confirm` 进 CrossReview 时按
+    // workspace_status_for_stage 落 Running），故它等价于「评审在途」。
+    // 此时端点既不得定稿也不得等锁：
+    // ① provider run 任务在整段 drive 里持引擎锁（见 workspace_ws_handler/run 的
+    //    「stream owner holds the engine mutex」），等锁会把确认请求挂到评审结束后
+    //    才落定稿——用户双击/多 tab 的第二次确认变成不可诊断的静默定稿；
+    // ② 落 Confirmed 会让迟到的 review 报告经 route_review_report_to_author_confirm
+    //    把已定稿会话拖回 AuthorConfirm（Running→Confirmed→WaitingForHuman），
+    //    与 F-30 终态口径相悖。
+    if matches!(
+        session.workspace_type,
+        WorkspaceType::Story | WorkspaceType::Design
+    ) && session.status == WorkspaceSessionStatus::Running
+    {
+        // stage 标注：锁空闲时取引擎 stage（残留态可诊断到 cross_review/revision），
+        // run 持锁驱动中 stage 不可读，退回 durable 在途状态口径。
+        let engine_handle = manager.as_ref().map(|manager| manager.engine());
+        let stage = match engine_handle {
+            Some(handle) => match handle.try_lock() {
+                Ok(engine) => engine.session().stage.as_str(),
+                Err(_) => workspace_stage_for_status(&session.status).as_str(),
+            },
+            None => workspace_stage_for_status(&session.status).as_str(),
+        };
+        return Err(ApiError::runtime(
+            "workspace_session_confirm_not_allowed",
+            "workspace session is in flight; confirm is not allowed before the run returns to a human gate",
+            json!({
+                "workspace_session_id": session_id,
+                "stage": stage,
+                "status": workspace_session_status_text(&session.status),
+            }),
+        ));
+    }
+
+    // ── F-31：引擎裁决（stage 唯一权威）──────────────────────────────────
+    // 活引擎在场时先问引擎：门态放行定稿，在途 stage（引擎内存面领先 durable 的残留态）
+    // 拒收，review 启用且本轮未评审则接管本轮。引擎缺席（无 run 可驱动）退回既有通路。
+    let disposition = match &manager {
+        Some(manager) => {
             let engine_handle = manager.engine();
             let mut engine = engine_handle.lock().await;
-            engine.begin_review_after_author_confirm().await
-        };
-        if started_review {
+            engine.http_confirm_disposition().await
+        }
+        None => HttpConfirmDisposition::NotHandled,
+    };
+    match disposition {
+        HttpConfirmDisposition::ReviewStarted => {
             // 端点 200 后发请求 tab 会乐观置 confirmed，权威状态以本帧收敛
             // （cross_review/评审在途），否则已连接 tab 停在 confirmed 终态投影。
-            manager.broadcast_current_session_state();
+            if let Some(manager) = &manager {
+                manager.broadcast_current_session_state();
+            }
             let current = lifecycle
                 .get_workspace_session(&session_id)
                 .map_err(product_store_api_error)?;
             return Ok(Json(workspace_session_dto(current)));
         }
+        HttpConfirmDisposition::Rejected { stage } => {
+            return Err(ApiError::runtime(
+                "workspace_session_confirm_not_allowed",
+                "workspace session confirm is not allowed in the current stage",
+                json!({"workspace_session_id": session_id, "stage": stage}),
+            ));
+        }
+        HttpConfirmDisposition::AlreadyConfirmed => {
+            let current = lifecycle
+                .get_workspace_session(&session_id)
+                .map_err(product_store_api_error)?;
+            return Ok(Json(workspace_session_dto(current)));
+        }
+        HttpConfirmDisposition::Finalize | HttpConfirmDisposition::NotHandled => {}
     }
+
     // Blocker 2 修复：先 gate 后确认。confirm_workspace_entity 内部先跑 product 层
     // validate_confirm_aggregate_spec（多仓 involved/change_order 校验），gate 失败即返回
     // 4xx，此时 session 尚未被置 Confirmed（不再出现“先确认后 gate 失败遗留已 Confirmed”的不一致）。
@@ -125,6 +183,15 @@ pub async fn workspace_session_confirm(
     lifecycle
         .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Confirmed)
         .map_err(product_store_api_error)?;
+    if let HttpConfirmDisposition::Finalize = disposition {
+        // F-31 fix round（k3 P2）：引擎面与端点同一提交实现——Fake reviewer 快速路径的
+        // 二次确认此前落 store-only，缺 confirmed_by / Completed 节点 / 终态 stage。
+        if let Some(manager) = &manager {
+            let engine_handle = manager.engine();
+            let mut engine = engine_handle.lock().await;
+            engine.commit_finalize_artifact("已确认通过").await;
+        }
+    }
     let confirmed = lifecycle
         .append_workspace_message(
             &session_id,
@@ -135,7 +202,7 @@ pub async fn workspace_session_confirm(
     // F-25b：durable 写完成后向已连接 WS 广播 confirmed session_state——前端
     // 乐观 setSessionStatus 只覆盖发请求的 tab，其他 tab/重连必须由服务端推送
     // 才能看到投影收敛（对照 F-09 HumanGateOpened 广播先例）。
-    if let Some(manager) = state.workspace_sessions.get(&session_id).await {
+    if let Some(manager) = &manager {
         manager.broadcast_http_confirm(&confirmed).await;
     }
     Ok(Json(workspace_session_dto(confirmed)))

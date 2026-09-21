@@ -589,6 +589,274 @@ async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() 
     server.abort();
 }
 
+// F-31 fix round（k3 P1）：评审在途（stage=cross_review / durable=running）时的第二次 HTTP
+// confirm 必须被拒。修复前端点无 stage/status 守卫：`begin_review_after_author_confirm` 因
+// stage!=author_confirm 返 false 即落到 confirm_workspace_entity + update_status(Confirmed)——
+// 评审未回门就定稿，迟到 review 报告再经 route_review_report_to_author_confirm 把已 Confirmed
+// 会话拖回 author_confirm（Running→Confirmed→WaitingForHuman，与 F-30 终态口径相悖）。
+// 触发面：双击确认 / 多 tab 在评审窗口内再确认。
+#[tokio::test]
+async fn http_confirm_during_cross_review_is_rejected_without_finalizing() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            author_prompts,
+        )),
+    );
+    // 评审 provider 挂起不返回：把第二次 confirm 钉在「评审在途」窗口内。
+    registry.register(ProviderName::Codex, Arc::new(HangingStreamingProvider));
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let served_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served_app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+
+    // 第一次确认：review 未跑 → 接管本轮进入 cross_review（durable 状态同口径落 running）。
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by": "user"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["status"], "running",
+        "首次确认进入评审，durable 状态须与 cross_review 口径一致：{body}"
+    );
+    assert_eq!(
+        recv_until_stage(&mut ws, "cross_review").await,
+        "cross_review"
+    );
+
+    // 评审窗口内的第二次确认：必须立即 409——既不阻塞（run 任务持引擎锁跑完整段
+    // provider drive，阻塞等锁会把确认挂到评审结束后才静默定稿），也不落定稿写入。
+    let (status, body) = timeout(
+        Duration::from_secs(5),
+        request_json(
+            app,
+            Method::POST,
+            "/api/workspace-sessions/workspace_session_0001/confirm",
+            json!({"confirmed_by": "user"}),
+        ),
+    )
+    .await
+    .expect("评审在途的 confirm 必须在守卫处立即拒收，不得阻塞等 run 释放引擎锁");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "评审在途的确认必须被拒（不得绕过评审定稿）：{body}"
+    );
+    assert_eq!(
+        body["code"], "workspace_session_confirm_not_allowed",
+        "{body}"
+    );
+    assert_eq!(body["details"]["stage"], "running", "{body}");
+    assert_eq!(body["details"]["status"], "running", "{body}");
+
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let session = lifecycle
+        .get_workspace_session("workspace_session_0001")
+        .expect("workspace session");
+    assert_eq!(
+        session.status,
+        cadence_aria::product::models::WorkspaceSessionStatus::Running,
+        "被拒的确认不得改写 durable 会话状态"
+    );
+    let story = lifecycle
+        .list_story_specs("project_0001", "issue_0001")
+        .expect("story specs")
+        .into_iter()
+        .find(|spec| spec.id == "story_spec_0001")
+        .expect("story spec entity");
+    assert_eq!(
+        story.confirmation_status,
+        cadence_aria::product::models::LifecycleConfirmationStatus::Draft,
+        "被拒的确认不得越过评审直接把实体落 Confirmed"
+    );
+    let nodes = lifecycle
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("timeline nodes");
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::Completed),
+        "评审在途的确认不得建 Completed 节点，got {nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|node| {
+            node.node_type == TimelineNodeType::ReviewerRun
+                && node.status == TimelineNodeStatus::Active
+        }),
+        "拒收确认后评审 run 必须仍在途（评审不被绕过/中断），got {nodes:?}"
+    );
+
+    drop(ws);
+    server.abort();
+}
+
+// F-31 fix round（k3 P2）：Fake reviewer 快速路径的二次 HTTP confirm 必须走引擎同一定稿实现。
+// 修复前：首次确认被接管后 `start_review` 走 Skipped 快速路径落 HumanConfirm
+// （durable=waiting_for_human），第二次确认因 stage!=author_confirm 返 false 而落到 store-only
+// 定稿——不经引擎 `finalize_current_artifact`，缺 `mark_latest_artifact_confirmed`
+//（产物 confirmed_by 为空）与 Completed 节点，引擎 stage 停留门态，durable 时间线与引擎投影分叉。
+#[tokio::test]
+async fn http_confirm_after_fake_reviewer_skip_finalizes_through_engine() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "fake", 1).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            author_prompts,
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let served_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served_app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+
+    // 第一次确认：review 未跑 → Fake reviewer 快速路径（Skipped）落 HumanConfirm。
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by": "user"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["status"], "waiting_for_human",
+        "Fake reviewer 快速路径确认后停在人工确认门：{body}"
+    );
+
+    // 第二次确认：引擎同实现定稿（修复前 store-only，缺 confirmed_by / Completed 节点）。
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by": "user"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "confirmed", "{body}");
+
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let versions = lifecycle
+        .list_artifact_versions("workspace_session_0001")
+        .expect("artifact versions");
+    let current = versions
+        .iter()
+        .find(|version| version.is_current)
+        .expect("current artifact version");
+    assert_eq!(
+        current.confirmed_by.as_deref(),
+        Some("human"),
+        "引擎定稿必须落 mark_latest_artifact_confirmed：{versions:?}"
+    );
+    let nodes = lifecycle
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("timeline nodes");
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node.node_type == TimelineNodeType::Completed),
+        "引擎定稿必须建 Completed 节点，got {nodes:?}"
+    );
+
+    // stage 一致：引擎面收敛后的广播 session_state 必须落 completed（不得停在门态）。
+    let mut confirmed_stage = None;
+    for _ in 0..20 {
+        let message = timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("post-confirm frame timeout")
+            .expect("post-confirm frame stream")
+            .expect("post-confirm frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let value: Value = serde_json::from_str(&text).expect("post-confirm frame json");
+        if value["type"] == "session_state" && value["session_status"] == "confirmed" {
+            confirmed_stage = value["stage"].as_str().map(str::to_string);
+            break;
+        }
+    }
+    assert_eq!(
+        confirmed_stage.as_deref(),
+        Some("completed"),
+        "定稿后的 session_state stage 必须与 Confirmed 同口径收敛为 completed"
+    );
+
+    drop(ws);
+    server.abort();
+}
+
 fn set_workspace_session_status_field(root: &TempDir, status: &str) {
     let session_path = root.path().join(
         ".aria/projects/project_0001/issues/issue_0001/workspace-sessions/workspace_session_0001.json",
