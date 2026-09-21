@@ -53,10 +53,10 @@ import type {
 } from "../../api/types";
 import {
   groupLifecycleCards,
-  subscribeToLifecycleInvalidation,
   useLifecycleWorkbenchStore,
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
+import { useLifecycleInvalidationRefresh } from "./useLifecycleInvalidationRefresh";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import {
   CreateProjectDialog,
@@ -121,7 +121,6 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   force_frontend_backend_split: true,
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
-const POLL_INTERVAL_MS = 2_000;
 
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
@@ -203,22 +202,15 @@ export function IssueLifecycleWorkbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // F-29：confirm 成功后的 lifecycle invalidation 订阅（同页 notify + 跨 tab
-  // BroadcastChannel）。订阅只做一次；handler 经 ref 间接层保持最新闭包，
-  // 避免每次 render 重订阅。
-  const refreshInvalidatedIssueRef = useRef<(issueId: string) => void>(() => {});
-  useEffect(() => {
-    refreshInvalidatedIssueRef.current = (issueId: string) => {
-      void refreshInvalidatedIssue(issueId);
-    };
+  // F-29：confirm 成功后的 lifecycle invalidation 订阅——定向刷新对应 issue。
+  useLifecycleInvalidationRefresh({
+    selectedProjectId,
+    lifecycles,
+    refreshRequestId,
+    setLifecycles,
+    setError,
+    setBusy,
   });
-  useEffect(
-    () =>
-      subscribeToLifecycleInvalidation((event) => {
-        refreshInvalidatedIssueRef.current(event.issueId);
-      }),
-    [],
-  );
 
   useEffect(() => {
     if (focusEntityKey === undefined) {
@@ -351,50 +343,6 @@ export function IssueLifecycleWorkbench({
 
   function isLatestRefresh(requestId: number) {
     return requestId === refreshRequestId.current;
-  }
-
-  // F-29：invalidation 到达时定向刷新对应 issue 的 durable 投影——不整页重拉，
-  // 只替换该 issue 的 lifecycle 条目；bump requestId 使在途的旧全量 refresh 失效，
-  // 避免其（confirm 之前发起的）旧数据回写覆盖新状态。
-  async function refreshInvalidatedIssue(issueId: string) {
-    if (!selectedProjectId) {
-      return;
-    }
-    const existing = lifecycles.find(
-      (lifecycle) => lifecycle.issue.issue_id === issueId,
-    );
-    if (!existing) {
-      // 当前未展示该 issue（其它 project / 未加载）——无需动作。
-      return;
-    }
-    const requestId = refreshRequestId.current + 1;
-    refreshRequestId.current = requestId;
-    try {
-      const normalized = normalizeLifecycleResponse(
-        await getIssueLifecycle(issueId, selectedProjectId),
-        existing.issue,
-      );
-      if (!isLatestRefresh(requestId)) {
-        return;
-      }
-      setLifecycles((previous) =>
-        previous.map((lifecycle) =>
-          lifecycle.issue.issue_id === issueId ? normalized : lifecycle,
-        ),
-      );
-    } catch (reason) {
-      if (isLatestRefresh(requestId)) {
-        setError(
-          reason instanceof Error
-            ? reason.message
-            : "refresh invalidated lifecycle failed",
-        );
-      }
-    } finally {
-      if (isLatestRefresh(requestId)) {
-        setBusy(false);
-      }
-    }
   }
 
   const allColumns = useMemo(
