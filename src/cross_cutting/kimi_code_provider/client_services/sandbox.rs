@@ -699,7 +699,7 @@ mod tests {
             &cwd,
             Some(42),
             true,
-            &[git_common.clone()],
+            std::slice::from_ref(&git_common),
             &env,
             &PathBuf::from("/usr/bin/git"),
             &["status".to_string()],
