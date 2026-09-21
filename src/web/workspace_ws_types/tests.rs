@@ -790,6 +790,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         plan_candidate_ir_ref: None,
         mechanical_report_ref: None,
         publication_provenance_ref: None,
+        pending_choice_requests: Vec::new(),
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");

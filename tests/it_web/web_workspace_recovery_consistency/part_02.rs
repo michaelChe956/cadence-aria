@@ -144,6 +144,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         plan_candidate_ir_ref: None,
         mechanical_report_ref: None,
         publication_provenance_ref: None,
+        pending_choice_requests: Vec::new(),
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");

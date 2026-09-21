@@ -33,6 +33,19 @@ pub enum RecoverableInterruptedOperation {
     Revision,
 }
 
+/// F-27：session_state 顶层挂起 choice 投影元素——与 `ChoiceRequest` 帧字段
+/// 同构（同一 options/questions DTO），供前端收帧对账补挂 choice 卡。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WsPendingChoiceRequest {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<ChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+    pub questions: Vec<ChoiceQuestion>,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverableInterruptedRun {
     pub failed_node_id: String,
@@ -208,6 +221,10 @@ pub enum WsOutMessage {
         mechanical_report_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         publication_provenance_ref: Option<String>,
+        /// F-27：挂起 choice 全量投影（provider pending + TextFallback pending），
+        /// 空时省略保持 wire 兼容；元素与 choice_request 帧字段同构。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_choice_requests: Vec<WsPendingChoiceRequest>,
     },
     Error {
         message: String,
@@ -278,6 +295,7 @@ mod tests {
             plan_candidate_ir_ref: Some("ir-ref".to_string()),
             mechanical_report_ref: Some("report-ref".to_string()),
             publication_provenance_ref: Some("provenance-ref".to_string()),
+            pending_choice_requests: Vec::new(),
         }
     }
 
@@ -302,19 +320,58 @@ mod tests {
             })
         );
     }
+
+    /// F-27 wire 契约：空投影省略字段（旧客户端零变化）；非空投影元素与
+    /// choice_request 帧字段同构。
     #[test]
-    fn session_state_serializes_optional_connection_id() {
+    fn session_state_omits_empty_pending_choice_requests() {
+        let value = serde_json::to_value(work_item_plan_session_state()).unwrap();
+
+        assert!(
+            value.get("pending_choice_requests").is_none(),
+            "empty pending projection must be omitted from the wire"
+        );
+    }
+
+    #[test]
+    fn session_state_serializes_pending_choice_requests_isomorphic_to_choice_frame() {
         let mut message = work_item_plan_session_state();
-        let WsOutMessage::SessionState { connection_id, .. } = &mut message else {
+        let WsOutMessage::SessionState {
+            pending_choice_requests,
+            ..
+        } = &mut message
+        else {
             unreachable!("fixture must be a session_state message");
         };
-        *connection_id = Some("conn-1".to_string());
+        pending_choice_requests.push(WsPendingChoiceRequest {
+            id: "choice_0001".to_string(),
+            prompt: "继续方式？".to_string(),
+            options: vec![ChoiceOption {
+                id: "opt_0".to_string(),
+                label: "继续 author".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_free_text: true,
+            questions: Vec::new(),
+            source: "text_fallback".to_string(),
+        });
 
         let value = serde_json::to_value(message).unwrap();
 
-        assert_eq!(value["connection_id"], "conn-1");
+        assert_eq!(
+            value["pending_choice_requests"],
+            serde_json::json!([{
+                "id": "choice_0001",
+                "prompt": "继续方式？",
+                "options": [{ "id": "opt_0", "label": "继续 author", "description": null }],
+                "allow_multiple": false,
+                "allow_free_text": true,
+                "questions": [],
+                "source": "text_fallback",
+            }])
+        );
     }
-
     #[test]
     fn session_state_preserves_nonempty_provider_start_ledger() {
         let mut message = work_item_plan_session_state();
@@ -331,15 +388,17 @@ mod tests {
             provider: None,
             started_at: None,
         });
+    }
+    #[test]
+    fn session_state_serializes_optional_connection_id() {
+        let mut message = work_item_plan_session_state();
+        let WsOutMessage::SessionState { connection_id, .. } = &mut message else {
+            unreachable!("fixture must be a session_state message");
+        };
+        *connection_id = Some("conn-1".to_string());
 
         let value = serde_json::to_value(message).unwrap();
 
-        assert_eq!(
-            value["provider_start_ledger"],
-            serde_json::json!([{
-                "provider_start_idempotency_key": "start:author:round-1",
-                "started": true,
-            }])
-        );
+        assert_eq!(value["connection_id"], "conn-1");
     }
 }

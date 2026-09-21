@@ -1,4 +1,5 @@
 use super::*;
+use crate::web::workspace_ws_types::WsPendingChoiceRequest;
 
 mod stream;
 mod timeline;
@@ -518,7 +519,69 @@ impl WorkspaceEngine {
             plan_candidate_ir_ref: self.session.plan_candidate_ir_ref.clone(),
             mechanical_report_ref: self.session.mechanical_report_ref.clone(),
             publication_provenance_ref: self.session.publication_provenance_ref.clone(),
+            pending_choice_requests: self.pending_choice_requests_projection(),
         }
+    }
+    /// F-27：session_state 顶层挂起 choice 全量投影，双来源统一：
+    /// provider pending（drive 循环登记簿快照——run 持锁窗口经 durable 投影
+    /// 临时 engine 读同一登记簿，见 provider_drive.rs 文件头注释）与
+    /// TextFallback pending（引擎 `pending_author_choice`——文本提问回退，
+    /// router 侧 F-24 挂起帧不登记该源，投影是其唯一恢复来源）。
+    /// 与 provider_drive.rs 文本回退事件（EngineEvent::ChoiceRequest
+    /// source=TextFallback）逐字段同构；id 去重后按 id 稳定排序。
+    fn pending_choice_requests_projection(&self) -> Vec<WsPendingChoiceRequest> {
+        let mut requests: Vec<WsPendingChoiceRequest> =
+            super::provider_drive::pending_choice_requests_snapshot(&self.session.session_id)
+                .into_iter()
+                .map(|data| {
+                    let questions = data.effective_questions();
+                    WsPendingChoiceRequest {
+                        id: data.id,
+                        prompt: data.prompt.clone(),
+                        options: data
+                            .options
+                            .into_iter()
+                            .map(crate::web::workspace_ws_handler::ws_choice_option)
+                            .collect(),
+                        allow_multiple: data.allow_multiple,
+                        allow_free_text: data.allow_free_text,
+                        questions: questions
+                            .into_iter()
+                            .map(crate::web::workspace_ws_handler::ws_choice_question)
+                            .collect(),
+                        source: data.source.as_str().to_string(),
+                    }
+                })
+                .collect();
+        if let Some(author_choice) = self.pending_author_choice.as_ref() {
+            let fallback = WsPendingChoiceRequest {
+                id: author_choice.id.clone(),
+                prompt: author_choice.prompt.clone(),
+                options: author_choice
+                    .options
+                    .clone()
+                    .into_iter()
+                    .map(crate::web::workspace_ws_handler::ws_choice_option)
+                    .collect(),
+                allow_multiple: false,
+                allow_free_text: true,
+                questions: vec![crate::web::workspace_ws_handler::ws_choice_question(
+                    ChoiceQuestionData {
+                        id: "default".to_string(),
+                        prompt: author_choice.prompt.clone(),
+                        options: author_choice.options.clone(),
+                        allow_multiple: false,
+                        allow_free_text: true,
+                    },
+                )],
+                source: ChoiceRequestSource::TextFallback.as_str().to_string(),
+            };
+            if !requests.iter().any(|request| request.id == fallback.id) {
+                requests.push(fallback);
+            }
+        }
+        requests.sort_by(|a, b| a.id.cmp(&b.id));
+        requests
     }
 
     /// F-25b：HTTP confirm（handler 层直写 durable）后的内存同步面。AuthorConfirm/

@@ -3,6 +3,7 @@ use super::*;
 mod aggregate_writeback;
 mod artifact_retry;
 mod choice_audit;
+mod pending_choices;
 mod watchdog;
 
 use crate::product::lifecycle_store::spec::ExistingSpecRecord;
@@ -12,6 +13,8 @@ use crate::product::workspace_engine::aggregate_output_parser::{
     parse_design_aggregate_output, parse_story_aggregate_output,
 };
 use choice_audit::ChoiceResponseAuditInput;
+use pending_choices::PendingChoiceRequests;
+pub(crate) use pending_choices::pending_choice_requests_snapshot;
 pub(crate) use watchdog::{PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT};
 
 impl WorkspaceEngine {
@@ -313,7 +316,9 @@ impl WorkspaceEngine {
         let mut commands_open = true;
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
-        let mut pending_choice_requests: HashMap<String, ChoiceRequestData> = HashMap::new();
+        // F-27：挂起集经 PendingChoiceRequests 镜像到进程级登记簿（见文件头
+        // 注释），session_state 全量投影据此补挂丢失的 choice 卡。
+        let mut pending_choice_requests = PendingChoiceRequests::new(&self.session.session_id);
         // F-19 零活动看门狗：事件/命令任一活动即重置；等待人工权限/选择应答
         // 期间挂起（人工等待由 ApprovalBridge PERMISSION_TIMEOUT 与其
         // PermissionTimeout 事件收口，不是 provider 楔死）。
@@ -377,10 +382,7 @@ impl WorkspaceEngine {
                     // F-22/F-19b：choice 卡丢失/无人应答超界——处置与看门狗
                     // 触发一致（Abort kill 链 + cancel + 失败节点原因码 +
                     // finish_failed_run 回 prepare_context 可重跑）。
-                    let pending_ids: Vec<&str> = pending_choice_requests
-                        .keys()
-                        .map(String::as_str)
-                        .collect();
+                    let pending_ids: Vec<&str> = pending_choice_requests.ids();
                     eprintln!(
                         "[aria-cancellation] workspace provider_drive choice_wait_timeout trigger=provider_choice_wait_timeout session_id={} role={role:?} pending={:?} timeout_secs={}",
                         self.session.session_id,
@@ -597,7 +599,7 @@ impl WorkspaceEngine {
                             let questions = request.effective_questions();
                             // F-22/F-19b：pending 由空转非空时起算/重置等待界。
                             let choice_wait_started = pending_choice_requests.is_empty();
-                            pending_choice_requests.insert(request.id.clone(), request.clone());
+                            pending_choice_requests.insert(request.clone());
                             if choice_wait_started {
                                 choice_wait_timer
                                     .as_mut()

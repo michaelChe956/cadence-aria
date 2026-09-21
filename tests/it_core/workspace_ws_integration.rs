@@ -6,3 +6,4 @@ include!("workspace_ws_integration/part_05.rs");
 include!("workspace_ws_integration/part_06.rs");
 include!("workspace_ws_integration/part_06b.rs");
 include!("workspace_ws_integration/part_07.rs");
+include!("workspace_ws_integration/part_08.rs");
