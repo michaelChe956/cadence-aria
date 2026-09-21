@@ -54,6 +54,9 @@ const store = useWorkspaceStore.getState();
       invalidatedPreStageNodeIds.clear();
       store.setSessionState(msg as never);
       store.rebuildChatEntries();
+      // F-27：choice 卡不依赖单帧送达——session_state 全量投影带挂起 choice，
+      // rebuild 后按 pending 补挂（幂等 upsert；pending 已移除的卡随 rebuild 消失）。
+      reconcilePendingChoiceRequests(store, msg);
       break;
     case "stream_chunk":
       {
@@ -263,23 +266,20 @@ const store = useWorkspaceStore.getState();
       });
       break;
     case "choice_request":
-      store.appendChatEntry({
-        id: chatEntryId("choice_request", msg.id as string),
-        type: "choice_request",
-        role: "system",
-        content: msg.prompt as string,
-        timestamp: new Date().toISOString(),
-        node_id: store.activeNodeId ?? undefined,
-        metadata: {
-          request_id: msg.id as string,
-          prompt: msg.prompt as string,
-          options: (msg.options as unknown[]) ?? [],
-          questions: Array.isArray(msg.questions) ? msg.questions : [],
-          allow_multiple: msg.allow_multiple === true,
-          allow_free_text: msg.allow_free_text === true,
-          source: typeof msg.source === "string" ? msg.source : "provider_choice",
-        },
-      });
+      store.appendChatEntry(
+        choiceRequestEntry(
+          {
+            id: msg.id as string,
+            prompt: msg.prompt as string,
+            options: (msg.options as unknown[]) ?? [],
+            questions: msg.questions,
+            allow_multiple: msg.allow_multiple === true,
+            allow_free_text: msg.allow_free_text === true,
+            source: msg.source,
+          },
+          store.activeNodeId,
+        ),
+      );
       break;
     case "provider_status":
       store.setProviderStatus(msg.status as ProviderStatus);
@@ -540,6 +540,77 @@ const store = useWorkspaceStore.getState();
       break;
   }
 }
+
+type ChoiceRequestFrame = {
+  id: string;
+  prompt: string;
+  options: unknown[];
+  questions: unknown;
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+  source: unknown;
+};
+
+// choice 卡 chat entry 的唯一构造点：live choice_request 帧与 F-27
+// session_state pending 对账共用，保证两路径逐字段同构；appendChatEntry 按
+// id upsert，同 id 重放不产生重复卡。
+function choiceRequestEntry(frame: ChoiceRequestFrame, nodeId: string | null): ChatEntry {
+  return {
+    id: chatEntryId("choice_request", frame.id),
+    type: "choice_request",
+    role: "system",
+    content: frame.prompt,
+    timestamp: new Date().toISOString(),
+    node_id: nodeId ?? undefined,
+    metadata: {
+      request_id: frame.id,
+      prompt: frame.prompt,
+      options: frame.options ?? [],
+      questions: Array.isArray(frame.questions) ? frame.questions : [],
+      allow_multiple: frame.allow_multiple === true,
+      allow_free_text: frame.allow_free_text === true,
+      source: typeof frame.source === "string" ? frame.source : "provider_choice",
+    },
+  };
+}
+
+// F-27：session_state 全量投影对账——挂起 choice（provider pending 与
+// TextFallback pending 双来源同数组）若尚未挂卡则补挂；pending 已移除的卡
+// 已随 rebuildChatEntries 消失，不重挂即不残留 stale 卡。畸形条目跳过。
+function reconcilePendingChoiceRequests(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  msg: WsServerMessage,
+) {
+  const pending = msg.pending_choice_requests;
+  if (!Array.isArray(pending)) {
+    return;
+  }
+  for (const raw of pending) {
+    if (
+      !isRecord(raw) ||
+      typeof raw.id !== "string" ||
+      raw.id.length === 0 ||
+      typeof raw.prompt !== "string"
+    ) {
+      continue;
+    }
+    store.appendChatEntry(
+      choiceRequestEntry(
+        {
+          id: raw.id,
+          prompt: raw.prompt,
+          options: Array.isArray(raw.options) ? raw.options : [],
+          questions: raw.questions,
+          allow_multiple: raw.allow_multiple === true,
+          allow_free_text: raw.allow_free_text === true,
+          source: raw.source,
+        },
+        store.activeNodeId,
+      ),
+    );
+  }
+}
+
 
 function handleStreamChunk(store: ReturnType<typeof useWorkspaceStore.getState>, msg: WsServerMessage) {
   const nodeId = resolveStreamEntryNodeId(store, msg.node_id as string | null | undefined);

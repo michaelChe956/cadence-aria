@@ -674,3 +674,165 @@ describe("workspace websocket human gate protocol branches", () => {
     expect(diagnostics[0]).toMatchObject({ code: "SEED" });
   });
 });
+
+// F-27：choice 卡此前依赖单帧 choice_request 送达；degraded 丢帧后卡永不出现。
+// 治本契约：session_state 帧顶层带 pending_choice_requests，收帧后按 choice id
+// 对账补挂（与 live choice_request handler 同构、幂等；pending 清空不残留）。
+describe("workspace websocket session_state pending choice reconciliation", () => {
+  installWorkspaceStoreTestHooks();
+
+  const handlerOptions = () => ({
+    invalidatedPreStageNodeIds: new Set<string>(),
+    scheduleFlush: vi.fn(),
+    streamFlushTimeouts: {},
+  });
+
+  const pendingChoiceFixture = (overrides: Record<string, unknown> = {}) => ({
+    id: "choice_pending_a",
+    prompt: "继续方式？",
+    options: [
+      { id: "opt_0", label: "继续 author", description: "沿用当前 author 会话" },
+      { id: "opt_1", label: "切换 provider" },
+    ],
+    allow_multiple: false,
+    allow_free_text: true,
+    questions: [
+      {
+        id: "default",
+        prompt: "继续方式？",
+        options: [
+          { id: "opt_0", label: "继续 author" },
+          { id: "opt_1", label: "切换 provider" },
+        ],
+        allow_multiple: false,
+        allow_free_text: true,
+      },
+    ],
+    source: "text_fallback",
+    ...overrides,
+  });
+
+  const sessionStateMessage = (pendingChoiceRequests: unknown) => ({
+    type: "session_state",
+    session_id: "session_pending_choice_reconcile",
+    workspace_type: "story",
+    stage: "running",
+    session_status: "running",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code", reviewer: null },
+    timeline_nodes: [],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    human_presentation_revisions: [],
+    ...(pendingChoiceRequests === undefined
+      ? {}
+      : { pending_choice_requests: pendingChoiceRequests }),
+  });
+
+  const choiceEntries = () =>
+    useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "choice_request");
+
+  it("mounts a missing pending choice entry isomorphic to the live choice_request handler", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([pendingChoiceFixture()]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+
+    expect(choiceEntries()).toEqual([
+      expect.objectContaining({
+        id: "choice_request:choice_pending_a",
+        type: "choice_request",
+        role: "system",
+        content: "继续方式？",
+        metadata: {
+          request_id: "choice_pending_a",
+          prompt: "继续方式？",
+          options: pendingChoiceFixture().options,
+          questions: pendingChoiceFixture().questions,
+          allow_multiple: false,
+          allow_free_text: true,
+          source: "text_fallback",
+        },
+      }),
+    ]);
+  });
+
+  it("keeps reconciliation idempotent for repeated session_state frames", () => {
+    for (let round = 0; round < 2; round += 1) {
+      handleWorkspaceWsMessage(
+        sessionStateMessage([pendingChoiceFixture()]) as unknown as WsServerMessage,
+        handlerOptions(),
+      );
+    }
+
+    expect(choiceEntries()).toHaveLength(1);
+    expect(choiceEntries()[0]).toMatchObject({
+      id: "choice_request:choice_pending_a",
+    });
+  });
+
+  it("does not duplicate an entry already mounted by the live choice_request frame", () => {
+    handleWorkspaceWsMessage(
+      {
+        type: "choice_request",
+        ...pendingChoiceFixture(),
+      } as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    handleWorkspaceWsMessage(
+      sessionStateMessage([pendingChoiceFixture()]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+
+    expect(choiceEntries()).toHaveLength(1);
+    expect(choiceEntries()[0]).toMatchObject({
+      id: "choice_request:choice_pending_a",
+      content: "继续方式？",
+    });
+  });
+
+  it("drops the stale card once the choice leaves the pending projection", () => {
+    handleWorkspaceWsMessage(
+      sessionStateMessage([pendingChoiceFixture()]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(choiceEntries()).toHaveLength(1);
+
+    handleWorkspaceWsMessage(
+      sessionStateMessage([]) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(choiceEntries()).toHaveLength(0);
+
+    handleWorkspaceWsMessage(
+      sessionStateMessage(undefined) as unknown as WsServerMessage,
+      handlerOptions(),
+    );
+    expect(choiceEntries()).toHaveLength(0);
+  });
+
+  it("ignores malformed pending_choice_requests payloads without crashing", () => {
+    expect(() =>
+      handleWorkspaceWsMessage(
+        sessionStateMessage({ not: "an array" }) as unknown as WsServerMessage,
+        handlerOptions(),
+      ),
+    ).not.toThrow();
+    expect(choiceEntries()).toHaveLength(0);
+  });
+});
