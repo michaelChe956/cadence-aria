@@ -244,13 +244,22 @@ describe("ChatCockpitPage", () => {
     cockpitInbox.push(stoppedItem("session_001"));
     renderCockpit();
 
+    // F-31：接管按钮随收件箱移入默认收起的抽屉。热键必须先展开抽屉——否则
+    // arm() 出来的「确认接管」态落在 display:none 子树里，用户没看到确认态
+    // 就要再按一次直接执行接管。jsdom 不加载 Tailwind，hidden 类不生效，
+    // 因此以抽屉 data-state/class 断言「确认态所在子树已展开」。
+    const drawer = screen.getByTestId("cockpit-inbox-drawer");
+    expect(drawer).toHaveAttribute("data-state", "closed");
+
     fireEvent.keyDown(document, {
       code: COCKPIT_HOTKEYS.takeover.code,
       ctrlKey: true,
       shiftKey: true,
     });
     expect(takeoverWorkspaceSession).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "确认接管" })).toBeVisible();
+    expect(drawer).toHaveAttribute("data-state", "open");
+    expect(drawer).not.toHaveClass("hidden");
+    expect(drawer).toContainElement(screen.getByRole("button", { name: "确认接管" }));
 
     fireEvent.keyDown(document, {
       code: COCKPIT_HOTKEYS.takeover.code,

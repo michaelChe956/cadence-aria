@@ -431,4 +431,38 @@ describe("ChatCockpitPage", () => {
     expect(screen.getByTestId("timeline-node-author_run")).toHaveAttribute("aria-current", "step");
     expect(scrollIntoView).toHaveBeenCalled();
   });
+
+  it("抽屉收起时反馈热键先展开抽屉再聚焦抽屉内的反馈框（F-31 story 确认面）", () => {
+    // story/design 的 author_confirm 会自动切到产物下钻视图，主区的门卡
+    // （GatePromptEntry）不在树上——唯一的反馈框在默认收起的抽屉里，此前
+    // focus() 对 display:none 子树静默 no-op，Ctrl+F 看着像坏了。
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({
+      flowKind: "single_candidate",
+      workspaceType: "story",
+      stage: "author_confirm",
+    });
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 1);
+    store.rebuildChatEntries();
+
+    renderCockpit();
+
+    const drawer = screen.getByTestId("cockpit-inbox-drawer");
+    expect(drawer).toHaveAttribute("data-state", "closed");
+    const editor = within(drawer).getByLabelText("门禁反馈");
+
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.feedback.code, ctrlKey: true });
+
+    expect(drawer).toHaveAttribute("data-state", "open");
+    expect(drawer).not.toHaveClass("hidden");
+    expect(editor).toHaveFocus();
+
+    // 抽屉已展开时再按一次同样要回到反馈框（挂起聚焦不能只在「展开那一次」生效）。
+    editor.blur();
+    expect(editor).not.toHaveFocus();
+
+    fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.feedback.code, ctrlKey: true });
+
+    expect(editor).toHaveFocus();
+  });
 });

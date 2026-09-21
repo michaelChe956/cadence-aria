@@ -28,7 +28,10 @@ import {
   useCockpitSettings,
   useCockpitShellInbox,
 } from "../components/cockpit/CockpitShell";
-import { CockpitInboxDrawer } from "../components/cockpit/CockpitInboxDrawer";
+import {
+  COCKPIT_INBOX_DRAWER_ID,
+  CockpitInboxDrawer,
+} from "../components/cockpit/CockpitInboxDrawer";
 import { CockpitPageHeader } from "../components/cockpit/CockpitPageHeader";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
@@ -691,6 +694,20 @@ export function ChatCockpitPage({
       )?.id.split(":")[0] ?? null,
     [observedInbox, sessionId],
   );
+  // F-31：待处理收件箱已移入默认收起的抽屉（收起只以 CSS display:none 隐藏、
+  // 子树不卸载），于是抽屉内的接管按钮/反馈框在收起态既不可见也不可聚焦。
+  // 热键要先展开抽屉；对 display:none 子树 focus() 会静默失效，所以收起时把
+  // 目标挂起，等抽屉真正提交/可见后再聚焦。
+  const [pendingInboxFocus, setPendingInboxFocus] = useState<HTMLElement | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!inboxDrawerOpen || pendingInboxFocus === null) {
+      return;
+    }
+    pendingInboxFocus.focus();
+    setPendingInboxFocus(null);
+  }, [inboxDrawerOpen, pendingInboxFocus]);
   const hotkeyHandlers = useMemo(
     () => ({
       confirm: () => {
@@ -709,16 +726,28 @@ export function ChatCockpitPage({
         }).confirm();
       },
       feedback: () => {
-        document
-          .querySelector<HTMLElement>(
-            '[data-testid="gate-feedback-editor"] [aria-label="门禁反馈"]',
-          )
-          ?.focus();
+        const editor = document.querySelector<HTMLElement>(
+          '[data-testid="gate-feedback-editor"] [aria-label="门禁反馈"]',
+        );
+        if (editor === null) {
+          return;
+        }
+        if (editor.closest(`#${COCKPIT_INBOX_DRAWER_ID}`) === null) {
+          // 主区门卡的反馈框本就可见，照旧直接聚焦。
+          editor.focus();
+          return;
+        }
+        setPendingInboxFocus(editor);
+        setInboxDrawerOpen(true);
       },
       takeover: () => {
-        if (takeoverTargetSessionId !== null) {
-          takeoverButtonRef.current?.arm();
+        if (takeoverTargetSessionId === null) {
+          return;
         }
+        // 接管按钮随收件箱入抽屉：先展开抽屉再 arm()，否则「确认接管」态落在
+        // 不可见子树里，用户还没看到确认态就要再按一次直接执行接管。
+        setInboxDrawerOpen(true);
+        takeoverButtonRef.current?.arm();
       },
       advance: () => {
         const current = useWorkspaceStore.getState();
