@@ -101,9 +101,9 @@ pub async fn workspace_session_confirm(
     let manager = state.workspace_sessions.get(&session_id).await;
 
     // ── F-31 fix round（k3 P1）：在途守卫 ──────────────────────────────────
-    // story/design 的 durable `running` 只有一个写点——F-31 的评审启动
-    // （`begin_review_after_author_confirm` 进 CrossReview 时按
-    // workspace_status_for_stage 落 Running），故它等价于「评审在途」。
+    // story/design 的 durable `running` 写点=在途驱动（生成启动于
+    // provider_drive 作者生成 / lifecycle 的 start-generation 流，F-31 评审启动于
+    // `begin_review_after_author_confirm` 进 CrossReview），故它等价于「有 run 在途」。
     // 此时端点既不得定稿也不得等锁：
     // ① provider run 任务在整段 drive 里持引擎锁（见 workspace_ws_handler/run 的
     //    「stream owner holds the engine mutex」），等锁会把确认请求挂到评审结束后
