@@ -7,6 +7,7 @@ import { CockpitInbox } from "./CockpitInbox";
 
 const actions: CockpitActionFacade = {
   confirm: vi.fn(),
+  confirmReview: vi.fn(),
   feedback: vi.fn(),
   terminate: vi.fn(),
   advance: vi.fn(),
@@ -55,6 +56,41 @@ const artifactVersions = [
     source_node_id: "node-artifact",
   },
 ] as const;
+
+// F-31（v37 复验 #2）：story/design author 门（产物确认阶段）在待处理抽屉内的
+// 动作面与主区门卡对齐——reviewer 启用三动作（确认定稿/确认并评审/终止），
+// 未启用两动作（确认定稿/终止）。
+const authorConfirmGate: NonNullable<CockpitInboxItem["gate"]> = {
+  key: "stage:author_confirm",
+  turn_id: null,
+  stage: "author_confirm",
+  flow_kind: "legacy",
+  status: "open",
+  trigger: null,
+  remaining_budget: null,
+  findings: [],
+  resumable: false,
+  triage: false,
+  closed: null,
+  closure_stage: null,
+  opened_at: "",
+  turn: null,
+  action_block_reason: null,
+  terminate_block_reason: null,
+};
+
+const authorConfirmItem = (reviewAvailable: boolean): CockpitInboxItem => ({
+  id: "session_001:gate:stage:author_confirm",
+  kind: "gate",
+  severity: 1,
+  title: "门禁等待",
+  summary: "等待人工确认",
+  triage: false,
+  source: "gate",
+  createdAt: null,
+  gate: { ...authorConfirmGate, review_available: reviewAvailable },
+  inlineError: null,
+});
 
 describe("CockpitInbox", () => {
   it("uses the shared dangerous confirmation and feedback editor for all actionable cards", () => {
@@ -135,6 +171,53 @@ describe("CockpitInbox", () => {
     expect(within(inbox).queryByText("未同步门命令，将以新命令提交")).toBeNull();
   });
 
+  it("author 门 reviewer 启用：抽屉内三动作，定稿/评审/终止各自发对应命令（F-31）", async () => {
+    const user = userEvent.setup();
+    const gateActions: CockpitActionFacade = {
+      confirm: vi.fn(),
+      confirmReview: vi.fn(),
+      feedback: vi.fn(),
+      terminate: vi.fn(),
+      advance: vi.fn(),
+    };
+    render(
+      <CockpitInbox
+        items={[authorConfirmItem(true)]}
+        actions={gateActions}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    await user.click(within(inbox).getByRole("button", { name: "确认定稿" }));
+    expect(gateActions.confirm).toHaveBeenCalledOnce();
+
+    await user.click(within(inbox).getByRole("button", { name: "确认并评审" }));
+    expect(gateActions.confirmReview).toHaveBeenCalledOnce();
+
+    await user.click(within(inbox).getByRole("button", { name: "终止" }));
+    expect(gateActions.terminate).not.toHaveBeenCalled();
+    await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+    expect(gateActions.terminate).toHaveBeenCalledOnce();
+  });
+
+  it("author 门 reviewer 未启用：两动作（定稿/终止），不露「确认并评审」（F-31）", () => {
+    render(
+      <CockpitInbox
+        items={[authorConfirmItem(false)]}
+        actions={actions}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeVisible();
+    expect(within(inbox).queryByRole("button", { name: "确认并评审" })).toBeNull();
+    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
+    // author 门是 HTTP confirm 通路：无 typed 反馈编辑器（维持既有纪律）。
+    expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
+  });
+
   it("only warns about a new feedback command while a typed gate has a repair reservation", () => {
     render(
       <CockpitInbox
@@ -187,6 +270,7 @@ describe("CockpitInbox", () => {
     const user = userEvent.setup();
     const gateActions: CockpitActionFacade = {
       confirm: vi.fn(),
+      confirmReview: vi.fn(),
       feedback: vi.fn(),
       terminate: vi.fn(),
       advance: vi.fn(),

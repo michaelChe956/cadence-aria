@@ -4,6 +4,11 @@ import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export type CockpitActionFacade = {
   confirm(): boolean | void;
+  /**
+   * F-31（v37 复验 #2）：story/design author 门「确认并评审」——复用 confirm
+   * 通道携带 with_review=true（HTTP confirm 端点），与主区门卡语义一致。
+   */
+  confirmReview(): boolean | void;
   feedback(feedback: string): boolean | void;
   terminate(): boolean | void;
   advance(): boolean | void;
@@ -20,7 +25,7 @@ export function createCockpitActionFacade(input: {
   flowKind: WorkspaceWsState["flowKind"];
   commandId: string | null;
   getState: () => WorkspaceWsState;
-  sendConfirm: () => boolean;
+  sendConfirm: (withReview?: boolean) => boolean;
   sendAbandonGate: (commandId: string) => boolean;
   sendHumanGateFeedback: (feedback: string, commandId?: string) => boolean;
   sendAdvance: (commandId?: string) => boolean;
@@ -31,6 +36,13 @@ export function createCockpitActionFacade(input: {
         return false;
       }
       return input.sendConfirm();
+    },
+    confirmReview() {
+      // F-31：与 confirm 同源阻断判据（收口/相位/终态），仅多带 with_review。
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
+      }
+      return input.sendConfirm(true);
     },
     feedback(feedback) {
       if (gateActionBlockReason(input.getState()) !== null) {

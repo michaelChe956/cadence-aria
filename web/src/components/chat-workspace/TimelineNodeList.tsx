@@ -54,12 +54,10 @@ export function TimelineNodeList({
           暂无 Timeline 节点
         </div>
       ) : variant === "flow" ? (
-        // 紧凑方块：自动执行流节点只占一个小方块，承载状态/进度/耗时等关键信息；
+        // 左侧窄栏形态（自上而下）：节点条目纵向堆叠成紧凑列表，不再横向铺网格；
         // 完整信息由 hover 提示（title）与点击下钻的详情面承载。
-        <div
-          data-testid="timeline-flow-grid"
-          className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] content-start gap-1.5"
-        >
+        // （testid「timeline-flow-grid」为既有契约名，沿用不改。）
+        <div data-testid="timeline-flow-grid" className="flex flex-col gap-1.5">
           {nodes.map((node) => (
             <TimelineFlowTile
               key={node.node_id}

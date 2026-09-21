@@ -654,4 +654,23 @@ describe("F-20 story/design author_confirm gate projection", () => {
       gate: expect.objectContaining({ key: "stage:author_confirm" }),
     });
   });
+
+  // F-31（v37 复验 #2）：author 门投影携带 review_available（=reviewerEnabled），
+  // 待处理抽屉据此露出「确认并评审」——与主区门卡 state.reviewerEnabled 同源。
+  it("projects review availability for the story author gate from reviewerEnabled (F-31)", () => {
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "story",
+      flowKind: "legacy",
+      sessionStatus: "waiting_for_human",
+      reviewerEnabled: true,
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+    });
+    expect(selectGateProjection(useWorkspaceStore.getState())?.review_available).toBe(true);
+
+    useWorkspaceStore.setState({ reviewerEnabled: false });
+    expect(selectGateProjection(useWorkspaceStore.getState())?.review_available).toBe(false);
+  });
 });

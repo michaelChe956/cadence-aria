@@ -152,6 +152,33 @@ describe("cockpit gate action facade", () => {
     expect(sendHumanGateFeedback).not.toHaveBeenCalled();
   });
 
+  // F-31（v37 复验 #2）：待处理抽屉动作面与主区门卡对齐——confirmReview 复用
+  // confirm 通道携带 with_review=true（HTTP confirm 端点语义）；confirm() 维持
+  // 定稿缺省（不带该字段），阻断判据与 confirm 同源。
+  it("forwards with_review through the shared confirm channel for the author gate (F-31)", () => {
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "story",
+      sessionStatus: "waiting_for_human",
+      flowKind: "legacy",
+    });
+    const sendConfirm = vi.fn((_withReview?: boolean) => true);
+    const facade = createCockpitActionFacade({
+      flowKind: "legacy",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm,
+      sendAbandonGate: vi.fn(() => true),
+      sendHumanGateFeedback: vi.fn(() => true),
+      sendAdvance: vi.fn(() => true),
+    });
+
+    expect(facade.confirm()).toBe(true);
+    expect(facade.confirmReview()).toBe(true);
+    expect(sendConfirm.mock.calls[0]).toHaveLength(0);
+    expect(sendConfirm.mock.calls[1]).toEqual([true]);
+  });
+
   it("sends a manual advance exactly once through the same facade", () => {
     useWorkspaceStore.setState({
       stage: "human_confirm",

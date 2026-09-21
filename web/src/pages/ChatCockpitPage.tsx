@@ -313,8 +313,9 @@ export function ChatCockpitPage({
   // confirmed 收敛决策面（投影层按 confirmed 关门）；F-31 起服务端可能接管本轮进入
   // CrossReview（响应未定稿），此时不得乐观收敛，权威状态以服务端 session_state 广播为准。
   // F-31 纠偏：评审改为用户可选——门上提供「确认定稿」（缺省，不带 with_review）
-  // 与「确认并评审」（with_review=true，服务端接管进入评审轮）两个动作；收件箱/
-  // 快捷键/门卡等既有 confirm 入口维持定稿缺省。
+  // 与「确认并评审」（with_review=true，服务端接管进入评审轮）两个动作；待处理
+  // 抽屉经 facade confirmReview 同款对齐（v37 复验 #2），快捷键/批量 confirm
+  // 等其余入口维持定稿缺省。
   const confirmStoryAuthorGate = useCallback((withReview = false): boolean => {
     const current = useWorkspaceStore.getState();
     const targetSessionId = current.sessionId;
@@ -363,10 +364,11 @@ export function ChatCockpitPage({
     return true;
   }, []);
   // 门面 confirm 统一入口：story/design author 门走 HTTP，其余（SC typed/legacy
-  // human_confirm）走既有 WS confirm 帧。
-  const routeGateConfirm = useCallback((): boolean => {
+  // human_confirm）走既有 WS confirm 帧；withReview 仅对 author 门有意义
+  // （F-31 抽屉「确认并评审」），WS 通路忽略该参。
+  const routeGateConfirm = useCallback((withReview = false): boolean => {
     if (isStoryDesignAuthorConfirm(useWorkspaceStore.getState())) {
-      return confirmStoryAuthorGate();
+      return confirmStoryAuthorGate(withReview);
     }
     return workspaceWs.sendConfirmGate();
   }, [confirmStoryAuthorGate, workspaceWs.sendConfirmGate]);
@@ -761,59 +763,63 @@ export function ChatCockpitPage({
         </div>
       ) : null}
 
-      {/* 主区：对话流是主区域（grow 2），执行流退居次区（grow 1）；待处理不再占据
-          20rem 侧栏，改由页头入口打开的右侧抽屉承载（UI-A）。 */}
+      {/* 主区：执行流退居左侧窄栏（w-48 纵向自上而下，不与对话流抢纵向空间），
+          对话流成为主区域占满余宽；待处理仍由页头入口打开的右侧抽屉承载（UI-A）。 */}
       <main
         data-testid="cockpit-main-region"
         className="flex min-h-0 flex-1 flex-col gap-2 p-2"
       >
         <BulkConfirmReport />
-        <section
-          data-testid="cockpit-execution-flow"
-          aria-label="自动执行流"
-          className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
-        >
-          <div className="flex items-center justify-between gap-2 px-3 py-2">
-            <p
-              data-testid="cockpit-generation-status"
-              role="status"
-              className="text-xs text-[var(--aria-ink-muted)]"
-            >
-              {generationStatusText(
-                isEmptyUnstarted ? "not_started" : statusState.providerStatus,
-                statusState.stage,
-                runningContext,
-                terminalContext,
-              )}
-            </p>
-            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
-            <button
-              type="button"
-              data-testid="cockpit-protocol-diagnostic-count"
-              onClick={() => setDrilldownNodeId(selectedState?.activeNodeId ?? null)}
-              className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
-            >
-              诊断 {selectedState?.protocolDiagnostics.length ?? 0}
-            </button>
-          </div>
-          <TimelineNodeList
-            nodes={selectedState?.timelineNodes ?? []}
-            // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。
-            activeNodeId={drilldownNodeId ?? selectedState?.activeNodeId ?? null}
-            selectedNodeId={drilldownNodeId}
-            onSelectNode={setDrilldownNodeId}
-            variant="flow"
-            flowRows={flowRows}
-            nodeDetails={selectedState?.nodeDetails ?? {}}
-            className="border-0"
-          />
-        </section>
+        <div data-testid="cockpit-main-columns" className="flex min-h-0 flex-1 flex-row gap-2">
+          <section
+            data-testid="cockpit-execution-flow"
+            aria-label="自动执行流"
+            className="grid min-h-0 w-48 shrink-0 grid-rows-[auto_minmax(0,1fr)] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+          >
+            {/* 窄栏页头：标题 + 诊断计数一行，生成状态换行跟随（信息不减，仅纵排）。 */}
+            <div className="flex flex-col gap-1 border-b border-[var(--aria-line)] px-2 py-2">
+              <div className="flex items-center justify-between gap-1.5">
+                <h2 className="text-sm font-semibold text-[var(--aria-ink)]">自动执行流</h2>
+                <button
+                  type="button"
+                  data-testid="cockpit-protocol-diagnostic-count"
+                  onClick={() => setDrilldownNodeId(selectedState?.activeNodeId ?? null)}
+                  className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                >
+                  诊断 {selectedState?.protocolDiagnostics.length ?? 0}
+                </button>
+              </div>
+              <p
+                data-testid="cockpit-generation-status"
+                role="status"
+                className="text-xs leading-snug text-[var(--aria-ink-muted)]"
+              >
+                {generationStatusText(
+                  isEmptyUnstarted ? "not_started" : statusState.providerStatus,
+                  statusState.stage,
+                  runningContext,
+                  terminalContext,
+                )}
+              </p>
+            </div>
+            <TimelineNodeList
+              nodes={selectedState?.timelineNodes ?? []}
+              // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。
+              activeNodeId={drilldownNodeId ?? selectedState?.activeNodeId ?? null}
+              selectedNodeId={drilldownNodeId}
+              onSelectNode={setDrilldownNodeId}
+              variant="flow"
+              flowRows={flowRows}
+              nodeDetails={selectedState?.nodeDetails ?? {}}
+              className="border-0"
+            />
+          </section>
 
-        <section
-          data-testid="cockpit-conversation-flow"
-          aria-label="下钻对话流"
-          className="grid min-h-0 flex-[2] grid-rows-[auto_minmax(0,1fr)_auto_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
-        >
+          <section
+            data-testid="cockpit-conversation-flow"
+            aria-label="下钻对话流"
+            className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+          >
           <div className="flex min-w-0 items-center gap-2 px-3 py-2">
             <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
             {canConfigureProviders ? (
@@ -1026,7 +1032,8 @@ export function ChatCockpitPage({
             />
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
-        </section>
+          </section>
+        </div>
       </main>
       <CockpitInboxDrawer open={inboxDrawerOpen} onClose={() => setInboxDrawerOpen(false)}>
         <CockpitInbox

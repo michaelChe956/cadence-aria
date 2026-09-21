@@ -131,6 +131,11 @@ export interface GateProjection {
   action_block_reason?: GateActionBlockReason;
   /** 终止专属阻断（F-21）：null 即终止可发；缺席时回退 action_block_reason。 */
   terminate_block_reason?: GateActionBlockReason;
+  /**
+   * F-31（v37 复验 #2）：author 门可否「确认并评审」（with_review=true）——
+   * = reviewerEnabled；仅 story/design author_confirm 分支设置，其余门缺省。
+   */
+  review_available?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -227,6 +232,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       turn: null,
       action_block_reason: actionBlockReason,
       terminate_block_reason: terminateBlockReason,
+      review_available: state.reviewerEnabled,
     };
   }
 

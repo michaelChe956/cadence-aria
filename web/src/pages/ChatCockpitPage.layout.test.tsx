@@ -50,17 +50,42 @@ describe("ChatCockpitPage 布局（UI-A）", () => {
     renderCockpit();
 
     const drawer = screen.getByTestId("cockpit-inbox-drawer");
+    const backdrop = screen.getByTestId("cockpit-inbox-drawer-backdrop");
     expect(drawer).toHaveAttribute("data-state", "closed");
-    expect(drawer).toHaveClass("hidden");
-    expect(screen.queryByTestId("cockpit-inbox-drawer-backdrop")).toBeNull();
+    // 动效收起态：屏外 + 不可见（不可聚焦/不可交互），遮罩淡出并放行点击。
+    expect(drawer).toHaveClass("invisible", "translate-x-full", "opacity-0");
+    expect(backdrop).toHaveClass("opacity-0", "pointer-events-none");
     expect(screen.getByTestId("cockpit-inbox-drawer-count")).toHaveTextContent("1");
 
     fireEvent.click(screen.getByTestId("cockpit-inbox-drawer-trigger"));
 
     expect(drawer).toHaveAttribute("data-state", "open");
-    expect(drawer).toHaveClass("flex");
+    expect(drawer).toHaveClass("visible", "translate-x-0", "opacity-100");
     expect(drawer).toContainElement(screen.getByTestId("cockpit-inbox"));
-    expect(screen.getByTestId("cockpit-inbox-drawer-backdrop")).toBeInTheDocument();
+    expect(backdrop).toHaveClass("opacity-100");
+  });
+
+  it("抽屉开合走滑入/淡出过渡，减弱动效下静止", () => {
+    cockpitInbox.push(gateItem("session_001", "gate_1"));
+
+    renderCockpit();
+
+    // 视觉契约（先例：ImageCreatePage 抽屉 / StageStepper）：
+    // transform/opacity 过渡 200ms ease-out（150–250ms 档）+ motion-reduce 降级。
+    const drawer = screen.getByTestId("cockpit-inbox-drawer");
+    const backdrop = screen.getByTestId("cockpit-inbox-drawer-backdrop");
+    expect(drawer).toHaveClass(
+      "transition-[transform,opacity,visibility]",
+      "duration-200",
+      "ease-out",
+      "motion-reduce:transition-none",
+    );
+    expect(backdrop).toHaveClass(
+      "transition-opacity",
+      "duration-200",
+      "ease-out",
+      "motion-reduce:transition-none",
+    );
   });
 
   it("收起抽屉不丢待处理状态，关闭钮与遮罩都能收起", () => {
@@ -83,20 +108,26 @@ describe("ChatCockpitPage 布局（UI-A）", () => {
     expect(screen.getByTestId("cockpit-inbox-drawer")).toHaveAttribute("data-state", "closed");
   });
 
-  it("待处理退出主区，对话流成为主区域（权重高于执行流）", () => {
+  it("执行流退居左侧窄栏，对话流占满余宽（自上而下的紧凑条目）", () => {
     cockpitInbox.push(gateItem("session_001", "gate_1"));
 
     renderCockpit();
 
     const main = screen.getByTestId("cockpit-main-region");
+    const columns = screen.getByTestId("cockpit-main-columns");
     const conversation = screen.getByTestId("cockpit-conversation-flow");
     const execution = screen.getByTestId("cockpit-execution-flow");
     expect(within(main).getByTestId("cockpit-conversation-flow")).toBeInTheDocument();
     expect(within(main).getByTestId("cockpit-execution-flow")).toBeInTheDocument();
     expect(within(main).queryByTestId("cockpit-inbox")).toBeNull();
-    expect(main.className).toContain("flex-col");
-    expect(conversation.className).toContain("flex-[2]");
-    expect(execution.className).toContain("flex-1");
+    // 左窄栏 + 右主区的横向双栏：执行流 ≤200px 纵向窄条，对话流吃掉剩余宽度。
+    expect(columns.className).toContain("flex-row");
+    expect(within(columns).getByTestId("cockpit-execution-flow")).toBeInTheDocument();
+    expect(within(columns).getByTestId("cockpit-conversation-flow")).toBeInTheDocument();
+    expect(columns.firstElementChild).toBe(execution);
+    expect(execution.className).toContain("w-48");
+    expect(execution.className).toContain("shrink-0");
+    expect(conversation.className).toContain("flex-1");
   });
 
   it("设置入口让位到页头，spec（产物审核）面板收起钮不被遮挡", () => {

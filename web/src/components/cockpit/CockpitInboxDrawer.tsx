@@ -74,22 +74,27 @@ export function CockpitInboxDrawer({
 
   return (
     <>
-      {open ? (
-        <div
-          data-testid="cockpit-inbox-drawer-backdrop"
-          aria-hidden="true"
-          onClick={onClose}
-          className="fixed inset-0 z-[94] bg-black/30"
-        />
-      ) : null}
+      {/* 遮罩与抽屉常驻 DOM：开合走滑入/淡出过渡（先例 ImageCreatePage 抽屉），
+          收起仅退到屏外不可见，不卸载子树——收件箱的勾选/反馈等状态在收起后保留。
+          visibility 参与过渡：收起方向动画结束时才隐藏（退出 tab 序/无障碍树）。 */}
+      <div
+        data-testid="cockpit-inbox-drawer-backdrop"
+        aria-hidden="true"
+        onClick={onClose}
+        className={[
+          "fixed inset-0 z-[94] bg-black/30 transition-opacity duration-200 ease-out motion-reduce:transition-none",
+          open ? "opacity-100" : "pointer-events-none opacity-0",
+        ].join(" ")}
+      />
       <aside
         id={COCKPIT_INBOX_DRAWER_ID}
         data-testid="cockpit-inbox-drawer"
         data-state={open ? "open" : "closed"}
         aria-label="待处理抽屉"
         className={[
-          open ? "flex" : "hidden",
-          "fixed inset-y-0 right-0 z-[95] w-[min(26rem,92vw)] flex-col border-l-2 border-[var(--aria-line-strong)] bg-[var(--aria-bg)] shadow-2xl",
+          "fixed inset-y-0 right-0 z-[95] flex w-[min(26rem,92vw)] flex-col border-l-2 border-[var(--aria-line-strong)] bg-[var(--aria-bg)] shadow-2xl",
+          "transition-[transform,opacity,visibility] duration-200 ease-out motion-reduce:transition-none",
+          open ? "visible translate-x-0 opacity-100" : "invisible translate-x-full opacity-0",
         ].join(" ")}
       >
         <div className="flex min-h-11 shrink-0 items-center justify-between gap-2 border-b border-[var(--aria-line)] px-3 py-2">

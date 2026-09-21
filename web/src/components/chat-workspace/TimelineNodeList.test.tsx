@@ -299,7 +299,7 @@ describe("TimelineNodeList flow variant", () => {
     expect(screen.getByTestId("timeline-node-reviewer_run").className).toContain("opacity-60");
   });
 
-  it("renders each flow node as a compact block in a wrapping grid instead of a full-width row", () => {
+  it("renders each flow node as a compact block stacked vertically for the narrow left rail", () => {
     render(
       <TimelineNodeList
         nodes={[
@@ -318,11 +318,11 @@ describe("TimelineNodeList flow variant", () => {
       />,
     );
 
-    const grid = screen.getByTestId("timeline-flow-grid");
-    expect(grid.className).toContain("grid");
-    expect(grid.className).toContain("grid-cols-[repeat(auto-fill,minmax(9rem,1fr))]");
+    // 左侧窄栏形态：条目自上而下纵向堆叠（不再横向铺网格）；testid 沿用历史名。
+    const rail = screen.getByTestId("timeline-flow-grid");
+    expect(rail.className).toContain("flex-col");
 
-    // 紧凑方块：摘要不再占方块版面（改由 hover 提示与下钻详情承载）。
+    // 紧凑条目：摘要不再占条目版面（改由 hover 提示与下钻详情承载）。
     expect(screen.queryByText("outline_backend_api · draft_002")).toBeNull();
   });
 

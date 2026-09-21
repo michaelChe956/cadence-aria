@@ -269,19 +269,20 @@ describe("ChatCockpitPage", () => {
         authorConfirmSession(workspaceType);
         renderCockpitWith(mockWorkspaceWs());
 
-        // 收件箱门条（默认产物视图下仍可见）带 确认+终止 两按钮。
+        // 收件箱门条（默认产物视图下仍可见）带 确认定稿+终止（v37 复验 #2 起
+        // author 门与主区门卡动作面对齐，确认语义=定稿）。
         const inbox = screen.getByTestId("cockpit-inbox");
         expect(within(inbox).getByText("门禁等待")).toBeVisible();
-        expect(within(inbox).getByRole("button", { name: "确认" })).toBeEnabled();
+        expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeEnabled();
         expect(within(inbox).getByRole("button", { name: "终止" })).toBeEnabled();
 
-        // 产物审核页签（author_confirm 默认视图）动作位同样露出两按钮。
+        // 产物审核页签（author_confirm 默认视图）动作位同样露出——收件箱与
+        // 产物面板各一枚定稿/终止（二次确认惯例），均可点。
         expect(screen.getByTestId("cockpit-artifact-review-tab")).toHaveAttribute(
           "aria-selected",
           "true",
         );
-        expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
-        // 收件箱与产物面板各一枚终止（二次确认惯例），均可点。
+        expect(screen.getAllByRole("button", { name: "确认定稿" })).toHaveLength(2);
         const terminateButtons = screen.getAllByRole("button", { name: "终止" });
         expect(terminateButtons.length).toBeGreaterThanOrEqual(2);
         for (const button of terminateButtons) {
@@ -305,8 +306,13 @@ describe("ChatCockpitPage", () => {
         authorConfirmSession(workspaceType, { reviewerEnabled: true });
         renderCockpitWith(mockWorkspaceWs());
 
-        expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
-        expect(screen.getByRole("button", { name: "确认并评审" })).toBeEnabled();
+        const finalizeButtons = screen.getAllByRole("button", { name: "确认定稿" });
+        const reviewButtons = screen.getAllByRole("button", { name: "确认并评审" });
+        expect(finalizeButtons).toHaveLength(2);
+        expect(reviewButtons).toHaveLength(2);
+        for (const button of [...finalizeButtons, ...reviewButtons]) {
+          expect(button).toBeEnabled();
+        }
       },
     );
 
@@ -328,7 +334,10 @@ describe("ChatCockpitPage", () => {
       authorConfirmSession("story", { reviewerEnabled: true });
       renderCockpitWith(mockWorkspaceWs());
 
-      await user.click(screen.getByRole("button", { name: "确认定稿" }));
+      // 经待处理抽屉点「确认定稿」（v37 复验 #2 对齐面）——请求体不带 with_review。
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认定稿" }),
+      );
 
       await waitFor(() => {
         const confirmCalls = fetchMock.mock.calls.filter(
@@ -353,8 +362,12 @@ describe("ChatCockpitPage", () => {
       authorConfirmSession("story");
       renderCockpitWith(mockWorkspaceWs());
 
-      expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
-      expect(screen.queryByRole("button", { name: "确认并评审" })).toBeNull();
+        const finalizeButtons = screen.getAllByRole("button", { name: "确认定稿" });
+        expect(finalizeButtons).toHaveLength(2);
+        for (const button of finalizeButtons) {
+          expect(button).toBeEnabled();
+        }
+        expect(screen.queryByRole("button", { name: "确认并评审" })).toBeNull();
     });
 
     // F-31 直接定稿分支：review 未启用（或本轮产物已评审）时 confirm 响应
@@ -381,8 +394,9 @@ describe("ChatCockpitPage", () => {
         invalidations.push(event.issueId);
       });
 
+      // 经待处理抽屉的「确认定稿」（facade.confirm→HTTP）——WS confirm 帧零出站。
       await user.click(
-        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认定稿" }),
       );
 
       await waitFor(() => {
@@ -436,7 +450,10 @@ describe("ChatCockpitPage", () => {
         invalidations.push(event.issueId),
       );
 
-      await user.click(screen.getByRole("button", { name: "确认并评审" }));
+      // 经待处理抽屉的「确认并评审」（facade.confirmReview→with_review=true）。
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认并评审" }),
+      );
 
       await waitFor(() => {
         const confirmCalls = fetchMock.mock.calls.filter(
@@ -455,7 +472,7 @@ describe("ChatCockpitPage", () => {
       expect(
         within(screen.getByTestId("cockpit-inbox")).getByText("门禁等待"),
       ).toBeVisible();
-      expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
+      expect(screen.getAllByRole("button", { name: "确认定稿" })).toHaveLength(2);
 
       // F-25b 广播收敛：评审在途的权威态到达 → 门关闭。
       act(() => {
@@ -508,7 +525,7 @@ describe("ChatCockpitPage", () => {
       renderCockpitWith(mockWorkspaceWs());
 
       await user.click(
-        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认定稿" }),
       );
 
       await waitFor(() => {
@@ -516,7 +533,7 @@ describe("ChatCockpitPage", () => {
       });
       // 失败不收敛：门条仍在、按钮仍可点（用户可重试或终止）。
       expect(
-        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认定稿" }),
       ).toBeEnabled();
     });
 
@@ -541,7 +558,9 @@ describe("ChatCockpitPage", () => {
       authorConfirmSession("story", { reviewerEnabled: true });
       renderCockpitWith(mockWorkspaceWs());
 
-      await user.click(screen.getByRole("button", { name: "确认并评审" }));
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认并评审" }),
+      );
 
       const notice = await screen.findByTestId("hard-error-notice");
       expect(notice).toHaveAttribute("role", "alert");
@@ -551,7 +570,7 @@ describe("ChatCockpitPage", () => {
       );
       // 失败不收敛：决策面保持敞开，可改点「确认定稿」。
       expect(useWorkspaceStore.getState().sessionStatus).toBe("waiting_for_human");
-      expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
+      expect(screen.getAllByRole("button", { name: "确认定稿" })).toHaveLength(2);
     });
 
     it("wires terminate through ConfirmTwice to the WS abandon_human_gate sender", async () => {

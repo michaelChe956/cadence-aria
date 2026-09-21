@@ -33,6 +33,7 @@ function gateEntry(
 function actions(): CockpitActionFacade {
   return {
     confirm: vi.fn(() => true),
+    confirmReview: vi.fn(() => true),
     feedback: vi.fn(() => true),
     terminate: vi.fn(() => true),
     advance: vi.fn(() => true),

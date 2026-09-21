@@ -335,6 +335,9 @@ function GateInboxActions({
     );
   }
 
+  // F-31（v37 复验 #2）：story/design author 门（产物确认阶段）——HTTP confirm
+  // 通路，确认语义为定稿；评审可选（review_available=reviewerEnabled）。
+  const authorGate = item.gate?.stage === "author_confirm";
   const typed = item.gate?.flow_kind === "single_candidate";
   const typedGateNeedsNewCommand =
     typed &&
@@ -377,7 +380,19 @@ function GateInboxActions({
             className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             <Check className="h-3.5 w-3.5" aria-hidden="true" />
-            确认
+            {authorGate ? "确认定稿" : "确认"}
+          </button>
+        ) : null}
+        {/* F-31（v37 复验 #2）：author 门与主区门卡动作面对齐——reviewer 启用
+            （投影 review_available）追加「确认并评审」（with_review=true，服务端
+            接管进入评审轮）；未启用不露出，与主区同源判据。 */}
+        {authorGate && item.gate?.review_available && actionBlockReason === null ? (
+          <button
+            type="button"
+            onClick={actions.confirmReview}
+            className="btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            确认并评审
           </button>
         ) : null}
         <ConfirmTwiceButton
