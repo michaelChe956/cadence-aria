@@ -388,6 +388,16 @@ mod tests {
             provider: None,
             started_at: None,
         });
+
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            value["provider_start_ledger"],
+            serde_json::json!([{
+                "provider_start_idempotency_key": "start:author:round-1",
+                "started": true,
+            }])
+        );
     }
     #[test]
     fn session_state_serializes_optional_connection_id() {
