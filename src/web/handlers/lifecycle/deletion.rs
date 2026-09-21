@@ -35,7 +35,11 @@ pub async fn delete_work_item_plan(
     if let Some(lineage) = schema_v2_plan_lineage(&app_paths, &project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?
     {
-        delete_schema_v2_work_item_plan_with_cleanup(
+        // 部分失败也必须驱逐：schema v2 清理第 0 步即 best-effort 删 work-item
+        // session 磁盘记录，后续任一步失败时跳过驱逐会留下「磁盘已删、内存残留」
+        // 的旧 manager（重新生成复用同 id session 时命中删除前 engine 状态）。
+        // 失败路径驱逐安全：磁盘记录尚存时，下次 attach 从磁盘重建 manager。
+        let cleanup = delete_schema_v2_work_item_plan_with_cleanup(
             &app_paths,
             &store,
             &project_id,
@@ -43,8 +47,9 @@ pub async fn delete_work_item_plan(
             &plan_id,
             &lineage,
         )
-        .await?;
+        .await;
         evict_workspace_session_managers(&state, &session_ids).await;
+        cleanup?;
         return Ok(Json(json!({"status":"deleted"})));
     }
     // legacy plan 级门禁：存在 group coding attempt 则拒绝（与 schema v2 路径语义一致）。
@@ -59,15 +64,28 @@ pub async fn delete_work_item_plan(
     {
         return Err(coding_workspace_exists_error(&plan_id, &attempt.id));
     }
-    for work_item_id in &plan.work_item_ids {
-        delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, work_item_id)
+    // 部分失败也必须驱逐：前面已删 work item 的 session 磁盘级联（delete_work_item）
+    // 已完成，靠后 work item 被门禁拒绝时跳过驱逐会留下「磁盘已删、内存残留」的
+    // 旧 manager。失败路径驱逐安全：磁盘记录尚存时，下次 attach 从磁盘重建 manager。
+    let cleanup = async {
+        for work_item_id in &plan.work_item_ids {
+            delete_work_item_with_cleanup(
+                &app_paths,
+                &store,
+                &project_id,
+                &issue_id,
+                work_item_id,
+            )
             .await?;
+        }
+        store
+            .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?;
+        purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)
     }
-    store
-        .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
-        .map_err(product_store_api_error)?;
-    purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)?;
+    .await;
     evict_workspace_session_managers(&state, &session_ids).await;
+    cleanup?;
     Ok(Json(json!({"status":"deleted"})))
 }
 
