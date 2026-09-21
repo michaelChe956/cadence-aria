@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { TimelineNode } from "../../state/workspace-ws-store";
+import type { CockpitFlowState } from "../../state/workspace-cockpit-projection";
 import { TimelineNodeList } from "./TimelineNodeList";
 
 describe("TimelineNodeList", () => {
@@ -120,6 +121,8 @@ function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
 }
 
 describe("TimelineNodeList flow variant", () => {
+  // 本地时刻构造 → 方块上的挂钟时间断言与运行环境 TZ 无关。
+  const startedAt = new Date(2026, 8, 13, 0, 0, 0).toISOString();
   const flowNode = timelineNode({ node_id: "node-flow-1", node_type: "author_run", status: "active" });
 
   const flowRows = [
@@ -131,7 +134,7 @@ describe("TimelineNodeList flow variant", () => {
       total: 2,
       elapsed_ms: 30_000,
       idle_ms: 5_000,
-      started_at: "2026-09-13T00:00:00Z",
+      started_at: startedAt,
       topology: ["running", "pending"] as const,
     },
     {
@@ -142,7 +145,7 @@ describe("TimelineNodeList flow variant", () => {
       total: 2,
       elapsed_ms: 90_000,
       idle_ms: 5_000,
-      started_at: "2026-09-13T00:01:00Z",
+      started_at: startedAt,
       topology: ["running", "awaiting_triage"] as const,
     },
   ];
@@ -262,5 +265,111 @@ describe("TimelineNodeList flow variant", () => {
     // REQ-UI37-18：久无事件 → 静默视觉（muted 透明度），不是报警。
     expect(screen.getByTestId("timeline-node-author_run").className).not.toContain("opacity-60");
     expect(screen.getByTestId("timeline-node-reviewer_run").className).toContain("opacity-60");
+  });
+
+  it("renders each flow node as a compact block in a wrapping grid instead of a full-width row", () => {
+    render(
+      <TimelineNodeList
+        nodes={[
+          timelineNode({
+            node_id: "node-flow-1",
+            node_type: "author_run",
+            status: "active",
+            summary: "outline_backend_api · draft_002",
+          }),
+        ]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+      />,
+    );
+
+    const grid = screen.getByTestId("timeline-flow-grid");
+    expect(grid.className).toContain("grid");
+    expect(grid.className).toContain("grid-cols-[repeat(auto-fill,minmax(9rem,1fr))]");
+
+    // 紧凑方块：摘要不再占方块版面（改由 hover 提示与下钻详情承载）。
+    expect(screen.queryByText("outline_backend_api · draft_002")).toBeNull();
+  });
+
+  it("shows start time, elapsed time and flow state on the compact block", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+      />,
+    );
+
+    expect(screen.getByTestId("flow-started-author_run")).toHaveTextContent("00:00:00");
+    expect(screen.getByTestId("flow-started-author_run").className).toContain("aria-mono");
+    expect(screen.getByTestId("flow-elapsed-author_run")).toHaveTextContent("30s");
+    expect(screen.getByTestId("flow-state-author_run")).toHaveTextContent("运行中");
+  });
+
+  it("keeps the full node detail reachable from a compact block", () => {
+    const onSelectNode = vi.fn();
+    render(
+      <TimelineNodeList
+        nodes={[
+          timelineNode({
+            node_id: "node-flow-1",
+            node_type: "author_run",
+            status: "active",
+            summary: "outline_backend_api · draft_002",
+          }),
+        ]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={onSelectNode}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+      />,
+    );
+
+    const tile = screen.getByTestId("timeline-node-author_run");
+    const hint = tile.getAttribute("title") ?? "";
+    expect(hint).toContain("Story Spec 生成");
+    expect(hint).toContain("运行中");
+    expect(hint).toContain("进度 1/2");
+    expect(hint).toContain("开始 00:00:00");
+    expect(hint).toContain("耗时 30s");
+    expect(hint).toContain("outline_backend_api · draft_002");
+
+    // 点击语义不变：下钻到该节点（详情在下钻区域展开）。
+    fireEvent.click(tile);
+    expect(onSelectNode).toHaveBeenCalledWith("node-flow-1");
+  });
+
+  it("keeps the mini topology bounded when the session has many nodes", () => {
+    const topology = Array.from({ length: 12 }, (_, index) =>
+      index === 11 ? ("running" as const) : ("done" as const),
+    ) as CockpitFlowState[];
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[{ ...flowRows[0]!, index: 12, total: 12, topology }]}
+      />,
+    );
+
+    const dots = Array.from(
+      screen.getByTestId("cockpit-mini-topology").children,
+    ) as HTMLElement[];
+    expect(dots.length).toBeGreaterThan(0);
+    expect(dots.length).toBeLessThan(topology.length);
+    // 当前步仍在窗口内（且只标记当前步）。
+    expect(
+      dots.filter((dot) => (dot.getAttribute("style") ?? "").includes("aria-topo-edge-active")),
+    ).toHaveLength(1);
+    expect(dots.at(-1)?.getAttribute("style")).toContain("aria-topo-edge-active");
   });
 });
