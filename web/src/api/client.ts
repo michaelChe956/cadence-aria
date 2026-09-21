@@ -95,13 +95,22 @@ export function takeoverWorkspaceSession(sessionId: string): Promise<TakeoverRes
 
 // F-20：story/design AuthorConfirm 的 approve 设计通路（WS confirm 帧在该阶段被
 // 矩阵拒收，wave2-f18-report §5）；confirmed_by 为审计署名（服务端落 system 消息）。
+// F-31 纠偏：评审改为用户可选——withReview=true 附 with_review（服务端接管进入
+// ReviewOnly 评审轮，响应非 confirmed）；缺省不带该字段=直接定稿。
 export function confirmWorkspaceSession(
   sessionId: string,
   confirmedBy = "user",
+  withReview = false,
 ): Promise<WorkspaceSession> {
   return requestJson<WorkspaceSession>(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/confirm`,
-    { method: "POST", body: JSON.stringify({ confirmed_by: confirmedBy }) },
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmed_by: confirmedBy,
+        ...(withReview ? { with_review: true } : {}),
+      }),
+    },
   );
 }
 

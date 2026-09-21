@@ -480,7 +480,10 @@ export function ChatCockpitPage({
   // HTTP confirm 端点——WS confirm 帧在该阶段被矩阵拒收。响应落定稿时乐观置
   // confirmed 收敛决策面（投影层按 confirmed 关门）；F-31 起服务端可能接管本轮进入
   // CrossReview（响应未定稿），此时不得乐观收敛，权威状态以服务端 session_state 广播为准。
-  const confirmStoryAuthorGate = useCallback((): boolean => {
+  // F-31 纠偏：评审改为用户可选——门上提供「确认定稿」（缺省，不带 with_review）
+  // 与「确认并评审」（with_review=true，服务端接管进入评审轮）两个动作；收件箱/
+  // 快捷键/门卡等既有 confirm 入口维持定稿缺省。
+  const confirmStoryAuthorGate = useCallback((withReview = false): boolean => {
     const current = useWorkspaceStore.getState();
     const targetSessionId = current.sessionId;
     if (!isStoryDesignAuthorConfirm(current) || targetSessionId === null) {
@@ -492,15 +495,15 @@ export function ChatCockpitPage({
       operation: "confirm",
       source: "chat",
       outcome: "sent",
-      detail: "http-confirm",
+      detail: withReview ? "http-confirm-review" : "http-confirm",
     });
-    void confirmWorkspaceSession(targetSessionId)
+    void confirmWorkspaceSession(targetSessionId, "user", withReview)
       .then((session) => {
         useOperationAuditStore.getState().markCompleted(auditRecordId);
-        // F-31 前端收口：review 启用的 story/design 会话确认后由服务端接管进入
-        // CrossReview——confirm 响应 status=running（评审在途），此时乐观置
-        // confirmed 会在评审期间露出已定稿 UI（F-25b 类误显），且与随后的
-        // session_state 广播打架。仅响应确实落定稿才收敛，其余交 F-25b 广播驱动。
+        // F-31 前端收口：「确认并评审」后由服务端接管进入 CrossReview——confirm
+        // 响应 status=running（评审在途），此时乐观置 confirmed 会在评审期间露出
+        // 已定稿 UI（F-25b 类误显），且与随后的 session_state 广播打架。仅响应确实
+        // 落定稿才收敛，其余交 F-25b 广播驱动。
         if (session.status === "confirmed") {
           useWorkspaceStore.getState().setSessionStatus("confirmed");
         }
@@ -1087,14 +1090,26 @@ export function ChatCockpitPage({
                     ) : null}
                     {/* F-18/F-20 决策面（对照门卡/收件箱先例）：确认=门面 confirm
                         （story/design author 门经 routeGateConfirm 走 HTTP confirm
-                        端点）；终止=门面 terminate（WS abandon_human_gate）+二次确认。 */}
+                        端点，定稿缺省）；终止=门面 terminate（WS abandon_human_gate）
+                        +二次确认。F-31 纠偏：review 启用的会话追加「确认并评审」
+                        （with_review=true，服务端接管进入评审轮）——评审由用户
+                        选择，不再强制进入；未启用不露出该选择。 */}
                     <button
                       type="button"
                       className="btn-primary h-9"
                       onClick={() => actions.confirm()}
                     >
-                      <Check className="h-4 w-4" aria-hidden="true" /> 确认产物
+                      <Check className="h-4 w-4" aria-hidden="true" /> 确认定稿
                     </button>
+                    {state.reviewerEnabled ? (
+                      <button
+                        type="button"
+                        className="btn-secondary h-9"
+                        onClick={() => confirmStoryAuthorGate(true)}
+                      >
+                        确认并评审
+                      </button>
+                    ) : null}
                     <ConfirmTwiceButton
                       label="终止"
                       confirmLabel="确认终止"

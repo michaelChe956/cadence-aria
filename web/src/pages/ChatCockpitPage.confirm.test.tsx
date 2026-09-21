@@ -211,7 +211,7 @@ describe("ChatCockpitPage", () => {
         "true",
       );
       expect(screen.queryByRole("button", { name: "确认定稿" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "确认并送审" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "确认并评审" })).toBeNull();
     });
 
     // 退役留档（T5/REQ-RET-02）：`exposes review decision actions at review decision stage` 驱动已删除的 legacy 决策发送面，
@@ -237,7 +237,10 @@ describe("ChatCockpitPage", () => {
       vi.unstubAllGlobals();
     });
 
-    function authorConfirmSession(workspaceType: "story" | "design") {
+    function authorConfirmSession(
+      workspaceType: "story" | "design",
+      overrides: Partial<WorkspaceWsState> = {},
+    ) {
       useWorkspaceStore.setState({
         sessionId: "session_001",
         stage: "author_confirm",
@@ -249,9 +252,12 @@ describe("ChatCockpitPage", () => {
         humanGateSnapshot: null,
         humanGateClosure: null,
         providers: { author: "pi", reviewer: null },
+        // F-31 纠偏基线：review 关闭的单按钮定稿面；评审选择用 overrides 打开。
+        reviewerEnabled: false,
         artifact: "# Story Spec",
         chatEntries: [],
         timelineNodes: [],
+        ...overrides,
       });
       useWorkspaceStore.getState().rebuildChatEntries();
     }
@@ -274,7 +280,7 @@ describe("ChatCockpitPage", () => {
           "aria-selected",
           "true",
         );
-        expect(screen.getByRole("button", { name: "确认产物" })).toBeEnabled();
+        expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
         // 收件箱与产物面板各一枚终止（二次确认惯例），均可点。
         const terminateButtons = screen.getAllByRole("button", { name: "终止" });
         expect(terminateButtons.length).toBeGreaterThanOrEqual(2);
@@ -290,6 +296,66 @@ describe("ChatCockpitPage", () => {
         expect(within(gateCard).getByRole("button", { name: "终止" })).toBeEnabled();
       },
     );
+
+    // F-31 纠偏①：review 启用的 story/design 会话门上露出两个动作——「确认定稿」
+    // 与「确认并评审」，评审与否由用户选择而非强制进入。
+    it.each(["story", "design"] as const)(
+      "renders finalize and confirm-with-review actions when review is enabled (%s)",
+      (workspaceType) => {
+        authorConfirmSession(workspaceType, { reviewerEnabled: true });
+        renderCockpitWith(mockWorkspaceWs());
+
+        expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
+        expect(screen.getByRole("button", { name: "确认并评审" })).toBeEnabled();
+      },
+    );
+
+    // F-31 纠偏③：review 启用的会话点「确认定稿」→ 请求体不带 with_review
+    // （直接定稿），响应 confirmed 即乐观收敛，不期待任何评审态。
+    it("finalizes without with_review when the user picks finalize on a review-enabled session", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            workspace_session_id: "session_001",
+            issue_id: "issue_0001",
+            status: "confirmed",
+          }),
+      } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      authorConfirmSession("story", { reviewerEnabled: true });
+      renderCockpitWith(mockWorkspaceWs());
+
+      await user.click(screen.getByRole("button", { name: "确认定稿" }));
+
+      await waitFor(() => {
+        const confirmCalls = fetchMock.mock.calls.filter(
+          (call) => call[0] === "/api/workspace-sessions/session_001/confirm",
+        );
+        expect(confirmCalls).toHaveLength(1);
+        expect(confirmCalls[0]?.[1]).toMatchObject({
+          method: "POST",
+          body: JSON.stringify({ confirmed_by: "user" }),
+        });
+      });
+      // 直接定稿期待态：乐观收敛 confirmed，决策面关闭。
+      await waitFor(() => {
+        expect(useWorkspaceStore.getState().sessionStatus).toBe("confirmed");
+      });
+      expect(screen.queryByRole("button", { name: "确认定稿" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "确认并评审" })).toBeNull();
+    });
+
+    // F-31 纠偏④：review 未启用的会话不提供评审选择——只有「确认定稿」。
+    it("renders only finalize when review is disabled", () => {
+      authorConfirmSession("story");
+      renderCockpitWith(mockWorkspaceWs());
+
+      expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "确认并评审" })).toBeNull();
+    });
 
     // F-31 直接定稿分支：review 未启用（或本轮产物已评审）时 confirm 响应
     // status=confirmed——维持既有乐观收敛行为。
@@ -336,7 +402,7 @@ describe("ChatCockpitPage", () => {
         expect(useWorkspaceStore.getState().sessionStatus).toBe("confirmed");
       });
       expect(
-        screen.queryByRole("button", { name: "确认产物" }),
+        screen.queryByRole("button", { name: "确认定稿" }),
       ).toBeNull();
       expect(
         within(screen.getByTestId("cockpit-inbox")).queryByText("门禁等待"),
@@ -346,11 +412,11 @@ describe("ChatCockpitPage", () => {
       unsubscribe();
     });
 
-    // F-31 评审接管分支：review 启用的 story/design 会话确认后由服务端接管进入
-    // CrossReview——confirm 响应 status=running（非 confirmed）。此时前端不得乐观置
-    // confirmed，否则评审期间露出已定稿 UI（F-25b 类误显）；权威态由 session_state
-    // 广播收敛。对照上一例的直接定稿分支。
-    it("keeps the session unconfirmed when the confirm response hands the round to review", async () => {
+    // F-31 纠偏（用户可选评审）：「确认并评审」显式携带 with_review=true——服务端
+    // 接管进入 ReviewOnly 评审轮，confirm 响应 status=running（非 confirmed）。此时
+    // 前端不得乐观置 confirmed，否则评审期间露出已定稿 UI（F-25b 类误显）；权威态
+    // 由 session_state 广播收敛。对照上一例的直接定稿分支。
+    it("sends with_review true from the confirm-with-review action and stays unconfirmed while review runs", async () => {
       const user = userEvent.setup();
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -363,17 +429,25 @@ describe("ChatCockpitPage", () => {
           }),
       } as unknown as Response);
       vi.stubGlobal("fetch", fetchMock);
-      authorConfirmSession("story");
+      authorConfirmSession("story", { reviewerEnabled: true });
       renderCockpitWith(mockWorkspaceWs());
       const invalidations: string[] = [];
       const unsubscribe = subscribeToLifecycleInvalidation((event) =>
         invalidations.push(event.issueId),
       );
 
-      await user.click(
-        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "确认" }),
-      );
+      await user.click(screen.getByRole("button", { name: "确认并评审" }));
 
+      await waitFor(() => {
+        const confirmCalls = fetchMock.mock.calls.filter(
+          (call) => call[0] === "/api/workspace-sessions/session_001/confirm",
+        );
+        expect(confirmCalls).toHaveLength(1);
+        expect(confirmCalls[0]?.[1]).toMatchObject({
+          method: "POST",
+          body: JSON.stringify({ confirmed_by: "user", with_review: true }),
+        });
+      });
       // F-29 通知落地即 .then 已跑完（评审接管分支同样刷新 durable 投影）。
       await waitFor(() => expect(invalidations).toEqual(["issue_0001"]));
       // 不乐观置 confirmed：评审在途，决策面等 session_state 关门。
@@ -381,7 +455,7 @@ describe("ChatCockpitPage", () => {
       expect(
         within(screen.getByTestId("cockpit-inbox")).getByText("门禁等待"),
       ).toBeVisible();
-      expect(screen.getByRole("button", { name: "确认产物" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "确认定稿" })).toBeEnabled();
 
       // F-25b 广播收敛：评审在途的权威态到达 → 门关闭。
       act(() => {
