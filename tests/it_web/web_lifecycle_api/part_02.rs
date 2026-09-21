@@ -470,14 +470,18 @@ async fn bootstrap_confirmed_work_item_session(
         })
         .expect("create work item");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: "work_item_0001".to_string(),
-        workspace_type: WorkspaceType::WorkItem,
-        author_provider,
-        reviewer_provider,
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider,
+            reviewer_provider,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
         .expect("create work item session");
     lifecycle
         .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
@@ -512,7 +516,9 @@ async fn delete_repository_with_idempotency_key(
 ) -> (StatusCode, Value) {
     let request = Request::builder()
         .method(Method::DELETE)
-        .uri(format!("/api/projects/{project_id}/repositories/{repository_id}"))
+        .uri(format!(
+            "/api/projects/{project_id}/repositories/{repository_id}"
+        ))
         .header("content-type", "application/json")
         .header("Idempotency-Key", "test-delete-repo-lifecycle-0001")
         .body(Body::from("{}".to_string()))
@@ -545,18 +551,19 @@ fn git_repo() -> tempfile::TempDir {
 // 1. issue_lifecycle 不要求 repo_id（Logical 分支不报 repository_required）；
 // 2. generate_story_specs Logical 分支经 PlanningContextResolver + 草稿态 create + 注入
 //    aggregate prompt（session context message 含 inventory + 聚合视野指令）。
-use cadence_aria::product::logical_codebase::{
-    aggregate_index::{
-        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
-    },
-    policy::AggregatePolicyArtifactStore,
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
-    IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
-    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
-    RepositoryType,
-};
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::lifecycle_store::CreateStorySpecInput;
+use cadence_aria::product::logical_codebase::{
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
+    aggregate_index::{
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+        AggregateIndexStore,
+    },
+    policy::AggregatePolicyArtifactStore,
+};
 use cadence_aria::product::models::LifecycleConfirmationStatus;
 
 /// 多仓场景 fixture：写 manifest + active member + checkout + 显式 selection + active
@@ -582,10 +589,7 @@ fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalReposito
     std::fs::write(checkout_path.join("lib.rs"), "pub fn fixture() {}\n")
         .expect("write api checkout fixture source");
     let commit = Command::new("git")
-        .args([
-            "add",
-            "lib.rs",
-        ])
+        .args(["add", "lib.rs"])
         .current_dir(&checkout_path)
         .output()
         .expect("stage api checkout fixture source");
@@ -626,7 +630,8 @@ fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalReposito
         .expect("git revision is UTF-8")
         .trim()
         .to_string();
-    let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![member_id]);
+    let manifest =
+        LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![member_id]);
     LogicalCodebaseStore::new(app_paths.clone())
         .save_manifest("project_0001", &manifest)
         .unwrap();
@@ -834,12 +839,18 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
         })
         .expect("generation context message");
     let content = context["content"].as_str().unwrap();
-    assert!(content.contains("聚合代码库成员清单"), "缺 inventory：{content}");
+    assert!(
+        content.contains("聚合代码库成员清单"),
+        "缺 inventory：{content}"
+    );
     assert!(
         content.contains("00000000-0000-0000-0000-000000000001"),
         "缺成员行：{content}"
     );
-    assert!(content.contains("involved_repository_ids"), "缺聚合指令：{content}");
+    assert!(
+        content.contains("involved_repository_ids"),
+        "缺聚合指令：{content}"
+    );
     assert!(
         content.contains("禁止回落到任意单一 primary 仓库"),
         "缺禁止 primary 回落指令：{content}"
@@ -923,7 +934,8 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
     );
     // 草稿态聚合 design（involved 空、Draft）。
     assert_eq!(
-        design_response["design_specs"][0]["confirmation_status"], "draft"
+        design_response["design_specs"][0]["confirmation_status"],
+        "draft"
     );
 
     // session context message 注入 inventory + 聚合视野指令（含 change_order/depends_on）。
@@ -940,18 +952,30 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
         })
         .expect("generation context message");
     let content = context["content"].as_str().unwrap();
-    assert!(content.contains("聚合代码库成员清单"), "缺 inventory：{content}");
+    assert!(
+        content.contains("聚合代码库成员清单"),
+        "缺 inventory：{content}"
+    );
     assert!(
         content.contains("00000000-0000-0000-0000-000000000001"),
         "缺成员行：{content}"
     );
-    assert!(content.contains("involved_repository_ids"), "缺聚合指令：{content}");
+    assert!(
+        content.contains("involved_repository_ids"),
+        "缺聚合指令：{content}"
+    );
     assert!(
         content.contains("禁止回落到任意单一 primary 仓库"),
         "缺禁止 primary 回落指令：{content}"
     );
-    assert!(content.contains("change_order"), "缺 change_order 指令：{content}");
-    assert!(content.contains("depends_on"), "缺 depends_on 依据：{content}");
+    assert!(
+        content.contains("change_order"),
+        "缺 change_order 指令：{content}"
+    );
+    assert!(
+        content.contains("depends_on"),
+        "缺 depends_on 依据：{content}"
+    );
 }
 
 // ---- Task 6：confirm gate（多仓 involved + change_order 校验，3b 收紧）----
@@ -1026,14 +1050,18 @@ async fn create_logical_confirm_fixture(
         _ => panic!("only Story/Design supported"),
     };
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id,
-        workspace_type: kind,
-        author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Codex,
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id,
+            workspace_type: kind,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
         .expect("workspace session");
     (root, app, session.id)
 }
@@ -1102,12 +1130,8 @@ async fn confirm_logical_design_with_change_order_succeeds() {
     // 多仓 Design（involved>1，有 change_order）→ confirm → 200。
     let m1 = LogicalRepositoryId(uuid::Uuid::from_u128(1));
     let m2 = LogicalRepositoryId(uuid::Uuid::from_u128(2));
-    let (_root, app, session_id) = create_logical_confirm_fixture(
-        WorkspaceType::Design,
-        vec![m1, m2],
-        vec![m1, m2],
-    )
-    .await;
+    let (_root, app, session_id) =
+        create_logical_confirm_fixture(WorkspaceType::Design, vec![m1, m2], vec![m1, m2]).await;
     let (status, body) = request_json(
         app,
         Method::POST,
@@ -1153,14 +1177,18 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
         })
         .expect("legacy story");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: story.id,
-        workspace_type: WorkspaceType::Story,
-        author_provider: ProviderName::Fake,
-        reviewer_provider: ProviderName::Codex,
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
         .expect("legacy session");
     let (status, body) = request_json(
         app,
@@ -1175,4 +1203,133 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
         "单仓 Story confirm 不得被新门拦截: {body}"
     );
     assert_eq!(body["status"], "confirmed");
+}
+
+// F-26b（0497 现场锚）：design 审核与 plan Review Round 在 workspace timeline 有
+// reviewer 节点证据，但生命周期工作台（issue 面）零展示——用户无从确认
+// 「review 已做」。修复后：spec DTO 附带 review_status 投影（active reviewer 节点
+// → running；否则 completed reviewer 节点 → completed；无证据 → null）。
+#[tokio::test]
+async fn lifecycle_projects_review_status_from_workspace_timeline_reviewer_runs() {
+    use cadence_aria::web::workspace_ws_types::{
+        ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType, WorkspaceStage,
+    };
+
+    fn reviewer_run_node(node_id: &str, status: TimelineNodeStatus) -> TimelineNode {
+        TimelineNode {
+            node_id: node_id.to_string(),
+            node_type: TimelineNodeType::ReviewerRun,
+            agent: Some(ProviderName::Codex),
+            stage: WorkspaceStage::CrossReview,
+            round: Some(1),
+            status,
+            title: "Review Round 1".to_string(),
+            summary: None,
+            started_at: "2026-09-21T00:00:00Z".to_string(),
+            completed_at: Some("2026-09-21T00:01:00Z".to_string()),
+            duration_ms: Some(60_000),
+            artifact_ref: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            retry: None,
+        }
+    }
+
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    cadence_aria::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(cadence_aria::product::project_store::CreateProjectInput {
+            name: "Lifecycle".to_string(),
+            description: None,
+        })
+        .expect("project");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "review evidence issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "review evidence story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story");
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("session");
+
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let lifecycle_uri = "/api/issues/issue_0001/lifecycle?project_id=project_0001";
+
+    // 1) 无 reviewer 节点 → review_status 缺省（null）。
+    lifecycle
+        .save_timeline_nodes(&session.id, &[])
+        .expect("empty timeline nodes");
+    let (status, body) = request_json(app.clone(), Method::GET, lifecycle_uri, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["story_specs"][0]["review_status"].is_null(),
+        "no reviewer evidence must project null review_status: {body}"
+    );
+
+    // 2) 仅有 completed reviewer_run → completed。
+    lifecycle
+        .save_timeline_nodes(
+            &session.id,
+            &[reviewer_run_node(
+                "timeline_node_002",
+                TimelineNodeStatus::Completed,
+            )],
+        )
+        .expect("completed reviewer node");
+    let (status, body) = request_json(app.clone(), Method::GET, lifecycle_uri, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["story_specs"][0]["review_status"], "completed",
+        "completed reviewer_run must project review_status=completed: {body}"
+    );
+
+    // 3) completed + active 并存 → running（进行中优先）。
+    lifecycle
+        .save_timeline_nodes(
+            &session.id,
+            &[
+                reviewer_run_node("timeline_node_002", TimelineNodeStatus::Completed),
+                reviewer_run_node("timeline_node_003", TimelineNodeStatus::Active),
+            ],
+        )
+        .expect("active reviewer node");
+    let (status, body) = request_json(app, Method::GET, lifecycle_uri, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["story_specs"][0]["review_status"], "running",
+        "an active reviewer_run must project review_status=running: {body}"
+    );
 }

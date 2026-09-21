@@ -520,4 +520,26 @@ impl WorkspaceEngine {
             publication_provenance_ref: self.session.publication_provenance_ref.clone(),
         }
     }
+
+    /// F-25b：HTTP confirm（handler 层直写 durable）后的内存同步面。AuthorConfirm/
+    /// HumanConfirm 静止态引擎内存与 durable 一致，唯一差异是该外部写入：按 record
+    /// 同步 session_status/门快照并补登尾部新增消息（确认审计行），使随后的全量
+    /// session_state 广播携带 confirmed 投影而不是旧内存态。
+    pub(crate) fn apply_external_confirm_record(&mut self, record: &WorkspaceSessionRecord) {
+        self.session.session_status = record.status.clone();
+        self.session.human_gate_snapshot = record.human_gate_snapshot.clone();
+        let in_memory_len = self.session.messages.len();
+        let durable_len = record.messages.len();
+        if durable_len > in_memory_len {
+            for (offset, message) in record.messages[in_memory_len..].iter().enumerate() {
+                self.session.messages.push(SessionMessage {
+                    id: format!("msg_{:03}", in_memory_len + offset + 1),
+                    role: message.role.clone(),
+                    content: message.content.clone(),
+                    checkpoint_id: None,
+                    created_at: message.created_at.clone(),
+                });
+            }
+        }
+    }
 }

@@ -728,6 +728,11 @@ export function toDrawerEntity(
     title: card.title,
     status: card.status,
     version: card.version,
+    // F-26b：spec/plan 卡的 workspace review 证据随卡进入 drawer overview。
+    reviewStatus:
+      card.kind === "story_spec" || card.kind === "design_spec" || card.kind === "work_item_group"
+        ? (card.raw.review_status ?? null)
+        : null,
   };
 
   if (card.kind === "issue") {

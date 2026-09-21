@@ -13,6 +13,8 @@ import type {
 } from "./work-item-plan";
 import type { ArtifactVersion, WorkspaceSession, WorkspaceSessionSummary } from "./workspace";
 
+export type WorkspaceReviewStatus = "running" | "completed";
+
 export type StorySpec = {
   story_spec_id: string;
   issue_id: string;
@@ -22,6 +24,8 @@ export type StorySpec = {
   current_markdown_preview: string | null;
   confirmation_status: LifecycleConfirmationStatus;
   artifact_versions: ArtifactVersion[];
+  // F-26b（additive）：workspace timeline reviewer 节点证据投影；旧响应缺省。
+  review_status?: WorkspaceReviewStatus | null;
 };
 
 export type DesignSpec = {
@@ -33,6 +37,8 @@ export type DesignSpec = {
   current_markdown_preview: string | null;
   confirmation_status: LifecycleConfirmationStatus;
   artifact_versions: ArtifactVersion[];
+  // F-26b（additive）：workspace timeline reviewer 节点证据投影；旧响应缺省。
+  review_status?: WorkspaceReviewStatus | null;
 };
 
 export type LifecycleWorkItem = {

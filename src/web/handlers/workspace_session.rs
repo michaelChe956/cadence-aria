@@ -104,14 +104,20 @@ pub async fn workspace_session_confirm(
     lifecycle
         .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Confirmed)
         .map_err(product_store_api_error)?;
-    let session = lifecycle
+    let confirmed = lifecycle
         .append_workspace_message(
             &session_id,
             "system".to_string(),
             format!("已由 {} 确认当前 Workspace 产物。", request.confirmed_by),
         )
         .map_err(product_store_api_error)?;
-    Ok(Json(workspace_session_dto(session)))
+    // F-25b：durable 写完成后向已连接 WS 广播 confirmed session_state——前端
+    // 乐观 setSessionStatus 只覆盖发请求的 tab，其他 tab/重连必须由服务端推送
+    // 才能看到投影收敛（对照 F-09 HumanGateOpened 广播先例）。
+    if let Some(manager) = state.workspace_sessions.get(&session_id).await {
+        manager.broadcast_http_confirm(&confirmed).await;
+    }
+    Ok(Json(workspace_session_dto(confirmed)))
 }
 
 pub async fn workspace_session_timeline_node_detail(

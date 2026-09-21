@@ -1,8 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  DesignSpec,
   IssueWorkItemPlanDetailDto,
   LifecycleWorkItem,
+  StorySpec,
 } from "../../api/types";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 import { LifecycleCard } from "./LifecycleCard";
@@ -145,6 +147,75 @@ describe("LifecycleCard", () => {
 
     expect(screen.getByText("前端")).toBeInTheDocument();
     expect(screen.getByText(/等待依赖完成：后端 API/)).toBeInTheDocument();
+  });
+
+  // F-26b：timeline reviewer_run 证据（review_status）必须映射到生命周期卡片——
+  // 用户从 issue 工作台即可看到「review 已做/进行中」，不必进会话页翻 timeline。
+  it("projects workspace review evidence onto spec and plan cards", () => {
+    const storyCard = lifecycleCard("story_spec", "登录会话过期提示");
+    const storyView = render(
+      <LifecycleCard
+        card={
+          {
+            ...storyCard,
+            raw: { ...(storyCard.raw as StorySpec), review_status: "completed" },
+          } as LifecycleCardData
+        }
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(storyView.container).getByTestId("lifecycle-card-review-status").textContent).toBe(
+      "Review 已完成",
+    );
+
+    const designCard = lifecycleCard("design_spec", "会话管理设计");
+    const designView = render(
+      <LifecycleCard
+        card={
+          {
+            ...designCard,
+            raw: { ...(designCard.raw as DesignSpec), review_status: "running" },
+          } as LifecycleCardData
+        }
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(designView.container).getByTestId("lifecycle-card-review-status").textContent).toBe(
+      "Review 进行中",
+    );
+
+    const planCard = lifecycleCard("work_item_group", "Work Item Group");
+    const planView = render(
+      <LifecycleCard
+        card={
+          {
+            ...planCard,
+            raw: { ...workItemPlanRaw(), review_status: "completed" },
+          } as LifecycleCardData
+        }
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(planView.container).getByTestId("lifecycle-card-review-status").textContent).toBe(
+      "Review 已完成",
+    );
+
+    // 无 review 证据的 spec 卡不渲染指示（零证据零展示）。
+    const bareView = render(
+      <LifecycleCard
+        card={lifecycleCard("story_spec", "无审核故事")}
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(bareView.container).queryByTestId("lifecycle-card-review-status")).toBeNull();
   });
 });
 

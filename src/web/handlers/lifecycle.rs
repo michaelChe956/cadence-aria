@@ -88,9 +88,22 @@ pub async fn issue_lifecycle(
                 .compute_plan_group_projection(&project_id, &issue_id, &plan.id)
                 .map_err(product_store_api_error)
                 .map(plan_group_projection_dto)?;
+            // F-26b：plan 会话的 reviewer 节点证据同样投影到 plan DTO。
+            let plan_session = workspace_session_for_entity(
+                &workspace_sessions,
+                &plan.id,
+                &WorkspaceType::WorkItemPlan,
+            );
+            let review_status = session_review_status(
+                &lifecycle,
+                &project_id,
+                &issue_id,
+                plan_session.map(|session| session.id.as_str()),
+            );
             Ok(issue_work_item_plan_detail_dto(
                 plan,
                 Some(group_projection),
+                review_status,
             ))
         })
         .collect::<ApiResult<Vec<_>>>()?;
@@ -757,7 +770,16 @@ pub async fn prepare_work_item_plan(
         .map_err(product_store_api_error)
         .map(plan_group_projection_dto)?;
     Ok(Json(PrepareWorkItemPlanResponse {
-        work_item_plan: issue_work_item_plan_detail_dto(&plan, Some(group_projection)),
+        work_item_plan: issue_work_item_plan_detail_dto(
+            &plan,
+            Some(group_projection),
+            session_review_status(
+                &lifecycle,
+                &plan.project_id,
+                &plan.issue_id,
+                Some(&session.id),
+            ),
+        ),
         workspace_session: workspace_session_dto(session),
     }))
 }

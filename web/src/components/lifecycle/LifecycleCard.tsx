@@ -104,6 +104,19 @@ export function LifecycleCard({
                   {workItemKindLabel(card.raw.kind)}
                 </span>
               ) : null}
+              {workItemReviewStatusLabel(card) ? (
+                <span
+                  data-testid="lifecycle-card-review-status"
+                  className={[
+                    "rounded border px-1.5 py-0.5",
+                    workItemReviewStatusLabel(card) === "Review 进行中"
+                      ? "border-sky-300 bg-sky-50 text-sky-800"
+                      : "border-[var(--aria-primary)] bg-white/70 text-[var(--aria-primary)]",
+                  ].join(" ")}
+                >
+                  {workItemReviewStatusLabel(card)}
+                </span>
+              ) : null}
               {workItemStatusLabel ? (
                 <span
                   className={[
@@ -255,6 +268,26 @@ function workItemStatusBadge(
   }
   if (card.raw.plan_status === "confirmed") {
     return { text: "可编码", waiting: false };
+  }
+  return null;
+}
+
+// F-26b：spec/plan 卡片的 workspace review 证据投影——timeline reviewer 节点
+// 状态经后端 review_status 传入（running/completed），issue 工作台不进会话页
+// 即可看到「review 已做/进行中」。issue/work_item 卡无此投影（零证据零展示）。
+function workItemReviewStatusLabel(card: LifecycleCardData): string | null {
+  if (
+    card.kind !== "story_spec" &&
+    card.kind !== "design_spec" &&
+    card.kind !== "work_item_group"
+  ) {
+    return null;
+  }
+  if (card.raw.review_status === "running") {
+    return "Review 进行中";
+  }
+  if (card.raw.review_status === "completed") {
+    return "Review 已完成";
   }
   return null;
 }

@@ -6,9 +6,11 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::models::WorkspaceSessionSummaryRecord;
 use crate::product::workspace_engine::WorkItemRepositoryGroup;
+use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
     group_projection: Option<PlanGroupProjectionDto>,
+    review_status: Option<String>,
 ) -> IssueWorkItemPlanDetailDto {
     IssueWorkItemPlanDetailDto {
         id: plan.id.clone(),
@@ -42,6 +44,7 @@ pub(crate) fn issue_work_item_plan_detail_dto(
         created_at: plan.created_at.clone(),
         updated_at: plan.updated_at.clone(),
         group_projection,
+        review_status,
     }
 }
 
@@ -198,6 +201,12 @@ pub(crate) fn story_spec_dto(
             &record.issue_id,
             session_id,
         )?,
+        review_status: session_review_status(
+            lifecycle,
+            &record.project_id,
+            &record.issue_id,
+            session_id,
+        ),
     })
 }
 
@@ -221,7 +230,51 @@ pub(crate) fn design_spec_dto(
             &record.issue_id,
             session_id,
         )?,
+        review_status: session_review_status(
+            lifecycle,
+            &record.project_id,
+            &record.issue_id,
+            session_id,
+        ),
     })
+}
+
+/// F-26b：workspace timeline 的 reviewer 节点证据（reviewer_run / plan 系 review
+/// 节点，与 engine reviewer 角色分类同集合）映射为生命周期投影——活跃节点在
+/// 则 review 进行中，否则任一已完成节点即 review 已做；零证据/读失败返回 None
+/// （只读投影降级，不阻断生命周期响应）。
+pub(crate) fn session_review_status(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    session_id: Option<&str>,
+) -> Option<String> {
+    let session_id = session_id?;
+    let nodes = lifecycle
+        .load_timeline_nodes_for_issue_session(project_id, issue_id, session_id)
+        .ok()?;
+    let is_reviewer_node = |node: &&crate::web::workspace_ws_types::TimelineNode| {
+        matches!(
+            node.node_type,
+            TimelineNodeType::ReviewerRun
+                | TimelineNodeType::WorkItemPlanOutlineReview
+                | TimelineNodeType::WorkItemDraftReview
+                | TimelineNodeType::WorkItemBatchReview
+        )
+    };
+    if nodes.iter().any(|node| {
+        is_reviewer_node(&node)
+            && matches!(
+                node.status,
+                TimelineNodeStatus::Active | TimelineNodeStatus::Paused
+            )
+    }) {
+        return Some("running".to_string());
+    }
+    nodes
+        .iter()
+        .any(|node| is_reviewer_node(&node) && matches!(node.status, TimelineNodeStatus::Completed))
+        .then(|| "completed".to_string())
 }
 
 pub(crate) fn workspace_session_for_entity<'a>(

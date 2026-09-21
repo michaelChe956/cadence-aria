@@ -347,4 +347,60 @@ describe("LifecycleCardDrawer", () => {
       screen.queryByTestId("plan-group-projection-panel"),
     ).not.toBeInTheDocument();
   });
+  // F-26b：spec/plan 详情 overview 头部展示 workspace review 证据——用户在
+  // issue 面打开抽屉即可确认「review 已做/进行中」。
+  it("projects workspace review evidence in the drawer header", () => {
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "用户认证模块",
+          status: "confirmed",
+          version: 2,
+          reviewStatus: "running",
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("drawer-review-status").textContent).toBe(
+      "Review 进行中",
+    );
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "用户认证模块",
+          status: "confirmed",
+          version: 2,
+          reviewStatus: "completed",
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("drawer-review-status").textContent).toBe(
+      "Review 已完成",
+    );
+
+    // 无 review 证据不渲染指示。
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "用户认证模块",
+          status: "confirmed",
+          version: 2,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("drawer-review-status")).not.toBeInTheDocument();
+  });
+
 });

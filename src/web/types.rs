@@ -557,6 +557,10 @@ pub struct StorySpecDto {
     pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
     pub artifact_versions: Vec<ArtifactVersionDto>,
+    /// F-26b（additive）：workspace timeline reviewer 节点证据投影
+    /// （"running"/"completed"），零证据缺省 None 兼容旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -570,6 +574,10 @@ pub struct DesignSpecDto {
     pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
     pub artifact_versions: Vec<ArtifactVersionDto>,
+    /// F-26b（additive）：workspace timeline reviewer 节点证据投影
+    /// （"running"/"completed"），零证据缺省 None 兼容旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -875,6 +883,10 @@ pub struct IssueWorkItemPlanDetailDto {
     /// 旧客户端缺省 None 兼容（serde default）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_projection: Option<PlanGroupProjectionDto>,
+    /// F-26b（additive）：plan 会话 workspace timeline reviewer 节点证据投影
+    /// （"running"/"completed"），零证据缺省 None 兼容旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_status: Option<String>,
     pub repository_profile_ref: Option<String>,
     pub options: WorkItemSplitOptions,
     pub validator_findings: Vec<WorkItemSplitFinding>,

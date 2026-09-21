@@ -3,7 +3,7 @@ import type {
   WorkItemContextBudget,
   WorkItemKind,
 } from "./common";
-import type { LifecycleWorkItem } from "./lifecycle";
+import type { LifecycleWorkItem, WorkspaceReviewStatus } from "./lifecycle";
 import type {
   ArtifactVersionSummary,
   WorkspaceSession,
@@ -652,6 +652,8 @@ export type IssueWorkItemPlanDetailDto = {
   // REQ-MTG-04（WP3，additive）：plan 级 group 聚合只读投影——旧响应缺省
   //（undefined/null）兼容。
   group_projection?: PlanGroupProjectionDto | null;
+  // F-26b（additive）：plan 会话 reviewer 节点证据投影；旧响应缺省。
+  review_status?: WorkspaceReviewStatus | null;
 };
 
 export type PrepareWorkItemPlanRequest = ProviderWorkspaceConfigInput & {

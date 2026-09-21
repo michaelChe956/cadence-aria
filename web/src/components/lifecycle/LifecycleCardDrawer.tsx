@@ -19,6 +19,7 @@ import type {
   WorkItemContextBudget,
   WorkItemExecutionPlanStatus,
   WorkItemKind,
+  WorkspaceReviewStatus,
   LifecycleWorkItem,
   WorkItemSplitFinding,
   PlanGroupProjectionDto,
@@ -68,6 +69,8 @@ export interface DrawerEntity {
   workItemPlanSourceDesignSpecIds?: string[];
   workItemPlanValidatorFindings?: WorkItemSplitFinding[];
   workItemPlanDependencyGraph?: IssueWorkItemPlanDependencyEdgeDto[];
+  // F-26b：workspace timeline reviewer 节点证据投影（spec/plan 实体）。
+  reviewStatus?: WorkspaceReviewStatus | null;
   // REQ-MTG-04（WP3）：plan 级 group 聚合只读投影（additive，缺省 undefined）。
   groupProjection?: PlanGroupProjectionDto | null;
 }
@@ -170,6 +173,19 @@ export function LifecycleCardDrawer({
             <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
               {STATUS_LABELS[entity.status] ?? entity.status}
             </span>
+            {entity.reviewStatus ? (
+              <span
+                data-testid="drawer-review-status"
+                className={[
+                  "rounded border px-1.5 py-0.5",
+                  entity.reviewStatus === "running"
+                    ? "border-sky-300 bg-sky-50 text-sky-800"
+                    : "border-[var(--aria-primary)] bg-white/70 text-[var(--aria-primary)]",
+                ].join(" ")}
+              >
+                {entity.reviewStatus === "running" ? "Review 进行中" : "Review 已完成"}
+              </span>
+            ) : null}
             {entity.version ? (
               <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
                 v{entity.version}

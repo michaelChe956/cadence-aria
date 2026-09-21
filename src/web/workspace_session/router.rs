@@ -280,4 +280,21 @@ impl WorkspaceSessionManager {
     pub(crate) fn broadcast_current_session_state(&self) {
         self.broadcast(self.current_session_state());
     }
+
+    /// F-25b：HTTP confirm 端点完成 durable 写后的广播面（对照 F-09
+    /// HumanGateOpened 的 engine 广播先例）。story/design AuthorConfirm 的确认
+    /// 通路在 handler 层直写 durable，此前后不广播——发请求 tab 靠乐观
+    /// setSessionStatus 收敛，其他 tab/重连只能整页 reload。现先按 record 同步
+    /// 引擎内存投影，再向全部 attachment 广播全量 session_state（顺带入
+    /// journal，后续 cursor 回放同样取到 confirmed 态）。
+    pub(crate) async fn broadcast_http_confirm(
+        &self,
+        record: &crate::product::models::WorkspaceSessionRecord,
+    ) {
+        {
+            let mut engine = self.engine.lock().await;
+            engine.apply_external_confirm_record(record);
+        }
+        self.broadcast_current_session_state();
+    }
 }
