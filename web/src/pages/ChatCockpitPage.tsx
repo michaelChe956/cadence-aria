@@ -248,6 +248,14 @@ function StreamingConversationBlock({
   );
 }
 
+/** F-28 二轮：仲裁层拒收、可经 sendHello(role=driver) 夺回的两码——
+ * STALE_DRIVER_LEASE（driver 丢租约）与 OBSERVER_WRITE_REJECTED（本连接以
+ * observer 身份重连后写操作被拒）。 */
+const RETAKABLE_LEASE_CODES: Record<string, true> = {
+  [STALE_DRIVER_LEASE_CODE]: true,
+  OBSERVER_WRITE_REJECTED: true,
+};
+
 export function ChatCockpitPage({
   sessionId,
   onBack,
@@ -629,12 +637,16 @@ export function ChatCockpitPage({
     const commandId = item.id.slice(item.id.lastIndexOf(":") + 1);
     workspaceWs.sendAdvance(commandId);
   }, [workspaceWs.sendAdvance]);
-  // F-11：裸 driver 抢走租约后，本连接写操作被 STALE_DRIVER_LEASE 拒绝——重发
-  // driver hello 即重新持有租约（服务端 bind_role 对既有连接同样执行 lease.acquire），
+  // F-11/F-28 二轮：裸 driver 抢走租约（STALE_DRIVER_LEASE）或本连接以
+  // observer 身份重连（OBSERVER_WRITE_REJECTED）后写操作被拒——重发 driver
+  // hello 即重新持有租约（服务端 bind_role 对既有连接同样执行 lease.acquire），
   // 并撤下协议错误条目。
   const handleRetakeLease = useCallback(() => {
     const current = useWorkspaceStore.getState();
-    if (current.protocolError?.code !== STALE_DRIVER_LEASE_CODE) {
+    if (
+      current.protocolError === null ||
+      RETAKABLE_LEASE_CODES[current.protocolError.code] !== true
+    ) {
       return;
     }
     const lastSeenNodeId =
@@ -642,12 +654,22 @@ export function ChatCockpitPage({
     workspaceWs.sendHello(sessionId, lastSeenNodeId);
     current.setProtocolError(null);
   }, [sessionId, workspaceWs.sendHello]);
-  // F-28（v33 复验 3）：丢租约后 start_generation 被仲裁层拒收，错误面必须直出
-  // 在生成动作区（按钮旁）——仅落收件箱 hard_error 条目时用户视线不在左侧，
-  // 感知为零。重接管复用上面 F-11 的 handleRetakeLease（确认后 sendHello）。
-  const staleLeaseNotice =
-    isCurrentSession && state.protocolError?.code === STALE_DRIVER_LEASE_CODE
-      ? { message: state.protocolError.message, onRetakeLease: handleRetakeLease }
+  // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：classifyProtocolError
+  // 把 gate/advance 分流之外的全部协议错误落 store.protocolError——就地面
+  // 此前只认 STALE_DRIVER_LEASE 一码，长开 tab 断线重连后拒收码变为
+  // OBSERVER_WRITE_REJECTED 或其它 hard_error 时生成按钮旁零显示。泛化为
+  // hard_error 全族：lease 拒收两码给「重新接管」（复用上面 F-11 回调链），
+  // 其余码报错误码+建议刷新（错误面仍与 F-30 终态禁用提示同屏共存）。
+  const hardErrorNotice =
+    isCurrentSession && state.protocolError !== null
+      ? {
+          code: state.protocolError.code,
+          message: state.protocolError.message,
+          onRetakeLease:
+            RETAKABLE_LEASE_CODES[state.protocolError.code] === true
+              ? handleRetakeLease
+              : null,
+        }
       : null;
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const takeoverButtonRef = useRef<ConfirmTwiceButtonHandle | null>(null);
@@ -1142,7 +1164,7 @@ export function ChatCockpitPage({
                 onSendContextNote={workspaceWs.sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 onAbort={workspaceWs.abort}
-                staleLeaseNotice={staleLeaseNotice}
+                hardErrorNotice={hardErrorNotice}
               />
             ) : null}
             {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}

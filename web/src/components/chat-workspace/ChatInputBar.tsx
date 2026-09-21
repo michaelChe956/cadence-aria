@@ -38,9 +38,18 @@ interface ChatInputBarProps {
   startGenerationDisabledHint?: string | null;
   /** spec-workbench-canvas-experience T4：输入框聚焦回调（并存面板据此收起）。 */
   onInputFocus?: () => void;
-  /** F-28（v33 复验 3）：STALE_DRIVER_LEASE 就地错误面——直出在生成动作区
-   * （不受收件箱 actionable 条件限制），重接管复用 F-11 二次确认回调链。 */
-  staleLeaseNotice?: { message: string; onRetakeLease: () => void } | null;
+  /** F-28 二轮（v34 复验「失败态点开始生成零反馈」）：hard_error 全族就地
+   * 错误面——直出在生成动作区（不受收件箱 actionable 条件限制）。lease
+   * 拒收两码（STALE_DRIVER_LEASE/OBSERVER_WRITE_REJECTED）附重接管二次确认；
+   * 其余码只报错误码与建议刷新。 */
+  hardErrorNotice?: HardErrorNotice | null;
+}
+
+export interface HardErrorNotice {
+  code: string;
+  message: string;
+  /** lease 拒收两码提供：重发 driver hello 夺回租约（复用 F-11 回调链）。 */
+  onRetakeLease: (() => void) | null;
 }
 
 /**
@@ -66,7 +75,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   startGenerationDisabled = false,
   startGenerationDisabledHint = null,
   onInputFocus,
-  staleLeaseNotice = null,
+  hardErrorNotice = null,
 }, ref) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -136,22 +145,29 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           placeholder={placeholderForStage(stage, activeNodeType)}
           className="min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         />
-        {/* F-28：丢租约后就地错误面紧贴动作按钮行——收件箱条目远离视线导致
-            零反馈；重接管复用 F-11 的 ConfirmTwiceButton 二次确认纪律。 */}
-        {staleLeaseNotice ? (
+        {/* F-28 二轮：hard_error 就地错误面紧贴动作按钮行——收件箱条目远离
+            视线导致零反馈；lease 拒收两码的重接管复用 F-11 的
+            ConfirmTwiceButton 二次确认纪律，其余码报错误码+建议刷新。 */}
+        {hardErrorNotice ? (
           <div
-            data-testid="stale-lease-notice"
+            data-testid="hard-error-notice"
             role="alert"
             className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2"
           >
             <span className="text-xs font-semibold text-red-700">
-              连接租约已过期——本连接的写操作已被拒绝（STALE_DRIVER_LEASE）：{staleLeaseNotice.message}
+              {hardErrorLeadText(hardErrorNotice.code)}（{hardErrorNotice.code}）：
+              {hardErrorNotice.message}
+              {hardErrorNotice.onRetakeLease === null
+                ? "——建议刷新页面或重新进入会话后重试"
+                : null}
             </span>
-            <ConfirmTwiceButton
-              label="重新接管"
-              confirmLabel="确认重新接管"
-              onConfirm={staleLeaseNotice.onRetakeLease}
-            />
+            {hardErrorNotice.onRetakeLease !== null ? (
+              <ConfirmTwiceButton
+                label="重新接管"
+                confirmLabel="确认重新接管"
+                onConfirm={hardErrorNotice.onRetakeLease}
+              />
+            ) : null}
           </div>
         ) : null}
         <div className="flex flex-wrap justify-end gap-2">
@@ -242,4 +258,14 @@ function appendOptimisticEntry(type: ChatEntryType, content: string) {
     timestamp: new Date().toISOString(),
   };
   useWorkspaceStore.getState().appendChatEntry(entry);
+}
+
+function hardErrorLeadText(code: string): string {
+  if (code === "STALE_DRIVER_LEASE") {
+    return "连接租约已过期——本连接的写操作已被拒绝";
+  }
+  if (code === "OBSERVER_WRITE_REJECTED") {
+    return "本连接为观察者连接，写操作已被拒收";
+  }
+  return "操作被拒绝";
 }

@@ -612,15 +612,129 @@ describe("ChatCockpitPage", () => {
     expect(screen.queryByText(/连接租约已过期/)).toBeNull();
   });
 
-  it("does not surface the stale-lease inline error for other protocol codes (F-28)", () => {
+  // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：classifyProtocolError 把
+  // gate/advance 分流之外的全部协议错误落 store.protocolError——就地面此前
+  // 只认 STALE_DRIVER_LEASE 一码，长开 tab 断线重连后拒收码变为
+  // OBSERVER_WRITE_REJECTED 或其它 hard_error 时生成按钮旁零显示。
+  it("shows the inline error with a confirm-twice retake for the observer-write-rejected code (F-28 R2)", async () => {
+    const user = userEvent.setup();
+    const sendHello = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendHello, connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "OBSERVER_WRITE_REJECTED",
+        message: "observer connection cannot send write message start_generation",
+      },
+      activeNodeId: "node-1",
+      timelineNodes: [timelineNode({ node_id: "node-1" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    const inputBar = screen.getByTestId("chat-input-bar");
+    const alert = within(inputBar).getByRole("alert");
+    expect(alert).toHaveTextContent(/观察者/);
+    expect(alert).toHaveTextContent("OBSERVER_WRITE_REJECTED");
+    expect(
+      within(inputBar).getByRole("button", { name: "开始生成" }),
+    ).toBeInTheDocument();
+
+    await user.click(within(inputBar).getByRole("button", { name: "重新接管" }));
+    expect(sendHello).not.toHaveBeenCalled();
+
+    await user.click(within(inputBar).getByRole("button", { name: "确认重新接管" }));
+    expect(sendHello).toHaveBeenCalledWith("session_001", "node-1");
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(within(inputBar).queryByRole("alert")).toBeNull();
+  });
+
+  // 其余未知 hard_error 码（非 lease 拒收）：错误码直出 + 建议刷新，不给重
+  // 接管钮。SESSION_ALREADY_CONFIRMED 在真实链路伴随终态（F-30 前置禁用按钮），
+  // 此处用非终态上下文隔离就地面自身的渲染契约。
+  it("shows the code and refresh advice without a retake for other hard-error codes (F-28 R2)", () => {
     mockWorkspaceWs({ connectionStatus: "connected" });
     useWorkspaceStore.setState({
       stage: "prepare_context",
-      protocolError: { code: "OTHER_PROTOCOL_CODE", message: "unrelated hard error" },
+      sessionStatus: "open",
+      protocolError: {
+        code: "SESSION_ALREADY_CONFIRMED",
+        message: "会话 session_001 已确认（终态），不能重新开始生成",
+      },
     });
 
     renderCockpit();
 
-    expect(screen.queryByText(/连接租约已过期/)).toBeNull();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("SESSION_ALREADY_CONFIRMED");
+    expect(alert).toHaveTextContent(/刷新/);
+    expect(alert).not.toHaveTextContent(/连接租约已过期/);
+    expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
+  });
+
+  // gate/advance 分流类（classifyProtocolError 非 hard_error）落门面/推进
+  // 记录的 inlineError，不落 store.protocolError——就地面保持零呈现
+  //（既有分流行为：门禁/推进错误在各自动作面就地呈现）。
+  it("keeps gate- and advance-routed protocol errors off the inline hard-error face (F-28 R2)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: null,
+      humanGateTurn: {
+        turn_id: "turn-1",
+        command_id: null,
+        remaining_budget: 1,
+        status: "open",
+        artifact_ref: null,
+        failure_class: null,
+        failure_message: null,
+        opened_at: "2026-09-21T00:00:00Z",
+        inlineError: {
+          code: "INVALID_HUMAN_CONFIRM_ACTION",
+          message: "confirm is rejected on this gate",
+        },
+      },
+      advanceCommands: {
+        cmd_1: {
+          command_id: "cmd_1",
+          status: "rejected",
+          code: null,
+          reason: null,
+          attempt_id: null,
+          workspace_entry: null,
+          inlineError: {
+            code: "ADVANCE_REPLAY_NOT_READY",
+            message: "advance replay not ready",
+          },
+        },
+      },
+    });
+
+    renderCockpit();
+
+    const inputBar = screen.getByTestId("chat-input-bar");
+    expect(within(inputBar).queryByRole("alert")).toBeNull();
+  });
+
+  // F-30 共存：终态禁用（按钮 disabled + 如实提示）与 hard_error 就地面
+  // 同屏——禁用态吞不掉错误面（长开 tab 终态残留 + 拒收错误叠加的真实形态）。
+  it("keeps the inline hard-error face visible while start generation is terminal-disabled (F-28 R2 × F-30)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      sessionStatus: "confirmed",
+      protocolError: {
+        code: "OBSERVER_WRITE_REJECTED",
+        message: "observer connection cannot send write message start_generation",
+      },
+    });
+
+    renderCockpit();
+
+    expect(screen.getByTestId("start-generation")).toBeDisabled();
+    expect(screen.getByTestId("start-generation-blocked-hint")).toHaveTextContent(
+      /终态/,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(/OBSERVER_WRITE_REJECTED/);
   });
 });

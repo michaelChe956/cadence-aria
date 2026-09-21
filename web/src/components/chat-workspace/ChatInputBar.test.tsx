@@ -128,14 +128,17 @@ describe("ChatInputBar", () => {
         onSendContextNote={vi.fn()}
         onStartGeneration={vi.fn()}
         onAbort={vi.fn()}
-        staleLeaseNotice={{
+        hardErrorNotice={{
+          code: "STALE_DRIVER_LEASE",
           message: "driver connection no longer holds the lease",
           onRetakeLease,
         }}
       />,
     );
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/连接租约已过期/);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/连接租约已过期/);
+    expect(alert).toHaveTextContent("STALE_DRIVER_LEASE");
     expect(screen.getByRole("button", { name: "开始生成" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "重新接管" }));
@@ -145,7 +148,89 @@ describe("ChatInputBar", () => {
     expect(onRetakeLease).toHaveBeenCalledTimes(1);
   });
 
-  it("renders no stale-lease notice without the host-provided notice (F-28)", () => {
+  // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：就地面泛化 hard_error
+  // 全族——长开 tab 断线重连后拒收码可能是 OBSERVER_WRITE_REJECTED（本连接以
+  // observer 身份重连，写操作被拒），同样给「重新接管」二次确认（sendHello
+  // role=driver 可夺回租约）。
+  it("offers the confirm-twice retake for the observer-write-rejected notice (F-28 R2)", () => {
+    const onRetakeLease = vi.fn();
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        hardErrorNotice={{
+          code: "OBSERVER_WRITE_REJECTED",
+          message: "observer connection cannot send write message start_generation",
+          onRetakeLease,
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/观察者/);
+    expect(alert).toHaveTextContent("OBSERVER_WRITE_REJECTED");
+    expect(alert).not.toHaveTextContent(/连接租约已过期/);
+
+    fireEvent.click(screen.getByRole("button", { name: "重新接管" }));
+    expect(onRetakeLease).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认重新接管" }));
+    expect(onRetakeLease).toHaveBeenCalledTimes(1);
+  });
+
+  // 其余未知 hard_error 码：错误码直出 + 建议刷新文案，不给重接管钮——
+  // 无凭据表明 sendHello 能恢复，重接管入口只留给 lease 拒收两码。
+  it("shows the code and refresh advice without a retake for unknown hard-error codes (F-28 R2)", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        hardErrorNotice={{
+          code: "SESSION_ALREADY_CONFIRMED",
+          message: "会话已确认（终态），不能重新开始生成",
+          onRetakeLease: null,
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("SESSION_ALREADY_CONFIRMED");
+    expect(alert).toHaveTextContent(/刷新/);
+    expect(alert).not.toHaveTextContent(/连接租约已过期/);
+    expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
+  });
+
+  // F-30 共存：终态禁用提示与 hard_error 就地面同屏——禁用态吞不掉错误面
+  //（长开 tab 终态残留 + 拒收错误叠加的真实形态：提示优先且错误面仍可见）。
+  it("keeps the hard-error notice visible beside the terminal-session disabled hint (F-28 R2 × F-30)", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+        startGenerationDisabled={true}
+        startGenerationDisabledHint="会话已确认（终态）——重新生成请走修订流程或新建会话"
+        hardErrorNotice={{
+          code: "OBSERVER_WRITE_REJECTED",
+          message: "observer connection cannot send write message start_generation",
+          onRetakeLease: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("start-generation")).toBeDisabled();
+    expect(screen.getByTestId("start-generation-blocked-hint")).toHaveTextContent(
+      /终态/,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(/OBSERVER_WRITE_REJECTED/);
+  });
+
+  it("renders no hard-error notice without the host-provided notice (F-28)", () => {
     render(
       <ChatInputBar
         stage="prepare_context"
