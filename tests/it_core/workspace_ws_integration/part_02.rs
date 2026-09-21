@@ -360,6 +360,235 @@ async fn workspace_ws_start_generation_on_confirmed_session_is_rejected_without_
     server.abort();
 }
 
+// F-31（P1 功能回归，v35 issue_0001/session_0001 现场锚）：story/design 的 AuthorConfirm
+// 门确认通路是 HTTP confirm 端点（WS confirm 帧被矩阵拒收）。C3-T5 删除
+// handle_author_decision 时连带删掉了「确认后触发 review」（原实现：reviewer_enabled_at_start
+// 命中 → complete node + start_review），F-20 只补偿了确认通道，未补偿 review 触发——
+// review 启用（review_rounds>0 && reviewer_provider.is_some()）的 story 会话确认后
+// 直接定稿，ReviewerRun 从不创建（v35 时间线只有 start_generation/author_run/author_confirm
+// 三节点）。修复后：确认时若 review 启用且本轮产物尚未评审 → 进入 cross_review 并跑
+// ReviewOnly；review 完成回 AuthorConfirm，再次确认才定稿。
+#[tokio::test]
+async fn http_confirm_on_story_author_confirm_starts_reviewer_then_finalizes() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            author_prompts,
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(ScriptedStreamingProvider::new(
+            ["审核通过。\n```json\n{\"verdict\":\"pass\",\"summary\":\"可进入人工确认\"}\n```"],
+            reviewer_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let served_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served_app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+
+    // 第一次确认：review 启用且本轮未评审 → 进入 cross_review（不得直接定稿）。
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by": "user"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(
+        body["status"], "confirmed",
+        "review 启用的 story 会话确认不得直接定稿，got {body}"
+    );
+
+    assert_eq!(
+        recv_until_stage(&mut ws, "cross_review").await,
+        "cross_review"
+    );
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ReviewComplete { verdict, .. } => {
+                assert_eq!(verdict, ReviewVerdictType::Pass);
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    // spec-design-dialog-revision T5：review pass 不自动定稿，统一回 AuthorConfirm。
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+    assert_eq!(
+        reviewer_prompts.lock().unwrap().len(),
+        1,
+        "ReviewOnly provider run must be initiated after the first confirm"
+    );
+
+    // ReviewerRun 节点锚：durable 时间线必须留下评审轮节点（v35 缺此节点=本回归）。
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let nodes = lifecycle
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("timeline nodes");
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node.node_type == TimelineNodeType::ReviewerRun),
+        "confirm 后必须创建 ReviewerRun 节点，got {nodes:?}"
+    );
+
+    // 第二次确认：本轮已评审 → 定稿。
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by": "user"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "confirmed", "{body}");
+
+    drop(ws);
+    server.abort();
+}
+
+// F-31 反向锚：未启用 review（生成时 reviewer_enabled=false）的 story 会话确认必须
+// 维持既有定稿通路——零 ReviewerRun 节点、零 provider run，直接 Confirmed。
+#[tokio::test]
+async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            author_prompts,
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(ScriptedStreamingProvider::new(
+            ["reviewer must not run without review"],
+            reviewer_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let served_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served_app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: None,
+                review_rounds: 0,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by": "user"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "confirmed", "{body}");
+
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let nodes = lifecycle
+        .load_timeline_nodes("workspace_session_0001")
+        .expect("timeline nodes");
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.node_type != TimelineNodeType::ReviewerRun),
+        "未启用 review 的确认不得创建 ReviewerRun 节点，got {nodes:?}"
+    );
+    assert!(
+        reviewer_prompts.lock().unwrap().is_empty(),
+        "未启用 review 的确认不得启动任何 reviewer provider run"
+    );
+    // 直接定稿：实体（Story Spec）确认状态落 Confirmed，而非停在评审前的等待态。
+    let story = lifecycle
+        .list_story_specs("project_0001", "issue_0001")
+        .expect("story specs")
+        .into_iter()
+        .find(|spec| spec.id == "story_spec_0001")
+        .expect("story spec entity");
+    assert_eq!(
+        story.confirmation_status,
+        cadence_aria::product::models::LifecycleConfirmationStatus::Confirmed,
+        "未启用 review 的确认必须直接定稿"
+    );
+
+    drop(ws);
+    server.abort();
+}
+
 fn set_workspace_session_status_field(root: &TempDir, status: &str) {
     let session_path = root.path().join(
         ".aria/projects/project_0001/issues/issue_0001/workspace-sessions/workspace_session_0001.json",

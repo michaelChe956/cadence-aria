@@ -97,6 +97,27 @@ pub async fn workspace_session_confirm(
     let session = lifecycle
         .get_workspace_session(&session_id)
         .map_err(product_store_api_error)?;
+    // F-31：story/design 的 AuthorConfirm 门确认面就是本端点（WS confirm 帧被 stage 矩阵
+    // 拒收），C3-T5 删除 handle_author_decision 时连带删掉了「确认后触发 review」，F-20
+    // 只补偿了确认通道。故落 Confirmed 前先问引擎处置意见：review 启用且本轮产物尚未评审
+    // 时，本轮交由引擎进入 CrossReview 并申请 ReviewOnly run，定稿留给 review 报告回门后
+    // 的下一次确认。活引擎缺席（无连接）时退回既有通路——无 run 可驱动，不能只落 stage。
+    if let Some(manager) = state.workspace_sessions.get(&session_id).await {
+        let started_review = {
+            let engine_handle = manager.engine();
+            let mut engine = engine_handle.lock().await;
+            engine.begin_review_after_author_confirm().await
+        };
+        if started_review {
+            // 端点 200 后发请求 tab 会乐观置 confirmed，权威状态以本帧收敛
+            // （cross_review/评审在途），否则已连接 tab 停在 confirmed 终态投影。
+            manager.broadcast_current_session_state();
+            let current = lifecycle
+                .get_workspace_session(&session_id)
+                .map_err(product_store_api_error)?;
+            return Ok(Json(workspace_session_dto(current)));
+        }
+    }
     // Blocker 2 修复：先 gate 后确认。confirm_workspace_entity 内部先跑 product 层
     // validate_confirm_aggregate_spec（多仓 involved/change_order 校验），gate 失败即返回
     // 4xx，此时 session 尚未被置 Confirmed（不再出现“先确认后 gate 失败遗留已 Confirmed”的不一致）。
