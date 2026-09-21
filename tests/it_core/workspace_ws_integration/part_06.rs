@@ -372,8 +372,15 @@ async fn workspace_ws_cursor_reconnect_replays_pending_choice_after_replay_windo
         },
     )
     .await;
-    let replayed_choice = recv_json_value(&mut ws2).await;
-    assert_eq!(replayed_choice["type"], "choice_request");
+    // F-27R2：choice_request 入 journal 后随即追加 session_state 广播帧
+    // （seq 更大）——cursor 回放先吐该帧，再补发挂起门卡。扫描到
+    // choice_request 为止，补发契约（REQ-WCR-04）不变。
+    let replayed_choice = loop {
+        let message = recv_json_value(&mut ws2).await;
+        if message["type"] == "choice_request" {
+            break message;
+        }
+    };
     assert_eq!(replayed_choice["id"], choice_id);
     assert!(
         replayed_choice.get("event_seq").is_none(),

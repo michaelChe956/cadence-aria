@@ -109,6 +109,21 @@ impl WorkspaceSessionManager {
                             manager.register_pending_choice_frame(message.clone());
                         }
                         manager.broadcast(message);
+                        // F-27R2（治本）：choice pending 变更即追加全量 session_state
+                        // 广播——投影自带 pending_choice_requests，已连接 tab 的前端
+                        // 对账（reconcilePendingChoiceRequests）是 choice_request 帧
+                        // 降级丢失后唯一的补卡通道。帧序锚：choice_request 帧先入
+                        // journal，随后的 session_state event_seq 恒更大；前端对
+                        // session_state 无条件接受，无去重误杀。
+                        manager.broadcast_choice_pending_state(
+                            source != ChoiceRequestSource::TextFallback,
+                        );
+                    }
+                    EngineEvent::ChoicePendingChanged => {
+                        // F-27R2：应答命中挂起 choice（登记簿已同步摘除，durable
+                        // 投影即时可见）——广播全量 session_state，前端对账
+                        // 收敛已答卡。
+                        manager.broadcast_choice_pending_state(true);
                     }
                     event => {
                         if let Some(message) = map_engine_event(event) {
@@ -279,6 +294,39 @@ impl WorkspaceSessionManager {
     /// 广播仍入 journal 供后续 cursor 回放）。
     pub(crate) fn broadcast_current_session_state(&self) {
         self.broadcast(self.current_session_state());
+    }
+
+    /// F-27R2：choice 挂起集变更（登记/移除）的 session_state 广播面——已连接
+    /// tab 的前端对账（reconcilePendingChoiceRequests）以 pending_choice_requests
+    /// 投影补卡/收卡，这是 choice_request 帧降级丢失后唯一的恢复通道（投影
+    /// 取法对照 F-25b broadcast_http_confirm 的 current_session_state/try_lock
+    /// 回退先例）。
+    ///
+    /// - 引擎锁空闲：活引擎投影即时广播一帧。
+    /// - run 持锁：`immediate_durable=true` 先按 durable 投影即时广播（provider
+    ///   pending 经进程级登记簿跨实例可见，登记/移除均先于事件可达），并调度
+    ///   锁释放后的活引擎补帧——收敛 durable 投影恒空的引擎内存面（如并发
+    ///   挂起的 TextFallback pending）。`immediate_durable=false`（TextFallback
+    ///   登记）跳过即时帧：该 pending 只活引擎内存，durable 帧必缺卡，只会
+    ///   闪断（choice_request 帧已先行渲染）。
+    fn broadcast_choice_pending_state(self: &Arc<Self>, immediate_durable: bool) {
+        if let Ok(engine) = self.engine.try_lock() {
+            let state = engine.build_session_state();
+            drop(engine);
+            self.broadcast(state);
+            return;
+        }
+        if immediate_durable {
+            self.broadcast(self.durable_projection().0);
+        }
+        let engine = self.engine.clone();
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let engine = engine.lock().await;
+            let state = engine.build_session_state();
+            drop(engine);
+            manager.broadcast(state);
+        });
     }
 
     /// F-25b：HTTP confirm 端点完成 durable 写后的广播面（对照 F-09

@@ -484,6 +484,15 @@ impl WorkspaceEngine {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
                             let choice_request = pending_choice_requests.remove(&id);
+                            if choice_request.is_some() {
+                                // F-27R2：应答命中挂起 choice（进程级登记簿已同步
+                                // 摘除）——通知 Web runtime 广播全量 session_state，
+                                // 已连接 tab 的前端对账据此收敛已答卡。
+                                let _ = self
+                                    .event_tx
+                                    .send(EngineEvent::ChoicePendingChanged)
+                                    .await;
+                            }
                             self.record_choice_response_audit(ChoiceResponseAuditInput {
                                 request: choice_request.as_ref(),
                                 choice_id: &id,

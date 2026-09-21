@@ -311,6 +311,11 @@ pub enum EngineEvent {
     ProviderStatus {
         status: ProviderStatus,
     },
+    /// F-27R2：choice 挂起集移除（应答命中挂起 id，进程级登记簿已同步
+    /// 摘除）。Web runtime 以全量 session_state（含 pending_choice_requests
+    /// 投影）同步所有已连接页面，前端对账据此收敛已答卡。此事件不经
+    /// WebSocket 对客户端序列化；仅由 socket runtime 消费。
+    ChoicePendingChanged,
     /// 引擎完成持久化路由后请求 Web runtime 启动新的 provider run。
     /// `node_id` 让 runtime 可以在不等待 engine mutex 的情况下排空同一节点的重复请求，
     /// 同时保留新节点请求替换旧 run 的语义。
