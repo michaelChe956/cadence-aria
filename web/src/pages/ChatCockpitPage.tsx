@@ -541,9 +541,9 @@ export function ChatCockpitPage({
       )?.id.split(":")[0] ?? null,
     [observedInbox, sessionId],
   );
-  // F-31：待处理收件箱已移入默认收起的抽屉（收起只以 CSS display:none 隐藏、
-  // 子树不卸载），于是抽屉内的接管按钮/反馈框在收起态既不可见也不可聚焦。
-  // 热键要先展开抽屉；对 display:none 子树 focus() 会静默失效，所以收起时把
+  // F-31：待处理收件箱已移入默认收起的抽屉（收起为常驻 DOM + visibility 过渡
+  // 隐藏、子树不卸载），于是抽屉内的接管按钮/反馈框在收起态既不可见也不可聚焦。
+  // 热键要先展开抽屉；对 visibility:hidden 子树 focus() 会静默失效，所以收起时把
   // 目标挂起，等抽屉真正提交/可见后再聚焦。
   const [pendingInboxFocus, setPendingInboxFocus] = useState<HTMLElement | null>(
     null,
