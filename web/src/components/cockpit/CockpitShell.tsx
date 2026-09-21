@@ -249,11 +249,19 @@ export function CockpitShell({
 
   return (
     <CockpitShellContext.Provider value={contextValue}>
-      <div data-testid="cockpit-shell" className="min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)]">
+      {/* v40 复验 #2：外壳独占视口高度（唯一 h-screen）。「待处理」告警条
+          与页面在同一列内分配高度——此前告警条（52px）叠在 h-screen 页面
+          之上，文档 scrollHeight=100vh+52px，主屏出现滚动条且页面底部
+          （输入条/发送反馈按钮）被挤出视口。可增长页面（工作台/图片创作）
+          改在内滚容器滚动，文档级不再滚动。 */}
+      <div
+        data-testid="cockpit-shell"
+        className="flex h-screen flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
+      >
         {countedInbox.length > 0 ? (
           <aside
             role="alert"
-            className="sticky top-0 z-[90] flex min-h-11 items-center justify-between gap-3 bg-[var(--aria-danger)] px-3 py-1 text-sm font-semibold text-white shadow-md"
+            className="z-[90] flex min-h-11 shrink-0 items-center justify-between gap-3 bg-[var(--aria-danger)] px-3 py-1 text-sm font-semibold text-white shadow-md"
           >
             <span>待处理 {countedInbox.length} 项</span>
             <button
@@ -290,7 +298,9 @@ export function CockpitShell({
           onChange={updateSettings}
         />
         <CockpitEscalation items={countedInbox} settings={settings} />
-        {children}
+        <div data-testid="cockpit-shell-scroll" className="min-h-0 flex-1 overflow-y-auto">
+          {children}
+        </div>
       </div>
     </CockpitShellContext.Provider>
   );

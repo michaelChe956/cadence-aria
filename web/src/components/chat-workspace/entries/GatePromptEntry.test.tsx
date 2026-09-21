@@ -37,6 +37,7 @@ function actions(): CockpitActionFacade {
     feedback: vi.fn(() => true),
     terminate: vi.fn(() => true),
     advance: vi.fn(() => true),
+    adoptReview: vi.fn(() => true),
   };
 }
 

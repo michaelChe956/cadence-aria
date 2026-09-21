@@ -1,4 +1,11 @@
-import { AlertTriangle, Check, ClipboardList, CircleAlert, RotateCcw } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ClipboardCopy,
+  ClipboardList,
+  CircleAlert,
+  RotateCcw,
+} from "lucide-react";
 import { useEffect, useMemo, useState, type Ref } from "react";
 import type { ArtifactVersionSummary } from "../../../state/workspace-ws-store-types";
 import type { WorkItemPlanRepairReservation } from "../../../state/workspace-ws-store-types";
@@ -393,6 +400,21 @@ function GateInboxActions({
             className="btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             确认并评审
+          </button>
+        ) : null}
+        {/* v40 复验 #3：author 门 review 已完成（存在未被修订取代的最新 review
+            报告，同主区 latestReviewReport 判据）时补齐第四钮——与主区/产物
+            审核面板「采纳 Review 意见」同款：门面 adoptReview 预填修订反馈+
+            切回对话视图。不与 review_available（可发起评审）耦合：评审完成后
+            即使 reviewer 已关，既有报告仍可采纳。无 review 结果不露出。 */}
+        {authorGate && latestReviewSummary !== null && actionBlockReason === null ? (
+          <button
+            type="button"
+            onClick={actions.adoptReview}
+            className="btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            <ClipboardCopy className="h-3.5 w-3.5" aria-hidden="true" />
+            采纳 Review 意见
           </button>
         ) : null}
         <ConfirmTwiceButton

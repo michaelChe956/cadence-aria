@@ -103,6 +103,7 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
     });
 
     actions.feedback("请补齐边界");
@@ -128,6 +129,7 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
     });
     actions.feedback("请补齐边界");
 
@@ -146,6 +148,7 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
     });
     actions.feedback("请补齐边界");
 
@@ -171,12 +174,45 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
     });
 
     expect(facade.confirm()).toBe(true);
     expect(facade.confirmReview()).toBe(true);
     expect(sendConfirm.mock.calls[0]).toHaveLength(0);
     expect(sendConfirm.mock.calls[1]).toEqual([true]);
+  });
+
+  // v40 复验 #3：author 门「采纳 Review 意见」经门面 adoptReview——纯客户端
+  // 通道（预填修订反馈+切视图），无 WS/HTTP 帧；阻断判据与 confirm 同源
+  // （门收口后不再预填修订）。
+  it("hands adoptReview to the client-side channel and blocks it on a closed gate (v40 #3)", () => {
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "story",
+      sessionStatus: "waiting_for_human",
+      flowKind: "legacy",
+    });
+    const adoptReview = vi.fn();
+    const facade = createCockpitActionFacade({
+      flowKind: "legacy",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm: vi.fn(() => true),
+      sendAbandonGate: vi.fn(() => true),
+      sendHumanGateFeedback: vi.fn(() => true),
+      sendAdvance: vi.fn(() => true),
+      adoptReview,
+    });
+
+    facade.adoptReview();
+    expect(adoptReview).toHaveBeenCalledTimes(1);
+
+    // HTTP confirm 200 乐观态（sessionStatus=confirmed）即门收口：采纳预填
+    // 同样阻断，不得把修订反馈预填进已定稿会话。
+    useWorkspaceStore.setState({ sessionStatus: "confirmed" });
+    facade.adoptReview();
+    expect(adoptReview).toHaveBeenCalledTimes(1);
   });
 
   it("sends a manual advance exactly once through the same facade", () => {
@@ -193,6 +229,7 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate: vi.fn(() => true),
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance,
+      adoptReview: vi.fn(),
     }).advance();
 
     expect(sendAdvance).toHaveBeenCalledTimes(1);
@@ -217,6 +254,7 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate: vi.fn(() => true),
         sendHumanGateFeedback: vi.fn(() => true),
         sendAdvance,
+        adoptReview: vi.fn(),
       }).advance(),
     ).toBe(true);
 
@@ -236,6 +274,7 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback,
       sendAbandonGate,
       sendAdvance,
+      adoptReview: vi.fn(),
     });
     useWorkspaceStore.setState({
       stage: "running",
@@ -285,6 +324,7 @@ describe("cockpit gate action facade", () => {
           sendAbandonGate: vi.fn(() => true),
           sendHumanGateFeedback: vi.fn(() => true),
           sendAdvance,
+          adoptReview: vi.fn(),
         }).advance(),
       ).toBe(false);
 
@@ -321,6 +361,7 @@ describe("cockpit gate action facade", () => {
         sendAbandonGate,
         sendHumanGateFeedback,
         sendAdvance: vi.fn(() => true),
+        adoptReview: vi.fn(),
       });
 
       expect(actions.confirm()).toBe(false);
@@ -355,6 +396,7 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate,
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance: vi.fn(() => true),
+      adoptReview: vi.fn(),
     }).terminate();
 
     expect(sendAbandonGate).toHaveBeenCalledWith("cmd_live");

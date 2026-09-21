@@ -12,6 +12,12 @@ export type CockpitActionFacade = {
   feedback(feedback: string): boolean | void;
   terminate(): boolean | void;
   advance(): boolean | void;
+  /**
+   * v40 复验 #3：author 门「采纳 Review 意见」——把最新 review 报告预填为修订
+   * 反馈并切回对话视图（纯客户端动作，无 WS/HTTP 帧），与主区/产物审核面板
+   * 按钮同款行为；待处理抽屉由此补齐第四动作。
+   */
+  adoptReview(): void;
 };
 
 
@@ -29,6 +35,8 @@ export function createCockpitActionFacade(input: {
   sendAbandonGate: (commandId: string) => boolean;
   sendHumanGateFeedback: (feedback: string, commandId?: string) => boolean;
   sendAdvance: (commandId?: string) => boolean;
+  /** v40 复验 #3：客户端采纳通道（预填修订反馈+切视图），由页面接线。 */
+  adoptReview: () => void;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -81,6 +89,14 @@ export function createCockpitActionFacade(input: {
         return false;
       }
       return input.sendAdvance(newCommandId());
+    },
+    adoptReview() {
+      // v40 复验 #3：与 confirm 同源阻断判据——门已收口/相位漂移时不再把修订
+      // 反馈预填进不可回传的输入框；纯客户端动作，无 WS/HTTP 帧。
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return;
+      }
+      input.adoptReview();
     },
   };
 }

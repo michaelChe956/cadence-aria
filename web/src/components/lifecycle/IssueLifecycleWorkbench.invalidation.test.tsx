@@ -86,7 +86,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
 
     await switchToStoryStage();
     const storyCard = screen.getByTestId("lifecycle-card-story_spec");
-    expect(within(storyCard).getByText("draft")).toBeInTheDocument();
+    expect(within(storyCard).getByText("草稿")).toBeInTheDocument();
 
     await confirmStoryOnServer(fetchMock);
 
@@ -98,7 +98,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
     await waitFor(() => {
       expect(
         within(screen.getByTestId("lifecycle-card-story_spec")).getByText(
-          "confirmed",
+          "已确认",
         ),
       ).toBeInTheDocument();
     });
@@ -127,7 +127,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
     await waitFor(() => {
       expect(
         within(screen.getByTestId("lifecycle-card-story_spec")).getByText(
-          "confirmed",
+          "已确认",
         ),
       ).toBeInTheDocument();
     });
@@ -165,7 +165,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
 
     await switchToStoryStage();
     expect(
-      within(screen.getByTestId("lifecycle-card-story_spec")).getByText("draft"),
+      within(screen.getByTestId("lifecycle-card-story_spec")).getByText("草稿"),
     ).toBeInTheDocument();
 
     // 服务端已确认 issue_0001 的 story（durable 投影 draft→confirmed）。
@@ -198,7 +198,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
     await waitFor(() => {
       expect(
         within(screen.getByTestId("lifecycle-card-story_spec")).getByText(
-          "confirmed",
+          "已确认",
         ),
       ).toBeInTheDocument();
     });
@@ -223,7 +223,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
 
     expect(countLifecycleFetches(fetchMock)).toBe(lifecycleFetchCount);
     expect(
-      within(screen.getByTestId("lifecycle-card-story_spec")).getByText("draft"),
+      within(screen.getByTestId("lifecycle-card-story_spec")).getByText("草稿"),
     ).toBeInTheDocument();
   });
 

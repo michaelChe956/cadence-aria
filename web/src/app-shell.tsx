@@ -20,6 +20,12 @@ export function AppShell({
   useEffect(() => {
     const previousScrollRestoration = window.history.scrollRestoration;
     window.history.scrollRestoration = "manual";
+    // v40 复验 #2：外壳（CockpitShell）接管视口高度后文档不再滚动，
+    // 进入工作台的「回顶」重置作用到外壳滚动容器；window 重置保留作兜底
+    //（直出/无外壳渲染场景）。
+    document
+      .querySelector('[data-testid="cockpit-shell-scroll"]')
+      ?.scrollTo({ top: 0, left: 0 });
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
 
     return () => {

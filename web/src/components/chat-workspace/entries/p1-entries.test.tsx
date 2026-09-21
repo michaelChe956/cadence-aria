@@ -256,7 +256,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { summary: "可以进入人工确认" },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
     fireEvent.click(screen.getByRole("button", { name: "终止" }));
     fireEvent.click(screen.getByRole("button", { name: "确认终止" }));
@@ -277,7 +277,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { verdict: "needs_human", summary: "需要先确认弹窗触发时机" },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "提交人工确认" }));
 
     expect(screen.getAllByText("需要人工确认").length).toBeGreaterThanOrEqual(1);
@@ -298,7 +298,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认使用当前版本" }));
 
     expect(screen.queryByRole("button", { name: "采纳建议并返修" })).not.toBeInTheDocument();
@@ -324,7 +324,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
 
     expect(screen.getByText("需要判断 reviewer 意图")).toBeInTheDocument();
@@ -357,7 +357,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
     expect(screen.queryByRole("button", { name: "按 reviewer 意见返修" })).not.toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
   });
@@ -369,6 +369,7 @@ describe("chat workspace p1 entries", () => {
       feedback: vi.fn(),
       terminate: vi.fn(),
       advance: vi.fn(),
+      adoptReview: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -399,6 +400,7 @@ describe("chat workspace p1 entries", () => {
       feedback: vi.fn(),
       terminate: vi.fn(),
       advance: vi.fn(),
+      adoptReview: vi.fn(),
     };
     const user = userEvent.setup();
     const entry = makeEntry({
@@ -440,7 +442,7 @@ describe("chat workspace p1 entries", () => {
       resolution,
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
 
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认产物" })).not.toBeInTheDocument();
@@ -460,7 +462,7 @@ describe("chat workspace p1 entries", () => {
       },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
 
     for (const confirmName of [
       "确认产物",
@@ -515,7 +517,7 @@ describe("chat workspace p1 entries", () => {
       metadata: { workspace_type: workspaceType },
     });
 
-    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined }} />);
+    render(<GatePromptEntry entry={entry} actions={{ confirm: () => onDecision("confirm"), confirmReview: () => undefined, feedback: () => undefined, terminate: () => onDecision("terminate"), advance: () => undefined, adoptReview: () => undefined }} />);
 
     fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
     expect(screen.getByRole("button", { name: "终止" })).toBeInTheDocument();

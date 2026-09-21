@@ -469,7 +469,10 @@ export function LegacyChatWorkspacePage({
   );
 
   return (
-    <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]">
+    <div
+      data-testid="legacy-chat-workspace-page"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
+    >
       <div className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3">
         <button
           type="button"

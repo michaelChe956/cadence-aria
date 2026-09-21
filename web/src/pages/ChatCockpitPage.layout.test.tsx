@@ -135,8 +135,13 @@ describe("ChatCockpitPage 布局（UI-A）", () => {
 
     renderCockpit();
 
-    // 页面根 h-screen overflow-hidden：文档级不出现滚动条
-    expect(screen.getByTestId("cockpit-page").className).toContain("overflow-hidden");
+    // v40 复验 #2：页面高度由外壳高度链供给（h-full），不再自带 h-screen——
+    // h-screen 会与外壳「待处理」告警条（52px）叠加，把输入条与「发送反馈」
+    // 按钮挤出视口并产生文档级滚动条（scrollHeight=100vh+52px）。
+    const pageRoot = screen.getByTestId("cockpit-page");
+    expect(pageRoot.className).toContain("h-full");
+    expect(pageRoot.className).not.toContain("h-screen");
+    expect(pageRoot.className).toContain("overflow-hidden");
 
     // 对话流视图：ChatEntryList 容器是唯一原生滚动容器（其余区域不自滚）
     const conversation = screen.getByTestId("cockpit-conversation-flow");

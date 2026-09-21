@@ -106,7 +106,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     const workItemRegion = await screen.findByRole("region", {
       name: "Work Item 内容",
     });
-    expect(workItemRegion).toHaveTextContent("confirmed");
+    expect(workItemRegion).toHaveTextContent("已确认");
 
     await user.click(
       await screen.findByRole("button", { name: "Work Item Group" }),

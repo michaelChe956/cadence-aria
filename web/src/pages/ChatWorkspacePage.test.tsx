@@ -648,6 +648,20 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(screen.getByTestId("start-generation")).toBeInTheDocument();
   });
 
+  // v40 复验 #2：legacy 页根与 cockpit 页同族——h-screen 会与外壳
+  // 「待处理」告警条（52px）叠加产生文档级滚动条；高度改由外壳高度链
+  // 供给（h-full）。
+  it("keeps the legacy page height shell-owned (h-full, not h-screen)", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item_plan");
+
+    renderWorkspace();
+
+    const root = screen.getByTestId("legacy-chat-workspace-page");
+    expect(root.className).toContain("h-full");
+    expect(root.className).not.toContain("h-screen");
+  });
+
   // F-30 P2（f30-review-k3）：legacy 面终态滞留 prepare_context（长开 tab /
   // session_state 未达窗口）时「开始生成」与 cockpit 面同款禁用+如实提示。
   it.each([

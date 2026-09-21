@@ -3,7 +3,7 @@ import { Check, ClipboardCopy } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
 import { confirmWorkspaceSession, takeoverWorkspaceSession } from "../api/client";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
-import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
+import { fetchWorkspaceArtifactVersion, fetchWorkspaceNodeDetail } from "../api/workspace-content";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
@@ -264,6 +264,8 @@ export function ChatCockpitPage({
   const isArtifactReviewSession =
     selectedState?.workspaceType === "story" || selectedState?.workspaceType === "design";
   const chatInputRef = useRef<ChatInputBarHandle | null>(null);
+  // v40 复验 #3：节点 detail 水合去重（见下方水合 effect）。
+  const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
   const activeNode = useMemo(
     () => state.timelineNodes.find((node) => node.node_id === state.activeNodeId) ?? null,
     [state.activeNodeId, state.timelineNodes],
@@ -399,6 +401,19 @@ export function ChatCockpitPage({
     }
     return sent;
   }, [sessionId, workspaceWs.sendRequestRevision]);
+  // v40 复验 #3：门面 adoptReview 接线——与主区/产物审核面板「采纳 Review
+  // 意见」同款行为：最新 review 报告预填为修订反馈（ChatInputBar prefill，
+  // 经「发送反馈」走 sendRevisionFeedback）并切回对话视图。纯客户端动作
+  // （无 WS/HTTP 帧）；报告在调用时从 store 现读，与渲染判据
+  // （latestReviewReport）同源且不吃 memo 闭包过期。
+  const adoptLatestReview = useCallback(() => {
+    const report = selectLatestReviewReport(useWorkspaceStore.getState());
+    if (!report) {
+      return;
+    }
+    chatInputRef.current?.prefill(`按以下 review 意见修订：\n\n${report}`);
+    setDrilldownView("conversation");
+  }, []);
   const actions = useMemo(
     () =>
       createCockpitActionFacade({
@@ -412,6 +427,7 @@ export function ChatCockpitPage({
         sendAbandonGate: workspaceWs.sendAbandonGate,
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
         sendAdvance: workspaceWs.sendAdvance,
+        adoptReview: adoptLatestReview,
       }),
     [
       state.flowKind,
@@ -421,8 +437,8 @@ export function ChatCockpitPage({
       state.sessionStatus,
       state.stage,
       workspaceWs.sendAdvance,
-      workspaceWs.sendAbandonGate,
       routeGateConfirm,
+      adoptLatestReview,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
@@ -597,6 +613,7 @@ export function ChatCockpitPage({
           sendAbandonGate: workspaceWs.sendAbandonGate,
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
+          adoptReview: adoptLatestReview,
         }).confirm();
       },
       feedback: () => {
@@ -636,6 +653,7 @@ export function ChatCockpitPage({
           sendAbandonGate: workspaceWs.sendAbandonGate,
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
+          adoptReview: adoptLatestReview,
         }).advance();
       },
     }),
@@ -644,6 +662,7 @@ export function ChatCockpitPage({
       workspaceWs.sendAdvance,
       workspaceWs.sendAbandonGate,
       routeGateConfirm,
+      adoptLatestReview,
       workspaceWs.sendHumanGateFeedback,
     ],
   );
@@ -661,6 +680,48 @@ export function ChatCockpitPage({
       chatListRef.current?.scrollToEntry(drilldownEntryId);
     }
   }, [drilldownEntryId]);
+
+  // v40 复验 #3 后续（刷新水合）：review verdict 只随节点 detail 携带（
+  // /timeline-node-details/{id}），live 时 WS 事件入 store；刷新/重开后 cockpit
+  // 页此前无 detail 水合（仅 Legacy 页有同款 effect），review_verdict 条目无法
+  // 重建——主区/收件箱「采纳 Review 意见」与审核结论卡在刷新后整体消失。对齐
+  // Legacy 纪律：拉取全部已完成节点 detail（气泡 usage 行同源受益）。
+  useEffect(() => {
+    hydratedNodeIdsRef.current.clear();
+  }, [sessionId]);
+  useEffect(() => {
+    const completedNodeIds = state.timelineNodes
+      .filter((node) => node.status === "completed")
+      .map((node) => node.node_id);
+    const nodeIds = Array.from(
+      new Set(
+        [state.activeNodeId, ...completedNodeIds].filter(
+          (nodeId): nodeId is string => typeof nodeId === "string" && nodeId.length > 0,
+        ),
+      ),
+    );
+    for (const nodeId of nodeIds) {
+      if (hydratedNodeIdsRef.current.has(nodeId)) {
+        continue;
+      }
+      hydratedNodeIdsRef.current.add(nodeId);
+      Promise.resolve(fetchWorkspaceNodeDetail(sessionId, nodeId))
+        .then((detail) => {
+          if (!detail) {
+            hydratedNodeIdsRef.current.delete(nodeId);
+            return;
+          }
+          const current = useWorkspaceStore.getState();
+          if (current.sessionId !== sessionId) {
+            return;
+          }
+          current.setNodeDetail(detail);
+        })
+        .catch(() => {
+          hydratedNodeIdsRef.current.delete(nodeId);
+        });
+    }
+  }, [sessionId, state.activeNodeId, state.timelineNodes]);
   useEffect(() => {
     const acknowledgedNodes = loadAcknowledgedAbortedNodes();
     if (acknowledgedNodes.length > 0) {
@@ -723,7 +784,7 @@ export function ChatCockpitPage({
   return (
     <div
       data-testid="cockpit-page"
-      className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
     >
       <CockpitPageHeader
         sessionId={sessionId}

@@ -19,7 +19,7 @@ import {
   type WorkspaceWsState,
 } from "../state/workspace-ws-store";
 import type { PlanProjectionBundle } from "../api/types";
-import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
+import { fetchWorkspaceArtifactVersion, fetchWorkspaceNodeDetail } from "../api/workspace-content";
 import { planRepairSnapshotFixture } from "../state/workspace-plan-repair-test-fixtures";
 import { observerStateFromSessionState } from "../state/workspace-observer-store";
 import { readCockpitSettings } from "../state/cockpit-settings";
@@ -136,8 +136,13 @@ describe("ChatCockpitPage", () => {
       });
 
       renderCockpitWith(workspaceWs);
-      await user.click(screen.getByRole("button", { name: "采纳 Review 意见" }));
-
+      // v40 复验 #3：待处理抽屉内作者门也渲染同名「采纳 Review 意见」（第四
+      // 动作，行为同源）——主区按钮按产物审核面板作用域定位。
+      await user.click(
+        within(screen.getByTestId("artifact-review-actions")).getByRole("button", {
+          name: "采纳 Review 意见",
+        }),
+      );
       expect(screen.getByTestId("cockpit-conversation-tab")).toHaveAttribute(
         "aria-selected",
         "true",
@@ -145,6 +150,58 @@ describe("ChatCockpitPage", () => {
       expect(screen.getByTestId("context-note-input")).toHaveValue(
         "按以下 review 意见修订：\n\n第二段缺少冲突",
       );
+    });
+
+    // v40 复验 #3 后续（刷新水合）：review verdict 只随节点 detail 携带——live
+    // 时 WS 事件入 store；刷新/重开后 cockpit 页此前无 detail 水合（仅 Legacy
+    // 页有），review_verdict 条目无法重建，主区/收件箱「采纳 Review 意见」整体
+    // 消失。已完成 reviewer 节点必须补拉 detail 重建审核结论。
+    it("rehydrates the reviewer verdict from node detail so adopt-review survives reload (v40 #3)", async () => {
+      const workspaceWs = mockWorkspaceWs();
+      useWorkspaceStore.setState({
+        stage: "author_confirm",
+        workspaceType: "story",
+        timelineNodes: [
+          timelineNode({
+            node_id: "node-review-1",
+            node_type: "reviewer_run",
+            status: "completed",
+          }),
+        ],
+      });
+      vi.mocked(fetchWorkspaceNodeDetail).mockImplementation(async (_sessionId, nodeId) =>
+        nodeId === "node-review-1"
+          ? ({
+              node_id: nodeId,
+              session_id: "session_001",
+              node_type: "reviewer_run",
+              status: "completed",
+              agent_role: "reviewer",
+              provider: null,
+              messages: [],
+              streaming_content: "",
+              execution_events: [],
+              permission_events: [],
+              verdict: { verdict: "revise", summary: "边界场景缺失", comments: "补充失败路径" },
+              artifact_ref: null,
+              is_revision: false,
+              base_artifact_ref: null,
+              started_at: "2026-09-17T10:00:00Z",
+              ended_at: "2026-09-17T10:01:00Z",
+            } as never)
+          : Promise.reject(new Error(`unexpected node ${nodeId}`)),
+      );
+
+      renderCockpitWith(workspaceWs);
+
+      await waitFor(() => {
+        expect(fetchWorkspaceNodeDetail).toHaveBeenCalledWith("session_001", "node-review-1");
+      });
+      await waitFor(() => {
+        expect(
+          screen.getAllByRole("button", { name: "采纳 Review 意见" }).length,
+        ).toBeGreaterThanOrEqual(1);
+      });
     });
 
     // v38 复验 #2/#3：story/design AuthorConfirm 的反馈修订发送链——输入框

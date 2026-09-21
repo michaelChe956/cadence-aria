@@ -11,6 +11,7 @@ const actions: CockpitActionFacade = {
   feedback: vi.fn(),
   terminate: vi.fn(),
   advance: vi.fn(),
+  adoptReview: vi.fn(),
 };
 
 const gateItem: CockpitInboxItem = {
@@ -179,6 +180,7 @@ describe("CockpitInbox", () => {
       feedback: vi.fn(),
       terminate: vi.fn(),
       advance: vi.fn(),
+      adoptReview: vi.fn(),
     };
     render(
       <CockpitInbox
@@ -216,6 +218,58 @@ describe("CockpitInbox", () => {
     expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
     // author 门是 HTTP confirm 通路：无 typed 反馈编辑器（维持既有纪律）。
     expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
+  });
+
+  // v40 复验 #3：review 已完成（存在未被修订取代的最新 review 报告）时，作者门
+  // 在待处理抽屉内补齐第四动作「采纳 Review 意见」——与主区/产物审核面板同款
+  // 行为，经门面 adoptReview 派发（预填修订反馈+切回对话视图，纯客户端）。
+  it("author 门 review 已完成：抽屉内四动作，采纳 Review 意见经门面派发（v40 #3）", async () => {
+    const user = userEvent.setup();
+    const gateActions: CockpitActionFacade = {
+      confirm: vi.fn(),
+      confirmReview: vi.fn(),
+      feedback: vi.fn(),
+      terminate: vi.fn(),
+      advance: vi.fn(),
+      adoptReview: vi.fn(),
+    };
+    render(
+      <CockpitInbox
+        items={[authorConfirmItem(true)]}
+        actions={gateActions}
+        actionableSessionId="session_001"
+        latestReviewSummary="[review_findings]\n1. severity: major\n   message: 遗漏边界场景"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "确认并评审" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "采纳 Review 意见" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
+
+    await user.click(within(inbox).getByRole("button", { name: "采纳 Review 意见" }));
+    expect(gateActions.adoptReview).toHaveBeenCalledOnce();
+    // 采纳是纯客户端预填：不得误触任何 WS/HTTP 决策命令。
+    expect(gateActions.confirm).not.toHaveBeenCalled();
+    expect(gateActions.confirmReview).not.toHaveBeenCalled();
+    expect(gateActions.terminate).not.toHaveBeenCalled();
+  });
+
+  it("author 门无 review 结果：不露「采纳 Review 意见」，维持三动作（v40 #3）", () => {
+    render(
+      <CockpitInbox
+        items={[authorConfirmItem(true)]}
+        actions={actions}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).queryByRole("button", { name: "采纳 Review 意见" })).toBeNull();
+    expect(within(inbox).getByRole("button", { name: "确认定稿" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "确认并评审" })).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "终止" })).toBeVisible();
   });
 
   it("only warns about a new feedback command while a typed gate has a repair reservation", () => {
@@ -274,6 +328,7 @@ describe("CockpitInbox", () => {
       feedback: vi.fn(),
       terminate: vi.fn(),
       advance: vi.fn(),
+      adoptReview: vi.fn(),
     };
     render(
       <CockpitInbox

@@ -161,6 +161,20 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(screen.getByTestId("operation-audit-view")).toHaveTextContent("REST 快照");
   });
 
+  // v40 复验 #2：coding 页根与 cockpit 页同族——h-screen 会与外壳
+  // 「待处理」告警条（52px）叠加产生文档级滚动条；高度改由外壳高度链
+  // 供给（h-full）。
+  it("keeps the page height shell-owned (h-full, not h-screen)", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({ ...readyCodingState() });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    const root = screen.getByTestId("coding-workspace-page");
+    expect(root.className).toContain("h-full");
+    expect(root.className).not.toContain("h-screen");
+  });
+
   it("renders coding workspace shell with timeline and keeps result tabs secondary until selected", async () => {
     mockCodingWs();
     vi.mocked(getCodingAttemptDiff).mockResolvedValue({

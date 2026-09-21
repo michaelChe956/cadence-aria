@@ -31,6 +31,12 @@ import {
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
 import { PlanGroupProjectionPanel } from "./PlanGroupProjectionPanel";
+import {
+  LIFECYCLE_META_CHIP_CLASS,
+  LIFECYCLE_STATUS_LABELS,
+  lifecycleStatusChipClass,
+  lifecycleStatusTone,
+} from "./LifecycleCard";
 import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 
 export type DrawerEntityKind =
@@ -92,16 +98,12 @@ const KIND_LABELS: Record<DrawerEntityKind, string> = {
   work_item: "Work Item",
   work_item_group: "Work Item Group",
 };
-
-const STATUS_LABELS: Record<string, string> = {
-  confirmed: "已确认",
-  draft: "草稿",
-  in_review: "审核中",
-  change_requested: "要求修改",
-  blocked: "阻塞",
-  pending: "待处理",
-  planning: "规划中",
-  completed: "已完成",
+const KIND_ICON_CLASS: Record<DrawerEntityKind, string> = {
+  issue: "text-sky-700",
+  story_spec: "text-emerald-700",
+  design_spec: "text-violet-700",
+  work_item: "text-amber-700",
+  work_item_group: "text-amber-700",
 };
 
 const NEXT_ACTION_LABELS: Partial<Record<DrawerEntityKind, string>> = {
@@ -160,19 +162,34 @@ export function LifecycleCardDrawer({
       <header className="flex min-w-0 items-start justify-between gap-3 border-b border-[var(--aria-line)] px-4 py-3">
         <div className="min-w-0">
           <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
-            <Icon className="h-3.5 w-3.5 text-[var(--aria-primary)]" />
+            <Icon className={`h-3.5 w-3.5 ${KIND_ICON_CLASS[entity.kind]}`} />
             {KIND_LABELS[entity.kind]}
           </div>
           <h2 className="truncate text-base font-semibold text-[var(--aria-ink)]">
             {entity.title}
           </h2>
           <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-            <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
+            <span
+              data-testid="drawer-id-chip"
+              className={LIFECYCLE_META_CHIP_CLASS}
+            >
               {entity.id}
             </span>
-            <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
-              {STATUS_LABELS[entity.status] ?? entity.status}
+            <span
+              data-testid="drawer-status-chip"
+              data-tone={lifecycleStatusTone(entity.status)}
+              className={lifecycleStatusChipClass(entity.status)}
+            >
+              {LIFECYCLE_STATUS_LABELS[entity.status] ?? entity.status}
             </span>
+            {entity.version ? (
+              <span
+                data-testid="drawer-version-chip"
+                className={LIFECYCLE_META_CHIP_CLASS}
+              >
+                v{entity.version}
+              </span>
+            ) : null}
             {entity.reviewStatus ? (
               <span
                 data-testid="drawer-review-status"
@@ -184,11 +201,6 @@ export function LifecycleCardDrawer({
                 ].join(" ")}
               >
                 {entity.reviewStatus === "running" ? "Review 进行中" : "Review 已完成"}
-              </span>
-            ) : null}
-            {entity.version ? (
-              <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
-                v{entity.version}
               </span>
             ) : null}
           </div>

@@ -293,6 +293,31 @@ describe("CockpitShell", () => {
     expect(screen.getByRole("dialog", { name: "驾驶舱设置" })).toBeInTheDocument();
   });
 
+  // v40 复验 #2：review 反馈按钮在屏幕下方 + 主屏滚动条。实测根因是
+  // 「待处理 N 项」告警条（52px，流内）叠在 h-screen 页面之上——文档
+  // scrollHeight=100vh+52px，页面底部（输入条/发送反馈）被挤出视口。
+  // 契约：外壳独占视口高度（唯一 h-screen），告警条与内容在同一列内
+  // 分配高度；可增长页面在内滚容器里滚，文档级不再滚动。
+  it("owns the viewport height when the pending alert bar is present (no document-level overflow)", () => {
+    renderShell({ inbox: [gateItem("s1")] });
+
+    const shell = screen.getByTestId("cockpit-shell");
+    expect(shell.className).toContain("h-screen");
+    expect(shell.className).toContain("flex-col");
+    expect(shell.className).toContain("overflow-hidden");
+
+    const alertBar = screen.getByRole("alert");
+    expect(alertBar.className).toContain("shrink-0");
+    expect(alertBar.parentElement).toBe(shell);
+
+    const scroller = screen.getByTestId("cockpit-shell-scroll");
+    expect(scroller.className).toContain("min-h-0");
+    expect(scroller.className).toContain("flex-1");
+    expect(scroller.className).toContain("overflow-y-auto");
+    expect(scroller.parentElement).toBe(shell);
+    expect(alertBar.compareDocumentPosition(scroller) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
   it("keeps the settings trigger reachable through the fallback overlay without a page slot", () => {
     stubEmptyObservers();
 

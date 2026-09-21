@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
+import { LifecycleCard } from "./LifecycleCard";
 
 vi.mock("../shared/MonacoViewer", () => ({
   MonacoViewer: ({ value, height }: { value: string; height?: string }) => (
@@ -402,5 +403,113 @@ describe("LifecycleCardDrawer", () => {
     );
     expect(screen.queryByTestId("drawer-review-status")).not.toBeInTheDocument();
   });
+  // 统一视觉语言：抽屉 header chips 与卡片 chips 同构——同一状态在两个
+  // 表面使用相同文案、tone 与样式类；chips 顺序与卡片一致（id→status→
+  // version→review），kind 图标色跟随实体 kind（与卡片图标同色系）。
+  it("unifies drawer header chips with card chips: same tone, classes, and order", () => {
+    render(
+      <div>
+        <LifecycleCard
+          card={{
+            kind: "design_spec",
+            id: "design_spec_0001",
+            issueId: "issue_0001",
+            title: "设计卡片",
+            status: "confirmed",
+            version: 2,
+            preview: null,
+            sourceIds: [],
+            artifactVersions: [],
+            raw: {
+              design_spec_id: "design_spec_0001",
+              issue_id: "issue_0001",
+              story_spec_ids: [],
+              title: "设计卡片",
+              current_version: 2,
+              current_markdown_preview: null,
+              confirmation_status: "confirmed",
+              artifact_versions: [],
+            },
+          }}
+          selected={false}
+          onSelect={vi.fn()}
+        />
+        <LifecycleCardDrawer
+          entity={{
+            id: "design_spec_0001",
+            kind: "design_spec",
+            title: "设计抽屉",
+            status: "confirmed",
+            version: 2,
+            reviewStatus: "completed",
+          }}
+          onClose={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+        />
+      </div>,
+    );
+
+    const cardStatus = screen.getByTestId("lifecycle-card-status-chip");
+    const drawerStatus = screen.getByTestId("drawer-status-chip");
+    expect(drawerStatus).toHaveTextContent("已确认");
+    expect(drawerStatus).toHaveAttribute("data-tone", "confirmed");
+    expect(drawerStatus.className).toBe(cardStatus.className);
+
+    const cardVersion = screen.getByTestId("lifecycle-card-version-chip");
+    const drawerVersion = screen.getByTestId("drawer-version-chip");
+    expect(drawerVersion).toHaveTextContent("v2");
+    expect(drawerVersion.className).toBe(cardVersion.className);
+
+    // chips 顺序与卡片一致：id → status → version → review
+    const chipsRow = drawerStatus.parentElement as HTMLElement;
+    const order = [...chipsRow.children].map(
+      (chip) => chip.getAttribute("data-testid") ?? chip.textContent,
+    );
+    expect(order).toEqual([
+      "drawer-id-chip",
+      "drawer-status-chip",
+      "drawer-version-chip",
+      "drawer-review-status",
+    ]);
+  });
+
+  it("colors the drawer kind icon with the entity kind palette like the card", () => {
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "故事",
+          status: "confirmed",
+          version: 1,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    const storyIcon = screen
+      .getByTestId("lifecycle-card-drawer")
+      .querySelector("header svg");
+    expect(storyIcon?.getAttribute("class")).toContain("text-emerald-700");
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "design-1",
+          kind: "design_spec",
+          title: "设计",
+          status: "confirmed",
+          version: 1,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    const designIcon = screen
+      .getByTestId("lifecycle-card-drawer")
+      .querySelector("header svg");
+    expect(designIcon?.getAttribute("class")).toContain("text-violet-700");
+  });
+
 
 });
