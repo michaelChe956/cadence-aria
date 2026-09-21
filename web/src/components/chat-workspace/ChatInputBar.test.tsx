@@ -96,6 +96,65 @@ describe("ChatInputBar", () => {
     expect(input).toHaveValue("第二次覆盖式预填");
   });
 
+  // 3.6 滚动体系收敛：textarea 不再以 rows=3 固定高度制造小内滚区——
+  // 高度随内容自适应（80–240px），封顶后超出部分才在框内滚动（可达性保留）。
+  // jsdom 无布局，用实例属性模拟 scrollHeight 驱动自适应逻辑。
+  it("grows the textarea with content up to a cap and keeps manual resize", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    // resize 契约不破坏（约束：不得移除输入框 resize）
+    expect(input.className).toContain("resize-y");
+    // 封顶（max-h-60）
+    let mockScrollHeight = 500;
+    Object.defineProperty(input, "scrollHeight", {
+      get: () => mockScrollHeight,
+      configurable: true,
+    });
+    fireEvent.change(input, { target: { value: "x".repeat(600) } });
+    expect(input.style.height).toBe("240px");
+    // 随内容收缩
+    mockScrollHeight = 120;
+    fireEvent.change(input, { target: { value: "中等内容" } });
+    expect(input.style.height).toBe("122px");
+    // 下限（min-h-20）
+    mockScrollHeight = 40;
+    fireEvent.change(input, { target: { value: "短" } });
+    expect(input.style.height).toBe("80px");
+  });
+
+  it("resets the textarea height to the minimum after sending", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    let mockScrollHeight = 300;
+    Object.defineProperty(input, "scrollHeight", {
+      get: () => mockScrollHeight,
+      configurable: true,
+    });
+    fireEvent.change(input, { target: { value: "多行反馈意见" } });
+    expect(input.style.height).toBe("240px");
+
+    mockScrollHeight = 60;
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(input).toHaveValue("");
+    expect(input.style.height).toBe("80px");
+  });
+
   // L1（REQ-RET-02）：human_confirm 决策输入发送面（发送修改意见=request-change）随
   // legacy 决策退役删除——该阶段输入只读、无发送按钮（决策走 typed 门动作面）。
   // 原「submits human confirm feedback with optimistic insertion」

@@ -98,6 +98,29 @@ select:disabled {
   cursor: not-allowed;
 }
 
+/* 3.6 滚动体系收敛：全局细滚动条（8px、浅灰滑块、悬停加深、轨道透明）。
+   各滚动容器（执行流/对话流/输入框/抽屉/设置弹窗）共用一套视觉，
+   消除多组默认粗滚动条并存的杂乱感；宽度收敛不损可达性（内容仍可滚到底）。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--aria-line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: var(--aria-line-strong);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--aria-ink-muted);
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 ::selection {
   background: rgba(249, 115, 22, 0.28);
   color: #17202a;

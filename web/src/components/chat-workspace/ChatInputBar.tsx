@@ -10,6 +10,8 @@ import {
 import {
   forwardRef,
   useImperativeHandle,
+  useLayoutEffect,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -64,8 +66,11 @@ export interface HardErrorNotice {
 export interface ChatInputBarHandle {
   prefill: (text: string) => void;
 }
-
 const BUSY_STAGES = new Set(["running", "cross_review", "revision"]);
+
+/** 3.6 滚动体系收敛：textarea 高度下限/上限，与 min-h-20 / max-h-60 对齐。 */
+const TEXTAREA_MIN_HEIGHT = 80;
+const TEXTAREA_MAX_HEIGHT = 240;
 
 export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   function ChatInputBar({
@@ -113,6 +118,20 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     workItemPlanArtifact?.type === "batch_state" ? workItemPlanArtifact.payload : null;
   const firstBatchFailureOutlineId = batchPayload?.failure_summary[0]?.outline_id;
 
+  // 3.6 滚动体系收敛：textarea 不再以 rows=3 固定高度制造小内滚区——高度随
+  // 内容自适应（80–240px），封顶后超出部分才在框内滚动；resize-y 保留。
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    el.style.height = "auto";
+    // border-box 下 scrollHeight 不含上下边框（border=1px），补齐避免 2px 差再触发滚动条
+    const measured = el.scrollHeight + 2;
+    el.style.height = `${Math.min(Math.max(measured, TEXTAREA_MIN_HEIGHT), TEXTAREA_MAX_HEIGHT)}px`;
+  }, [input]);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -156,6 +175,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     >
       <div className="flex min-w-0 flex-col gap-2">
         <textarea
+          ref={textareaRef}
           data-testid="context-note-input"
           value={input}
           onChange={(event) => setInput(event.target.value)}
@@ -163,7 +183,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           disabled={inputDisabled}
           rows={3}
           placeholder={placeholderForStage(stage, activeNodeType)}
-          className="min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+          className="min-h-20 max-h-60 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         />
         {/* F-28 二轮：hard_error 就地错误面紧贴动作按钮行——收件箱条目远离
             视线导致零反馈；lease 拒收两码的重接管复用 F-11 的

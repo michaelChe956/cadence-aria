@@ -83,6 +83,24 @@ describe("ArtifactReviewPanel", () => {
     expect(screen.queryByTestId("artifact-review-actions")).not.toBeInTheDocument();
   });
 
+  it("外壳裁剪不自滚：唯一滚动交给 Monaco 渲染区（滚动体系单一归属）", () => {
+    const props = baseProps();
+    render(
+      <ArtifactReviewPanel
+        {...props}
+        changelogSummary={"改动摘要行\n".repeat(8)}
+        actions={<button type="button">定稿</button>}
+      />,
+    );
+
+    const panel = screen.getByTestId("artifact-review-panel");
+    expect(panel.className).toContain("overflow-hidden");
+    // 面板内部（含改动摘要展开态）不得再挂原生滚动容器，避免外层+内层双滚动条
+    expect(
+      panel.querySelectorAll('[class*="overflow-auto"], [class*="overflow-scroll"]'),
+    ).toHaveLength(0);
+  });
+
   it("点击收起按钮触发 onClose", async () => {
     const props = baseProps();
     render(<ArtifactReviewPanel {...props} actions={null} />);

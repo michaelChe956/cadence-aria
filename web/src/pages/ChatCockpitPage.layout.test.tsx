@@ -130,6 +130,24 @@ describe("ChatCockpitPage 布局（UI-A）", () => {
     expect(conversation.className).toContain("flex-1");
   });
 
+  it("滚动体系单一归属：页面根不滚，对话流视图仅列表一个滚动容器", () => {
+    useWorkspaceStore.setState({ workspaceType: "story" });
+
+    renderCockpit();
+
+    // 页面根 h-screen overflow-hidden：文档级不出现滚动条
+    expect(screen.getByTestId("cockpit-page").className).toContain("overflow-hidden");
+
+    // 对话流视图：ChatEntryList 容器是唯一原生滚动容器（其余区域不自滚）
+    const conversation = screen.getByTestId("cockpit-conversation-flow");
+    expect(conversation.querySelectorAll('[class*="overflow-auto"]').length).toBe(1);
+
+    // 切到产物审核：面板内部不再出现原生滚动容器（滚动交给 Monaco 渲染区）
+    fireEvent.click(screen.getByTestId("cockpit-artifact-review-tab"));
+    const panel = screen.getByTestId("artifact-review-panel");
+    expect(panel.querySelectorAll('[class*="overflow-auto"], [class*="overflow-scroll"]')).toHaveLength(0);
+  });
+
   it("设置入口让位到页头，spec（产物审核）面板收起钮不被遮挡", () => {
     useWorkspaceStore.setState({ workspaceType: "story" });
 
