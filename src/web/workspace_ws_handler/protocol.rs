@@ -178,6 +178,12 @@ pub(crate) fn is_message_valid_for_stage_with_flow(
                         // L0 typed 重承载（REQ-RET-02/REQ-CG-04）：typed abandon
                         // 门命令与 HumanGateFeedback/Confirm 同族放行。
                         | WsInMessage::AbandonHumanGate { .. }
+                        // 独立 compile recovery 操作，不属于 typed 三命令
+                        //（REQ-RET-02 边界不变）：durable 事实由引擎守卫校验
+                        //（compile.rs handle_work_item_plan_compile_recovery_action），
+                        // 矩阵层只做 stage/flow 放行，缺失/不匹配 recovery
+                        // 事实在引擎侧 fail-closed 零副作用。
+                        | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
                 )
             } else {
                 matches!(

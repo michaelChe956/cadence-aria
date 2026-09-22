@@ -83,6 +83,61 @@ fn conversational_gate_stage_matrix_accepts_only_typed_gate_commands_and_advance
 }
 
 #[test]
+fn sc_human_confirm_accepts_compile_recovery_action_only_in_recovery_stage() {
+    use crate::web::workspace_ws_types::WorkItemPlanCompileRecoveryActionDto;
+
+    // 缺口 B 协议面：SC `HumanConfirm` 臂放行既有 compile recovery action
+    //（与 :188 非 SC 臂同构）。durable recovery 事实不在纯矩阵层校验
+    //（矩阵无 session 状态访问），由引擎守卫 fail-closed 承担。
+    for action in [
+        WorkItemPlanCompileRecoveryActionDto::Continue,
+        WorkItemPlanCompileRecoveryActionDto::AbortAndRollback,
+        WorkItemPlanCompileRecoveryActionDto::HumanTriage,
+    ] {
+        let message = WsInMessage::WorkItemPlanCompileRecoveryAction {
+            action: action.clone(),
+            reason: None,
+        };
+        assert!(
+            is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &message,
+                &WorkspaceStage::HumanConfirm,
+            ),
+            "SC human confirm must accept recovery action {action:?}"
+        );
+        // human_gate_message_boundary_error 以矩阵判定为准：矩阵放行后
+        // 不再构造门边界错误（故 recovery action 不会被协议面拦截）。
+        assert!(
+            human_gate_message_boundary_error(
+                WorkItemPlanFlowKind::SingleCandidate,
+                WorkspaceStage::HumanConfirm,
+                &message,
+            )
+            .is_none(),
+            "recovery action must not be rejected by the human gate boundary error"
+        );
+        // 其余阶段维持 fail-closed：矩阵只放行 recovery 所在的 HumanConfirm 门。
+        for stage in [
+            WorkspaceStage::PrepareContext,
+            WorkspaceStage::Running,
+            WorkspaceStage::AuthorConfirm,
+            WorkspaceStage::ReviewDecision,
+            WorkspaceStage::Completed,
+        ] {
+            assert!(
+                !is_message_valid_for_stage_with_flow(
+                    WorkItemPlanFlowKind::SingleCandidate,
+                    &message,
+                    &stage,
+                ),
+                "recovery action must stay invalid for stage {stage:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn conversational_gate_unknown_stage_message_is_zero_side_effect_protocol_error() {
     let feedback = WsInMessage::HumanGateFeedback {
         command_id: "cmd-feedback".to_string(),
