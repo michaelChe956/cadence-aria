@@ -92,6 +92,8 @@ Skill 调用：Claude/Kimi 原生调用；Codex/pi/omp 清单选择后将用途�
 - **格式化命令**：`cargo fmt --check`（应用：`cargo fmt`）
 - **命令规范**：详见 `cadence/project-rules/build-test-commands.md`
 
+- **识图规则**：需要理解图片时第一步 `read <图片路径>?q=<问题>` 走 vision 通道，详见 `cadence/project-rules/vision-image-reading.md`
+
 **前端（web/）**：
 - **语言**：TypeScript + React
 - **构建工具**：Vite
