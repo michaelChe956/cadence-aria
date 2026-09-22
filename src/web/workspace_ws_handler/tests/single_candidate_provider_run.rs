@@ -368,6 +368,164 @@ fn single_candidate_markdown_with_command(
         1,
     )
 }
+fn single_candidate_markdown_with_duplicate_command(story_id: &str, design_id: &str) -> String {
+    single_candidate_markdown(story_id, design_id).replacen(
+        "- check_id: CHECK-001\n- manual_instruction: Inspect the backend API response manually.",
+        "- check_id: CHECK-001\n- command: cargo test --locked --lib backend_api\n- manual_instruction: Inspect the backend API response manually.\n- required: true\n- non_zero_test_execution_required: false\n- check_id: CHECK-002\n- command: cargo test --locked --lib backend_api\n- manual_instruction: Confirm the backend API response manually.\n- required: true\n- non_zero_test_execution_required: false",
+        1,
+    )
+}
+
+#[tokio::test]
+async fn single_candidate_repairs_duplicate_trusted_command_before_terminal_failure() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output =
+        single_candidate_markdown_with_duplicate_command(&fixture.story_id, &fixture.design_id);
+    let provider = Arc::new(RecordingOutputProvider {
+        output,
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("full author provider must receive input")
+        .expect("full author provider input");
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "mechanically repairable duplicate command must not trigger a provider re-drive"
+    );
+
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload repaired single-candidate session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+        "duplicate trusted command must reach the engine approval path instead of terminal failure"
+    );
+
+    let source_ref = durable
+        .work_item_plan_source_revision_ref
+        .as_deref()
+        .expect("repaired source revision ref");
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: durable.project_id.clone(),
+        issue_id: durable.issue_id.clone(),
+        plan_id: durable.entity_id.clone(),
+    };
+    let source_store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+        fixture.app_paths.clone(),
+    );
+    let repaired_source = source_store
+        .get_source_revision(&scope, source_ref)
+        .expect("repaired source must be persisted")
+        .source;
+    assert_eq!(
+        repaired_source
+            .matches("- command: cargo test --locked --lib backend_api")
+            .count(),
+        1,
+        "engine authoritative convergence must persist source with one trusted command"
+    );
+
+    while let Ok(Some(outbound)) =
+        tokio::time::timeout(std::time::Duration::from_millis(20), outbound_rx.recv()).await
+    {
+        if let OutboundControl::Text(json) = outbound {
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            assert_ne!(value["type"], "error", "repair path must not emit terminal error");
+            assert!(!value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compile markdown source failed"));
+        }
+    }
+}
+
+
+#[tokio::test]
+async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_reredrive() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output = single_candidate_markdown_with_duplicate_command(&fixture.story_id, &fixture.design_id)
+        .replacen("### Inputs\n\n", "", 1);
+    let provider = Arc::new(RecordingOutputProvider {
+        output,
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("full author provider must receive input")
+        .expect("full author provider input");
+    let reredrive_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("mixed diagnostics must receive one teaching re-drive")
+        .expect("teaching re-drive input");
+    assert!(reredrive_input
+        .prompt
+        .contains("立即输出完整 work-item-plan markdown source"));
+    assert!(
+        !matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
+            Ok(Some(_))
+        ),
+        "mixed diagnostics must consume at most one teaching re-drive"
+    );
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let outbound = outbound_rx
+                .recv()
+                .await
+                .expect("mixed compile failure outbound");
+            let OutboundControl::Text(json) = outbound else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
+            if value["type"] == "error" {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("mixed compile failure error");
+    assert!(error["message"]
+        .as_str()
+        .expect("error message")
+        .contains("compile markdown source failed"));
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+}
 
 #[tokio::test]
 async fn legacy_provider_run_uses_outline_builder_and_legacy_parser_only() {

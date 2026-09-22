@@ -458,47 +458,51 @@ pub(crate) async fn run_single_candidate_author(
     .await;
     let full_output = delivery.source;
     // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。missing_section 类
-    // compile 失败不再直接终态：先在 handler 预编译分类（compile 为纯函数，与
-    // complete_... 内部编译同源同果），命中则同 node 发送教学重驱 prompt（含
-    // compile 错误原文）再驱一次 provider；重驱仍败→维持终态失败（错误含两轮
-    // 信息）；非 missing_section 错误不触发重驱，保持既有终态错误形态。
+    // compile 失败不再直接终态：先在 handler 预检查中复用与引擎落盘路径同源的
+    // contract_autorepair 收敛器；收敛成功的机械 lowering 缺口（当前为重复
+    // trusted command）直接带着修复后的 source 进入 complete，后者再次经过同一
+    // 收敛入口并落盘。收敛失败则保留原诊断，missing_section 继续教学重驱。
+    // 重驱产物重新进入本循环，因此同样不能绕过收敛器；重驱槽与收敛轮彼此独立，
+    // 每 candidate 仍至多一次额外 provider 驱动。
     // 3.6 弱模型基线加固：IR 校验失败（validate plan candidate IR failed 类，
     // 如 unknown_requirement_ref / acceptance_criterion_without_reviewer_check）
     // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
     // 分类，重驱 prompt 附错误原文与修正引用/补齐字段指令；重驱再败→终态含
     // 两轮；非 IR/非 missing_section 的其他失败（如内部错误）不触发重驱。
-    // 重驱机会在 compile/IR 两类间共享（first_round_failure 单槽）：每 candidate
-    // 至多一次额外 provider 驱动。
+    // 重驱机会在 compile/IR 两类间共享（first_round_failure 单槽）。
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
     };
     let mut compile_source = full_output;
     let mut first_round_failure: Option<String> = None;
     let candidate_item_count = loop {
-        match crate::product::work_item_plan_compiler::compile_work_item_plan(
-            &compile_source,
-            &compile_context,
-        ) {
-            Ok(ir) => {
-                // 3.6：持久化前 IR 预校验——与 complete_... 内部同源同果；仅确定性
-                // IR 校验失败才触发重驱/终态，装载失败交给权威路径兜底。
-                if let Some(reasons) =
-                    prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir)
-                {
-                    if first_round_failure.is_none() {
+        let (ir, repaired_source, _autorepair_log) =
+            match crate::product::workspace_engine::contract_autorepair::converge_work_item_plan_source(
+                &compile_source,
+                compile_context.clone(),
+            ) {
+                Ok(outcome) => outcome,
+                Err(diagnostics) => {
+                    let reasons = format_compile_failure_reasons(&diagnostics);
+                    if first_round_failure.is_none()
+                        && diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic.code == "missing_section")
+                    {
                         first_round_failure = Some(reasons.join("; "));
-                        let reredrive_prompt = build_work_item_plan_ir_reredrive_prompt(&reasons);
+                        let reredrive_prompt =
+                            crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
+                                &reasons,
+                            );
                         engine
                             .emit_execution_event(
                                 ProviderExecutionEvent {
-                                    event_id: format!("{node_id}_prompt_ir_reredrive"),
+                                    event_id: format!("{node_id}_prompt_compile_reredrive"),
                                     kind: ProviderExecutionEventKind::Output,
                                     status: ProviderExecutionEventStatus::Started,
-                                    title: "SC IR 校验失败教学重驱提示词".to_string(),
+                                    title: "SC compile 失败教学重驱提示词".to_string(),
                                     detail: Some(
-                                        "IR 校验失败（unknown_requirement_ref / \
-                                         acceptance_criterion_without_reviewer_check 等）的\
-                                         教学重驱（含错误原文与修正指令），恰一次"
+                                        "missing_section 类 compile 失败的教学重驱（含 compile 错误原文），恰一次"
                                             .to_string(),
                                     ),
                                     command: None,
@@ -527,93 +531,83 @@ pub(crate) async fn run_single_candidate_author(
                     let detail = reasons.join("; ");
                     let message = match first_round_failure.as_deref() {
                         Some(first_round) => format!(
-                            "validate plan candidate IR failed (after one teaching re-drive): \
+                            "compile markdown source failed (after one teaching re-drive): \
                              first round: {first_round}; re-drive round: {detail}"
                         ),
-                        None => format!("validate plan candidate IR failed: {detail}"),
+                        None => format!("compile markdown source failed: {detail}"),
                     };
                     engine.persist_single_candidate_terminal_phase(
                         crate::product::models::SingleCandidatePhase::Failed,
                     );
                     return Err(SingleCandidateProviderRunError::Message(message));
                 }
-                break match engine
-                    .complete_single_candidate_work_item_plan_author(
-                        compile_source,
-                        repository.id.clone(),
+            };
+        compile_source = repaired_source;
+
+        if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
+            if first_round_failure.is_none() {
+                first_round_failure = Some(reasons.join("; "));
+                let reredrive_prompt = build_work_item_plan_ir_reredrive_prompt(&reasons);
+                engine
+                    .emit_execution_event(
+                        ProviderExecutionEvent {
+                            event_id: format!("{node_id}_prompt_ir_reredrive"),
+                            kind: ProviderExecutionEventKind::Output,
+                            status: ProviderExecutionEventStatus::Started,
+                            title: "SC IR 校验失败教学重驱提示词".to_string(),
+                            detail: Some(
+                                "IR 校验失败（unknown_requirement_ref / acceptance_criterion_without_reviewer_check 等）的教学重驱（含错误原文与修正指令），恰一次"
+                                    .to_string(),
+                            ),
+                            command: None,
+                            cwd: None,
+                            output: Some(reredrive_prompt.clone()),
+                            exit_code: None,
+                        },
+                        Some(node_id.clone()),
+                        Some(author_provider.clone()),
                     )
-                    .await
-                {
-                    Ok(candidate_item_count) => candidate_item_count,
-                    Err(message) => {
-                        engine.persist_single_candidate_terminal_phase(
-                            crate::product::models::SingleCandidatePhase::Failed,
-                        );
-                        return Err(SingleCandidateProviderRunError::Message(message));
-                    }
-                };
+                    .await;
+                compile_source = drive_single_candidate_reredrive(
+                    engine,
+                    &launch,
+                    Arc::clone(&provider_for_run),
+                    &run_cancel,
+                    command_rx,
+                    &node_id,
+                    &author_provider,
+                    &reredrive_prompt,
+                    &repository.path,
+                )
+                .await?;
+                continue;
             }
-            Err(diagnostics) => {
-                let reasons = format_compile_failure_reasons(&diagnostics);
-                if first_round_failure.is_none()
-                    && diagnostics
-                        .iter()
-                        .any(|diagnostic| diagnostic.code == "missing_section")
-                {
-                    first_round_failure = Some(reasons.join("; "));
-                    let reredrive_prompt =
-                        crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
-                            &reasons,
-                        );
-                    engine
-                        .emit_execution_event(
-                            ProviderExecutionEvent {
-                                event_id: format!("{node_id}_prompt_compile_reredrive"),
-                                kind: ProviderExecutionEventKind::Output,
-                                status: ProviderExecutionEventStatus::Started,
-                                title: "SC compile 失败教学重驱提示词".to_string(),
-                                detail: Some(
-                                    "missing_section 类 compile 失败的教学重驱（含 compile 错误原文），恰一次"
-                                        .to_string(),
-                                ),
-                                command: None,
-                                cwd: None,
-                                output: Some(reredrive_prompt.clone()),
-                                exit_code: None,
-                            },
-                            Some(node_id.clone()),
-                            Some(author_provider.clone()),
-                        )
-                        .await;
-                    // 3.6：抽共用驱动 helper（与 IR 重驱同源），行为与原内联块一致。
-                    compile_source = drive_single_candidate_reredrive(
-                        engine,
-                        &launch,
-                        Arc::clone(&provider_for_run),
-                        &run_cancel,
-                        command_rx,
-                        &node_id,
-                        &author_provider,
-                        &reredrive_prompt,
-                        &repository.path,
-                    )
-                    .await?;
-                    continue;
-                }
-                let detail = reasons.join("; ");
-                let message = match first_round_failure {
-                    Some(first_round) => format!(
-                        "compile markdown source failed (after one teaching re-drive): \
-                         first round: {first_round}; re-drive round: {detail}"
-                    ),
-                    None => format!("compile markdown source failed: {detail}"),
-                };
+            let detail = reasons.join("; ");
+            let message = match first_round_failure.as_deref() {
+                Some(first_round) => format!(
+                    "validate plan candidate IR failed (after one teaching re-drive): \
+                     first round: {first_round}; re-drive round: {detail}"
+                ),
+                None => format!("validate plan candidate IR failed: {detail}"),
+            };
+            engine.persist_single_candidate_terminal_phase(
+                crate::product::models::SingleCandidatePhase::Failed,
+            );
+            return Err(SingleCandidateProviderRunError::Message(message));
+        }
+
+        break match engine
+            .complete_single_candidate_work_item_plan_author(compile_source, repository.id.clone())
+            .await
+        {
+            Ok(candidate_item_count) => candidate_item_count,
+            Err(message) => {
                 engine.persist_single_candidate_terminal_phase(
                     crate::product::models::SingleCandidatePhase::Failed,
                 );
                 return Err(SingleCandidateProviderRunError::Message(message));
             }
-        }
+        };
     };
     #[cfg(test)]
     {
