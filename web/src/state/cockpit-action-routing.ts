@@ -1,5 +1,10 @@
 import { newCommandId } from "../hooks/useWorkspaceWs";
-import { gateActionBlockReason, gateTerminateBlockReason } from "./workspace-cockpit-projection";
+import type { WorkItemPlanCompileRecoveryAction } from "../api/types";
+import {
+  gateActionBlockReason,
+  gateKindOf,
+  gateTerminateBlockReason,
+} from "./workspace-cockpit-projection";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export type CockpitActionFacade = {
@@ -18,6 +23,22 @@ export type CockpitActionFacade = {
    * 按钮同款行为；待处理抽屉由此补齐第四动作。
    */
   adoptReview(): void;
+  /**
+   * REQ-PCG-01（plan-compile-gate-visibility）：整组 Work Item Draft 确认——HTTP
+   * confirm 端点（与 story/design author 门同通路，SC AuthorConfirm 阶段矩阵不放行
+   * WS confirm 帧）。仅对 kind=batch_confirm 且未阻断的门生效；不得映射为
+   * Confirm/HumanGateFeedback/AbandonHumanGate 三命令（REQ-RET-02/REQ-CG-02）。
+   */
+  confirmBatch(): Promise<void>;
+  /**
+   * REQ-PCG-02：Final Compile recovery——经既有 WS
+   * `work_item_plan_compile_recovery_action` 发送既有 action 枚举。仅对
+   * kind=compile_recovery 且未阻断的门生效；不复制 compile 状态机、不改 action 语义。
+   */
+  recoverCompile(
+    action: WorkItemPlanCompileRecoveryAction,
+    reason?: string,
+  ): Promise<void>;
 };
 
 
@@ -37,6 +58,13 @@ export function createCockpitActionFacade(input: {
   sendAdvance: (commandId?: string) => boolean;
   /** v40 复验 #3：客户端采纳通道（预填修订反馈+切视图），由页面接线。 */
   adoptReview: () => void;
+  /** REQ-PCG-01：整组 Draft 确认的 HTTP confirm 发送器（页面接线，含审计与错误面）。 */
+  sendBatchConfirm: () => Promise<void>;
+  /** REQ-PCG-02：既有 compile recovery WS 发送器（`useWorkspaceWs`）。 */
+  sendCompileRecovery: (
+    action: WorkItemPlanCompileRecoveryAction,
+    reason?: string,
+  ) => void;
 }): CockpitActionFacade {
   return {
     confirm() {
@@ -97,6 +125,26 @@ export function createCockpitActionFacade(input: {
         return;
       }
       input.adoptReview();
+    },
+    // REQ-PCG-01：整组 Draft 确认（HTTP）。门种类与阻断判据都在发送前现读——
+    // 批次门已收口/终态或当前不是批次门时零出站（REQ-PCG-03 fail-closed）。
+    async confirmBatch() {
+      const state = input.getState();
+      if (gateKindOf(state) !== "batch_confirm" || gateActionBlockReason(state) !== null) {
+        return;
+      }
+      await input.sendBatchConfirm();
+    },
+    // REQ-PCG-02：compile recovery（既有 WS action 通路，action 枚举原样透传）。
+    async recoverCompile(action, reason) {
+      const state = input.getState();
+      if (
+        gateKindOf(state) !== "compile_recovery" ||
+        gateActionBlockReason(state) !== null
+      ) {
+        return;
+      }
+      input.sendCompileRecovery(action, reason);
     },
   };
 }

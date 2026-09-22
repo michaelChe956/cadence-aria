@@ -43,6 +43,7 @@ import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   cockpitInboxItemSessionId,
   gateActionBlockReason,
+  gateKindOf,
   isStoryDesignAuthorConfirm,
   selectGateProjection,
   selectCockpitFlow,
@@ -310,70 +311,107 @@ export function ChatCockpitPage({
     setDrilldownView("conversation");
     setJumpEntryId(entryId);
   }, []);
-  // F-20（wave2-f18-report §5）：story/design AuthorConfirm 的 approve 设计通路是
-  // HTTP confirm 端点——WS confirm 帧在该阶段被矩阵拒收。响应落定稿时乐观置
-  // confirmed 收敛决策面（投影层按 confirmed 关门）；F-31 起服务端可能接管本轮进入
-  // CrossReview（响应未定稿），此时不得乐观收敛，权威状态以服务端 session_state 广播为准。
-  // F-31 纠偏：评审改为用户可选——门上提供「确认定稿」（缺省，不带 with_review）
-  // 与「确认并评审」（with_review=true，服务端接管进入评审轮）两个动作；待处理
-  // 抽屉经 facade confirmReview 同款对齐（v37 复验 #2），快捷键/批量 confirm
-  // 等其余入口维持定稿缺省。
-  const confirmStoryAuthorGate = useCallback((withReview = false): boolean => {
-    const current = useWorkspaceStore.getState();
-    const targetSessionId = current.sessionId;
-    if (!isStoryDesignAuthorConfirm(current) || targetSessionId === null) {
-      return false;
-    }
-    const auditRecordId = useOperationAuditStore.getState().record({
-      sessionId: targetSessionId,
-      gateId: selectGateProjection(current)?.key ?? null,
-      operation: "confirm",
-      source: "chat",
-      outcome: "sent",
-      detail: withReview ? "http-confirm-review" : "http-confirm",
-    });
-    void confirmWorkspaceSession(targetSessionId, "user", withReview)
-      .then((session) => {
-        useOperationAuditStore.getState().markCompleted(auditRecordId);
-        // F-31 前端收口：「确认并评审」后由服务端接管进入 CrossReview——confirm
-        // 响应 status=running（评审在途），此时乐观置 confirmed 会在评审期间露出
-        // 已定稿 UI（F-25b 类误显），且与随后的 session_state 广播打架。仅响应确实
-        // 落定稿才收敛，其余交 F-25b 广播驱动。
-        if (session.status === "confirmed") {
-          useWorkspaceStore.getState().setSessionStatus("confirmed");
-        }
-        // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
-        // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
-        notifyLifecycleInvalidated(session.issue_id);
-      })
-      .catch((error: unknown) => {
-        const code =
-          typeof error === "object" && error !== null && "code" in error
-            ? String(error.code)
-            : "http_confirm_failed";
-        const message =
-          error instanceof Error && error.message !== ""
-            ? error.message
-            : "确认请求被服务端拒绝";
-        useOperationAuditStore.getState().markRejected(auditRecordId, code);
-        // k3 P3（F-31 纠偏复审）：拒收不得零反馈（F-28 同类）——legacy 会话
-        // reviewer_enabled_at_start=None 时前端 reviewerEnabled 缺省 true，
-        // 「确认并评审」会撞后端如实 4xx（workspace_session_review_not_enabled）。
-        // 复用 F-28 hard-error-notice 面（ChatInputBar 在 author_confirm 渲染）
-        // 就地亮出错误码+语义，决策面保持敞开供改点「确认定稿」。
-        useWorkspaceStore.getState().setProtocolError({ code, message });
+  // F-31 纠偏：评审改为用户可选——author 门上提供「确认定稿」（缺省，不带
+  // with_review）与「确认并评审」（with_review=true，服务端接管进入评审轮）两个
+  // 动作；待处理抽屉经 facade confirmReview 同款对齐（v37 复验 #2），
+  // 快捷键/批量 confirm 等其余入口维持定稿缺省。
+  /**
+   * F-20（wave2-f18-report §5）+ REQ-PCG-01（plan-compile-gate-visibility）：HTTP
+   * confirm 通路。story/design AuthorConfirm 与 work_item_plan 整组 Draft
+   * （batch_confirm）的 approve 设计通路同为 HTTP confirm 端点——WS confirm 帧在
+   * 这些阶段被矩阵拒收。响应落定稿时乐观置 confirmed 收敛决策面；F-31 起服务端可能
+   * 接管本轮进入 CrossReview（响应未定稿），此时不得乐观收敛，权威状态以服务端
+   * session_state 广播为准。失败就地亮协议错误面（拒收不得零反馈）。
+   */
+  const sendHttpConfirm = useCallback(
+    (options: { withReview: boolean; detail: string }): Promise<void> => {
+      const current = useWorkspaceStore.getState();
+      const targetSessionId = current.sessionId;
+      if (targetSessionId === null) {
+        return Promise.resolve();
+      }
+      const auditRecordId = useOperationAuditStore.getState().record({
+        sessionId: targetSessionId,
+        gateId: selectGateProjection(current)?.key ?? null,
+        operation: "confirm",
+        source: "chat",
+        outcome: "sent",
+        detail: options.detail,
       });
-    return true;
-  }, []);
-  // 门面 confirm 统一入口：story/design author 门走 HTTP，其余（SC typed/legacy
-  // human_confirm）走既有 WS confirm 帧；withReview 仅对 author 门有意义
-  // （F-31 抽屉「确认并评审」），WS 通路忽略该参。
+      return confirmWorkspaceSession(targetSessionId, "user", options.withReview)
+        .then((session) => {
+          useOperationAuditStore.getState().markCompleted(auditRecordId);
+          if (session.status === "confirmed") {
+            useWorkspaceStore.getState().setSessionStatus("confirmed");
+          }
+          // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
+          // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
+          notifyLifecycleInvalidated(session.issue_id);
+        })
+        .catch((error: unknown) => {
+          const code =
+            typeof error === "object" && error !== null && "code" in error
+              ? String(error.code)
+              : "http_confirm_failed";
+          const message =
+            error instanceof Error && error.message !== ""
+              ? error.message
+              : "确认请求被服务端拒绝";
+          useOperationAuditStore.getState().markRejected(auditRecordId, code);
+          // k3 P3（F-31 纠偏复审）：拒收不得零反馈（F-28 同类）——legacy 会话
+          // reviewer_enabled_at_start=None 时前端 reviewerEnabled 缺省 true，
+          // 「确认并评审」会撞后端如实 4xx（workspace_session_review_not_enabled）。
+          // 复用 F-28 hard-error-notice 面（ChatInputBar 在 author_confirm 渲染）
+          // 就地亮出错误码+语义，决策面保持敞开供改点「确认定稿」。
+          useWorkspaceStore.getState().setProtocolError({ code, message });
+        });
+    },
+    [],
+  );
+  // 门面 confirm/confirmReview 的统一入口：HTTP 通路门（story/design author 门与
+  // work_item_plan 整组 Draft 门）走 HTTP confirm；其余（SC typed/legacy
+  // human_confirm）走既有 WS confirm 帧。withReview 仅对 author 门有意义（F-31
+  // 抽屉「确认并评审」）——整组 Draft 确认不带评审参数。
+  const confirmHttpGate = useCallback(
+    (withReview = false): boolean => {
+      const current = useWorkspaceStore.getState();
+      const batch = gateKindOf(current) === "batch_confirm";
+      if ((!batch && !isStoryDesignAuthorConfirm(current)) || current.sessionId === null) {
+        return false;
+      }
+      void sendHttpConfirm({
+        withReview: !batch && withReview,
+        detail: batch ? "http-confirm-batch" : withReview ? "http-confirm-review" : "http-confirm",
+      });
+      return true;
+    },
+    [sendHttpConfirm],
+  );
+  /**
+   * REQ-PCG-01：门面 confirmBatch 的发送入口——只有当前门确实是未阻断的
+   * batch_confirm 时才出站（门面已做同类校验；这里再读一次 store 防陈旧闭包）。
+   */
+  const confirmBatchGate = useCallback((): Promise<void> => {
+    const current = useWorkspaceStore.getState();
+    if (
+      gateKindOf(current) !== "batch_confirm" ||
+      gateActionBlockReason(current) !== null ||
+      current.sessionId === null
+    ) {
+      return Promise.resolve();
+    }
+    return sendHttpConfirm({ withReview: false, detail: "http-confirm-batch" });
+  }, [sendHttpConfirm]);
+  // 门面 confirm 统一入口：story/design author 门与 work_item_plan 整组 Draft 门走
+  // HTTP，其余（SC typed/legacy human_confirm）走既有 WS confirm 帧；withReview 仅对
+  // author 门有意义（F-31 抽屉「确认并评审」），WS 通路忽略该参。
   const routeGateConfirm = useCallback((withReview = false): boolean => {
-    if (isStoryDesignAuthorConfirm(useWorkspaceStore.getState())) {
-      return confirmStoryAuthorGate(withReview);
+    const current = useWorkspaceStore.getState();
+    if (gateKindOf(current) === "batch_confirm" || isStoryDesignAuthorConfirm(current)) {
+      return confirmHttpGate(withReview);
     }
     return workspaceWs.sendConfirmGate();
-  }, [confirmStoryAuthorGate, workspaceWs.sendConfirmGate]);
+  }, [confirmHttpGate, workspaceWs.sendConfirmGate]);
 
   // v38 复验 #2/#3（恢复 C3 前原意）：story/design AuthorConfirm 门的反馈修订
   // 发送通道——「采纳 Review 意见」预填（或手输）后经「发送反馈」提交即
@@ -428,6 +466,8 @@ export function ChatCockpitPage({
         sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
         sendAdvance: workspaceWs.sendAdvance,
         adoptReview: adoptLatestReview,
+        sendBatchConfirm: confirmBatchGate,
+        sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
       }),
     [
       state.flowKind,
@@ -440,6 +480,8 @@ export function ChatCockpitPage({
       routeGateConfirm,
       adoptLatestReview,
       workspaceWs.sendHumanGateFeedback,
+      confirmBatchGate,
+      workspaceWs.sendWorkItemPlanCompileRecoveryAction,
     ],
   );
   const auditRows = useMemo(
@@ -614,6 +656,8 @@ export function ChatCockpitPage({
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
           adoptReview: adoptLatestReview,
+          sendBatchConfirm: confirmBatchGate,
+          sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
         }).confirm();
       },
       feedback: () => {
@@ -654,6 +698,8 @@ export function ChatCockpitPage({
           sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
           sendAdvance: workspaceWs.sendAdvance,
           adoptReview: adoptLatestReview,
+          sendBatchConfirm: confirmBatchGate,
+          sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
         }).advance();
       },
     }),
@@ -664,6 +710,8 @@ export function ChatCockpitPage({
       routeGateConfirm,
       adoptLatestReview,
       workspaceWs.sendHumanGateFeedback,
+      confirmBatchGate,
+      workspaceWs.sendWorkItemPlanCompileRecoveryAction,
     ],
   );
   useCockpitHotkeys(hotkeyHandlers);
@@ -1037,11 +1085,11 @@ export function ChatCockpitPage({
                     >
                       <Check className="h-4 w-4" aria-hidden="true" /> 确认定稿
                     </button>
-                    {state.reviewerEnabled ? (
+                    {state.reviewerEnabled && gateKindOf(state) !== "batch_confirm" ? (
                       <button
                         type="button"
                         className="btn-secondary h-9"
-                        onClick={() => confirmStoryAuthorGate(true)}
+                        onClick={() => confirmHttpGate(true)}
                       >
                         确认并评审
                       </button>

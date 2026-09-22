@@ -5,14 +5,7 @@ import type { CockpitActionFacade } from "../../../state/cockpit-action-routing"
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
 import { CockpitInbox } from "./CockpitInbox";
 
-const actions: CockpitActionFacade = {
-  confirm: vi.fn(),
-  confirmReview: vi.fn(),
-  feedback: vi.fn(),
-  terminate: vi.fn(),
-  advance: vi.fn(),
-  adoptReview: vi.fn(),
-};
+const actions = mockActions();
 
 const gateItem: CockpitInboxItem = {
   id: "session_001:gate:gate_001",
@@ -95,6 +88,60 @@ const authorConfirmItem = (reviewAvailable: boolean): CockpitInboxItem => ({
   inlineError: null,
 });
 
+// REQ-PCG-01：整组 Draft 确认门——key=`node:${node_id}`，动作面 [确认整组][终止]。
+const batchConfirmItem: CockpitInboxItem = {
+  id: "session_001:gate:node:node_batch",
+  kind: "gate",
+  severity: 1,
+  title: "确认整组 Work Item Draft",
+  summary: "等待整组 Work Item Draft 确认",
+  triage: false,
+  source: "gate",
+  createdAt: "2026-09-22T00:00:00.000Z",
+  gate: {
+    ...gateItem.gate!,
+    key: "node:node_batch",
+    kind: "batch_confirm",
+    turn_id: null,
+    stage: "author_confirm",
+    opened_at: "2026-09-22T00:00:00.000Z",
+  },
+  inlineError: null,
+};
+
+// REQ-PCG-02：compile recovery 门——动作面 [继续][放弃并回滚][转人工]。
+const recoveryItem: CockpitInboxItem = {
+  id: "session_001:gate:node:node_recovery",
+  kind: "gate",
+  severity: 1,
+  title: "Final Compile 恢复",
+  summary: "Final Compile 中断，等待恢复动作 · Final Compile 需要恢复：provider timeout",
+  triage: false,
+  source: "gate",
+  createdAt: "2026-09-22T00:00:00.000Z",
+  gate: {
+    ...gateItem.gate!,
+    key: "node:node_recovery",
+    kind: "compile_recovery",
+    turn_id: null,
+    opened_at: "2026-09-22T00:00:00.000Z",
+  },
+  inlineError: null,
+};
+
+function mockActions(): CockpitActionFacade {
+  return {
+    confirm: vi.fn(),
+    confirmReview: vi.fn(),
+    feedback: vi.fn(),
+    terminate: vi.fn(),
+    advance: vi.fn(),
+    adoptReview: vi.fn(),
+    confirmBatch: vi.fn(async () => undefined),
+    recoverCompile: vi.fn(async () => undefined),
+  };
+}
+
 describe("CockpitInbox", () => {
   it("uses the shared dangerous confirmation and feedback editor for all actionable cards", () => {
     render(
@@ -176,14 +223,7 @@ describe("CockpitInbox", () => {
 
   it("author 门 reviewer 启用：抽屉内三动作，定稿/评审/终止各自发对应命令（F-31）", async () => {
     const user = userEvent.setup();
-    const gateActions: CockpitActionFacade = {
-      confirm: vi.fn(),
-      confirmReview: vi.fn(),
-      feedback: vi.fn(),
-      terminate: vi.fn(),
-      advance: vi.fn(),
-      adoptReview: vi.fn(),
-    };
+    const gateActions = mockActions();
     render(
       <CockpitInbox
         items={[authorConfirmItem(true)]}
@@ -227,14 +267,7 @@ describe("CockpitInbox", () => {
   // 行为，经门面 adoptReview 派发（预填修订反馈+切回对话视图，纯客户端）。
   it("author 门 review 已完成：抽屉内四动作，采纳 Review 意见经门面派发（v40 #3）", async () => {
     const user = userEvent.setup();
-    const gateActions: CockpitActionFacade = {
-      confirm: vi.fn(),
-      confirmReview: vi.fn(),
-      feedback: vi.fn(),
-      terminate: vi.fn(),
-      advance: vi.fn(),
-      adoptReview: vi.fn(),
-    };
+    const gateActions = mockActions();
     render(
       <CockpitInbox
         items={[authorConfirmItem(true)]}
@@ -324,14 +357,7 @@ describe("CockpitInbox", () => {
   // null）时门条渲染终止（二次确认），确认与反馈编辑器维持相位纪律不露出。
   it("renders a terminate-only gate row for a phase-mismatched plan gate (F-21)", async () => {
     const user = userEvent.setup();
-    const gateActions: CockpitActionFacade = {
-      confirm: vi.fn(),
-      confirmReview: vi.fn(),
-      feedback: vi.fn(),
-      terminate: vi.fn(),
-      advance: vi.fn(),
-      adoptReview: vi.fn(),
-    };
+    const gateActions = mockActions();
     render(
       <CockpitInbox
         items={[
@@ -487,5 +513,123 @@ describe("CockpitInbox", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
+  });
+
+  // REQ-PCG-01：整组 Draft 确认门——[确认整组] 走 HTTP confirm 通路（门面
+  // confirmBatch），[终止] 复用既有 WS abandon 二次确认；整组确认不是 WS confirm
+  // 门，故不提供批量勾选、不出现 typed 反馈编辑器。
+  it("routes the batch gate row to confirmBatch and the shared terminate (REQ-PCG-01)", async () => {
+    const user = userEvent.setup();
+    const gateActions = mockActions();
+    render(
+      <CockpitInbox
+        items={[batchConfirmItem]}
+        actions={gateActions}
+        actionableSessionId="session_001"
+        onBulkConfirm={vi.fn()}
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("确认整组 Work Item Draft")).toBeVisible();
+    expect(within(inbox).getByRole("button", { name: "确认整组" })).toBeVisible();
+    expect(within(inbox).queryByTestId("gate-feedback-editor")).toBeNull();
+    expect(within(inbox).queryByRole("checkbox")).toBeNull();
+
+    await user.click(within(inbox).getByRole("button", { name: "确认整组" }));
+    expect(gateActions.confirmBatch).toHaveBeenCalledOnce();
+    expect(gateActions.confirm).not.toHaveBeenCalled();
+
+    await user.click(within(inbox).getByRole("button", { name: "终止" }));
+    expect(gateActions.terminate).not.toHaveBeenCalled();
+    await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
+    expect(gateActions.terminate).toHaveBeenCalledOnce();
+  });
+
+  // REQ-PCG-02：recovery 门三动作按既有 recovery action 枚举原样派发；human_triage
+  // 可携带原因（wire 可选 reason），不得映射成 confirm/feedback/abandon。
+  it("routes the recovery gate row to the three existing recovery actions (REQ-PCG-02)", async () => {
+    const user = userEvent.setup();
+    const gateActions = mockActions();
+    render(
+      <CockpitInbox
+        items={[recoveryItem]}
+        actions={gateActions}
+        actionableSessionId="session_001"
+        onBulkConfirm={vi.fn()}
+      />,
+    );
+
+    const inbox = screen.getByTestId("cockpit-inbox");
+    expect(within(inbox).getByText("Final Compile 恢复")).toBeVisible();
+    expect(within(inbox).getByText(/provider timeout/)).toBeVisible();
+
+    await user.click(within(inbox).getByRole("button", { name: "继续" }));
+    expect(gateActions.recoverCompile).toHaveBeenLastCalledWith("continue");
+
+    await user.click(within(inbox).getByRole("button", { name: "放弃并回滚" }));
+    expect(gateActions.recoverCompile).toHaveBeenLastCalledWith("abort_and_rollback");
+
+    await user.type(within(inbox).getByLabelText("转人工原因（可选）"), "  需要人工判断  ");
+    await user.click(within(inbox).getByRole("button", { name: "转人工" }));
+    expect(gateActions.recoverCompile).toHaveBeenLastCalledWith(
+      "human_triage",
+      "需要人工判断",
+    );
+
+    expect(gateActions.confirm).not.toHaveBeenCalled();
+    expect(gateActions.confirmBatch).not.toHaveBeenCalled();
+    expect(gateActions.feedback).not.toHaveBeenCalled();
+    expect(gateActions.terminate).not.toHaveBeenCalled();
+    // recovery 门不参与批量确认（批量 runner 只发 WS confirm 帧）。
+    expect(within(inbox).queryByRole("checkbox")).toBeNull();
+  });
+
+  // REQ-PCG-02/F-30：门已关闭或会话终态（action_block_reason/terminate_block_reason
+  // 同源）时只呈现诊断原因，两新门的写动作一律不露出。
+  it.each([batchConfirmItem, recoveryItem])(
+    "shows the block reason instead of write actions for a collapsed node gate (F-30)",
+    (item) => {
+      render(
+        <CockpitInbox
+          items={[
+            {
+              ...item,
+              gate: {
+                ...item.gate!,
+                action_block_reason: "terminal_stage",
+                terminate_block_reason: "terminal_stage",
+              },
+            },
+          ]}
+          actions={mockActions()}
+          actionableSessionId="session_001"
+        />,
+      );
+
+      expect(screen.getByText("已离开人工确认门")).toBeVisible();
+      expect(screen.queryByRole("button", { name: "确认整组" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "放弃并回滚" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "转人工" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    },
+  );
+
+  // REQ-PCG-02：当前连接不是该会话的 driver（actionable=false）时，两新门的写动作
+  // 一律不可用——恢复动作只由持锁连接提交。
+  it("hides batch/recovery write actions for a non-driver connection (REQ-PCG-02)", () => {
+    render(
+      <CockpitInbox
+        items={[batchConfirmItem, recoveryItem]}
+        actions={mockActions()}
+        actionableSessionId="session_other"
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "确认整组" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "放弃并回滚" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "转人工" })).toBeNull();
   });
 });

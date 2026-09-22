@@ -38,6 +38,8 @@ function actions(): CockpitActionFacade {
     terminate: vi.fn(() => true),
     advance: vi.fn(() => true),
     adoptReview: vi.fn(() => true),
+    confirmBatch: vi.fn(async () => undefined),
+    recoverCompile: vi.fn(async () => undefined),
   };
 }
 

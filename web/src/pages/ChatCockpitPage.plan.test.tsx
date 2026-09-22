@@ -3,9 +3,9 @@ import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import type * as ApiClient from "../api/client";
 import type { TakeoverResponse } from "../api/types";
 import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   selectCockpitInbox,
   type CockpitInboxItem,
@@ -529,6 +529,82 @@ describe("ChatCockpitPage", () => {
       await user.click(within(inbox).getByRole("button", { name: "终止" }));
       await user.click(within(inbox).getByRole("button", { name: "确认终止" }));
       expect(workspaceWs.sendAbandonGate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // REQ-PCG-01（plan-compile-gate-visibility）：work_item_plan 停在 batch_confirm 时，
+  // Cockpit 的确认必须走 HTTP confirm 端点——SC AuthorConfirm 阶段矩阵不放行 WS
+  // confirm 帧；同时不得误发任何 WS 三命令或 recovery 帧。
+  describe("REQ-PCG-01 plan batch confirm wiring", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    function batchConfirmSession() {
+      useWorkspaceStore.setState({
+        sessionId: "session_001",
+        stage: "author_confirm",
+        workspaceType: "work_item_plan",
+        flowKind: "single_candidate",
+        sessionStatus: "waiting_for_human",
+        singleCandidatePhase: null,
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+        providers: { author: "pi", reviewer: null },
+        artifact: null,
+        chatEntries: [],
+        timelineNodes: [
+          timelineNode({
+            node_id: "node_batch",
+            node_type: "work_item_batch_confirm",
+            stage: "author_confirm",
+            status: "active",
+            title: "Work Item Batch 确认",
+          }),
+        ],
+      });
+      useWorkspaceStore.getState().rebuildChatEntries();
+    }
+
+    it("confirms the whole batch over the HTTP endpoint and never the WS confirm frame", async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            workspace_session_id: "session_001",
+            issue_id: "issue_0001",
+            status: "confirmed",
+          }),
+      } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      batchConfirmSession();
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+
+      const inbox = screen.getByTestId("cockpit-inbox");
+      expect(within(inbox).getByText("确认整组 Work Item Draft")).toBeVisible();
+
+      await user.click(within(inbox).getByRole("button", { name: "确认整组" }));
+
+      await waitFor(() => {
+        const confirmCalls = fetchMock.mock.calls.filter(
+          (call) => call[0] === "/api/workspace-sessions/session_001/confirm",
+        );
+        expect(confirmCalls).toHaveLength(1);
+        expect(confirmCalls[0]?.[1]).toMatchObject({
+          method: "POST",
+          body: JSON.stringify({ confirmed_by: "user" }),
+        });
+      });
+
+      expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+      expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+      expect(workspaceWs.sendHumanGateFeedback).not.toHaveBeenCalled();
+      expect(workspaceWs.sendAdvance).not.toHaveBeenCalled();
+      expect(workspaceWs.sendWorkItemPlanCompileRecoveryAction).not.toHaveBeenCalled();
     });
   });
 });

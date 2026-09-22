@@ -4,7 +4,9 @@ import {
   ClipboardCopy,
   ClipboardList,
   CircleAlert,
+  Play,
   RotateCcw,
+  UserRound,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type Ref } from "react";
 import type { ArtifactVersionSummary } from "../../../state/workspace-ws-store-types";
@@ -334,6 +336,28 @@ function GateInboxActions({
     item.gate !== null && item.gate.terminate_block_reason !== undefined
       ? item.gate.terminate_block_reason
       : actionBlockReason;
+  // REQ-PCG-01/02：批次确认与 compile recovery 是 durable node 门（无 typed
+  // turn/snapshot），动作面独立于既有 typed/legacy 分流——阻断时只呈现原因，
+  // 写动作一律不露出（F-30 终态守卫）。
+  const nodeGateKind =
+    item.gate?.kind === "batch_confirm" || item.gate?.kind === "compile_recovery"
+      ? item.gate.kind
+      : null;
+  if (nodeGateKind !== null) {
+    if (actionBlockReason !== null) {
+      return (
+        <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
+          {gateActionBlockCopy(actionBlockReason)}
+        </p>
+      );
+    }
+    return nodeGateKind === "batch_confirm" ? (
+      <BatchConfirmActions actions={actions} />
+    ) : (
+      <CompileRecoveryActions actions={actions} />
+    );
+  }
+
   if (actionBlockReason && terminateBlockReason) {
     return (
       <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
@@ -427,6 +451,89 @@ function GateInboxActions({
   );
 }
 
+/**
+ * REQ-PCG-01：整组 Work Item Draft 确认门动作面——[确认整组]（HTTP confirm 通路，
+ * 门面 confirmBatch）+ [终止]（既有 WS abandon 二次确认）。确认语义是整组 Draft，
+ * 不重新暴露 legacy 逐段决策，也不提供批量勾选（批量 runner 只发 WS confirm 帧）。
+ */
+function BatchConfirmActions({ actions }: { actions: CockpitActionFacade }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      <button
+        type="button"
+        onClick={() => {
+          void actions.confirmBatch();
+        }}
+        className="btn-primary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+      >
+        <Check className="h-3.5 w-3.5" aria-hidden="true" />
+        确认整组
+      </button>
+      <ConfirmTwiceButton
+        label="终止"
+        confirmLabel="确认终止"
+        onConfirm={actions.terminate}
+      />
+    </div>
+  );
+}
+
+/**
+ * REQ-PCG-02：Final Compile recovery 动作面——既有 `WorkItemPlanCompileRecoveryAction`
+ * 三动作原样派发（不映射为 confirm/feedback/abandon）；`human_triage` 可携带原因
+ * （wire 可选 reason，能力对齐 legacy WorkItemPlanStagedPanel 的动作集合）。
+ */
+function CompileRecoveryActions({ actions }: { actions: CockpitActionFacade }) {
+  const [triageReason, setTriageReason] = useState("");
+  const buttonClass =
+    "btn-secondary inline-flex min-h-11 items-center gap-1 px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]";
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            void actions.recoverCompile("continue");
+          }}
+          className={buttonClass}
+        >
+          <Play className="h-3.5 w-3.5" aria-hidden="true" />
+          继续
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void actions.recoverCompile("abort_and_rollback");
+          }}
+          className={buttonClass}
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+          放弃并回滚
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void actions.recoverCompile("human_triage", triageReason.trim() || undefined);
+          }}
+          className={buttonClass}
+        >
+          <UserRound className="h-3.5 w-3.5" aria-hidden="true" />
+          转人工
+        </button>
+      </div>
+      <label className="flex min-h-11 items-center gap-2 text-xs font-medium text-[var(--aria-ink)]">
+        转人工原因（可选）
+        <input
+          type="text"
+          value={triageReason}
+          onChange={(event) => setTriageReason(event.target.value)}
+          className="min-h-9 flex-1 rounded-md border border-[var(--aria-line-strong)] px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        />
+      </label>
+    </div>
+  );
+}
+
 function gateSummary(
   versions: readonly ArtifactVersionSummary[],
   reviewSummary: string | null,
@@ -477,7 +584,10 @@ function isSelectableGate(item: CockpitInboxItem): boolean {
   const sessionId = cockpitInboxItemSessionId(item.id);
   // F-20：author_confirm 门（story/design AuthorConfirm）的 confirm 通路是 HTTP
   // 端点，而批量 runner 只发 WS confirm 帧（该阶段被矩阵拒收）——不提供批量勾选。
+  // REQ-PCG-01/02：整组确认（HTTP）与 compile recovery（WS recovery 动作）都不是
+  // WS confirm 门——只有 kind="human_gate" 提供勾选，未知 kind 一并 fail-closed。
   return item.kind === "gate" &&
+    item.gate?.kind === "human_gate" &&
     item.gate?.stage !== "author_confirm" &&
     item.gate?.closed === null &&
     item.gate.action_block_reason === null &&

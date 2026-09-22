@@ -5,7 +5,8 @@ import {
   createCockpitActionFacade,
   type ProtocolErrorDisposition,
 } from "./cockpit-action-routing";
-import type { WorkspaceWsState } from "./workspace-ws-store-types";
+import { selectCockpitInbox } from "./workspace-cockpit-projection";
+import type { TimelineNode, WorkspaceWsState } from "./workspace-ws-store-types";
 import { useWorkspaceStore } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 
@@ -104,6 +105,8 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     });
 
     actions.feedback("请补齐边界");
@@ -130,6 +133,8 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     });
     actions.feedback("请补齐边界");
 
@@ -149,6 +154,8 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback,
       sendAdvance: vi.fn(() => true),
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     });
     actions.feedback("请补齐边界");
 
@@ -175,6 +182,8 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance: vi.fn(() => true),
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     });
 
     expect(facade.confirm()).toBe(true);
@@ -203,6 +212,8 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance: vi.fn(() => true),
       adoptReview,
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     });
 
     facade.adoptReview();
@@ -230,6 +241,8 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance,
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     }).advance();
 
     expect(sendAdvance).toHaveBeenCalledTimes(1);
@@ -255,6 +268,8 @@ describe("cockpit gate action facade", () => {
         sendHumanGateFeedback: vi.fn(() => true),
         sendAdvance,
         adoptReview: vi.fn(),
+        sendBatchConfirm: vi.fn(async () => undefined),
+        sendCompileRecovery: vi.fn(),
       }).advance(),
     ).toBe(true);
 
@@ -275,6 +290,8 @@ describe("cockpit gate action facade", () => {
       sendAbandonGate,
       sendAdvance,
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     });
     useWorkspaceStore.setState({
       stage: "running",
@@ -325,6 +342,8 @@ describe("cockpit gate action facade", () => {
           sendHumanGateFeedback: vi.fn(() => true),
           sendAdvance,
           adoptReview: vi.fn(),
+          sendBatchConfirm: vi.fn(async () => undefined),
+          sendCompileRecovery: vi.fn(),
         }).advance(),
       ).toBe(false);
 
@@ -362,6 +381,8 @@ describe("cockpit gate action facade", () => {
         sendHumanGateFeedback,
         sendAdvance: vi.fn(() => true),
         adoptReview: vi.fn(),
+        sendBatchConfirm: vi.fn(async () => undefined),
+        sendCompileRecovery: vi.fn(),
       });
 
       expect(actions.confirm()).toBe(false);
@@ -397,8 +418,228 @@ describe("cockpit gate action facade", () => {
       sendHumanGateFeedback: vi.fn(() => true),
       sendAdvance: vi.fn(() => true),
       adoptReview: vi.fn(),
+      sendBatchConfirm: vi.fn(async () => undefined),
+      sendCompileRecovery: vi.fn(),
     }).terminate();
 
     expect(sendAbandonGate).toHaveBeenCalledWith("cmd_live");
+  });
+});
+
+// REQ-PCG-01/02（plan-compile-gate-visibility）：批次确认与 compile recovery 是两条
+// 独立操作——它们不得被转换成 Confirm / HumanGateFeedback / AbandonHumanGate 三命令
+// （REQ-RET-02/REQ-CG-02），发送前查新 kind 的阻断判据（F-30 终态守卫不放宽）。
+describe("cockpit batch confirm & compile recovery facade", () => {
+  installWorkspaceStoreTestHooks();
+
+  function activeGateNode(
+    nodeId: string,
+    nodeType: "work_item_batch_confirm" | "work_item_plan_compile_recovery",
+    stage: string,
+  ): TimelineNode {
+    return {
+      node_id: nodeId,
+      node_type: nodeType,
+      agent: null,
+      stage,
+      round: null,
+      status: "active",
+      title: nodeType,
+      summary: "node summary",
+      started_at: "2026-09-22T00:00:00Z",
+      completed_at: null,
+      duration_ms: null,
+      artifact_ref: null,
+      provider_config_snapshot: { author: "claude_code", reviewer: null, review_rounds: 1 },
+      retry: null,
+    };
+  }
+
+  function batchGateSession(overrides: Partial<WorkspaceWsState> = {}) {
+    useWorkspaceStore.setState({
+      sessionId: "session_batch",
+      stage: "author_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [activeGateNode("node_batch", "work_item_batch_confirm", "author_confirm")],
+      ...overrides,
+    });
+  }
+
+  function recoveryGateSession(overrides: Partial<WorkspaceWsState> = {}) {
+    useWorkspaceStore.setState({
+      sessionId: "session_recovery",
+      stage: "human_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [
+        activeGateNode(
+          "node_recovery",
+          "work_item_plan_compile_recovery",
+          "human_confirm",
+        ),
+      ],
+      ...overrides,
+    });
+  }
+
+  function facadeChannelSpies() {
+    const sendConfirm = vi.fn(() => true);
+    const sendAbandonGate = vi.fn((_commandId: string) => true);
+    const sendHumanGateFeedback = vi.fn((_feedback: string, _commandId?: string) => true);
+    const sendAdvance = vi.fn((_commandId?: string) => true);
+    const sendBatchConfirm = vi.fn(async () => undefined);
+    const sendCompileRecovery = vi.fn();
+    const actions = createCockpitActionFacade({
+      flowKind: "single_candidate",
+      commandId: null,
+      getState: useWorkspaceStore.getState,
+      sendConfirm,
+      sendAbandonGate,
+      sendHumanGateFeedback,
+      sendAdvance,
+      adoptReview: vi.fn(),
+      sendBatchConfirm,
+      sendCompileRecovery,
+    });
+    return {
+      actions,
+      sendConfirm,
+      sendAbandonGate,
+      sendHumanGateFeedback,
+      sendAdvance,
+      sendBatchConfirm,
+      sendCompileRecovery,
+    };
+  }
+
+  it("routes confirmBatch to the HTTP channel only, never the three-command channels", async () => {
+    batchGateSession();
+    const spies = facadeChannelSpies();
+
+    await spies.actions.confirmBatch();
+
+    expect(spies.sendBatchConfirm).toHaveBeenCalledTimes(1);
+    expect(spies.sendConfirm).not.toHaveBeenCalled();
+    expect(spies.sendAbandonGate).not.toHaveBeenCalled();
+    expect(spies.sendHumanGateFeedback).not.toHaveBeenCalled();
+    expect(spies.sendAdvance).not.toHaveBeenCalled();
+  });
+
+  it("keeps confirmBatch fail-closed on every other gate kind", async () => {
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [],
+    });
+    const spies = facadeChannelSpies();
+
+    await spies.actions.confirmBatch();
+
+    expect(spies.sendBatchConfirm).not.toHaveBeenCalled();
+  });
+
+  it.each(["confirmed", "terminated"] as const)(
+    "blocks confirmBatch once the session is %s (F-30)",
+    async (sessionStatus) => {
+      batchGateSession({ sessionStatus });
+      const spies = facadeChannelSpies();
+
+      await spies.actions.confirmBatch();
+
+      expect(spies.sendBatchConfirm).not.toHaveBeenCalled();
+    },
+  );
+
+  it("submits the three existing recovery actions verbatim over the WS channel", async () => {
+    recoveryGateSession();
+    const spies = facadeChannelSpies();
+
+    await spies.actions.recoverCompile("continue");
+    await spies.actions.recoverCompile("abort_and_rollback");
+    await spies.actions.recoverCompile("human_triage", "需要人工判断");
+
+    expect(spies.sendCompileRecovery.mock.calls).toEqual([
+      ["continue", undefined],
+      ["abort_and_rollback", undefined],
+      ["human_triage", "需要人工判断"],
+    ]);
+    expect(spies.sendConfirm).not.toHaveBeenCalled();
+    expect(spies.sendAbandonGate).not.toHaveBeenCalled();
+    expect(spies.sendHumanGateFeedback).not.toHaveBeenCalled();
+    expect(spies.sendAdvance).not.toHaveBeenCalled();
+  });
+
+  it("keeps recoverCompile off non-recovery gates and terminal sessions", async () => {
+    const spies = facadeChannelSpies();
+
+    // 普通 human gate：stage human_confirm 但没有 recovery 节点。
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "approval",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [],
+    });
+    await spies.actions.recoverCompile("continue");
+    expect(spies.sendCompileRecovery).not.toHaveBeenCalled();
+
+    // recovery 节点残留但会话已终态（迟到动作零副作用）。
+    recoveryGateSession({ sessionStatus: "terminated" });
+    await spies.actions.recoverCompile("continue");
+    expect(spies.sendCompileRecovery).not.toHaveBeenCalled();
+
+    // recovery 节点 + 门已关闭。
+    recoveryGateSession({
+      humanGateClosure: { decision: "terminate", stage: "human_confirm" },
+    });
+    await spies.actions.recoverCompile("human_triage", "triage");
+    expect(spies.sendCompileRecovery).not.toHaveBeenCalled();
+  });
+
+  // REQ-PCG-02：协议拒绝必须保持可诊断——recovery 拒收码即使带上 turn_id 也不得被
+  // 误判成普通门的拒收（否则收件箱零可见反馈）。
+  it("keeps a rejected compile recovery action as a diagnosable hard error", () => {
+    expect(
+      classifyProtocolError(
+        "INVALID_COMPILE_RECOVERY_ACTION",
+        { turn_id: "turn-1" },
+        stateWithGate("turn-1"),
+      ),
+    ).toEqual({ kind: "hard_error" } satisfies ProtocolErrorDisposition);
+
+    useWorkspaceStore.setState({
+      protocolError: {
+        code: "INVALID_COMPILE_RECOVERY_ACTION",
+        message: "recovery action rejected",
+      },
+    });
+
+    expect(selectCockpitInbox(useWorkspaceStore.getState())).toContainEqual(
+      expect.objectContaining({
+        id: "hard_error:protocol:INVALID_COMPILE_RECOVERY_ACTION",
+        kind: "hard_error",
+        summary: "recovery action rejected",
+        protocolErrorCode: "INVALID_COMPILE_RECOVERY_ACTION",
+      }),
+    );
   });
 });
