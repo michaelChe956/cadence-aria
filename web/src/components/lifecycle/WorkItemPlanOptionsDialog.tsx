@@ -1,11 +1,29 @@
 import { useRef, useState, type FormEvent } from "react";
+import type { WorkspaceProviderName } from "../../api/types";
+import {
+  getProviderOptions,
+  providerOptionsForValue,
+  workspaceProviderName,
+  type ProviderOption,
+} from "../../state/provider-options";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 
 export type WorkItemPlanOptionsFormValue = {
   include_integration_tests: boolean;
   include_e2e_tests: boolean;
   force_frontend_backend_split: boolean;
   require_execution_plan_confirm: boolean;
+  /** REQ-PPS-01：创建请求携带的 author provider 快照；缺省表示沿用服务端兼容默认。 */
+  author_provider?: WorkspaceProviderName;
+  /** REQ-PPS-01：创建请求携带的 reviewer provider 快照；缺省表示沿用服务端兼容默认。 */
+  reviewer_provider?: WorkspaceProviderName;
 };
+
+type WorkItemPlanBooleanOptionKey =
+  | "include_integration_tests"
+  | "include_e2e_tests"
+  | "force_frontend_backend_split"
+  | "require_execution_plan_confirm";
 
 export function WorkItemPlanOptionsDialog({
   defaultOptions,
@@ -21,6 +39,10 @@ export function WorkItemPlanOptionsDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  const providerSnapshot = useProviderAvailabilityStore(
+    (state) => state.snapshot,
+  );
+  const providerOptions = getProviderOptions(providerSnapshot);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -43,11 +65,21 @@ export function WorkItemPlanOptionsDialog({
     }
   }
 
-  function updateOption(key: keyof WorkItemPlanOptionsFormValue) {
+  function updateOption(key: WorkItemPlanBooleanOptionKey) {
     setOptions((current) => ({
       ...current,
       [key]: !current[key],
     }));
+    setSubmitError(null);
+  }
+
+  // 空字符串是「沿用服务端默认」占位项：收窄失败即落 undefined，请求体不落键。
+  function updateProvider(
+    key: "author_provider" | "reviewer_provider",
+    value: string,
+  ) {
+    const provider = workspaceProviderName(value) ?? undefined;
+    setOptions((current) => ({ ...current, [key]: provider }));
     setSubmitError(null);
   }
 
@@ -99,6 +131,22 @@ export function WorkItemPlanOptionsDialog({
             disabled={submitting}
             onChange={() => updateOption("require_execution_plan_confirm")}
           />
+          {/* REQ-PPS-01：创建即快照 provider，不再依赖创建后页面补发选择；
+              不可用项置灰禁选，缺省项沿用服务端兼容默认。 */}
+          <ProviderSelect
+            label="Author Provider"
+            value={options.author_provider}
+            options={providerOptions}
+            disabled={submitting}
+            onChange={(value) => updateProvider("author_provider", value)}
+          />
+          <ProviderSelect
+            label="Reviewer Provider"
+            value={options.reviewer_provider}
+            options={providerOptions}
+            disabled={submitting}
+            onChange={(value) => updateProvider("reviewer_provider", value)}
+          />
         </div>
 
         {submitError ? (
@@ -129,6 +177,44 @@ export function WorkItemPlanOptionsDialog({
         </div>
       </form>
     </div>
+  );
+}
+
+function ProviderSelect({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: WorkspaceProviderName | undefined;
+  options: ProviderOption[];
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="flex items-center gap-3 rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
+      <span className="w-32 shrink-0 text-[var(--aria-ink-muted)]">{label}</span>
+      <select
+        aria-label={label}
+        value={value ?? ""}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="min-w-0 flex-1 rounded-md border border-[var(--aria-line)] bg-white px-2 py-1.5 text-sm text-[var(--aria-ink)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+      >
+        <option value="">（沿用服务端默认）</option>
+        {providerOptionsForValue(options, value).map((option) => (
+          <option
+            key={option.value}
+            value={option.value}
+            disabled={option.disabled}
+          >
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

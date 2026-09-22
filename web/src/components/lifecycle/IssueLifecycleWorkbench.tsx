@@ -77,6 +77,7 @@ import {
   WorkItemPlanOptionsDialog,
   type WorkItemPlanOptionsFormValue,
 } from "./WorkItemPlanOptionsDialog";
+import { readWorkspaceProviderDefaultsSnapshot } from "../../state/workspace-provider-defaults";
 import { IssueQueue } from "./IssueQueue";
 import {
   defaultCollapsedGroups,
@@ -114,6 +115,8 @@ export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 type PendingWorkItemPlanLaunch = {
   card: LifecycleCardData;
+  /** REQ-PPS-01：开启弹窗即快照表单初值（含用户默认 provider），弹窗期间不被并发写入改动。 */
+  options: WorkItemPlanOptionsFormValue;
 };
 const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   include_integration_tests: true,
@@ -717,6 +720,7 @@ export function IssueLifecycleWorkbench({
         {
           title: defaultLaunchTitle({ target: "design", card }),
           story_spec_ids: [card.id],
+          ...readWorkspaceProviderDefaultsSnapshot(),
         },
       );
       const nextId = response.design_specs[0]?.design_spec_id;
@@ -731,7 +735,13 @@ export function IssueLifecycleWorkbench({
 
     if (card.kind === "design_spec") {
       setError(null);
-      setPendingWorkItemPlanLaunch({ card });
+      setPendingWorkItemPlanLaunch({
+        card,
+        options: {
+          ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
+          ...readWorkspaceProviderDefaultsSnapshot(),
+        },
+      });
       return;
     }
 
@@ -935,6 +945,7 @@ export function IssueLifecycleWorkbench({
         card.issueId,
         {
           title: defaultLaunchTitle({ target, card }),
+          ...readWorkspaceProviderDefaultsSnapshot(),
         },
       );
       const storySpecId = response.story_specs[0]?.story_spec_id;
@@ -957,6 +968,7 @@ export function IssueLifecycleWorkbench({
         {
           title: defaultLaunchTitle({ target, card }),
           story_spec_ids: [card.id],
+          ...readWorkspaceProviderDefaultsSnapshot(),
         },
       );
       const designSpecId = response.design_specs[0]?.design_spec_id;
@@ -974,7 +986,13 @@ export function IssueLifecycleWorkbench({
 
     if (target === "work_item" && card.kind === "design_spec") {
       setError(null);
-      setPendingWorkItemPlanLaunch({ card });
+      setPendingWorkItemPlanLaunch({
+        card,
+        options: {
+          ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
+          ...readWorkspaceProviderDefaultsSnapshot(),
+        },
+      });
       return;
     }
 
@@ -1068,7 +1086,7 @@ export function IssueLifecycleWorkbench({
       ) : null}
       {pendingWorkItemPlanLaunch ? (
         <WorkItemPlanOptionsDialog
-          defaultOptions={DEFAULT_WORK_ITEM_PLAN_OPTIONS}
+          defaultOptions={pendingWorkItemPlanLaunch.options}
           onConfirm={handleConfirmWorkItemPlanOptions}
           onClose={() => setPendingWorkItemPlanLaunch(null)}
         />

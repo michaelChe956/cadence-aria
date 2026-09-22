@@ -117,3 +117,24 @@ export function getProviderOption(
 ): ProviderOption {
   return getProviderOptions(snapshot).find((option) => option.value === provider)!;
 }
+
+/**
+ * 把外部裸字符串（localStorage 默认值、表单选择等）收窄为合法 provider 名；未知值返回
+ * null。基于 PROVIDER_ORDER 收窄，与可用性选项目录同源，不会各自漂移。
+ */
+export function workspaceProviderName(
+  value: string | null | undefined,
+): WorkspaceProviderName | null {
+  return PROVIDER_ORDER.find((name) => name === value) ?? null;
+}
+
+/**
+ * select 应渲染的选项：可见项 + 当前值本身（不可见的当前值也要保留，否则 select 会
+ * 回落到第一个选项，把「不可用/测试模式」的真实选择显示成另一个 provider）。
+ */
+export function providerOptionsForValue(
+  options: ProviderOption[],
+  current: WorkspaceProviderName | null | undefined,
+): ProviderOption[] {
+  return options.filter((option) => option.visible || option.value === current);
+}

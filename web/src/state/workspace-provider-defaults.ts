@@ -1,3 +1,6 @@
+import type { WorkspaceProviderName } from "../api/types";
+import { workspaceProviderName } from "./provider-options";
+
 export const WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY = "aria.workspace.provider-defaults";
 
 export interface WorkspaceProviderDefaults {
@@ -39,4 +42,21 @@ export function writeWorkspaceProviderDefaults(defaults: WorkspaceProviderDefaul
   } catch {
     // localStorage 不可用时静默降级，不影响当前会话内的 Provider 选择。
   }
+}
+
+/**
+ * 创建请求的 provider 快照字段（REQ-PPS-01）：把用户默认里的裸字符串收窄为合法 provider
+ * 名。非法名或缺失时不落键——由服务端兼容默认兜底，客户端不静默改写用户已选 provider。
+ */
+export function readWorkspaceProviderDefaultsSnapshot(): {
+  author_provider?: WorkspaceProviderName;
+  reviewer_provider?: WorkspaceProviderName;
+} {
+  const defaults = readWorkspaceProviderDefaults();
+  const author = workspaceProviderName(defaults?.author);
+  const reviewer = workspaceProviderName(defaults?.reviewer);
+  return {
+    ...(author ? { author_provider: author } : {}),
+    ...(reviewer ? { reviewer_provider: reviewer } : {}),
+  };
 }

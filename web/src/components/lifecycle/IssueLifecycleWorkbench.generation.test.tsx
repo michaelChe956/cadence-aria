@@ -1,6 +1,9 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ProviderHealthResponse, RealProviderName } from "../../api/types";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY } from "../../state/workspace-provider-defaults";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   defaultLaunchTitle,
@@ -14,6 +17,7 @@ import {
   lifecycleFetch,
   projectRecord,
   repositoryRecord,
+  type LifecycleFetchMock,
 } from "./IssueLifecycleWorkbench.test-utils";
 
 vi.mock("../shared/MonacoViewer", () => ({
@@ -361,5 +365,260 @@ describe("IssueLifecycleWorkbench generation actions", () => {
         String(url).includes("/work-item-plans:prepare"),
       ),
     ).toBe(false);
+  });
+});
+
+const PROVIDER_LABELS: Record<RealProviderName, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  pi: "Pi",
+  kimi_code: "Kimi Code",
+};
+
+/** 可用性快照 fixture：只声明关心的 provider，其余按不可用构造（镜像 /api/providers/status）。 */
+function setProviderAvailability(
+  available: Partial<Record<RealProviderName, boolean>>,
+) {
+  useProviderAvailabilityStore.setState({
+    loadStatus: "loaded",
+    snapshot: {
+      schema_version: 1,
+      generation: 1,
+      checked_at: "2026-09-22T00:00:00Z",
+      state_status: "ready",
+      state_error: null,
+      real_workflow_blocked: false,
+      test_provider_enabled: false,
+      providers: (Object.keys(PROVIDER_LABELS) as RealProviderName[]).map(
+        (provider) => {
+          const isAvailable = available[provider] === true;
+          return {
+            provider,
+            display_name: PROVIDER_LABELS[provider],
+            available: isAvailable,
+            version: isAvailable ? "1.0.0" : null,
+            reason_code: isAvailable ? null : "command_missing",
+            reason: isAvailable ? null : `${PROVIDER_LABELS[provider]} 未安装`,
+            checked_at: "2026-09-22T00:00:00Z",
+            install_hint: isAvailable
+              ? ""
+              : `请先安装 ${PROVIDER_LABELS[provider]}`,
+          };
+        },
+      ),
+    } satisfies ProviderHealthResponse,
+  });
+}
+
+// REQ-PPS-01：创建请求携带 provider 快照——plan 弹窗内选择、story/design 自动补默认。
+describe("IssueLifecycleWorkbench plan provider snapshots", () => {
+  installIssueLifecycleWorkbenchTestHooks();
+
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    useProviderAvailabilityStore.getState().reset();
+  });
+
+  function writeProviderDefaults(author: string, reviewer: string) {
+    window.localStorage.setItem(
+      WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY,
+      JSON.stringify({ author, reviewer, reviewerEnabled: true }),
+    );
+  }
+
+  async function openPlanDialog(user: UserEvent) {
+    await user.click(await screen.findByTestId("stage-tab-design"));
+    await user.click(screen.getByText("前端提示设计"));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    return await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+  }
+
+  function requestBody(
+    fetchMock: LifecycleFetchMock,
+    path: string,
+  ): Record<string, unknown> {
+    const call = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes(path),
+    );
+    expect(call).toBeDefined();
+    return JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>;
+  }
+
+  it("prefills the plan provider selects from stored defaults and locks unavailable providers", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", lifecycleFetch());
+    writeProviderDefaults("codex", "claude_code");
+    setProviderAvailability({ codex: true, claude_code: false, pi: true });
+
+    render(<IssueLifecycleWorkbench />);
+
+    const dialog = await openPlanDialog(user);
+    const authorSelect = within(dialog).getByLabelText("Author Provider");
+    const reviewerSelect = within(dialog).getByLabelText("Reviewer Provider");
+
+    expect(authorSelect).toHaveValue("codex");
+    expect(reviewerSelect).toHaveValue("claude_code");
+    expect(
+      within(authorSelect).getByRole("option", { name: "Claude Code" }),
+    ).toBeDisabled();
+    expect(
+      within(reviewerSelect).getByRole("option", { name: "Codex" }),
+    ).toBeEnabled();
+  });
+
+  it("sends the plan creation request with the providers chosen in the dialog", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const onOpenWorkspace = vi.fn();
+    writeProviderDefaults("codex", "codex");
+    setProviderAvailability({ codex: true, pi: true });
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    const dialog = await openPlanDialog(user);
+    await user.selectOptions(
+      within(dialog).getByLabelText("Author Provider"),
+      "pi",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
+
+    await waitFor(() =>
+      expect(onOpenWorkspace).toHaveBeenCalledWith(
+        "workspace_session_plan_group_0001",
+      ),
+    );
+    expect(requestBody(fetchMock, "/work-item-plans:prepare")).toMatchObject({
+      author_provider: "pi",
+      reviewer_provider: "codex",
+    });
+  });
+
+  it("omits provider fields when no user default is stored", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    setProviderAvailability({ codex: true });
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+
+    const dialog = await openPlanDialog(user);
+    expect(within(dialog).getByLabelText("Author Provider")).toHaveValue("");
+    expect(within(dialog).getByLabelText("Reviewer Provider")).toHaveValue("");
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/work-item-plans:prepare"),
+        ),
+      ).toBe(true),
+    );
+    const body = requestBody(fetchMock, "/work-item-plans:prepare");
+    expect(body).not.toHaveProperty("author_provider");
+    expect(body).not.toHaveProperty("reviewer_provider");
+  });
+
+  it("keeps the plan dialog open and shows the provider_unavailable message inline", async () => {
+    const user = userEvent.setup();
+    const lifecycleFetchMock = lifecycleFetch();
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (String(input).includes("/work-item-plans:prepare")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                code: "provider_unavailable",
+                message: "Provider Codex 当前不可用，请重新选择",
+              }),
+              { status: 400, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return lifecycleFetchMock(input, init);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onOpenWorkspace = vi.fn();
+    writeProviderDefaults("codex", "codex");
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    const dialog = await openPlanDialog(user);
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Provider Codex 当前不可用，请重新选择",
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Work Item Plan 配置" }),
+    ).toBeInTheDocument();
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("sends the stored provider defaults with the story generation request", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch({ emptyLifecycle: true });
+    vi.stubGlobal("fetch", fetchMock);
+    writeProviderDefaults("pi", "kimi_code");
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+
+    await screen.findByRole("button", { name: "选择 Issue 登录会话过期" });
+    await user.click(
+      within(screen.getByRole("region", { name: "Issue 卡片列表" })).getByRole(
+        "button",
+        { name: "生成 Story Spec 登录会话过期" },
+      ),
+    );
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/story-specs:generate"),
+        ),
+      ).toBe(true),
+    );
+    expect(requestBody(fetchMock, "/story-specs:generate")).toMatchObject({
+      author_provider: "pi",
+      reviewer_provider: "kimi_code",
+    });
+  });
+
+  it("sends the stored provider defaults with the design generation request", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    writeProviderDefaults("pi", "kimi_code");
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
+    await user.click(screen.getByRole("button", { name: "生成 Design Spec" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/design-specs:generate"),
+        ),
+      ).toBe(true),
+    );
+    expect(requestBody(fetchMock, "/design-specs:generate")).toMatchObject({
+      author_provider: "pi",
+      reviewer_provider: "kimi_code",
+    });
   });
 });

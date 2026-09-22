@@ -2,8 +2,42 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY,
   readWorkspaceProviderDefaults,
+  readWorkspaceProviderDefaultsSnapshot,
   writeWorkspaceProviderDefaults,
 } from "./workspace-provider-defaults";
+
+describe("workspace provider defaults creation snapshot (REQ-PPS-01)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("narrows stored defaults into creation request provider fields", () => {
+    writeWorkspaceProviderDefaults({
+      author: "pi",
+      reviewer: "kimi_code",
+      reviewerEnabled: true,
+    });
+
+    expect(readWorkspaceProviderDefaultsSnapshot()).toEqual({
+      author_provider: "pi",
+      reviewer_provider: "kimi_code",
+    });
+  });
+
+  it("drops unknown provider names and stays empty without stored defaults", () => {
+    expect(readWorkspaceProviderDefaultsSnapshot()).toEqual({});
+
+    writeWorkspaceProviderDefaults({
+      author: "gpt-9",
+      reviewer: "codex",
+      reviewerEnabled: false,
+    });
+
+    expect(readWorkspaceProviderDefaultsSnapshot()).toEqual({
+      reviewer_provider: "codex",
+    });
+  });
+});
 
 describe("workspace provider defaults", () => {
   beforeEach(() => {
