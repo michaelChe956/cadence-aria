@@ -10,15 +10,16 @@
 
 | 角色 | 指派 | 通道降级链（2026-09-22 用户调整） | 全挂处置 |
 |---|---|---|---|
-| **实施（worker）** | **ter-task（优先）** | ✅ dihua-openai/gpt-5.6-terra（2026-09-22 用户指令恢复并优先；探针 4m18s 通过） | 通知用户 |
+| **实施（worker）** | **ds-task（优先）** | ✅ tydic-openai/deepseek-flash（2026-09-22 用户开放并优先） | 通知用户 |
 | **实施（worker 备）** | glm53-task | ✅ my-anthropic/glm-5.3 → tydic-openai/deepseek-flash | 通知用户 |
-| 审核（reviewer） | k3-reviewer | ✅ 可多实例扩容；my-anthropic/kimi-for-coding → my-openai/gpt-5.6-sol | 通知用户 |
+| ter-task | 🟡 **暂缓（用户裁定太慢）** | 不派工（等用户通知恢复） | 等用户通知解除 |
+| 审核（reviewer） | k3-reviewer | ✅ 可多实例扩容；dihua-openai/gpt-5.6-sol → my-anthropic/kimi-for-coding | 通知用户 |
 | 勘察（scout） | glm5.3-f-scout | ✅ my-anthropic/glm-5.3-flash → bingqi/glm-5.3-flash | 通知用户 |
-| 裁决 | oracle | ✅ 保持不变（my-anthropic/k3 主链） | 分歧挂起等用户 |
-| ds-task | 🔴 **用户暂停** | 不派工（配置已加 SUSPENDED 标注） | 等用户通知解除 |
+| 裁决 | oracle | ✅ dihua-openai/gpt-6-astra → my-anthropic/k3 → my-anthropic/glm-5.3 | 分歧挂起等用户 |
+| 快速机械 | max-task | ✅ dihua-openai/gpt-6-astra | 通知用户 |
 
-- **实施链（2026-09-22 用户调整）**：**ter-task 优先**（dihua-openai/gpt-5.6-terra，用户指令「能用则优先使用」）；glm53-task 为备选 worker（my-anthropic/glm-5.3 优先→tydic-openai/deepseek-flash 自动降级）；k3-reviewer 降级位=my-openai/gpt-5.6-sol；ds-task 仍暂停；链全挂→通知用户，不自主启用规则外模型（max-task/通用 task 等）。
-- **分层派工（2026-09-22 用户核准 controller 建议）**：**大/多步实施派 ter-task**（能力优先，接受其响应较慢——探针 4m18s vs glm53-task 2.6s）；**机械小改/小任务派 glm53-task**（快）；同一批次内两条链可用时按此分流。
+- **实施链（2026-09-22 用户再调）**：**ds-task 优先**（tydic-openai/deepseek-flash，用户开放）；glm53-task 为备选（my-anthropic/glm-5.3→tydic-openai/deepseek-flash）；**ter-task 暂缓**（用户裁定响应太慢，等通知恢复）；k3-reviewer 首位=**dihua-openai/gpt-5.6-sol**→my-anthropic/kimi-for-coding 降级；oracle 首位=**dihua-openai/gpt-6-astra**→my-anthropic/k3→my-anthropic/glm-5.3；max-task=**dihua-openai/gpt-6-astra**。
+- **分层派工（2026-09-22 用户再调）**：**大/多步实施派 ds-task**（能力优先）；**机械小改/小任务派 glm53-task 或 max-task**（快/max thinking minimal 适合极简机械）。
 - **模型切换先例**：改 `~/.omp/agent/agents/<name>.md` 的 `model:` 列表（首位优先、降级通道留尾）——2026-09-21 按用户指令调整 glm53-task/k3-reviewer 两文件降级位（此前 2026-09-19 调整三文件+ter/ds 加 SUSPENDED）。
 - **通道探针**：派工前秒投一行探针（各角色一行回复即证健康）；通道挂的表现=404 model_not_found / 401 key disabled / 挂起无响应。
 
@@ -109,3 +110,4 @@
 | 2026-09-19 | **用户指令调整通道链**：worker 链 my-anthropic/glm-5.3→bingqi；k3 降级 ds-flash；scout 改 my-anthropic flash 优先；ter/ds 暂停等通知 | 用户配置指令 |
 | 2026-09-21 | **用户指令再调降级链**：worker 降级位 bingqi/glm-5.3→**tydic-openai/deepseek-flash**；k3 降级位 tydic-openai/deepseek-flash→**my-openai/gpt-5.6-sol**（初版 my-openai/deepseek-flash / dihua-openai/gpt-5.6-sol 实测不可用，用户当场纠正） | 用户配置指令 |
 | 2026-09-22 | **ter-task 恢复并设为优先 worker**（dihua-openai/gpt-5.6-terra；探针 4m18s 通过）；glm53-task 降为备选；ds-task 仍暂停 | 用户指令「尝试一下 ter-task 能不能用?能用的话优先使用」 |
+| 2026-09-22 | **四项再调**：①ds-task 开放并设为优先 worker（tydic-openai/deepseek-flash）；②ter-task 暂缓（用户裁定太慢）；③oracle 首位改 dihua-openai/gpt-6-astra→my-anthropic/k3 降级；④k3-reviewer 首位改 dihua-openai/gpt-5.6-sol→my-anthropic/kimi-for-coding 降级；⑤max-task 模型改 dihua-openai/gpt-6-astra | 用户配置指令 |
