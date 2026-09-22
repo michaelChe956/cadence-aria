@@ -6,6 +6,8 @@ description: 本项目规则索引——被派工时按活动类型定位项目�
 
 > 面向所有被派工的 subagent。通用协作纪律见 `rule://subagent-protocol`，
 > 规则与工具的发现方式见 `rule://subagent-grounding`。
+> 这两条由 `cadence-subagents-config` 分发（安装见 `subagent-usage.md` §0）；
+> 若解析失败说明未安装，**按本文件继续执行**并在报告中记一句，不要因此停工。
 > 本文件只做**索引**：指向本项目专属约束的所在，正文不在此重复。
 
 ## 一、按活动定位
