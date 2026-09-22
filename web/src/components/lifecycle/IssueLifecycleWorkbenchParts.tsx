@@ -225,7 +225,7 @@ export function IssueLifecycleDetail({
         </div>
       </div>
       {/* Task 6：单阶段面板——同一时刻只渲染当前阶段区域，内容占满工作区宽度。 */}
-      <div id={`stage-panel-${activeStage}`} className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div id={`stage-panel-${activeStage}`} className="flex min-h-0 flex-1 flex-col p-3">
         {activeStage === "story" ? (
           <LifecycleContentSection
             title="Story Spec"
@@ -369,7 +369,7 @@ function WorkItemRepositoryGroupSection({
     <section
       role="region"
       aria-label="Work Item 内容"
-      className="min-h-72 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+      className="flex min-h-72 flex-1 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
     >
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
@@ -384,7 +384,7 @@ function WorkItemRepositoryGroupSection({
           暂无内容
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
           {groups.map((group) => {
             const groupKey =
               group.target_repository_id ?? "unassigned";
@@ -469,7 +469,7 @@ function LifecycleContentSection({
     <section
       role="region"
       aria-label={ariaLabel}
-      className="min-h-72 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+      className="flex min-h-72 flex-1 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
     >
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
@@ -494,7 +494,7 @@ function LifecycleContentSection({
           ) : null}
         </div>
       ) : (
-        <ul className="space-y-2">
+        <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto">
           {cards.map((card) => (
             <li key={lifecycleCardKey(card)}>
               <LifecycleCard
