@@ -426,6 +426,27 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
     return JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>;
   }
 
+  /** 把某个创建端点整体替换成 4xx 失败响应（provider 不可用等服务端 fail-closed）。 */
+  function failRequests(
+    baseFetch: LifecycleFetchMock,
+    pathFragment: string,
+    message: string,
+  ): LifecycleFetchMock {
+    return vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (String(input).includes(pathFragment)) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ code: "provider_unavailable", message }),
+              { status: 400, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return baseFetch(input, init);
+      },
+    ) as LifecycleFetchMock;
+  }
+
   it("prefills the plan provider selects from stored defaults and locks unavailable providers", async () => {
     const user = userEvent.setup();
     vi.stubGlobal("fetch", lifecycleFetch());
@@ -507,22 +528,10 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
 
   it("keeps the plan dialog open and shows the provider_unavailable message inline", async () => {
     const user = userEvent.setup();
-    const lifecycleFetchMock = lifecycleFetch();
-    const fetchMock = vi.fn(
-      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        if (String(input).includes("/work-item-plans:prepare")) {
-          return Promise.resolve(
-            new Response(
-              JSON.stringify({
-                code: "provider_unavailable",
-                message: "Provider Codex 当前不可用，请重新选择",
-              }),
-              { status: 400, headers: { "content-type": "application/json" } },
-            ),
-          );
-        }
-        return lifecycleFetchMock(input, init);
-      },
+    const fetchMock = failRequests(
+      lifecycleFetch(),
+      "/work-item-plans:prepare",
+      "Provider Codex 当前不可用，请重新选择",
     );
     vi.stubGlobal("fetch", fetchMock);
     const onOpenWorkspace = vi.fn();
@@ -542,6 +551,60 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
       screen.getByRole("dialog", { name: "Work Item Plan 配置" }),
     ).toBeInTheDocument();
     expect(onOpenWorkspace).not.toHaveBeenCalled();
+  });
+
+  // REQ-PPS-01 场景三：story/design 创建被服务端 fail-closed 拒绝时必须有可诊断反馈
+  // ——这两条入口没有弹窗承载错误，落工作台错误横幅（不再是无处可去的 rejection）。
+  it("surfaces a rejected story creation with the stored provider on the workbench banner", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      failRequests(
+        lifecycleFetch({ emptyLifecycle: true }),
+        "/story-specs:generate",
+        "Provider pi 当前不可用",
+      ),
+    );
+    const onOpenWorkspace = vi.fn();
+    writeProviderDefaults("pi", "kimi_code");
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await screen.findByRole("button", { name: "选择 Issue 登录会话过期" });
+    await user.click(
+      within(screen.getByRole("region", { name: "Issue 卡片列表" })).getByRole(
+        "button",
+        { name: "生成 Story Spec 登录会话过期" },
+      ),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Provider pi 当前不可用",
+    );
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a rejected next-design creation with the stored provider on the workbench banner", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      failRequests(
+        lifecycleFetch(),
+        "/design-specs:generate",
+        "Provider kimi_code 当前不可用",
+      ),
+    );
+    writeProviderDefaults("pi", "kimi_code");
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
+    await user.click(screen.getByRole("button", { name: "生成 Design Spec" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Provider kimi_code 当前不可用",
+    );
   });
 
   it("sends the stored provider defaults with the story generation request", async () => {

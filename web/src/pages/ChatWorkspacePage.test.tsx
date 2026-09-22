@@ -698,29 +698,36 @@ describe("ChatWorkspacePage dual track switch", () => {
 
   // REQ-PPS-02：用户默认 provider 由共享 hook 覆盖 legacy 页（此前只有 Cockpit 会补发），
   // 走既有 provider-select 通路，锁定态会话不被覆盖。
-  it("applies the stored provider defaults through the shared hook in the legacy page", async () => {
-    window.localStorage.setItem("aria.chat.cockpit", "legacy");
-    window.localStorage.setItem(
-      WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY,
-      JSON.stringify({
-        author: "pi",
-        reviewer: "kimi_code",
-        reviewerEnabled: true,
-      }),
-    );
-    setWorkspaceType("story");
+  describe("legacy provider defaults application", () => {
+    // 该用例写入用户默认键：无论成败都清掉，不给同文件后续用例留隐式默认。
+    afterEach(() => {
+      window.localStorage.removeItem(WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY);
+    });
 
-    renderWorkspace();
-    const workspaceWs = currentMockWorkspaceWs();
+    it("applies the stored provider defaults through the shared hook in the legacy page", async () => {
+      window.localStorage.setItem("aria.chat.cockpit", "legacy");
+      window.localStorage.setItem(
+        WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY,
+        JSON.stringify({
+          author: "pi",
+          reviewer: "kimi_code",
+          reviewerEnabled: true,
+        }),
+      );
+      setWorkspaceType("story");
 
-    await waitFor(() =>
-      expect(workspaceWs.selectProvider).toHaveBeenCalledWith("author", "pi"),
-    );
-    expect(workspaceWs.selectProvider).toHaveBeenCalledWith(
-      "reviewer",
-      "kimi_code",
-    );
-    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+      renderWorkspace();
+      const workspaceWs = currentMockWorkspaceWs();
+
+      await waitFor(() =>
+        expect(workspaceWs.selectProvider).toHaveBeenCalledWith("author", "pi"),
+      );
+      expect(workspaceWs.selectProvider).toHaveBeenCalledWith(
+        "reviewer",
+        "kimi_code",
+      );
+      expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+    });
   });
 
   it("renders a known session in the cockpit when cockpit is explicitly set", () => {

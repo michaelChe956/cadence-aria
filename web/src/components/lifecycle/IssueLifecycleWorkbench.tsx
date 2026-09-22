@@ -125,6 +125,14 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
 
+// REQ-PPS-01 场景三：创建被服务端 fail-closed 拒绝（provider 不可用等 4xx）时的兜底文案，
+// 服务端 message 存在时以它为准。
+const LAUNCH_FAILURE_MESSAGES: Record<ProviderWorkspaceLaunchTarget, string> = {
+  story: "生成 Story Spec 失败",
+  design: "生成 Design Spec 失败",
+  work_item: "生成 Work Item Plan 失败",
+};
+
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
 
@@ -713,39 +721,52 @@ export function IssueLifecycleWorkbench({
       return;
     }
 
-    if (card.kind === "story_spec") {
-      const response = await generateDesignSpecs(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target: "design", card }),
-          story_spec_ids: [card.id],
-          ...readWorkspaceProviderDefaultsSnapshot(),
-        },
-      );
-      const nextId = response.design_specs[0]?.design_spec_id;
-      await refresh(selectedProjectId);
-      if (nextId) {
-        const nextKey = lifecycleEntityKey("design_spec", card.issueId, nextId);
-        setSelectedCardKey(nextKey);
-        openDrawer(nextKey);
+    try {
+      if (card.kind === "story_spec") {
+        const response = await generateDesignSpecs(
+          selectedProjectId,
+          card.issueId,
+          {
+            title: defaultLaunchTitle({ target: "design", card }),
+            story_spec_ids: [card.id],
+            ...readWorkspaceProviderDefaultsSnapshot(),
+          },
+        );
+        const nextId = response.design_specs[0]?.design_spec_id;
+        await refresh(selectedProjectId);
+        if (nextId) {
+          const nextKey = lifecycleEntityKey("design_spec", card.issueId, nextId);
+          setSelectedCardKey(nextKey);
+          openDrawer(nextKey);
+        }
+        return;
       }
-      return;
-    }
 
-    if (card.kind === "design_spec") {
-      setError(null);
-      setPendingWorkItemPlanLaunch({
-        card,
-        options: {
-          ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
-          ...readWorkspaceProviderDefaultsSnapshot(),
-        },
-      });
-      return;
-    }
+      if (card.kind === "design_spec") {
+        setError(null);
+        setPendingWorkItemPlanLaunch({
+          card,
+          options: {
+            ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
+            ...readWorkspaceProviderDefaultsSnapshot(),
+          },
+        });
+        return;
+      }
 
-    setError("当前实体不支持生成下一阶段");
+      setError("当前实体不支持生成下一阶段");
+    } catch (reason) {
+      // 调用方是 `void handleGenerateNext(...)`：与 handleLaunchWorkspace 同款，失败
+      // 必须显式落到工作台错误横幅（REQ-PPS-01 场景三）。
+      setError(
+        errorMessage(
+          reason,
+          card.kind === "story_spec"
+            ? LAUNCH_FAILURE_MESSAGES.design
+            : LAUNCH_FAILURE_MESSAGES.work_item,
+        ),
+      );
+    }
   }
 
   // Task 6：阶段工作区空阶段主按钮接线——复用现有生成链路，不新增 API：
@@ -939,64 +960,70 @@ export function IssueLifecycleWorkbench({
       return;
     }
 
-    if (target === "story") {
-      const response = await generateStorySpecs(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target, card }),
-          ...readWorkspaceProviderDefaultsSnapshot(),
-        },
-      );
-      const storySpecId = response.story_specs[0]?.story_spec_id;
-      setSelectedCardKey(
-        storySpecId
-          ? lifecycleEntityKey("story_spec", card.issueId, storySpecId)
-          : null,
-      );
-      await refresh(selectedProjectId);
-      if (response.workspace_session) {
-        onOpenWorkspace(response.workspace_session.workspace_session_id);
+    try {
+      if (target === "story") {
+        const response = await generateStorySpecs(
+          selectedProjectId,
+          card.issueId,
+          {
+            title: defaultLaunchTitle({ target, card }),
+            ...readWorkspaceProviderDefaultsSnapshot(),
+          },
+        );
+        const storySpecId = response.story_specs[0]?.story_spec_id;
+        setSelectedCardKey(
+          storySpecId
+            ? lifecycleEntityKey("story_spec", card.issueId, storySpecId)
+            : null,
+        );
+        await refresh(selectedProjectId);
+        if (response.workspace_session) {
+          onOpenWorkspace(response.workspace_session.workspace_session_id);
+        }
+        return;
       }
-      return;
-    }
 
-    if (target === "design" && card.kind === "story_spec") {
-      const response = await generateDesignSpecs(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target, card }),
-          story_spec_ids: [card.id],
-          ...readWorkspaceProviderDefaultsSnapshot(),
-        },
-      );
-      const designSpecId = response.design_specs[0]?.design_spec_id;
-      setSelectedCardKey(
-        designSpecId
-          ? lifecycleEntityKey("design_spec", card.issueId, designSpecId)
-          : null,
-      );
-      await refresh(selectedProjectId);
-      if (response.workspace_session) {
-        onOpenWorkspace(response.workspace_session.workspace_session_id);
+      if (target === "design" && card.kind === "story_spec") {
+        const response = await generateDesignSpecs(
+          selectedProjectId,
+          card.issueId,
+          {
+            title: defaultLaunchTitle({ target, card }),
+            story_spec_ids: [card.id],
+            ...readWorkspaceProviderDefaultsSnapshot(),
+          },
+        );
+        const designSpecId = response.design_specs[0]?.design_spec_id;
+        setSelectedCardKey(
+          designSpecId
+            ? lifecycleEntityKey("design_spec", card.issueId, designSpecId)
+            : null,
+        );
+        await refresh(selectedProjectId);
+        if (response.workspace_session) {
+          onOpenWorkspace(response.workspace_session.workspace_session_id);
+        }
+        return;
       }
-      return;
-    }
 
-    if (target === "work_item" && card.kind === "design_spec") {
-      setError(null);
-      setPendingWorkItemPlanLaunch({
-        card,
-        options: {
-          ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
-          ...readWorkspaceProviderDefaultsSnapshot(),
-        },
-      });
-      return;
-    }
+      if (target === "work_item" && card.kind === "design_spec") {
+        setError(null);
+        setPendingWorkItemPlanLaunch({
+          card,
+          options: {
+            ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
+            ...readWorkspaceProviderDefaultsSnapshot(),
+          },
+        });
+        return;
+      }
 
-    setError("当前卡片不能启动该 Workspace");
+      setError("当前卡片不能启动该 Workspace");
+    } catch (reason) {
+      // 调用方是 `void handleLaunchWorkspace(...)`：没有宿主接住这条链路，失败必须
+      // 落到工作台错误横幅，否则 provider 不可用等 4xx 对用户完全不可见。
+      setError(errorMessage(reason, LAUNCH_FAILURE_MESSAGES[target]));
+    }
   }
 
   async function handleConfirmWorkItemPlanOptions(
