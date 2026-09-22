@@ -15,10 +15,10 @@
 | ter-task | 🟡 **暂缓（用户裁定太慢）** | 不派工（等用户通知恢复） | 等用户通知解除 |
 | 审核（reviewer） | k3-reviewer | ✅ 可多实例扩容；my-anthropic/kimi-for-coding → dihua-openai/gpt-5.6-sol | 通知用户 |
 | 勘察（scout） | glm5.3-f-scout | ✅ my-anthropic/glm-5.3-flash → bingqi/glm-5.3-flash | 通知用户 |
-| 裁决 | oracle | ✅ dihua-openai/gpt-6-astra → my-anthropic/k3 → my-anthropic/glm-5.3 | 分歧挂起等用户 |
+| 裁决 | oracle | ✅ my-anthropic/k3 → dihua-openai/gpt-6-astra → my-openai/gpt-5.6-sol | 分歧挂起等用户 |
 | max-task | 🔒 **仅 oracle 推荐+用户批准** | 模型已配（dihua-openai/gpt-6-astra），不进常规派工链；oracle 认为任务过于复杂/繁琐时可建议使用，用户裁决 | 等用户批准 |
 
-- **实施链（2026-09-22 用户再调）**：**ds-task 优先**（tydic-openai/deepseek-flash，用户开放）；glm53-task 为备选（my-anthropic/glm-5.3→tydic-openai/deepseek-flash）；**ter-task 暂缓**（用户裁定响应太慢，等通知恢复）；k3-reviewer 链=**my-anthropic/kimi-for-coding**→dihua-openai/gpt-5.6-sol 降级；oracle 链=**dihua-openai/gpt-6-astra**→my-anthropic/k3→my-anthropic/glm-5.3。
+- **实施链（2026-09-22 用户再调）**：**ds-task 优先**（tydic-openai/deepseek-flash，用户开放）；glm53-task 为备选（my-anthropic/glm-5.3→tydic-openai/deepseek-flash）；**ter-task 暂缓**（用户裁定响应太慢，等通知恢复）；k3-reviewer 链=**my-anthropic/kimi-for-coding**→dihua-openai/gpt-5.6-sol 降级；oracle 链=**my-anthropic/k3**→dihua-openai/gpt-6-astra→my-openai/gpt-5.6-sol。
 - **分层派工（2026-09-22 用户再调）**：**大/多步实施派 ds-task**（能力优先）；**机械小改/小任务派 glm53-task**（快）。max-task 不在常规派工链——仅 oracle 判定任务过于复杂/繁琐并建议后，由用户裁决是否使用。
 - **模型切换先例**：改 `~/.omp/agent/agents/<name>.md` 的 `model:` 列表（首位优先、降级通道留尾）——2026-09-21 按用户指令调整 glm53-task/k3-reviewer 两文件降级位（此前 2026-09-19 调整三文件+ter/ds 加 SUSPENDED）。
 - **通道探针**：派工前秒投一行探针（各角色一行回复即证健康）；通道挂的表现=404 model_not_found / 401 key disabled / 挂起无响应。
@@ -112,3 +112,4 @@
 | 2026-09-22 | **ter-task 恢复并设为优先 worker**（dihua-openai/gpt-5.6-terra；探针 4m18s 通过）；glm53-task 降为备选；ds-task 仍暂停 | 用户指令「尝试一下 ter-task 能不能用?能用的话优先使用」 |
 | 2026-09-22 | **四项再调**：①ds-task 开放并设为优先 worker（tydic-openai/deepseek-flash）；②ter-task 暂缓（用户裁定太慢）；③oracle 首位改 dihua-openai/gpt-6-astra→my-anthropic/k3 降级；④k3-reviewer 首位改 dihua-openai/gpt-5.6-sol→my-anthropic/kimi-for-coding 降级；⑤max-task 模型改 dihua-openai/gpt-6-astra | 用户配置指令 |
 | 2026-09-22 | **用户纠正**：k3-reviewer 链改回 my-anthropic/kimi-for-coding 首位→dihua-openai/gpt-5.6-sol 降级（controller 首调时顺序写反）；max-task 从常规派工链移除，改为仅 oracle 判定任务过于复杂/繁琐时建议+用户裁决 | 用户纠正指令 |
+| 2026-09-22 | **oracle 模型链再调**：my-anthropic/k3 → dihua-openai/gpt-6-astra → my-openai/gpt-5.6-sol（k3 回首位） | 用户配置指令 |
