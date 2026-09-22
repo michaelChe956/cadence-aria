@@ -173,6 +173,29 @@ pub async fn workspace_session_confirm(
                 .map_err(product_store_api_error)?;
             return Ok(Json(workspace_session_dto(current)));
         }
+        // change plan-compile-gate-visibility（Task 3）：WorkItemPlan 批次确认门由引擎在本
+        // 裁决内落 Confirmed（plan 确认 + 子 WorkItem 会话 + stage→Completed + Completed
+        // 节点）。端点不得再走下面的 store-only 兜底（那正是「假 Confirmed、半落状态」的
+        // 来源），只向已连接 WS 广播权威状态并返回权威 DTO——与 ReviewStarted 臂同构。
+        HttpConfirmDisposition::WorkItemPlanConfirmed => {
+            if let Some(manager) = &manager {
+                manager.broadcast_current_session_state();
+            }
+            let current = lifecycle
+                .get_workspace_session(&session_id)
+                .map_err(product_store_api_error)?;
+            return Ok(Json(workspace_session_dto(current)));
+        }
+        HttpConfirmDisposition::WorkItemPlanRejected { message } => {
+            return Err(ApiError::runtime(
+                "workspace_session_confirm_not_allowed",
+                message,
+                json!({
+                    "workspace_session_id": session_id,
+                    "stage": workspace_stage_for_status(&session.status).as_str(),
+                }),
+            ));
+        }
         HttpConfirmDisposition::Finalize | HttpConfirmDisposition::NotHandled => {}
         // F-31 纠正轮：用户显式要求送审但会话未启用 review——如实 4xx 拒绝，不静默定稿。
         HttpConfirmDisposition::ReviewUnavailable => {

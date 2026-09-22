@@ -1028,6 +1028,11 @@ impl WorkspaceEngine {
         &mut self,
         with_review: bool,
     ) -> HttpConfirmDisposition {
+        if self.session.workspace_type == WorkspaceType::WorkItemPlan {
+            return self
+                .work_item_plan_http_confirm_disposition(with_review)
+                .await;
+        }
         if !matches!(
             self.session.workspace_type,
             WorkspaceType::Story | WorkspaceType::Design
@@ -1064,6 +1069,48 @@ impl WorkspaceEngine {
                 stage: other.as_str(),
             },
         }
+    }
+
+    /// WorkItemPlan 的 HTTP confirm 裁决（change plan-compile-gate-visibility Task 3）。
+    ///
+    /// 端点对 WorkItemPlan 此前一律 `NotHandled` → store-only 兜底只写 status=Confirmed，
+    /// stage 停在 `AuthorConfirm`（批次确认门）且不建子 WorkItem 会话：既不能 advance
+    /// （矩阵仅放行 SC + `Completed` 的 advance）也没建子会话，是用户可见的半落状态。
+    ///
+    /// - 批次确认门（`AuthorConfirm` + active `WorkItemBatchConfirm`）→ 执行既有引擎确认面
+    ///   [`Self::confirm_work_item_plan_and_complete`]，本裁决内落 Confirmed + 子 WorkItem
+    ///   会话 + stage→Completed；`with_review=true` 先行拒收（WorkItemPlan 无送审语义，
+    ///   镜像 F-31 ReviewUnavailable 模式 → 端点 422）；
+    /// - `Completed` + Confirmed → 既有终态守卫幂等返回（重复 confirm 零副作用）；
+    /// - 其余形态（如普通 `HumanConfirm` 对话门）维持 `NotHandled`：端点既有通路语义不变。
+    async fn work_item_plan_http_confirm_disposition(
+        &mut self,
+        with_review: bool,
+    ) -> HttpConfirmDisposition {
+        let batch_confirm_gate = self.session.stage == WorkspaceStage::AuthorConfirm
+            && self.active_node_type() == Some(TimelineNodeType::WorkItemBatchConfirm);
+        if batch_confirm_gate {
+            if with_review {
+                return HttpConfirmDisposition::ReviewUnavailable;
+            }
+            return match self.confirm_work_item_plan_and_complete().await {
+                Ok(_) => HttpConfirmDisposition::WorkItemPlanConfirmed,
+                Err(message) => {
+                    tracing::warn!(%message, "work item plan batch confirm failed");
+                    HttpConfirmDisposition::WorkItemPlanRejected { message }
+                }
+            };
+        }
+        if self.session.stage == WorkspaceStage::Completed {
+            return if self.session.session_status == WorkspaceSessionStatus::Confirmed {
+                HttpConfirmDisposition::AlreadyConfirmed
+            } else {
+                HttpConfirmDisposition::Rejected {
+                    stage: WorkspaceStage::Completed.as_str(),
+                }
+            };
+        }
+        HttpConfirmDisposition::NotHandled
     }
 
     /// v38 复验 #2/#3（恢复 C3 前原意，spec-design-dialog-revision T3 `Revise`

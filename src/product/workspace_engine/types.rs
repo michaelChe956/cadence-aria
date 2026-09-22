@@ -448,6 +448,14 @@ pub(crate) enum HttpConfirmDisposition {
     Finalize,
     /// 会话已是 Confirmed 终态：幂等返回，不重复写入。
     AlreadyConfirmed,
+    /// WorkItemPlan 批次确认门（`AuthorConfirm` + active `WorkItemBatchConfirm`）：引擎
+    /// **已在本裁决内**经 `confirm_work_item_plan` 执行面落 Confirmed（plan 确认 + 子
+    /// WorkItem 会话 + stage→Completed + Completed 节点）。端点不得再走 store-only
+    /// 兜底定稿，只广播权威状态并返回当前记录。
+    WorkItemPlanConfirmed,
+    /// WorkItemPlan 批次确认门的引擎拒绝（如缺失 compiled WorkItems）：端点如实 409 并
+    /// **携带引擎诊断 message**（可诊断、不降级为空错误），不得回落 store-only 假 Confirmed。
+    WorkItemPlanRejected { message: String },
     /// 用户显式要求送审（with_review=true）但会话未启用 review：端点必须如实 4xx
     /// （workspace_session_review_not_enabled），不得静默按定稿处理。
     ReviewUnavailable,

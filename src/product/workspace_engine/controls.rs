@@ -43,30 +43,8 @@ impl WorkspaceEngine {
                         return Ok(WorkspaceConfirmOutcome::None);
                     }
                     WorkspaceType::WorkItemPlan => {
-                        self.complete_active_node(Some("已确认通过".to_string()))
-                            .await;
-                        self.mark_latest_artifact_confirmed(Some("human".to_string()));
-                        let (plan, new_sessions) = self.confirm_work_item_plan().await?;
-                        self.transition_stage(WorkspaceStage::Completed).await;
-                        self.persist_single_candidate_terminal_phase(
-                            crate::product::models::SingleCandidatePhase::Completed,
-                        );
-                        let _ = self
-                            .create_timeline_node(TimelineNodeDraft {
-                                node_type: TimelineNodeType::Completed,
-                                agent: None,
-                                stage: WorkspaceStage::Completed,
-                                round: None,
-                                title: "WorkItemPlan 已确认".to_string(),
-                                summary: Some(format!(
-                                    "plan {} confirmed，已建立 {} 个子 WorkItem session",
-                                    plan.id,
-                                    new_sessions.len()
-                                )),
-                                status: TimelineNodeStatus::Completed,
-                            })
-                            .await;
-
+                        let (_plan, new_sessions) =
+                            self.confirm_work_item_plan_and_complete().await?;
                         return Ok(WorkspaceConfirmOutcome::WorkItemPlan {
                             child_sessions: new_sessions,
                         });
@@ -84,6 +62,45 @@ impl WorkspaceEngine {
             _ => {}
         }
         Ok(WorkspaceConfirmOutcome::None)
+    }
+
+    /// WorkItemPlan 确认的引擎推进段（**纯移动**自 `handle_confirm` 的 WorkItemPlan 臂，
+    /// 行为不变）：收口当前门节点 → 定稿产物 → `confirm_work_item_plan`（plan Draft→
+    /// Confirmed + 建子 WorkItem 会话，SC 流走 CAS 保留门快照）→ stage→Completed → SC
+    /// 终态相位 → Completed 节点。
+    ///
+    /// 两处共用：`handle_confirm`（HumanConfirm 门的 legacy/对话流）与 HTTP confirm 端点
+    /// 的 `WorkItemBatchConfirm` 分支（change plan-compile-gate-visibility Task 3——
+    /// 端点此前对 WorkItemPlan 走 store-only 兜底，只写 status=Confirmed，stage 停在
+    /// AuthorConfirm 且不建子会话，形成「既不能 advance 也无子会话」的半落状态）。
+    pub(crate) async fn confirm_work_item_plan_and_complete(
+        &mut self,
+    ) -> Result<(IssueWorkItemPlan, Vec<WorkspaceSessionRecord>), String> {
+        self.complete_active_node(Some("已确认通过".to_string()))
+            .await;
+        self.mark_latest_artifact_confirmed(Some("human".to_string()));
+        let (plan, new_sessions) = self.confirm_work_item_plan().await?;
+        self.transition_stage(WorkspaceStage::Completed).await;
+        self.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Completed,
+        );
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::Completed,
+                agent: None,
+                stage: WorkspaceStage::Completed,
+                round: None,
+                title: "WorkItemPlan 已确认".to_string(),
+                summary: Some(format!(
+                    "plan {} confirmed，已建立 {} 个子 WorkItem session",
+                    plan.id,
+                    new_sessions.len()
+                )),
+                status: TimelineNodeStatus::Completed,
+            })
+            .await;
+
+        Ok((plan, new_sessions))
     }
 
     /// Confirmed 写入前的聚合 Spec 门禁。Story/Design 的旧 HumanConfirm 路径与
