@@ -393,13 +393,13 @@ fn lower_verification_checks(
             }
             "command" => {
                 if let Some(entry) = current.as_mut() {
-                    entry.1 = nonempty(field.value.value.as_str());
+                    entry.1 = non_placeholder(field.value.value.as_str());
                     entry.2 = Some(field.value.line);
                 }
             }
             "manual_instruction" => {
                 if let Some(entry) = current.as_mut() {
-                    entry.3 = nonempty(field.value.value.as_str());
+                    entry.3 = non_placeholder(field.value.value.as_str());
                 }
             }
             "required" => {
@@ -772,8 +772,12 @@ fn section_fields<'a>(
         .filter_map(|(name, field)| (*name == section).then_some(*field))
         .collect()
 }
-fn nonempty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_string())
+/// Verification 文本字段占位归一：空值与字面量 null/none（trim + 大小写不敏感）视为未声明，
+/// 防止 `- command: null` 注册成名为 null 的 trusted command。
+fn non_placeholder(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let is_placeholder = matches!(trimmed.to_ascii_lowercase().as_str(), "null" | "none");
+    (!trimmed.is_empty() && !is_placeholder).then(|| trimmed.to_string())
 }
 fn split_values(values: Vec<&str>) -> Vec<String> {
     values.into_iter().flat_map(split_value).collect()
