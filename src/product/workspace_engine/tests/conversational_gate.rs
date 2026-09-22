@@ -7,7 +7,7 @@ use crate::product::models::{
     HumanGateTurnStatus, ProviderName, SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{
-    HumanGateSnapshot, HumanReason, RunPolicy, WorkItemPlanFlowKind,
+    HumanGateSnapshot, HumanReason, RunBudgets, RunHistory, RunPolicy, WorkItemPlanFlowKind,
 };
 use tempfile::TempDir;
 
@@ -484,4 +484,192 @@ async fn conversational_gate_concurrent_feedback_reserves_exactly_one_turn() {
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].status, HumanGateTurnStatus::Reserved);
     assert_eq!(session.provider_start_ledger.len(), 1);
+}
+
+/// R3（oracle 裁决）夹具：SC 会话停在 Final Compile 失败落门前的形态——
+/// phase=Approval、WaitingForHuman、**无** human_gate_snapshot（AutoIfValid 链
+/// ContinueToCompleted 路由只落 (Running, None)，见 policy_route_record_values）、
+/// run_history 已有 repairs_used=2 / manual_repairs_used=1 计数，用于断言补建
+/// 预算「接续而非重置」（默认 max_manual_repairs=3 − 1 = 2）。
+fn compile_failure_gate_fixture(
+    flow_kind: WorkItemPlanFlowKind,
+    run_policy: RunPolicy,
+) -> (TempDir, LifecycleStore, WorkspaceEngine) {
+    let root = TempDir::new().expect("tempdir");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    let mut record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind,
+                run_policy,
+                rollout_snapshot: true,
+            }),
+        })
+        .expect("create session");
+    record.status = WorkspaceSessionStatus::WaitingForHuman;
+    if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+        record.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    }
+    record.human_gate_snapshot = None;
+    record.run_history = RunHistory {
+        repairs_used: 2,
+        manual_repairs_used: 1,
+        ..RunHistory::default()
+    };
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_lifecycle_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist compile failure fixture");
+    let (event_tx, _event_rx) = mpsc::channel(32);
+    let mut session = WorkspaceSession::from_record(record);
+    session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: "# Work Item Plan\n".to_string(),
+        diff: None,
+    });
+    let engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+    (root, lifecycle, engine)
+}
+
+/// R3（oracle 裁决）：SC plan 因 Final Compile 失败落 HumanConfirm 时必须补建
+/// human gate snapshot——否则 `handle_human_gate_feedback` 的硬前置
+/// （conversational_gate「human gate snapshot is missing」拒收）令该门上的
+/// 反馈入口形同虚设。预算口径沿用既有来源（routing_scope.rs
+/// `single_candidate_approval_gate` 等价构造）：
+/// `RunBudgets::default().max_manual_repairs − run_history.manual_repairs_used`，
+/// 从既有 durable 计数接续扣减，不臆造新预算常量。
+#[tokio::test]
+async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedback() {
+    let (_root, lifecycle, mut engine) = compile_failure_gate_fixture(
+        WorkItemPlanFlowKind::SingleCandidate,
+        RunPolicy::AutoIfValid,
+    );
+    // 无 source revision ref → SC compile 确定性失败，走 Final Compile 失败
+    // 第三分支（非 recovery、非 batch）落 HumanConfirm。
+    engine.enter_policy_valid_work_item_plan_compile().await;
+
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::HumanConfirm,
+        "Final Compile 失败必须落 HumanConfirm"
+    );
+    let durable = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session");
+    assert_eq!(durable.status, WorkspaceSessionStatus::WaitingForHuman);
+    let snapshot = durable
+        .human_gate_snapshot
+        .as_ref()
+        .expect("R3: compile 失败落门必须补建 human gate snapshot");
+    assert_eq!(
+        snapshot.manual_repairs_remaining,
+        RunBudgets::default().max_manual_repairs - 1,
+        "预算接续而非重置：默认 max_manual_repairs(3) − manual_repairs_used(1)"
+    );
+    assert_eq!(
+        snapshot.attempts_used, 3,
+        "attempts_used = repairs_used(2) + manual_repairs_used(1)，与 policy_routing 口径一致"
+    );
+    assert_eq!(snapshot.trigger, HumanReason::NativeHumanRequired);
+    assert_eq!(
+        engine.session().human_gate_snapshot, durable.human_gate_snapshot,
+        "内存会话必须与 durable 快照同步（handle_human_gate_feedback 读内存快照）"
+    );
+
+    // 反馈入口真可用：不再被 "human gate snapshot is missing" 拒收。
+    let opened = engine
+        .handle_human_gate_feedback(feedback("cmd_r3_compile_failure_feedback"))
+        .await
+        .expect("compile 失败门上的 HumanGateFeedback 必须被接受");
+    match opened {
+        HumanGateCommandOutcome::TurnOpened {
+            remaining_budget, ..
+        } => assert_eq!(remaining_budget, 1, "开门 remaining=2，turn 预留恰扣 1"),
+        other => panic!("expected TurnOpened, got {other:?}"),
+    }
+    let after = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session after turn");
+    assert_eq!(
+        after
+            .human_gate_snapshot
+            .as_ref()
+            .expect("gate snapshot")
+            .manual_repairs_remaining,
+        1,
+        "turn 预留后 durable 预算恰扣 1"
+    );
+}
+
+/// 对照（R3）：非 SC（Legacy）plan compile 失败同样落 HumanConfirm，但不补建
+/// 快照，反馈仍按既有语义拒收——补建不放宽 SingleCandidate 前置。
+#[tokio::test]
+async fn compile_failure_human_confirm_keeps_legacy_rejection_without_snapshot() {
+    let (_root, lifecycle, mut engine) = compile_failure_gate_fixture(
+        WorkItemPlanFlowKind::Legacy,
+        RunPolicy::Interactive,
+    );
+    engine.enter_policy_valid_work_item_plan_compile().await;
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    let durable = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("durable session");
+    assert_eq!(
+        durable.human_gate_snapshot, None,
+        "非 SC 不补建快照（反馈入口本就限定 SingleCandidate）"
+    );
+    assert_eq!(
+        engine
+            .handle_human_gate_feedback(feedback("cmd_r3_legacy_feedback"))
+            .await
+            .expect("structured rejection"),
+        HumanGateCommandOutcome::Rejected {
+            code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+            reason: "human gate feedback is only available for a single-candidate work-item plan in human_confirm"
+                .to_string(),
+        }
+    );
+}
+
+/// 对照（R3）：非法 stage（非 HumanConfirm）的反馈仍拒收——补建快照不放宽
+/// stage 门。
+#[tokio::test]
+async fn compile_failure_rebuilt_gate_keeps_stage_rejection() {
+    let (_root, _lifecycle, mut engine) = compile_failure_gate_fixture(
+        WorkItemPlanFlowKind::SingleCandidate,
+        RunPolicy::AutoIfValid,
+    );
+    engine.enter_policy_valid_work_item_plan_compile().await;
+    assert!(engine.session().human_gate_snapshot.is_some());
+    engine.session.stage = WorkspaceStage::Running; // 模拟门已推进后的迟到反馈
+    assert_eq!(
+        engine
+            .handle_human_gate_feedback(feedback("cmd_r3_stage_invalid"))
+            .await
+            .expect("structured rejection"),
+        HumanGateCommandOutcome::Rejected {
+            code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+            reason: "human gate feedback is only available for a single-candidate work-item plan in human_confirm"
+                .to_string(),
+        }
+    );
 }

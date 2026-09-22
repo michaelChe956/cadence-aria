@@ -7,7 +7,10 @@ use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::work_item_plan_compiler::{
     PlanCandidatePublicationProvenance, verify_publish_freshness,
 };
-use crate::product::work_item_plan_policy::{PolicyDiagnostic, RunPolicy, WorkItemPlanFlowKind};
+use crate::product::work_item_plan_policy::{
+    HumanGateSnapshot, HumanReason, PolicyDiagnostic, RunBudgets, RunPolicy,
+    WorkItemPlanFlowKind,
+};
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::product::work_item_split_validator::WorkItemSplitValidationReport;
 use crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto;
@@ -499,6 +502,11 @@ impl WorkspaceEngine {
                     )))
                     .await;
                 } else {
+                    // R3（oracle 裁决）：落门持久化 WaitingForHuman 之前先补建
+                    // SC 门快照，保证 HumanGateOpened 事件对应的 SessionState
+                    // 广播已带门快照（反馈入口读内存/持久快照）。
+                    self.ensure_human_gate_snapshot_after_compile_failure()
+                        .await;
                     self.enter_human_confirm(Some(format!("Final Compile 失败：{message}")))
                         .await;
                 }
@@ -590,6 +598,79 @@ impl WorkspaceEngine {
         tx.failure_reason = Some(message.to_string());
         tx.updated_at = chrono::Utc::now().to_rfc3339();
         store.put_compile_transaction(&tx).is_ok()
+    }
+
+    /// R3（oracle 裁决）：Final Compile 失败落 HumanConfirm 的第三分支此前不建
+    /// human gate snapshot，`handle_human_gate_feedback` 的硬前置
+    /// （conversational_gate「human gate snapshot is missing」拒收）令该门上的
+    /// 反馈入口形同虚设（缺口主体是 AutoIfValid 链：ContinueToCompleted 路由只落
+    /// (Running, None)，见 policy_route_record_values）。仅对 SingleCandidate 且
+    /// 快照缺席的会话补建：在场快照（Interactive 链自 Approval 门接续保留的，
+    /// close(Running) 与 WaitingForHuman 写入均不清快照）原样保留，不做重置。
+    ///
+    /// 预算口径与 routing_scope.rs `single_candidate_approval_gate` /
+    /// policy_routing.rs `human_gate_snapshot` 等价构造一致：
+    /// `manual_repairs_remaining = RunBudgets::default().max_manual_repairs
+    /// − run_history.manual_repairs_used`（saturating）、`attempts_used =
+    /// repairs_used + manual_repairs_used`——从既有 durable 计数接续扣减，
+    /// 不臆造新预算常量。trigger 沿用 NativeHumanRequired、findings/
+    /// repeated_fingerprints 为空（编译失败门无 review 分类语境，同 approval
+    /// 门「不新增决策协议」的理由），resumable=true（与 SC 门快照的既有
+    /// 可续语义一致）。
+    async fn ensure_human_gate_snapshot_after_compile_failure(&mut self) {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.human_gate_snapshot.is_some()
+        {
+            return;
+        }
+        let Some(store) = self.lifecycle_store.clone() else {
+            return;
+        };
+        let Ok(record) = store.get_workspace_session(&self.session.session_id) else {
+            return;
+        };
+        let history = record.run_history.clone();
+        let snapshot = HumanGateSnapshot {
+            findings: Vec::new(),
+            repeated_fingerprints: Vec::new(),
+            attempts_used: history.repairs_used.saturating_add(history.manual_repairs_used),
+            manual_repairs_remaining: RunBudgets::default()
+                .max_manual_repairs
+                .saturating_sub(history.manual_repairs_used),
+            trigger: HumanReason::NativeHumanRequired,
+            resumable: true,
+        };
+        match store.compare_and_save_policy_route(
+            &record,
+            PolicyRoutePersist {
+                status: record.status.clone(),
+                single_candidate_phase: record.single_candidate_phase.clone(),
+                run_history: record.run_history.clone(),
+                scope: record.review_invocation_scope.clone(),
+                gate: Some(snapshot),
+                diagnostics: record.policy_diagnostics.clone(),
+                repair_reservation: record.repair_reservation.clone(),
+                provider_start_ledger: record.provider_start_ledger.clone(),
+            },
+        ) {
+            Ok(saved) => {
+                self.session.human_gate_snapshot = saved.human_gate_snapshot;
+                self.session.run_history = saved.run_history;
+            }
+            Err(error) => {
+                // CAS 失败＝并发推进已抢先改写该 record：保持快照缺席的既有
+                // 语义（反馈按缺失拒收），不阻塞失败落门本身，仅让错误可见。
+                let _ = self
+                    .event_tx
+                    .send(EngineEvent::Error {
+                        message: format!(
+                            "rebuild human gate snapshot after compile failure lost the durable race: {error}"
+                        ),
+                    })
+                    .await;
+            }
+        }
     }
 
     #[cfg(test)]
