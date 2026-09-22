@@ -810,6 +810,9 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
         "[cross_reference_discipline]",
         "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
         "同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。",
+        "违反会被编译器最终校验拒绝：lowering_error/trusted_commands「同一 Work Item 不得重复引用 trusted command。」——整份计划编译失败，需人工修复后重新编译。",
+        "反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。",
+        "正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。",
         "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
         "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
     ] {
@@ -1016,7 +1019,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     );
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        21_500
+        22_000
     );
     assert!(
         prompt.len()
@@ -1166,8 +1169,8 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
 
     assert_eq!(
         crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        21_500,
-        "第 9 次提额：codex×重 输出契约 capabilities 逐字覆盖教学要求预算上调至整百级 20,500"
+        22_000,
+        "第 11 次提额：trusted command 重复拒绝后果+正反例教学后预算上调至整百级 22,000"
     );
     assert!(
         prompt.len()

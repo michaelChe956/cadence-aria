@@ -83,7 +83,12 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 #[cfg(test)]
 // 第 10 次提额（2026-09-19，DEF-PVR-ALL 方案 a）：输出契约纪律补跨 WI 依赖
 // 成对书写正例（门重测 codex rep1/rep2 只写消费侧忘写提供侧根因），净增约 260B。
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 21_500;
+// 第 11 次提额（2026-09-22，Final Compile 重复 trusted command 收敛方案 b）：grammar
+// 「同一 command 至多声明一次」条款补编译器拒绝后果（lowering_error/trusted_commands
+// 逐字消息）与正反例 few-shot，净增 448B；实测 21,838/余 162B（最大 fixture，见
+// prompt_contract::work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_
+// real_findings 的 eprintln）。
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_000;
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
 /// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，
@@ -177,7 +182,9 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
          - compatibility_policy: require_all\n\
          无依赖时 Inputs 留空 section。\n\
          反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。\n\
-         同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。\n\
+         同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。违反会被编译器最终校验拒绝：lowering_error/trusted_commands「同一 Work Item 不得重复引用 trusted command。」——整份计划编译失败，需人工修复后重新编译。\n\
+         反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。\n\
+         正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。\n\
          key 白名单：{structured_keys}。\n\
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",

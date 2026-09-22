@@ -69,7 +69,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "增补教学后仍必须低于质量预算红线（第 10 次提额后 21,500），实测 {} bytes",
+        "增补教学后仍必须低于质量预算红线（第 11 次提额后 22,000），实测 {} bytes",
         prompt.len()
     );
 }
@@ -294,7 +294,7 @@ fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_co
 /// 忘写提供侧）：输出契约纪律之后追加「成对书写纪律」——跨 WI 依赖两侧
 /// 成对书写的完整正例（下游 Inputs 三行 ↔ 上游 Outputs 一行逐字同串）与
 /// 反例；错误码与 dependency 校验器口径逐字一致；预算红线第 10 次提额后
-/// （21,500）仍必须守住，段序不破。
+/// （22,000）仍必须守住，段序不破。
 #[test]
 fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
     let (request, issue, repository) = split_prompt_fixture();
@@ -340,7 +340,7 @@ fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
     assert!(
         prompt.len()
             < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
-        "成对书写教学追加后仍必须低于质量预算红线（第 10 次提额后 21,500），实测 {} bytes",
+        "成对书写教学追加后仍必须低于质量预算红线（第 11 次提额后 22,000），实测 {} bytes",
         prompt.len()
     );
     eprintln!(
