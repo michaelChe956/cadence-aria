@@ -1,8 +1,9 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProviderHealthResponse, RealProviderName } from "../../api/types";
+import type { RealProviderName } from "../../api/types";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { providerHealthSnapshot } from "../../state/provider-availability-test-fixtures";
 import { WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY } from "../../state/workspace-provider-defaults";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
@@ -381,32 +382,7 @@ function setProviderAvailability(
 ) {
   useProviderAvailabilityStore.setState({
     loadStatus: "loaded",
-    snapshot: {
-      schema_version: 1,
-      generation: 1,
-      checked_at: "2026-09-22T00:00:00Z",
-      state_status: "ready",
-      state_error: null,
-      real_workflow_blocked: false,
-      test_provider_enabled: false,
-      providers: (Object.keys(PROVIDER_LABELS) as RealProviderName[]).map(
-        (provider) => {
-          const isAvailable = available[provider] === true;
-          return {
-            provider,
-            display_name: PROVIDER_LABELS[provider],
-            available: isAvailable,
-            version: isAvailable ? "1.0.0" : null,
-            reason_code: isAvailable ? null : "command_missing",
-            reason: isAvailable ? null : `${PROVIDER_LABELS[provider]} 未安装`,
-            checked_at: "2026-09-22T00:00:00Z",
-            install_hint: isAvailable
-              ? ""
-              : `请先安装 ${PROVIDER_LABELS[provider]}`,
-          };
-        },
-      ),
-    } satisfies ProviderHealthResponse,
+    snapshot: providerHealthSnapshot(available),
   });
 }
 

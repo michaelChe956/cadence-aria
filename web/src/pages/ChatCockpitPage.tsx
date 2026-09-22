@@ -67,10 +67,8 @@ import {
 import { OperationAuditView } from "../components/cockpit/OperationAuditView";
 import { parentSessionIdFor } from "../state/parent-session-navigation";
 import { useStageUI } from "../hooks/useStageUI";
-import {
-  readWorkspaceProviderDefaults,
-  writeWorkspaceProviderDefaults,
-} from "../state/workspace-provider-defaults";
+import { useProviderDefaultsApplication } from "../hooks/useProviderDefaultsApplication";
+import { writeWorkspaceProviderDefaults } from "../state/workspace-provider-defaults";
 import {
   clampReviewRounds,
   latestUnacknowledgedAbortedNode,
@@ -181,7 +179,6 @@ export function ChatCockpitPage({
   >("conversation");
   const [jumpEntryId, setJumpEntryId] = useState<string | null>(null);
   const [defaultsSavedAt, setDefaultsSavedAt] = useState<number | null>(null);
-  const appliedDefaultsSessionRef = useRef<string | null>(null);
   const isCurrentSession = takeoverSessionId === null;
   const stageConfig = useStageUI(state.stage);
   const canConfigureProviders =
@@ -806,40 +803,14 @@ export function ChatCockpitPage({
       setDrilldownView("artifact");
     }
   }, [selectedState?.stage, selectedState?.workspaceType]);
-  useEffect(() => {
-    if (
-      takeoverSessionId !== null ||
-      state.sessionId !== sessionId ||
-      !stageConfig.providerEditable ||
-      workspaceWs.connectionStatus !== "connected" ||
-      appliedDefaultsSessionRef.current === sessionId
-    ) {
-      return;
-    }
-
-    const defaults = readWorkspaceProviderDefaults();
-    if (!defaults || !state.providers) {
-      return;
-    }
-
-    appliedDefaultsSessionRef.current = sessionId;
-    if (state.providers.author !== defaults.author) {
-      workspaceWs.selectProvider("author", defaults.author);
-    }
-    if (defaults.reviewerEnabled && state.providers.reviewer !== defaults.reviewer) {
-      workspaceWs.selectProvider("reviewer", defaults.reviewer);
-    }
-    if (useWorkspaceStore.getState().reviewerEnabled !== defaults.reviewerEnabled) {
-      useWorkspaceStore.setState({ reviewerEnabled: defaults.reviewerEnabled });
-    }
-  }, [
+  useProviderDefaultsApplication({
+    ws: workspaceWs,
     sessionId,
-    stageConfig.providerEditable,
-    state.providers,
-    state.sessionId,
-    takeoverSessionId,
-    workspaceWs,
-  ]);
+    connected: workspaceWs.connectionStatus === "connected",
+    providerEditable: stageConfig.providerEditable,
+    providers: state.providers,
+    isTakeover: takeoverSessionId !== null,
+  });
 
   return (
     <div

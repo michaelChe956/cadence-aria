@@ -30,6 +30,7 @@ import { WorkItemPlanCandidatePanel } from "../components/workspace/WorkItemPlan
 import { WorkItemPlanStagedPanel } from "../components/workspace/WorkItemPlanStagedPanel";
 import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
+import { useProviderDefaultsApplication } from "../hooks/useProviderDefaultsApplication";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
@@ -146,6 +147,15 @@ export function LegacyChatWorkspacePage({
   );
 
   const stageConfig = useStageUI(stage);
+  // REQ-PPS-02：legacy 面与 Cockpit 同源应用用户默认 provider（此前 legacy 无此能力）。
+  useProviderDefaultsApplication({
+    ws: workspaceWs,
+    sessionId,
+    connected: connectionStatus === "connected",
+    providerEditable: stageConfig.providerEditable,
+    providers,
+    isTakeover: false,
+  });
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
   const [activePanel, setActivePanel] = useState<"chat" | "artifact">("chat");

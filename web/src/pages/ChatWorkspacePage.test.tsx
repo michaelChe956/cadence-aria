@@ -21,9 +21,11 @@ import {
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
 import { useProviderAvailabilityStore } from "../state/provider-availability-store";
+import { WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY } from "../state/workspace-provider-defaults";
 import { ChatWorkspacePage } from "./ChatWorkspacePage";
 import {
   chatEntry,
+  currentMockWorkspaceWs,
   installChatWorkspacePageTestHooks,
   makeNodeDetail,
   mockWorkspaceWs,
@@ -692,6 +694,33 @@ describe("ChatWorkspacePage dual track switch", () => {
     expect(
       screen.queryByTestId("start-generation-blocked-hint"),
     ).toBeNull();
+  });
+
+  // REQ-PPS-02：用户默认 provider 由共享 hook 覆盖 legacy 页（此前只有 Cockpit 会补发），
+  // 走既有 provider-select 通路，锁定态会话不被覆盖。
+  it("applies the stored provider defaults through the shared hook in the legacy page", async () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    window.localStorage.setItem(
+      WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY,
+      JSON.stringify({
+        author: "pi",
+        reviewer: "kimi_code",
+        reviewerEnabled: true,
+      }),
+    );
+    setWorkspaceType("story");
+
+    renderWorkspace();
+    const workspaceWs = currentMockWorkspaceWs();
+
+    await waitFor(() =>
+      expect(workspaceWs.selectProvider).toHaveBeenCalledWith("author", "pi"),
+    );
+    expect(workspaceWs.selectProvider).toHaveBeenCalledWith(
+      "reviewer",
+      "kimi_code",
+    );
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
   });
 
   it("renders a known session in the cockpit when cockpit is explicitly set", () => {

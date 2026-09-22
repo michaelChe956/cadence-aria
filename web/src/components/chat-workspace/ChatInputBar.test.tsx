@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { providerHealthSnapshot } from "../../state/provider-availability-test-fixtures";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 import { ChatInputBar, type ChatInputBarHandle } from "./ChatInputBar";
 
@@ -382,4 +384,80 @@ describe("ChatInputBar", () => {
 
   // 退役留档（T5/REQ-RET-02）：`keeps the author confirm input usable when the host provides a decision callback` 驱动已删除的 legacy 决策发送面，
   // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
+
+  // REQ-PPS-03：开始生成前显示将要使用的实际 provider；不可用即 fail-closed 禁用+原因，
+  // 不让「先用服务端默认、再由页面纠正」的隐式窗口出现。
+  describe("generation provider visibility", () => {
+    afterEach(() => {
+      useProviderAvailabilityStore.getState().reset();
+    });
+
+    function renderPrepareBar(
+      stage = "prepare_context",
+      author: "claude_code" | "codex" = "claude_code",
+    ) {
+      useWorkspaceStore.setState({
+        providers: { author, reviewer: "codex" },
+      });
+      return render(
+        <ChatInputBar
+          stage={stage}
+          onSendContextNote={vi.fn()}
+          onStartGeneration={vi.fn()}
+          onAbort={vi.fn()}
+        />,
+      );
+    }
+
+    it("shows the effective author provider and its availability beside 开始生成", () => {
+      useProviderAvailabilityStore.setState({
+        loadStatus: "loaded",
+        snapshot: providerHealthSnapshot({ claude_code: true, codex: true }),
+      });
+
+      // 会话侧选定的 author provider 就是展示与启动使用的那一个。
+      renderPrepareBar("prepare_context", "codex");
+
+      const status = screen.getByTestId("start-generation-provider");
+      expect(status).toHaveTextContent("Codex");
+      expect(status).toHaveTextContent("可用");
+      expect(screen.getByTestId("start-generation")).toBeEnabled();
+      expect(screen.queryByTestId("start-generation-blocked-hint")).toBeNull();
+    });
+
+    it("blocks 开始生成 and shows the reason when the author provider is unavailable", () => {
+      useProviderAvailabilityStore.setState({
+        loadStatus: "loaded",
+        snapshot: providerHealthSnapshot({ codex: true, claude_code: false }),
+      });
+
+      renderPrepareBar();
+
+      expect(screen.getByTestId("start-generation")).toBeDisabled();
+      expect(screen.getByTestId("start-generation-provider")).toHaveTextContent(
+        "Claude Code",
+      );
+      expect(screen.getByTestId("start-generation-provider")).toHaveTextContent(
+        "不可用",
+      );
+      expect(
+        screen.getByTestId("start-generation-blocked-hint"),
+      ).toHaveTextContent("Claude Code 未安装");
+    });
+
+    it("leaves later stages to their regular input state", () => {
+      useProviderAvailabilityStore.setState({
+        loadStatus: "loaded",
+        snapshot: providerHealthSnapshot({ claude_code: false }),
+      });
+
+      renderPrepareBar("running");
+
+      expect(screen.queryByTestId("start-generation")).toBeNull();
+      expect(screen.queryByTestId("start-generation-provider")).toBeNull();
+      expect(screen.queryByTestId("start-generation-blocked-hint")).toBeNull();
+      expect(screen.getByRole("button", { name: "中止" })).toBeInTheDocument();
+      expect(screen.getByRole("textbox")).toBeDisabled();
+    });
+  });
 });

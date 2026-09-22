@@ -19,6 +19,8 @@ import type {
   WorkItemPlanArtifactPayload,
 } from "../../api/types";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
+import { getProviderOption } from "../../state/provider-options";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import type { ChatEntry, ChatEntryType } from "../../state/chat-entries";
 import { ConfirmTwiceButton } from "./cockpit/ConfirmTwiceButton";
 import { DraftValidationFailureNotice } from "../workspace/DraftValidationFailureNotice";
@@ -91,6 +93,35 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
   const isPrepareContext = stage === "prepare_context";
+  // REQ-PPS-03：开始生成前必须可见「将要使用的实际 author provider」及其可用性；不可用即
+  // fail-closed 禁用按钮并给出来因。author 兜底与 providerConfigFor 同源（同为
+  // claude_code）；可用性快照由 ProviderAvailabilityGuard 在这棵子树渲染前加载完成，
+  // 未加载时如实标「可用性未知」而不假装 provider 不可用。
+  const providers = useWorkspaceStore((state) => state.providers);
+  const providerSnapshot = useProviderAvailabilityStore((state) => state.snapshot);
+  const authorProvider = providers?.author ?? "claude_code";
+  const authorOption = providerSnapshot
+    ? getProviderOption(providerSnapshot, authorProvider)
+    : null;
+  const providerBlockReason =
+    authorOption && !authorOption.available
+      ? `${authorOption.label} 当前不可用：${authorOption.reason ?? "原因未知"}`
+      : null;
+  const providerStatusSuffix = !authorOption
+    ? "（可用性未知）"
+    : authorOption.available
+      ? "（可用）"
+      : "（不可用）";
+  // 生成动作区只在 PrepareContext 有意义：Running 等阶段（生成中/锁定）不受 provider 门影响。
+  const showStartGeneration = isPrepareContext && !hideStartGeneration;
+  const startGenerationBlocked =
+    startGenerationDisabled || providerBlockReason !== null;
+  // 阻断提示：provider 不可用原因优先（按钮可见时才谈得上），其次宿主传入的终态提示；
+  // 与「开始生成」显隐无关——可恢复中断把按钮藏起时，F-30 的如实提示仍就地可见。
+  const generateBlockedHint = !isPrepareContext
+    ? null
+    : (showStartGeneration ? providerBlockReason : null) ??
+      (startGenerationDisabled ? startGenerationDisabledHint : null);
   const isAuthorConfirm = stage === "author_confirm";
   const isWorkItemOutlineConfirm = activeNodeType === "work_item_plan_outline_confirm";
   const isWorkItemGenerationMode = activeNodeType === "work_item_generation_mode";
@@ -160,7 +191,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   }
 
   function handleStartGeneration() {
-    if (disabled || startGenerationDisabled) {
+    if (disabled || startGenerationBlocked) {
       return;
     }
     appendOptimisticEntry("start_generation", "开始生成");
@@ -210,7 +241,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
             ) : null}
           </div>
         ) : null}
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {isBusy ? (
             <button
               type="button"
@@ -234,24 +265,32 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
             </button>
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：staged/author 决策按钮分支随消息族删除。 */}
-          {isPrepareContext && !hideStartGeneration ? (
+          {showStartGeneration ? (
+            <span
+              data-testid="start-generation-provider"
+              className="inline-flex h-9 items-center text-xs font-semibold text-[var(--aria-ink-muted)]"
+            >
+              {`Provider：${authorOption?.label ?? authorProvider}${providerStatusSuffix}`}
+            </span>
+          ) : null}
+          {showStartGeneration ? (
             <button
               data-testid="start-generation"
               type="button"
               onClick={handleStartGeneration}
-              disabled={disabled || startGenerationDisabled}
+              disabled={disabled || startGenerationBlocked}
               className="btn-primary h-9 disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
               开始生成
             </button>
           ) : null}
-          {isPrepareContext && startGenerationDisabled ? (
+          {generateBlockedHint ? (
             <p
               data-testid="start-generation-blocked-hint"
               className="w-full text-right text-xs text-[var(--aria-ink-muted)]"
             >
-              {startGenerationDisabledHint}
+              {generateBlockedHint}
             </p>
           ) : null}
         </div>
