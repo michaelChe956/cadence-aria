@@ -64,7 +64,8 @@ pub(crate) fn converge_work_item_plan_source(
                 applied.extend(outcome.applied);
             }
             Err(diagnostics) => {
-                let Some(outcome) = apply_duplicate_trusted_command_autorepair(&source, &diagnostics)
+                let Some(outcome) =
+                    apply_duplicate_trusted_command_autorepair(&source, &diagnostics)
                 else {
                     return Err(diagnostics);
                 };
@@ -147,9 +148,11 @@ fn duplicate_trusted_command_repair(
         else {
             continue;
         };
-        let Some(command_index) = verification.fields.iter().position(|field| {
-            field.key.value == "command" && field.value.line == command_line
-        }) else {
+        let Some(command_index) = verification
+            .fields
+            .iter()
+            .position(|field| field.key.value == "command" && field.value.line == command_line)
+        else {
             continue;
         };
         let check_start_index = verification.fields[..=command_index]
@@ -161,9 +164,11 @@ fn duplicate_trusted_command_repair(
             .map(|index| command_index + 1 + index);
         let check_end_line = next_check_index
             .map(|index| verification.fields[index].value.line.saturating_sub(1))
-            .unwrap_or_else(|| verification_section_end_line(source, command_line).saturating_sub(1));
-        let check_fields =
-            &verification.fields[check_start_index..next_check_index.unwrap_or(verification.fields.len())];
+            .unwrap_or_else(|| {
+                verification_section_end_line(source, command_line).saturating_sub(1)
+            });
+        let check_fields = &verification.fields
+            [check_start_index..next_check_index.unwrap_or(verification.fields.len())];
         let check_id = verification.fields[check_start_index].value.value.clone();
         let has_manual_instruction = check_fields.iter().any(|field| {
             field.key.value == "manual_instruction" && !is_explicit_none(&field.value.value)
@@ -488,7 +493,6 @@ fn rewrite_lines(
     rewritten
 }
 
-
 fn remove_lines(source: &str, deleted: &BTreeSet<usize>) -> String {
     let had_trailing_newline = source.ends_with('\n');
     let mut lines = source
@@ -752,7 +756,10 @@ mod tests {
 
         let verification = &ir.items[0].contract.verification_checks;
         assert_eq!(verification.len(), 2);
-        assert_eq!(verification[0].command.as_deref(), Some("cargo test --locked --lib levels_api"));
+        assert_eq!(
+            verification[0].command.as_deref(),
+            Some("cargo test --locked --lib levels_api")
+        );
         assert_eq!(verification[1].command, None);
         assert_eq!(
             source
@@ -801,6 +808,10 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.field == "kind" && diagnostic.code != "lowering_error"
         }));
-        assert!(!diagnostics.iter().any(is_duplicate_trusted_command_diagnostic));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(is_duplicate_trusted_command_diagnostic)
+        );
     }
 }
