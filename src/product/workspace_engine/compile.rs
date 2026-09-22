@@ -8,8 +8,7 @@ use crate::product::work_item_plan_compiler::{
     PlanCandidatePublicationProvenance, verify_publish_freshness,
 };
 use crate::product::work_item_plan_policy::{
-    HumanGateSnapshot, HumanReason, PolicyDiagnostic, RunBudgets, RunPolicy,
-    WorkItemPlanFlowKind,
+    HumanGateSnapshot, HumanReason, PolicyDiagnostic, RunBudgets, RunPolicy, WorkItemPlanFlowKind,
 };
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::product::work_item_split_validator::WorkItemSplitValidationReport;
@@ -634,7 +633,9 @@ impl WorkspaceEngine {
         let snapshot = HumanGateSnapshot {
             findings: Vec::new(),
             repeated_fingerprints: Vec::new(),
-            attempts_used: history.repairs_used.saturating_add(history.manual_repairs_used),
+            attempts_used: history
+                .repairs_used
+                .saturating_add(history.manual_repairs_used),
             manual_repairs_remaining: RunBudgets::default()
                 .max_manual_repairs
                 .saturating_sub(history.manual_repairs_used),

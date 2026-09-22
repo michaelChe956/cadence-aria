@@ -449,22 +449,27 @@ async fn single_candidate_repairs_duplicate_trusted_command_before_terminal_fail
     {
         if let OutboundControl::Text(json) = outbound {
             let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
-            assert_ne!(value["type"], "error", "repair path must not emit terminal error");
-            assert!(!value["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("compile markdown source failed"));
+            assert_ne!(
+                value["type"], "error",
+                "repair path must not emit terminal error"
+            );
+            assert!(
+                !value["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("compile markdown source failed")
+            );
         }
     }
 }
-
 
 #[tokio::test]
 async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_reredrive() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let output = single_candidate_markdown_with_duplicate_command(&fixture.story_id, &fixture.design_id)
-        .replacen("### Inputs\n\n", "", 1);
+    let output =
+        single_candidate_markdown_with_duplicate_command(&fixture.story_id, &fixture.design_id)
+            .replacen("### Inputs\n\n", "", 1);
     let provider = Arc::new(RecordingOutputProvider {
         output,
         inputs: input_tx,
@@ -488,9 +493,11 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
         .await
         .expect("mixed diagnostics must receive one teaching re-drive")
         .expect("teaching re-drive input");
-    assert!(reredrive_input
-        .prompt
-        .contains("立即输出完整 work-item-plan markdown source"));
+    assert!(
+        reredrive_input
+            .prompt
+            .contains("立即输出完整 work-item-plan markdown source")
+    );
     assert!(
         !matches!(
             tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
@@ -516,10 +523,12 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
     })
     .await
     .expect("mixed compile failure error");
-    assert!(error["message"]
-        .as_str()
-        .expect("error message")
-        .contains("compile markdown source failed"));
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("compile markdown source failed")
+    );
     wait_for_single_candidate_phase(
         &fixture,
         crate::product::models::SingleCandidatePhase::Failed,

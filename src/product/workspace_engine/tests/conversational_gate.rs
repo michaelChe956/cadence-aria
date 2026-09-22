@@ -591,7 +591,8 @@ async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedba
     );
     assert_eq!(snapshot.trigger, HumanReason::NativeHumanRequired);
     assert_eq!(
-        engine.session().human_gate_snapshot, durable.human_gate_snapshot,
+        engine.session().human_gate_snapshot,
+        durable.human_gate_snapshot,
         "内存会话必须与 durable 快照同步（handle_human_gate_feedback 读内存快照）"
     );
 
@@ -624,10 +625,8 @@ async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedba
 /// 快照，反馈仍按既有语义拒收——补建不放宽 SingleCandidate 前置。
 #[tokio::test]
 async fn compile_failure_human_confirm_keeps_legacy_rejection_without_snapshot() {
-    let (_root, lifecycle, mut engine) = compile_failure_gate_fixture(
-        WorkItemPlanFlowKind::Legacy,
-        RunPolicy::Interactive,
-    );
+    let (_root, lifecycle, mut engine) =
+        compile_failure_gate_fixture(WorkItemPlanFlowKind::Legacy, RunPolicy::Interactive);
     engine.enter_policy_valid_work_item_plan_compile().await;
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
     let durable = lifecycle
