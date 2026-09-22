@@ -218,6 +218,10 @@ async fn single_candidate_compile_missing_section_reredrive_failure_is_terminal_
         message.matches("missing_section").count() >= 2,
         "terminal failure must contain both rounds' error text: {message}"
     );
+    assert!(
+        message.contains("请显式重新开始生成"),
+        "terminal failure must tell the user how to recover (explicit reopen guidance): {message}"
+    );
     wait_for_single_candidate_phase(
         &fixture,
         crate::product::models::SingleCandidatePhase::Failed,
@@ -255,6 +259,10 @@ async fn single_candidate_compile_unknown_key_failure_stays_terminal_without_rer
         message.contains("compile markdown source failed")
             && message.contains("unknown_structured_key"),
         "non-missing_section compile failure must stay terminal: {message}"
+    );
+    assert!(
+        message.contains("请显式重新开始生成"),
+        "single-round terminal failure must also carry the explicit reopen guidance: {message}"
     );
     wait_for_single_candidate_phase(
         &fixture,

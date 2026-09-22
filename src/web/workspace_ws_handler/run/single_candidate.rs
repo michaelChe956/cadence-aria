@@ -14,6 +14,13 @@ pub(crate) enum SingleCandidateProviderRunError {
     Message(String),
 }
 
+/// SC author 终态失败消息的显式重开指引后缀：Failed 相位有显式恢复入口
+/// （`start_generation` 对 Failed 会话 re-arm），终态消息不能只留诊断原文，
+/// 必须告诉用户下一步怎么做。措辞与 run_single_candidate_author 内
+/// 「已终态失败……请显式重新开始生成」恢复入口消息同族。
+const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
+    "；SingleCandidate session 已终态失败，请显式重新开始生成";
+
 /// 丢弃 provider 在 markdown 文档标题前输出的前言，保留既有 parser 的失败语义。
 ///
 /// 定位首个固定文档标题的字节偏移并从该处修剪；找不到标题时原样返回，避免把
@@ -532,9 +539,13 @@ pub(crate) async fn run_single_candidate_author(
                     let message = match first_round_failure.as_deref() {
                         Some(first_round) => format!(
                             "compile markdown source failed (after one teaching re-drive): \
-                             first round: {first_round}; re-drive round: {detail}"
+                             first round: {first_round}; re-drive round: {detail}\
+                             {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                         ),
-                        None => format!("compile markdown source failed: {detail}"),
+                        None => format!(
+                            "compile markdown source failed: {detail}\
+                             {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
+                        ),
                     };
                     engine.persist_single_candidate_terminal_phase(
                         crate::product::models::SingleCandidatePhase::Failed,
@@ -586,9 +597,13 @@ pub(crate) async fn run_single_candidate_author(
             let message = match first_round_failure.as_deref() {
                 Some(first_round) => format!(
                     "validate plan candidate IR failed (after one teaching re-drive): \
-                     first round: {first_round}; re-drive round: {detail}"
+                     first round: {first_round}; re-drive round: {detail}\
+                     {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                 ),
-                None => format!("validate plan candidate IR failed: {detail}"),
+                None => format!(
+                    "validate plan candidate IR failed: {detail}\
+                     {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
+                ),
             };
             engine.persist_single_candidate_terminal_phase(
                 crate::product::models::SingleCandidatePhase::Failed,

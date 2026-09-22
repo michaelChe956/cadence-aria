@@ -171,6 +171,10 @@ async fn single_candidate_ir_validation_reredrive_failure_is_terminal_with_both_
             && message.contains("AC-001 has no handoff reviewer check"),
         "终态必须含重驱轮错误原文: {message}"
     );
+    assert!(
+        message.contains("请显式重新开始生成"),
+        "IR 终态失败同样必须带显式重开指引: {message}"
+    );
     wait_for_single_candidate_phase(
         &fixture,
         crate::product::models::SingleCandidatePhase::Failed,
