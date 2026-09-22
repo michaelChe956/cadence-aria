@@ -4,7 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { ArtifactVersionSummary } from "../../../api/types";
 import { RevisionDiffView } from "./RevisionDiffView";
 
-function version(versionNo: number, markdown: string): ArtifactVersionSummary {
+vi.mock("../../shared/MonacoViewer", () => ({
+  MonacoViewer: ({ value, height }: { value: string; height?: string }) => (
+    <div data-testid="monaco-viewer" data-height={height}>
+      {value}
+    </div>
+  ),
+}));
+
+function version(versionNo: number, markdown?: string): ArtifactVersionSummary {
   return {
     version: versionNo,
     markdown,
@@ -23,6 +31,7 @@ function renderView(
   options: {
     load?: (version: number) => Promise<string>;
     cache?: Record<number, string>;
+    advisoryCount?: number | null;
   } = {},
 ) {
   return render(
@@ -32,22 +41,72 @@ function renderView(
       contentCache={options.cache ?? {}}
       loadVersionMarkdown={options.load ?? null}
       onCacheVersionMarkdown={vi.fn()}
+      advisoryFindingCount={options.advisoryCount ?? null}
     />,
   );
 }
 
 describe("RevisionDiffView", () => {
-  it("explains there is nothing to compare with fewer than two rounds", () => {
-    renderView([version(1, "# 计划\n")]);
-    expect(screen.getByTestId("revision-diff-view")).toHaveTextContent(
-      "当前会话只有一个 artifact 轮次",
+  // F-38：单版本会话此前只渲染「暂无对比对象」空话术——plan 会话首轮（无第二轮）
+  // 的产物全文与评审结论在「轮次差异」视图里不可达。单版本分支改为渲染当前版
+  // 全文（markdown）+ review_verdict 只读标签 + 可选建议条数。
+  it("renders the single round full text with its review verdict and advisory count", async () => {
+    const load = vi.fn().mockResolvedValue("# Work Item Plan\n\n## WI-001 登录\n");
+    renderView(
+      [{ ...version(1), review_verdict: "pass", is_current: true }],
+      { load, advisoryCount: 3 },
+    );
+
+    const fullText = await screen.findByTestId("monaco-viewer");
+    expect(fullText).toHaveTextContent("# Work Item Plan");
+    expect(fullText).toHaveTextContent("WI-001 登录");
+    expect(load).toHaveBeenCalledWith(1);
+    expect(screen.getByTestId("revision-diff-single-version")).toBeVisible();
+    expect(screen.getByTestId("revision-diff-verdict")).toHaveTextContent("v1 审批：通过");
+    expect(screen.getByTestId("revision-diff-advisory-count")).toHaveTextContent(
+      "可选建议 3 条",
     );
   });
 
-  it("does not request markdown for a single artifact round", () => {
-    const load = vi.fn().mockResolvedValue("# only\n");
-    renderView([version(1, "")], { load });
-    expect(screen.getByTestId("revision-diff-view")).toHaveTextContent("当前会话只有一个 artifact 轮次");
+  it("renders the single round full text from the version summary without fetching", () => {
+    const load = vi.fn();
+    renderView([version(1, "# 计划全文\n目标 A\n")], { load });
+
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("计划全文");
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("keeps the single round verdict label while omitting an empty advisory count", () => {
+    renderView(
+      [{ ...version(1, "# 计划\n"), review_verdict: "revise" }],
+      { advisoryCount: null },
+    );
+
+    expect(screen.getByTestId("revision-diff-verdict")).toHaveTextContent(
+      "v1 审批：建议返修",
+    );
+    expect(screen.queryByTestId("revision-diff-advisory-count")).toBeNull();
+  });
+
+  it("explains there is no artifact round yet for a session without versions", () => {
+    renderView([]);
+    expect(screen.getByTestId("revision-diff-view")).toHaveTextContent(
+      "当前会话还没有 artifact 轮次",
+    );
+  });
+
+  it("surfaces a single round load failure inline without crashing", async () => {
+    const load = vi.fn().mockRejectedValue(new Error("boom"));
+    renderView([version(1)], { load });
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("加载失败");
+  });
+
+  it("prefers the page cache for the single round without fetching", () => {
+    const load = vi.fn();
+    renderView([version(1)], { load, cache: { 1: "# 缓存全文\n" } });
+
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("缓存全文");
     expect(load).not.toHaveBeenCalled();
   });
 

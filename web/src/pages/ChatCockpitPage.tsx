@@ -259,8 +259,14 @@ export function ChatCockpitPage({
     [workspaceWs.sendChoiceResponse],
   );
   const isPlanApprovalSession = selectedState?.workspaceType === "work_item_plan";
+  // F-38：plan 会话此前被排除在「产物审核」之外——Work Item Plan 产物（artifact_versions
+  // 单串 markdown）在 cockpit 里不可达。产物面板与页签扩到 work_item_plan；面板内的
+  // story/design 定稿动作位仍按 author 门判据（isStoryDesignAuthorConfirm）渲染，不随
+  // 页签可见性外溢（plan 门的相位不是 author_confirm）。
   const isArtifactReviewSession =
-    selectedState?.workspaceType === "story" || selectedState?.workspaceType === "design";
+    selectedState?.workspaceType === "story" ||
+    selectedState?.workspaceType === "design" ||
+    selectedState?.workspaceType === "work_item_plan";
   const chatInputRef = useRef<ChatInputBarHandle | null>(null);
   // v40 复验 #3：节点 detail 水合去重（见下方水合 effect）。
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
@@ -460,6 +466,11 @@ export function ChatCockpitPage({
     }
     chatInputRef.current?.prefill(`按以下 review 意见修订：\n\n${report}`);
     setDrilldownView("conversation");
+  }, []);
+  // F-38：门卡「查看产物」入口——切到产物审核页签（确认者就地看到待确认产物全文与
+  // 评审结论）。纯视图动作，无 WS/HTTP 帧；无产物版本时门卡不渲染该入口（fail-closed）。
+  const openArtifactView = useCallback(() => {
+    setDrilldownView("artifact");
   }, []);
   const actions = useMemo(
     () =>
@@ -1038,7 +1049,10 @@ export function ChatCockpitPage({
               onClose={() => setDrilldownView("conversation")}
               actions={
                 isCurrentSession &&
-                state.stage === "author_confirm" &&
+                // F-38：动作位属于 story/design author 门本身（不是「阶段名等于
+                // author_confirm」——plan 的 batch_confirm 门同样停在 author_confirm，
+                // 套用旧判据会把 story/design 的定稿面泄到 plan 门上）。
+                isStoryDesignAuthorConfirm(state) &&
                 gateActionBlockReason(state) === null ? (
                   <>
                     {latestReviewReport ? (
@@ -1102,6 +1116,11 @@ export function ChatCockpitPage({
               ref={chatListRef}
               entries={selectedState?.chatEntries ?? []}
               actions={takeoverSessionId === null ? actions : undefined}
+              onOpenArtifact={
+                takeoverSessionId === null && isArtifactReviewSession
+                  ? openArtifactView
+                  : undefined
+              }
               onPermissionResponse={
                 takeoverSessionId === null ? handlePermissionResponse : undefined
               }

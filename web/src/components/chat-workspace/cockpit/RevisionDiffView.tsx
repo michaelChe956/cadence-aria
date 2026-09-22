@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactVersionSummary, ReviewVerdictType } from "../../../api/types";
+import { MonacoViewer } from "../../shared/MonacoViewer";
 import {
   REVISION_DIFF_MAX_LINES,
   computeRevisionDiff,
@@ -12,6 +13,8 @@ export interface RevisionDiffViewProps {
   contentCache: Readonly<Record<number, string>>; // 版本号 -> markdown（含零个条目）
   loadVersionMarkdown: ((version: number) => Promise<string>) | null;
   onCacheVersionMarkdown: ((version: number, markdown: string) => void) | null;
+  /** F-38：最近一次 review 结论的可选建议条数（>0 才渲染标签）；null 即无结论。 */
+  advisoryFindingCount?: number | null;
 }
 
 // 「为什么改」：与 ReviewVerdictEntry 的 verdictLabel 同一套中文文案。
@@ -27,6 +30,7 @@ export function RevisionDiffView({
   contentCache,
   loadVersionMarkdown,
   onCacheVersionMarkdown,
+  advisoryFindingCount = null,
 }: RevisionDiffViewProps) {
   const [baseVersion, setBaseVersion] = useState<number | null>(null);
   const [targetVersion, setTargetVersion] = useState<number | null>(null);
@@ -44,11 +48,25 @@ export function RevisionDiffView({
   // （baseOptions / targetOptions），版本号唯一 ⇒ 基准与目标结构性不可能相同。
   const effectiveTarget = targetVersion ?? sortedVersions[0]?.version ?? null;
   const effectiveBase = baseVersion ?? sortedVersions[1]?.version ?? null;
+  const onlyVersion = sortedVersions.length === 1 ? sortedVersions[0] : null;
 
-  const markdownFor = (versionNo: number): string | undefined =>
-    contentCache[versionNo] ?? localCache[versionNo];
+  const markdownFor = (versionNo: number): string | undefined => {
+    // F-38：版本摘要自带 markdown（live artifact_update 落盘/单版本会话）时直接
+    // 用全文，与 ArtifactPane 同一优先级；空白摘要不算内容，仍走缓存/fetch。
+    const summaryMarkdown = versions.find(
+      (item) => item.version === versionNo,
+    )?.markdown;
+    if (typeof summaryMarkdown === "string" && summaryMarkdown.trim().length > 0) {
+      return summaryMarkdown;
+    }
+    return contentCache[versionNo] ?? localCache[versionNo];
+  };
 
-  const missingKey = [effectiveBase, effectiveTarget]
+  // 需要内容的是「当前展示的轮次」：单版本=该版本全文（F-38 全文视图），
+  // 多版本=对比的两轮。零版本无内容需求。
+  const missingKey = (
+    onlyVersion ? [onlyVersion.version] : [effectiveBase, effectiveTarget]
+  )
     .filter(
       (versionNo): versionNo is number =>
         versionNo !== null && markdownFor(versionNo) === undefined,
@@ -57,7 +75,7 @@ export function RevisionDiffView({
 
   useEffect(() => {
     setLoadError(null);
-    if (sortedVersions.length < 2 || !loadVersionMarkdown || !missingKey) return;
+    if (!loadVersionMarkdown || !missingKey) return;
     for (const versionNo of missingKey.split(",").map(Number)) {
       if (
         inFlightVersionsRef.current.has(versionNo) ||
@@ -73,7 +91,7 @@ export function RevisionDiffView({
         .catch(() => setLoadError(`轮次 v${versionNo} 加载失败`))
         .finally(() => inFlightVersionsRef.current.delete(versionNo));
     }
-  }, [missingKey, loadVersionMarkdown, onCacheVersionMarkdown, sortedVersions.length]);
+  }, [missingKey, loadVersionMarkdown, onCacheVersionMarkdown]);
 
   const diff = useMemo(() => {
     if (effectiveBase === null || effectiveTarget === null) {
@@ -85,7 +103,9 @@ export function RevisionDiffView({
       return null;
     }
     return computeRevisionDiff(oldMarkdown, newMarkdown);
-  }, [contentCache, localCache, effectiveBase, effectiveTarget]);
+    // F-38：markdownFor 现在还认版本摘要自带的 markdown（live artifact_update），
+    // 摘要变化必须重算 diff——versions 进依赖。
+  }, [contentCache, localCache, effectiveBase, effectiveTarget, versions]);
 
   // 摘要直接消费 T1 导出的 summary / truncated，不从 lines 重算。
   const hunks = useMemo(
@@ -171,9 +191,45 @@ export function RevisionDiffView({
         ) : null}
       </div>
 
-      {sortedVersions.length < 2 ? (
+      {onlyVersion ? (
+        // F-38：单轮次会话没有对比对象，但产物全文与评审结论正是确认者要看的东西
+        //（plan 会话首轮即停在门上）。此前只给「暂无对比对象」空话术。
+        <section
+          data-testid="revision-diff-single-version"
+          className="flex min-h-0 flex-col gap-2"
+        >
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]">
+              当前仅 v{onlyVersion.version}，无对比轮次
+            </span>
+            {advisoryFindingCount !== null && advisoryFindingCount > 0 ? (
+              <span
+                data-testid="revision-diff-advisory-count"
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+              >
+                可选建议 {advisoryFindingCount} 条
+              </span>
+            ) : null}
+          </div>
+          {loadError ? (
+            <p role="alert" className="text-sm text-[var(--aria-danger)]">
+              {loadError}
+            </p>
+          ) : markdownFor(onlyVersion.version) === undefined ? (
+            <p className="text-sm text-[var(--aria-ink-muted)]">正在加载轮次内容…</p>
+          ) : (
+            <div className="h-[420px] overflow-hidden rounded-md border border-[var(--aria-line)]">
+              <MonacoViewer
+                value={markdownFor(onlyVersion.version) ?? ""}
+                language="markdown"
+                height="100%"
+              />
+            </div>
+          )}
+        </section>
+      ) : sortedVersions.length === 0 ? (
         <p className="text-sm text-[var(--aria-ink-muted)]">
-          当前会话只有一个 artifact 轮次，暂无对比对象。
+          当前会话还没有 artifact 轮次。
         </p>
       ) : loadError ? (
         <p role="alert" className="text-sm text-[var(--aria-danger)]">

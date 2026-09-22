@@ -1,4 +1,4 @@
-import type { WorkspaceContentRef } from "./chat-entries";
+import type { ChatEntry, WorkspaceContentRef } from "./chat-entries";
 import type { WorkspaceWsState } from "./workspace-ws-store-types";
 
 export const selectWorkspaceHeaderState = (state: WorkspaceWsState) => ({
@@ -63,10 +63,8 @@ function formatReviewFindings(findings: ReviewFindingLike[]): string {
 }
 
 export function selectLatestReviewReport(state: WorkspaceWsState): string | undefined {
-  const entry = state.chatEntries
-    .filter((candidate) => candidate.type === "review_verdict")
-    .at(-1);
-  if (!entry || reviewIsSupersededByRevision(state, entry.node_id)) {
+  const entry = latestReviewVerdictEntry(state);
+  if (!entry) {
     return undefined;
   }
   const content = typeof entry.content === "string" ? entry.content.trim() : "";
@@ -90,6 +88,41 @@ export function selectLatestReviewReport(state: WorkspaceWsState): string | unde
   }
   parts.push(`[review_findings]\n${formatReviewFindings(findings)}`);
   return parts.join("\n\n");
+}
+
+/**
+ * F-38：最近一次 review 结论里的「可选建议」条数——单版本产物视图的评审结论标签
+ * 与 ReviewVerdictEntry 的「可选建议」分组同一判据（severity 非 blocking/must_fix）。
+ * 与 selectLatestReviewReport 同源同门：被完成的 revision 顶替即视为过期 → null；
+ * 无结论或结论没有 findings → null（渲染面据此不画零条标签，fail-closed 不猜）。
+ */
+export function selectLatestReviewAdvisoryCount(state: WorkspaceWsState): number | null {
+  const entry = latestReviewVerdictEntry(state);
+  if (!entry) {
+    return null;
+  }
+  const findings = Array.isArray(entry.metadata?.findings)
+    ? (entry.metadata?.findings as ReviewFindingLike[])
+    : [];
+  if (findings.length === 0) {
+    return null;
+  }
+  return findings.filter(
+    (finding) => finding.severity !== "blocking" && finding.severity !== "must_fix",
+  ).length;
+}
+
+/**
+ * 最新 review_verdict 条目；被其后的 completed revision 顶替时视为过期。
+ */
+function latestReviewVerdictEntry(state: WorkspaceWsState): ChatEntry | undefined {
+  const entry = state.chatEntries
+    .filter((candidate) => candidate.type === "review_verdict")
+    .at(-1);
+  if (!entry || reviewIsSupersededByRevision(state, entry.node_id)) {
+    return undefined;
+  }
+  return entry;
 }
 
 /**

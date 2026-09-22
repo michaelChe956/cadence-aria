@@ -15,6 +15,8 @@ interface ChatEntryListProps {
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   actions?: CockpitActionFacade;
+  /** F-38：门卡「查看产物」入口——切到产物视图（cockpit 产物审核页签）。 */
+  onOpenArtifact?: () => void;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
@@ -30,6 +32,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       onPermissionResponse,
       onChoiceResponse,
         actions,
+      onOpenArtifact,
       sessionId,
       contentCache,
       loadContent,
@@ -182,6 +185,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                     onPermissionResponse={onPermissionResponse}
                     onChoiceResponse={onChoiceResponse}
                     actions={actions}
+                    onOpenArtifact={onOpenArtifact}
                   />
                 </div>
               );

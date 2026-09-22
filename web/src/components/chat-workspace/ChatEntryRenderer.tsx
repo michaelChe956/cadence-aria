@@ -24,6 +24,8 @@ interface ChatEntryRendererProps {
     response: { selected_option_ids: string[]; free_text: string | null },
   ) => void;
   actions?: CockpitActionFacade;
+  /** F-38：门卡「查看产物」入口——切到产物视图（cockpit 产物审核页签）。 */
+  onOpenArtifact?: () => void;
 }
 
 export function ChatEntryRenderer({
@@ -31,6 +33,7 @@ export function ChatEntryRenderer({
   onPermissionResponse,
   onChoiceResponse,
   actions,
+  onOpenArtifact,
 }: ChatEntryRendererProps) {
   switch (entry.type) {
     case "context_note":
@@ -55,7 +58,13 @@ export function ChatEntryRenderer({
       // 退役留档（T5/REQ-RET-02）：review_decision 路径动作面已删，verdict 仅只读呈现。
       return <ReviewVerdictEntry entry={entry} />;
     case "gate_prompt":
-      return <GatePromptEntry entry={entry} actions={actions} />;
+      return (
+        <GatePromptEntry
+          entry={entry}
+          actions={actions}
+          onOpenArtifact={onOpenArtifact}
+        />
+      );
     case "human_decision":
       return <HumanDecisionEntry entry={entry} />;
     case "stage_change":

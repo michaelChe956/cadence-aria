@@ -11,6 +11,7 @@ import {
   selectPlanRepairPanel,
 } from "../../../state/plan-approval-projection";
 import type { WorkspaceWsState } from "../../../state/workspace-ws-store-types";
+import { selectLatestReviewAdvisoryCount } from "../../../state/workspace-ws-selectors";
 import { ContractChecklistView } from "./ContractChecklistView";
 import { PlanRepairReadOnlyPanel } from "./PlanRepairReadOnlyPanel";
 import { RevisionDiffView } from "./RevisionDiffView";
@@ -117,6 +118,9 @@ export function PlanApprovalPanel({
             contentCache={artifactContentCache}
             loadVersionMarkdown={loadVersionMarkdown}
             onCacheVersionMarkdown={onCacheVersionMarkdown}
+            // F-38：单版本（无第二轮）时把最近一次 review 结论的可选建议条数
+            // 一并带进「轮次差异」视图，与 verdict 标签同屏。
+            advisoryFindingCount={selectLatestReviewAdvisoryCount(state)}
           />
         ) : activeTab === "checklist" ? (
           <ContractChecklistView

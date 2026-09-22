@@ -250,13 +250,28 @@ describe("ChatCockpitPage", () => {
       expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
     });
 
-    it("keeps the conversation tab for non story/design sessions", () => {
+    // F-38：plan 会话此前被排除在「产物审核」页签之外（work_item_plan 不可见自己的
+    // Work Item Plan 产物）；现在 plan 与 story/design 一样有产物页签，动作位仍只属于
+    // story/design author 门。
+    it("opens the artifact tab for work item plan sessions", () => {
       useWorkspaceStore.setState({ stage: "author_confirm", workspaceType: "work_item_plan" });
 
       renderCockpitWith(mockWorkspaceWs());
 
-      expect(screen.queryByTestId("cockpit-artifact-review-tab")).toBeNull();
+      expect(screen.getByTestId("cockpit-artifact-review-tab")).toBeVisible();
       expect(screen.getByTestId("cockpit-conversation-tab")).toBeVisible();
+    });
+
+    it("keeps the story/design finalize actions out of the plan artifact panel", async () => {
+      const user = userEvent.setup();
+      useWorkspaceStore.setState({ stage: "author_confirm", workspaceType: "work_item_plan" });
+
+      renderCockpitWith(mockWorkspaceWs());
+      await user.click(screen.getByTestId("cockpit-artifact-review-tab"));
+
+      const panel = screen.getByTestId("artifact-review-panel");
+      expect(within(panel).queryByRole("button", { name: "确认定稿" })).toBeNull();
+      expect(within(panel).queryByRole("button", { name: "确认并评审" })).toBeNull();
     });
 
     it("keeps finalize actions hidden while observing another session at author confirm", async () => {

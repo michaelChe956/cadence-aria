@@ -1,4 +1,4 @@
-import { Check } from "lucide-react";
+import { Check, FileText } from "lucide-react";
 import { useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import {
@@ -17,12 +17,22 @@ import { ConfirmTwiceButton } from "../cockpit/ConfirmTwiceButton";
 import { GateFeedbackEditor } from "../cockpit/GateFeedbackEditor";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
+/** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
+const GATE_ARTIFACT_LABELS: Record<string, string> = {
+  work_item_plan: "Work Item Plan",
+  story: "Story Spec",
+  design: "Design Spec",
+};
+
 export function GatePromptEntry({
   entry,
   actions,
+  onOpenArtifact,
 }: {
   entry: ChatEntry;
   actions?: CockpitActionFacade;
+  /** F-38：切到产物视图（cockpit 产物审核页签）；缺省即不渲染产物入口（legacy 页）。 */
+  onOpenArtifact?: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
   const summary = summaryFromEntry(entry);
@@ -32,6 +42,21 @@ export function GatePromptEntry({
   const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
   const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
+  // F-38：确认者必须知道在确认什么——门卡说明区带出待确认产物版本与入口。
+  // 没有产物版本即不渲染（fail-closed 不猜）；版本取 is_current，缺省退最新一轮。
+  const workspaceType = useWorkspaceStore((state) => state.workspaceType);
+  const pendingArtifactVersion = useWorkspaceStore((state) => {
+    const versions = state.artifactVersions ?? [];
+    if (versions.length === 0) {
+      return null;
+    }
+    return (
+      versions.find((version) => version.is_current === true) ??
+      versions.reduce((latest, version) =>
+        version.version > latest.version ? version : latest,
+      )
+    );
+  });
   const confirmLabel =
     requiresTriage
       ? "确认当前版本"
@@ -92,6 +117,28 @@ export function GatePromptEntry({
       <div className="space-y-3">
         <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
         {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
+        {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
+          <div
+            data-testid="gate-artifact-context"
+            className="flex flex-wrap items-center gap-2 text-xs text-[var(--aria-ink-muted)]"
+          >
+            <span>
+              待确认产物：
+              {GATE_ARTIFACT_LABELS[workspaceType ?? ""]
+                ? `${GATE_ARTIFACT_LABELS[workspaceType ?? ""]} `
+                : ""}
+              v{pendingArtifactVersion.version}
+            </span>
+            <button
+              type="button"
+              data-testid="gate-artifact-open"
+              onClick={onOpenArtifact}
+              className="inline-flex min-h-9 items-center gap-1 rounded-md border border-[var(--aria-line-strong)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            >
+              <FileText className="h-3.5 w-3.5" aria-hidden="true" /> 查看产物
+            </button>
+          </div>
+        ) : null}
         {gateTrigger || remainingBudget !== null ? (
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {gateTrigger ? (

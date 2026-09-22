@@ -107,6 +107,103 @@ describe("GatePromptEntry actionability", () => {
     expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
   });
 
+  // F-38：确认卡此前只说「等待人工确认」——确认者不知道在确认什么。有产物版本时
+  // 说明区露出「待确认产物：<种类> vN」+「查看产物」入口；无版本则不猜（fail-closed）。
+  describe("F-38 pending artifact entry", () => {
+    function artifactVersion(versionNo: number, isCurrent: boolean) {
+      return {
+        version: versionNo,
+        generated_by: "pi" as const,
+        reviewed_by: null,
+        review_verdict: null,
+        confirmed_by: null,
+        is_current: isCurrent,
+        created_at: "2026-09-22T16:02:09Z",
+        source_node_id: `timeline_node_00${versionNo}`,
+      };
+    }
+
+    it("names the pending artifact and opens the artifact view from the gate card", async () => {
+      const gateActions = actions();
+      const onOpenArtifact = vi.fn();
+      const user = userEvent.setup();
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        artifactVersions: [artifactVersion(1, false), artifactVersion(2, true)],
+      });
+
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null)}
+          actions={gateActions}
+          onOpenArtifact={onOpenArtifact}
+        />,
+      );
+
+      expect(screen.getByTestId("gate-artifact-context")).toHaveTextContent(
+        "待确认产物：Work Item Plan v2",
+      );
+      await user.click(screen.getByRole("button", { name: "查看产物" }));
+      expect(onOpenArtifact).toHaveBeenCalledOnce();
+      expect(gateActions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the latest version when no version is flagged current", () => {
+      useWorkspaceStore.setState({
+        workspaceType: "story",
+        artifactVersions: [artifactVersion(1, false), artifactVersion(2, false)],
+      });
+
+      render(
+        <GatePromptEntry entry={gateEntry(null)} actions={actions()} onOpenArtifact={vi.fn()} />,
+      );
+
+      expect(screen.getByTestId("gate-artifact-context")).toHaveTextContent(
+        "待确认产物：Story Spec v2",
+      );
+    });
+
+    it("renders no artifact entry when the session has no artifact version", () => {
+      useWorkspaceStore.setState({ workspaceType: "work_item_plan", artifactVersions: [] });
+
+      render(
+        <GatePromptEntry entry={gateEntry(null)} actions={actions()} onOpenArtifact={vi.fn()} />,
+      );
+
+      expect(screen.queryByTestId("gate-artifact-context")).toBeNull();
+      expect(screen.queryByRole("button", { name: "查看产物" })).toBeNull();
+    });
+
+    it("keeps the artifact entry off cards that have no artifact view to open", () => {
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        artifactVersions: [artifactVersion(1, true)],
+      });
+
+      render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+      expect(screen.queryByTestId("gate-artifact-context")).toBeNull();
+    });
+
+    it("drops the pending artifact line once the gate is resolved", () => {
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        artifactVersions: [artifactVersion(1, true)],
+      });
+
+      render(
+        <GatePromptEntry
+          entry={{ ...gateEntry(null), resolved: true, resolution: "confirm" }}
+          actions={actions()}
+          onOpenArtifact={vi.fn()}
+        />,
+      );
+
+      expect(screen.queryByTestId("gate-artifact-context")).toBeNull();
+      expect(screen.getByText("已确认")).toBeVisible();
+    });
+  });
+
   it("keeps typed gate controls wired to the supplied facade when no block reason exists", async () => {
     const gateActions = actions();
     const user = userEvent.setup();

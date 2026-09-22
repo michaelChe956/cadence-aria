@@ -174,6 +174,148 @@ describe("ChatCockpitPage", () => {
       expect(screen.getByTestId("cockpit-plan-approval-tab")).toBeVisible();
     });
 
+    // F-38：plan 会话此前没有「产物审核」页签——Work Item Plan 全文（artifact_versions
+    // 单串 markdown）在 cockpit 里不可达；PlanApprovalPanel 的数据源是 plan-repair
+    // 链路，普通 SC 会话空转。产物页签扩到 work_item_plan（复用 ArtifactReviewPanel）。
+    function planArtifactVersion(versionNo: number, isCurrent = true) {
+      return {
+        version: versionNo,
+        generated_by: "pi" as const,
+        reviewed_by: "kimi_code" as const,
+        review_verdict: "pass" as const,
+        confirmed_by: null,
+        is_current: isCurrent,
+        created_at: "2026-09-22T16:02:09Z",
+        source_node_id: `timeline_node_00${versionNo}`,
+      };
+    }
+
+    it("opens the artifact review tab for plan sessions", async () => {
+      const user = userEvent.setup();
+      enterPlanSession();
+      useWorkspaceStore.setState({
+        artifactVersions: [planArtifactVersion(1)],
+        artifact: "# Work Item Plan\n## WI-001 登录\n",
+      });
+      // 刷新/重建后的 artifact_version_summaries 不带 markdown（store 快照契约）——
+      // 全文经版本端点取回，与 story/design 产物面板同一通路。
+      vi.mocked(fetchWorkspaceArtifactVersion).mockReset();
+      vi.mocked(fetchWorkspaceArtifactVersion).mockResolvedValue({
+        version: 1,
+        markdown: "# Work Item Plan\n## WI-001 登录\n",
+      });
+
+      renderCockpit();
+
+      const tab = screen.getByTestId("cockpit-artifact-review-tab");
+      expect(tab).toBeVisible();
+      await user.click(tab);
+
+      const panel = screen.getByTestId("artifact-review-panel");
+      expect(panel).toBeVisible();
+      // 产物全文（plan 是整块 markdown）经 ArtifactPane 渲染。
+      expect(await within(panel).findByTestId("monaco-viewer")).toHaveTextContent(
+        "Work Item Plan",
+      );
+      expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("session_001", 1);
+    });
+
+    it("keeps the plan artifact panel free of story/design finalize actions", async () => {
+      const user = userEvent.setup();
+      enterPlanSession();
+      useWorkspaceStore.setState({
+        artifactVersions: [planArtifactVersion(1)],
+        artifact: "# Work Item Plan\n",
+      });
+
+      renderCockpit();
+      await user.click(screen.getByTestId("cockpit-artifact-review-tab"));
+
+      // story/design author 门的定稿动作面不得泄入 plan 门（相位判据不是
+      // author_confirm，而是 story/design author 门本身）。
+      const panel = screen.getByTestId("artifact-review-panel");
+      expect(within(panel).queryByRole("button", { name: "确认定稿" })).toBeNull();
+      expect(within(panel).queryByRole("button", { name: "确认并评审" })).toBeNull();
+      expect(within(panel).queryByRole("button", { name: "采纳 Review 意见" })).toBeNull();
+    });
+
+    it("shows the plan full text and review conclusion for a single artifact round", async () => {
+      const user = userEvent.setup();
+      enterPlanSession();
+      useWorkspaceStore.setState({
+        artifactVersions: [planArtifactVersion(1)],
+        chatEntries: [
+          {
+            id: "review:1",
+            type: "review_verdict",
+            role: "reviewer",
+            content: "计划可确认",
+            timestamp: "2026-09-22T16:03:00Z",
+            node_id: "timeline_node_003",
+            metadata: {
+              verdict: "pass",
+              summary: "计划可确认",
+              findings: [
+                { severity: "suggestion", message: "建议一" },
+                { severity: "suggestion", message: "建议二" },
+                { severity: "suggestion", message: "建议三" },
+              ],
+            },
+          },
+        ],
+      });
+      vi.mocked(fetchWorkspaceArtifactVersion).mockReset();
+      vi.mocked(fetchWorkspaceArtifactVersion).mockResolvedValue({
+        version: 1,
+        markdown: "# Work Item Plan\n## WI-001 登录\n",
+      });
+
+      renderCockpit();
+      await user.click(screen.getByTestId("cockpit-plan-approval-tab"));
+
+      // 单版本（无第二轮）此前只有「暂无对比对象」空话术——现在给全文+评审结论。
+      expect(screen.getByTestId("revision-diff-single-version")).toBeVisible();
+      expect(screen.getByTestId("revision-diff-verdict")).toHaveTextContent(
+        "v1 审批：通过",
+      );
+      expect(screen.getByTestId("revision-diff-advisory-count")).toHaveTextContent(
+        "可选建议 3 条",
+      );
+      expect(await screen.findByTestId("monaco-viewer")).toHaveTextContent(
+        "WI-001 登录",
+      );
+      expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("session_001", 1);
+    });
+
+    it("switches to the artifact view from the pending gate card", async () => {
+      const user = userEvent.setup();
+      enterPlanSession();
+      useWorkspaceStore.setState({
+        artifactVersions: [planArtifactVersion(1)],
+        artifact: "# Work Item Plan\n",
+        chatEntries: [
+          {
+            id: "node_gate:gate-prompt",
+            type: "gate_prompt",
+            role: "system",
+            content: "等待人工确认",
+            timestamp: "2026-09-22T16:04:00Z",
+            metadata: { action_facade: "legacy" },
+          },
+        ],
+      });
+
+      renderCockpit();
+
+      const card = screen.getByTestId("gate-prompt-entry");
+      expect(within(card).getByTestId("gate-artifact-context")).toHaveTextContent(
+        "待确认产物：Work Item Plan v1",
+      );
+      await user.click(within(card).getByRole("button", { name: "查看产物" }));
+      expect(screen.getByTestId("artifact-review-panel")).toBeVisible();
+      expect(screen.queryByTestId("cockpit-conversation-flow-list")).toBeNull();
+    });
+
     it("swaps the drilldown zone to the plan approval panel and back", async () => {
       const user = userEvent.setup();
       enterPlanSession();
@@ -361,8 +503,10 @@ describe("ChatCockpitPage", () => {
 
       await user.click(await screen.findByTestId("cockpit-plan-approval-tab"));
       expect(screen.getByTestId("cockpit-plan-approval-panel")).toBeVisible();
+      // 该观测会话没有 artifact 轮次（artifact_versions: []）——单版本/零版本分支
+      // 如实说明，不白屏（F-38 起零轮次与单轮次是两条不同话术）。
       expect(screen.getByTestId("revision-diff-view")).toHaveTextContent(
-        "当前会话只有一个 artifact 轮次，暂无对比对象。",
+        "当前会话还没有 artifact 轮次",
       );
 
       await user.click(screen.getByTestId("plan-approval-tab-checklist"));
