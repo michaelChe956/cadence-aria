@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactVersionSummary, ReviewVerdictType } from "../../../api/types";
 import { MonacoViewer } from "../../shared/MonacoViewer";
+import { REVIEW_VERDICT_LABELS } from "../review-verdict-labels";
 import {
   REVISION_DIFF_MAX_LINES,
   computeRevisionDiff,
@@ -17,12 +18,8 @@ export interface RevisionDiffViewProps {
   advisoryFindingCount?: number | null;
 }
 
-// 「为什么改」：与 ReviewVerdictEntry 的 verdictLabel 同一套中文文案。
-const REVIEW_VERDICT_LABELS: Readonly<Record<ReviewVerdictType, string>> = {
-  pass: "通过",
-  revise: "建议返修",
-  needs_human: "需要人工确认",
-};
+// 「为什么改」：与 ReviewVerdictEntry 的 verdictLabel 同一套中文文案（共享常量，见
+// review-verdict-labels.ts）。
 
 export function RevisionDiffView({
   sessionId,

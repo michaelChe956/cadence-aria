@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactVersionSummary } from "../../state/workspace-ws-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
+import { REVIEW_VERDICT_LABELS } from "./review-verdict-labels";
 
 interface ArtifactPaneProps {
   artifactVersions: ArtifactVersionSummary[];
@@ -227,6 +228,18 @@ export function ArtifactPane({
               )}
             </select>
           </label>
+          {/* F-38 fix2（controller 二次实测反例，可达性）：评审结论徽章常显在头部——
+              单版本会话「显示 Diff」disabled（无 previous）时 RevisionDiffView 不挂载，
+              徽章若只在那里就不可达；数据源=所选版本的 review_verdict（多版本时跟随
+              版本下拉），无结论不渲染。 */}
+          {selected?.review_verdict != null ? (
+            <span
+              data-testid="artifact-version-verdict"
+              className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+            >
+              审批：{REVIEW_VERDICT_LABELS[selected.review_verdict]}
+            </span>
+          ) : null}
           <button
             type="button"
             onClick={() => setShowDiff((value) => !value)}

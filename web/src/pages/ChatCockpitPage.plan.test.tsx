@@ -217,6 +217,11 @@ describe("ChatCockpitPage", () => {
       expect(await within(panel).findByTestId("monaco-viewer")).toHaveTextContent(
         "Work Item Plan",
       );
+      // F-38 fix2（可达性）：单版本会话 Diff 按钮 disabled、RevisionDiffView 不挂载——
+      // 评审结论必须常显在产物面板头部（默认面）。
+      expect(within(panel).getByTestId("artifact-version-verdict")).toHaveTextContent(
+        "审批：通过",
+      );
       expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("session_001", 1);
     });
 

@@ -304,6 +304,40 @@ describe("ArtifactPane", () => {
     expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("旧内容");
   });
 
+  // F-38 fix2（controller 二次实测反例，可达性）：单版本会话「显示 Diff」按钮 disabled
+  // （无 previous），RevisionDiffView 不挂载——评审结论徽章必须常显在 ArtifactPane
+  // 头部（默认面=版本下拉+全文），数据源 selected.review_verdict。
+  it("shows the selected version's review verdict next to the version chip", () => {
+    render(
+      <ArtifactPane
+        artifactVersions={[
+          { ...artifactVersionSummary(1), review_verdict: "revise" },
+          { ...artifactVersionSummary(2), review_verdict: "pass", is_current: true },
+        ]}
+        artifact={null}
+      />,
+    );
+
+    expect(screen.getByTestId("artifact-version-verdict")).toHaveTextContent("审批：通过");
+
+    // 多版本：徽章跟随版本下拉切换（所选版本的结论）。
+    fireEvent.change(screen.getByLabelText("Artifact 版本"), { target: { value: "1" } });
+
+    expect(screen.getByTestId("artifact-version-verdict")).toHaveTextContent("审批：建议返修");
+  });
+
+  it("omits the verdict badge when the selected version has no review verdict", () => {
+    render(
+      <ArtifactPane
+        artifactVersions={[artifactVersionSummary(1)]}
+        artifact={null}
+      />,
+    );
+
+    expect(screen.getByTestId("artifact-pane")).toBeVisible();
+    expect(screen.queryByTestId("artifact-version-verdict")).toBeNull();
+  });
+
   it("shows a Monaco diff and can collapse", () => {
     render(<ArtifactPane artifactVersions={artifactVersions()} artifact={null} />);
 
