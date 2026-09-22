@@ -1011,6 +1011,67 @@ describe("workspace ws store gate rebuild", () => {
 
     expect(selectCockpitInbox(useWorkspaceStore.getState())).toHaveLength(0);
   });
+
+  // REQ-PCG-01/02（plan-compile-gate-visibility）：批次确认与 compile recovery 是
+  // durable node 门——重建（刷新/重连）不得把它们铸成 typed/legacy 决策卡：卡面
+  // 带 `action_facade=typed` 时会露出 feedback 编辑器与 confirm/abandon 三命令动作，
+  // 而 REQ-RET-02/REQ-CG-02 明确禁止把两新门映射进该面。两新门只经 Cockpit 收件箱
+  // 与流程投影呈现。
+  it.each([
+    ["work_item_batch_confirm", "author_confirm"],
+    ["work_item_plan_compile_recovery", "human_confirm"],
+  ] as const)(
+    "does not mint a typed decision card for the %s node gate",
+    (nodeType, stage) => {
+      useWorkspaceStore.setState({
+        sessionId: "session_node_gate",
+        stage,
+        workspaceType: "work_item_plan",
+        flowKind: "single_candidate",
+        sessionStatus: "waiting_for_human",
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+        chatEntries: [],
+        timelineNodes: [
+          {
+            node_id: "node_gate",
+            node_type: nodeType,
+            agent: null,
+            stage,
+            round: null,
+            status: "active",
+            title: nodeType,
+            summary: "Final Compile 需要恢复：provider timeout",
+            started_at: "2026-09-22T00:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: null,
+              review_rounds: 1,
+            },
+            retry: null,
+          },
+        ],
+      });
+
+      useWorkspaceStore.getState().rebuildChatEntries();
+
+      expect(
+        useWorkspaceStore
+          .getState()
+          .chatEntries.filter((entry) => entry.type === "gate_prompt"),
+      ).toHaveLength(0);
+      // 门本身仍可见——可见面收敛到收件箱，而不是丢失。
+      expect(
+        selectCockpitInbox(useWorkspaceStore.getState()).filter(
+          (item) => item.kind === "gate",
+        ),
+      ).toHaveLength(1);
+    },
+  );
 });
 
 function buildSessionState(sessionId: string) {

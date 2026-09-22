@@ -533,6 +533,14 @@ export function buildGatePromptEntry(
   if (!projection) {
     return null;
   }
+  // REQ-PCG-01/02（plan-compile-gate-visibility）：批次确认与 compile recovery 是
+  // durable node 门，本函数构造的是 typed/legacy 决策卡（feedback 编辑器 +
+  // confirm/abandon 三命令面）——不得把两新门映射进该面（REQ-RET-02/REQ-CG-02）。
+  // 两新门的可见性与动作面在 Cockpit 收件箱与流程投影
+  // （selectCockpitInbox / selectCockpitFlow），此处保持改前行为（无投影即无卡）。
+  if (projection.kind !== "human_gate") {
+    return null;
+  }
 
   const gatePromptNode =
     findLatestNodeOfType(state.timelineNodes, "human_confirm") ?? state.timelineNodes.at(-1);
