@@ -607,4 +607,71 @@ describe("ChatCockpitPage", () => {
       expect(workspaceWs.sendWorkItemPlanCompileRecoveryAction).not.toHaveBeenCalled();
     });
   });
+
+  // REQ-PCG-02：recovery 门没有 confirm 语义——门开着时 confirm 热键/门面若落到
+  // WS confirm 帧，SC HumanConfirm 的 Approval 臂会开启第二个 compile
+  // （compile.rs enter_policy_valid_work_item_plan_compile）。确认入口必须 fail-closed。
+  describe("REQ-PCG-02 recovery gate confirm routing", () => {
+    function recoveryGateSession() {
+      useWorkspaceStore.setState({
+        sessionId: "session_001",
+        stage: "human_confirm",
+        workspaceType: "work_item_plan",
+        flowKind: "single_candidate",
+        sessionStatus: "waiting_for_human",
+        singleCandidatePhase: null,
+        humanGateTurn: null,
+        humanGateSnapshot: null,
+        humanGateClosure: null,
+        providers: { author: "pi", reviewer: null },
+        artifact: null,
+        chatEntries: [],
+        timelineNodes: [
+          timelineNode({
+            node_id: "node_recovery",
+            node_type: "work_item_plan_compile_recovery",
+            stage: "human_confirm",
+            status: "active",
+            title: "WorkItemPlan Compile Recovery",
+            summary: "Final Compile 需要恢复：provider timeout",
+          }),
+        ],
+      });
+      useWorkspaceStore.getState().rebuildChatEntries();
+    }
+
+    it("keeps the confirm hotkey off the WS confirm frame while the recovery gate is open", () => {
+      recoveryGateSession();
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+
+      const inbox = screen.getByTestId("cockpit-inbox");
+      expect(within(inbox).getByText("Final Compile 恢复")).toBeVisible();
+
+      fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
+
+      expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+      expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();
+      expect(workspaceWs.sendHumanGateFeedback).not.toHaveBeenCalled();
+      expect(workspaceWs.sendAdvance).not.toHaveBeenCalled();
+      expect(workspaceWs.sendWorkItemPlanCompileRecoveryAction).not.toHaveBeenCalled();
+    });
+
+    it("still submits the recovery action from the gate row (the confirm block is not a blanket disable)", async () => {
+      const user = userEvent.setup();
+      recoveryGateSession();
+      const workspaceWs = mockWorkspaceWs();
+      renderCockpitWith(workspaceWs);
+
+      await user.click(
+        within(screen.getByTestId("cockpit-inbox")).getByRole("button", { name: "继续" }),
+      );
+
+      expect(workspaceWs.sendWorkItemPlanCompileRecoveryAction).toHaveBeenCalledWith(
+        "continue",
+        undefined,
+      );
+      expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -402,12 +402,24 @@ export function ChatCockpitPage({
     }
     return sendHttpConfirm({ withReview: false, detail: "http-confirm-batch" });
   }, [sendHttpConfirm]);
-  // 门面 confirm 统一入口：story/design author 门与 work_item_plan 整组 Draft 门走
-  // HTTP，其余（SC typed/legacy human_confirm）走既有 WS confirm 帧；withReview 仅对
-  // author 门有意义（F-31 抽屉「确认并评审」），WS 通路忽略该参。
+  // 门面 confirm 统一入口（门面 confirm/confirmReview、快捷键、批量确认共用本入口）：
+  // story/design author 门与 work_item_plan 整组 Draft 门走 HTTP，其余（SC typed/
+  // legacy human_confirm）走既有 WS confirm 帧；withReview 仅对 author 门有意义
+  // （F-31 抽屉「确认并评审」），WS 通路忽略该参。
   const routeGateConfirm = useCallback((withReview = false): boolean => {
     const current = useWorkspaceStore.getState();
-    if (gateKindOf(current) === "batch_confirm" || isStoryDesignAuthorConfirm(current)) {
+    const kind = gateKindOf(current);
+    if (kind === "batch_confirm") {
+      return confirmHttpGate(withReview);
+    }
+    // REQ-PCG-02：compile recovery 门没有 confirm 语义——WS confirm 帧在 SC
+    // HumanConfirm 会命中 Approval 臂并开启第二个 compile
+    // （compile.rs enter_policy_valid_work_item_plan_compile），故确认入口对整个
+    // recovery 门 fail-closed（recovery 自身动作走 recoverCompile 的独立通道）。
+    if (kind === "compile_recovery") {
+      return false;
+    }
+    if (isStoryDesignAuthorConfirm(current)) {
       return confirmHttpGate(withReview);
     }
     return workspaceWs.sendConfirmGate();
