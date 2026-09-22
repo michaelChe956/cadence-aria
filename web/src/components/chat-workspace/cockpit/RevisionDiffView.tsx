@@ -175,15 +175,20 @@ export function RevisionDiffView({
             ))}
           </select>
         </label>
-        {verdictChips.map((chip) => (
-          <span
-            key={chip.version}
-            data-testid="revision-diff-verdict"
-            className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
-          >
-            v{chip.version} 审批：{REVIEW_VERDICT_LABELS[chip.verdict]}
-          </span>
-        ))}
+        {/* F-38 fix1（controller 实测反例）：verdictChips 由 effectiveBase/Target 派生，
+            单版本模式没有对比对象，徽章不归表头——归属下方单版本区块（从版本记录的
+            review_verdict 直接渲染），故单版本模式表头不渲染对比徽章。 */}
+        {onlyVersion
+          ? null
+          : verdictChips.map((chip) => (
+              <span
+                key={chip.version}
+                data-testid="revision-diff-verdict"
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+              >
+                v{chip.version} 审批：{REVIEW_VERDICT_LABELS[chip.verdict]}
+              </span>
+            ))}
         {sessionId ? (
           <span className="aria-mono text-[11px] text-[var(--aria-ink-muted)]">
             {sessionId}
@@ -202,6 +207,17 @@ export function RevisionDiffView({
             <span className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]">
               当前仅 v{onlyVersion.version}，无对比轮次
             </span>
+            {/* F-38 fix1：评审结论是持久结论，从版本记录直接渲染——不依赖对比表头的
+                effectiveBase/Target 派生（单版本模式两者不构成对比对）。无结论不画。 */}
+            {onlyVersion.review_verdict != null ? (
+              <span
+                data-testid="revision-diff-verdict"
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+              >
+                v{onlyVersion.version} 审批：
+                {REVIEW_VERDICT_LABELS[onlyVersion.review_verdict]}
+              </span>
+            ) : null}
             {advisoryFindingCount !== null && advisoryFindingCount > 0 ? (
               <span
                 data-testid="revision-diff-advisory-count"

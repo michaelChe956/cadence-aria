@@ -76,6 +76,25 @@ describe("RevisionDiffView", () => {
     expect(load).not.toHaveBeenCalled();
   });
 
+  it("renders the single round verdict badge inside the single-version section", () => {
+    renderView([{ ...version(1, "# 计划\n"), review_verdict: "pass" }]);
+
+    const section = screen.getByTestId("revision-diff-single-version");
+    const badge = within(section).getByTestId("revision-diff-verdict");
+    expect(badge).toHaveTextContent("v1 审批：通过");
+    // 单版本模式只有这一枚 verdict 徽章（对比表头的徽章由 effectiveBase/Target 派生，
+    // 单版本下无意义——徽章归属单版本区块本身）。
+    expect(screen.getAllByTestId("revision-diff-verdict")).toHaveLength(1);
+  });
+
+  it("omits the single round verdict badge when the version has no review verdict", () => {
+    renderView([version(1, "# 计划\n")]);
+
+    expect(screen.getByTestId("revision-diff-single-version")).toBeVisible();
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("计划");
+    expect(screen.queryByTestId("revision-diff-verdict")).toBeNull();
+  });
+
   it("keeps the single round verdict label while omitting an empty advisory count", () => {
     renderView(
       [{ ...version(1, "# 计划\n"), review_verdict: "revise" }],
