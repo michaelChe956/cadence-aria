@@ -169,7 +169,7 @@ export function IssueLifecycleDetail({
     <section
       role="region"
       aria-label="Issue 生命周期详情"
-      className="flex min-h-0 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+      className="flex min-h-0 min-w-0 w-full flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
     >
       <div className="sticky top-0 z-10 shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3">
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
