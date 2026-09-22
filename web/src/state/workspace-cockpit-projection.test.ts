@@ -7,6 +7,7 @@ import {
   formatFlowElapsed,
   gateActionBlockCopy,
   gateActionBlockReason,
+  gateKindOf,
   gateTerminateBlockReason,
   isStaleDriverLeaseItem,
   selectCockpitFlow,
@@ -713,5 +714,260 @@ describe("F-20 story/design author_confirm gate projection", () => {
 
     useWorkspaceStore.setState({ reviewerEnabled: false });
     expect(selectGateProjection(useWorkspaceStore.getState())?.review_available).toBe(false);
+  });
+});
+
+// REQ-PCG-01（plan-compile-gate-visibility）：整组 Draft 确认门——compile 成功与
+// compile 失败转 batch-confirm 两条路径都停在 `work_item_batch_confirm`，Cockpit
+// 必须把它投影成稳定、去重、可诊断的门，而不是要求用户切到 legacy 页面。
+describe("REQ-PCG-01 batch confirm gate projection", () => {
+  installWorkspaceStoreTestHooks();
+
+  const batchNode = timelineNode({
+    node_id: "node_batch",
+    node_type: "work_item_batch_confirm",
+    stage: "author_confirm",
+    status: "active",
+    title: "Work Item Batch 确认",
+  });
+
+  function batchSession(overrides: Partial<WorkspaceWsState> = {}) {
+    useWorkspaceStore.setState({
+      sessionId: "session_batch",
+      stage: "author_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [batchNode],
+      ...overrides,
+    });
+  }
+
+  it("projects the batch node as a node-keyed gate and one inbox item", () => {
+    batchSession();
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "node:node_batch",
+      kind: "batch_confirm",
+      stage: "author_confirm",
+      flow_kind: "single_candidate",
+      status: "open",
+      turn_id: null,
+      turn: null,
+      closed: null,
+      triage: false,
+      action_block_reason: null,
+      terminate_block_reason: null,
+    });
+
+    const items = selectCockpitInbox(useWorkspaceStore.getState());
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: "gate:node:node_batch",
+      kind: "gate",
+      severity: 1,
+      title: "确认整组 Work Item Draft",
+      source: "gate",
+      gate: expect.objectContaining({ kind: "batch_confirm", key: "node:node_batch" }),
+    });
+    expect(items[0]?.summary).toContain("等待整组 Work Item Draft 确认");
+  });
+
+  // REQ-PCG-03：缺少 durable 凭据（flow/stage 与门不符）时不认门、不猜动作。
+  it("stays gateless without the durable single_candidate/author_confirm credentials", () => {
+    batchSession({ flowKind: "legacy" });
+    const state = useWorkspaceStore.getState();
+
+    expect(gateKindOf(state)).toBe("human_gate");
+    expect(selectGateProjection(state)).toBeNull();
+    expect(gateActionBlockReason(state)).toBe("terminal_stage");
+  });
+
+  it("keeps one item with the same key across repeated frames and a reconnect", () => {
+    batchSession();
+    const first = selectCockpitInbox(useWorkspaceStore.getState());
+
+    // 重复帧：同一 durable node 再 upsert（时间戳可漂移，身份不变）。
+    useWorkspaceStore.getState().setTimelineNodesForTest([
+      { ...batchNode, started_at: "2026-09-22T00:10:00Z" },
+    ]);
+    const repeated = selectCockpitInbox(useWorkspaceStore.getState());
+
+    expect(repeated).toHaveLength(1);
+    expect(repeated[0]?.id).toBe("gate:node:node_batch");
+    expect(repeated[0]?.id).toBe(first[0]?.id);
+
+    // 新一代门（新 node_id）才换身份——key 随 durable node，不随渲染顺序。
+    useWorkspaceStore.getState().setTimelineNodesForTest([
+      { ...batchNode, node_id: "node_batch_2" },
+    ]);
+    expect(selectCockpitInbox(useWorkspaceStore.getState())[0]?.id).toBe(
+      "gate:node:node_batch_2",
+    );
+  });
+
+  it.each(["confirmed", "terminated"] as const)(
+    "collapses a lingering batch node once the session is %s (F-30)",
+    (sessionStatus) => {
+      batchSession({ sessionStatus });
+      const state = useWorkspaceStore.getState();
+
+      expect(selectGateProjection(state)).toBeNull();
+      expect(selectCockpitInbox(state).filter((item) => item.kind === "gate")).toHaveLength(0);
+      expect(gateActionBlockReason(state)).toBe("terminal_stage");
+    },
+  );
+
+  it("closes the batch gate on the durable closure decision", () => {
+    batchSession({ humanGateClosure: { decision: "confirm", stage: "author_confirm" } });
+    const state = useWorkspaceStore.getState();
+
+    expect(gateActionBlockReason(state)).toBe("closed");
+    expect(selectCockpitInbox(state)).toHaveLength(0);
+  });
+});
+
+// REQ-PCG-02（plan-compile-gate-visibility）：Final Compile recovery 门——此前只在
+// legacy 页面可见；Cockpit 必须投影它并带上引擎写入的中断原因。
+describe("REQ-PCG-02 compile recovery gate projection", () => {
+  installWorkspaceStoreTestHooks();
+
+  function recoveryNode(summary: string | null): TimelineNode {
+    return timelineNode({
+      node_id: "node_recovery",
+      node_type: "work_item_plan_compile_recovery",
+      stage: "human_confirm",
+      status: "active",
+      title: "WorkItemPlan Compile Recovery",
+      summary,
+    });
+  }
+
+  function recoverySession(
+    summary: string | null,
+    overrides: Partial<WorkspaceWsState> = {},
+  ) {
+    useWorkspaceStore.setState({
+      sessionId: "session_recovery",
+      stage: "human_confirm",
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      sessionStatus: "waiting_for_human",
+      humanGateTurn: null,
+      humanGateSnapshot: null,
+      humanGateClosure: null,
+      timelineNodes: [recoveryNode(summary)],
+      ...overrides,
+    });
+  }
+
+  it("projects the recovery node with the interruption reason and no turn carrier", () => {
+    recoverySession("Final Compile 需要恢复：provider timeout");
+    const state = useWorkspaceStore.getState();
+
+    expect(selectGateProjection(state)).toMatchObject({
+      key: "node:node_recovery",
+      kind: "compile_recovery",
+      stage: "human_confirm",
+      status: "open",
+      turn_id: null,
+      turn: null,
+      trigger: null,
+      closed: null,
+      action_block_reason: null,
+      terminate_block_reason: null,
+    });
+
+    const items = selectCockpitInbox(state);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: "gate:node:node_recovery",
+      title: "Final Compile 恢复",
+      gate: expect.objectContaining({ kind: "compile_recovery" }),
+    });
+    expect(items[0]?.summary).toContain("Final Compile 中断，等待恢复动作");
+    expect(items[0]?.summary).toContain("Final Compile 需要恢复：provider timeout");
+  });
+
+  it("shows a read-only diagnostic summary when the node carries no reason (REQ-PCG-03)", () => {
+    recoverySession(null);
+
+    expect(selectCockpitInbox(useWorkspaceStore.getState())[0]?.summary).toContain(
+      "中断原因未同步（只读诊断）",
+    );
+  });
+
+  // REQ-PCG-03：阶段不一致（节点残留/事件乱序）→ 不投影、不猜动作，落回通用判据。
+  it("fails closed for a recovery node observed outside the HumanConfirm stage", () => {
+    recoverySession("late frame", { stage: "running" });
+    const state = useWorkspaceStore.getState();
+
+    expect(gateKindOf(state)).toBe("human_gate");
+    expect(selectGateProjection(state)).toBeNull();
+    expect(gateActionBlockReason(state)).toBe("terminal_stage");
+  });
+
+  it.each(["confirmed", "terminated"] as const)(
+    "collapses a lingering recovery node once the session is %s (F-30)",
+    (sessionStatus) => {
+      recoverySession("late frame", { sessionStatus });
+      const state = useWorkspaceStore.getState();
+
+      expect(selectGateProjection(state)).toBeNull();
+      expect(selectCockpitInbox(state).filter((item) => item.kind === "gate")).toHaveLength(0);
+      expect(gateActionBlockReason(state)).toBe("terminal_stage");
+    },
+  );
+});
+
+// 回归：没有两新门节点时，既有四路门必须与改前逐项一致（kind 恒 "human_gate"）。
+describe("REQ-PCG-01 existing gate regression", () => {
+  installWorkspaceStoreTestHooks();
+
+  it("keeps the stage-only, typed turn, snapshot and story author gates on human_gate", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setStage("human_confirm");
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "stage:human_confirm",
+      kind: "human_gate",
+      turn_id: null,
+    });
+
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 3);
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "turn_1",
+      kind: "human_gate",
+      turn_id: "turn_1",
+      remaining_budget: 3,
+    });
+
+    useWorkspaceStore.setState({
+      humanGateTurn: null,
+      humanGateSnapshot: humanGateSnapshotFixture(),
+    });
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      kind: "human_gate",
+      trigger: "verification_new_findings",
+      remaining_budget: 1,
+    });
+    expect(gateKindOf(useWorkspaceStore.getState())).toBe("human_gate");
+
+    useWorkspaceStore.setState({
+      stage: "author_confirm",
+      workspaceType: "story",
+      flowKind: "legacy",
+      sessionStatus: "waiting_for_human",
+      humanGateSnapshot: null,
+    });
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "stage:author_confirm",
+      kind: "human_gate",
+    });
   });
 });

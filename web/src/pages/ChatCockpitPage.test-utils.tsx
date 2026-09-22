@@ -105,6 +105,7 @@ export function gateItem(sessionId: string, key: string): CockpitInboxItem {
     createdAt: null,
     gate: {
       key,
+      kind: "human_gate",
       turn_id: key,
       stage: "human_confirm",
       flow_kind: "single_candidate",

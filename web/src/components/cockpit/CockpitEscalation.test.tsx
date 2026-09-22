@@ -73,6 +73,7 @@ function gateItem(
     createdAt: new Date(now).toISOString(),
     gate: {
       key: id,
+      kind: "human_gate",
       turn_id: null,
       stage: "human_confirm",
       flow_kind: "single_candidate",

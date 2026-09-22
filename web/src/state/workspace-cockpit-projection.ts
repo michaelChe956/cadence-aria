@@ -39,6 +39,79 @@ const TERMINAL_GATE_STAGES: Record<string, true> = {
   revision: true,
 };
 
+/**
+ * REQ-PCG-01/02（plan-compile-gate-visibility）：门种类。既有四路（typed turn /
+ * durable snapshot / story-design AuthorConfirm / human_confirm 阶段）都是 human
+ * gate；批次确认与 compile recovery 是两条独立的 durable 门——没有 typed turn 或
+ * snapshot 载体，由引擎落下的 timeline node（+ 阶段/流凭据）识别。
+ */
+export type GateKind = "human_gate" | "batch_confirm" | "compile_recovery";
+
+/** REQ-PCG-03/F-30：终态会话状态——终态后不得新开或复活任何门。 */
+const TERMINAL_SESSION_STATUSES: Record<string, true> = {
+  confirmed: true,
+  terminated: true,
+};
+
+/** 门身份判据的输入面（投影、阻断判据、动作面共用）。 */
+export type GateKindState = Pick<
+  WorkspaceWsState,
+  "stage" | "flowKind" | "timelineNodes"
+>;
+
+/**
+ * REQ-PCG-01：整组 Draft 确认门（`work_item_batch_confirm`）——SC 流停在
+ * AuthorConfirm 阶段的 durable 批次门。条件取自引擎不变式：flow=single_candidate
+ * + stage=author_confirm（compile 成功产出整组 Draft 与 compile 失败转批次确认
+ * 两条路径都经 `enter_work_item_batch_confirm`，decisions.rs）后仍有 Active 门节点。
+ * 凭据不齐（flow/stage 不符）时不认门 → REQ-PCG-03 fail-closed。
+ */
+function batchConfirmGateNode(state: GateKindState): TimelineNode | null {
+  if (state.flowKind !== "single_candidate" || state.stage !== "author_confirm") {
+    return null;
+  }
+  return (
+    state.timelineNodes.find(
+      (node) =>
+        node.node_type === "work_item_batch_confirm" && node.status === "active",
+    ) ?? null
+  );
+}
+
+/**
+ * REQ-PCG-02：Final Compile recovery 门（`work_item_plan_compile_recovery`）——
+ * 引擎进入 recovery 时先切 stage 再落节点（compile.rs
+ * `enter_work_item_plan_compile_recovery`：transition_stage(HumanConfirm) →
+ * create_timeline_node），故 HumanConfirm 阶段是门的 durable 凭据之一；阶段不符
+ * 即为状态事件不一致 → REQ-PCG-03 fail-closed（不投影、不猜动作），也避免残留
+ * 节点在后续 human_confirm 门上冒充 recovery。
+ */
+function compileRecoveryGateNode(
+  state: Pick<WorkspaceWsState, "stage" | "timelineNodes">,
+): TimelineNode | null {
+  if (state.stage !== "human_confirm") {
+    return null;
+  }
+  return (
+    state.timelineNodes.find(
+      (node) =>
+        node.node_type === "work_item_plan_compile_recovery" &&
+        node.status === "active",
+    ) ?? null
+  );
+}
+
+/** 门种类判定：投影 / 阻断判据 / 动作面共用的单一事实源。 */
+export function gateKindOf(state: GateKindState): GateKind {
+  if (batchConfirmGateNode(state) !== null) {
+    return "batch_confirm";
+  }
+  if (compileRecoveryGateNode(state) !== null) {
+    return "compile_recovery";
+  }
+  return "human_gate";
+}
+
 /** F-20：story/design legacy 流的 AuthorConfirm 阶段本身即人工门（无 typed turn/snapshot）。 */
 export function isStoryDesignAuthorConfirm(
   state: Pick<WorkspaceWsState, "stage" | "workspaceType">,
@@ -50,6 +123,18 @@ export function isStoryDesignAuthorConfirm(
 }
 
 export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockReason {
+  // REQ-PCG-01/02：批次确认与 compile recovery 门没有 typed turn/durable snapshot
+  // 载体，阻断判据只取「门已关闭」与「会话终态」（F-30）——不得套用 HumanConfirm
+  // 的相位纪律：它们的 stage（AuthorConfirm / HumanConfirm）不是 typed 门阶段，
+  // 走通用分支会误报 terminal_stage/phase_mismatch 把整门静默禁用。
+  if (gateKindOf(state) !== "human_gate") {
+    if (state.humanGateClosure?.decision) {
+      return "closed";
+    }
+    return TERMINAL_SESSION_STATUSES[state.sessionStatus ?? ""] === true
+      ? "terminal_stage"
+      : null;
+  }
   if (state.humanGateClosure?.decision) {
     return "closed";
   }
@@ -115,6 +200,8 @@ export function gateActionBlockCopy(reason: Exclude<GateActionBlockReason, null>
 
 export interface GateProjection {
   key: string;
+  /** REQ-PCG-01/02：门种类——既有四路均为 "human_gate"（零破坏）。 */
+  kind: GateKind;
   turn_id: string | null;
   stage: string;
   flow_kind: WorkspaceWsState["flowKind"];
@@ -159,6 +246,42 @@ export function isGateTriage(state: WorkspaceWsState): boolean {
   return state.pendingReviewerSummary?.verdict === "needs_human";
 }
 
+/**
+ * REQ-PCG-01/02：两新门的投影形状相同（无 turn/snapshot/预算/findings），只有
+ * kind、key 与 opened_at 来源不同——key 恒取 `node:${node_id}`（durable node 身份），
+ * 同一门在重复帧/重连重投影下保持同一身份，不重复追加收件箱条目。
+ */
+function nodeGateProjection(input: {
+  state: WorkspaceWsState;
+  node: TimelineNode;
+  kind: "batch_confirm" | "compile_recovery";
+  actionBlockReason: GateActionBlockReason;
+  terminateBlockReason: GateActionBlockReason;
+}): GateProjection {
+  const { state, node } = input;
+  return {
+    key: `node:${node.node_id}`,
+    kind: input.kind,
+    turn_id: null,
+    stage: state.stage,
+    flow_kind: state.flowKind,
+    status: "open",
+    trigger: null,
+    remaining_budget: null,
+    findings: [],
+    resumable: false,
+    // 两新门没有 review verdict 分诊语义（triage 专属 review gate）：恒 false，
+    // 不收件箱提级、不把流程行标成 awaiting_triage。
+    triage: false,
+    closed: state.humanGateClosure?.decision ?? null,
+    closure_stage: state.humanGateClosure?.stage ?? null,
+    opened_at: node.started_at,
+    turn: null,
+    action_block_reason: input.actionBlockReason,
+    terminate_block_reason: input.terminateBlockReason,
+  };
+}
+
 // 单一事实源：收件箱门禁条目与 ③ 区门卡都从本函数派生。
 // 存在条件 = 「有 store gate 投影」：typed turn / durable snapshot / legacy human_confirm 阶段三者之一。
 export function selectGateProjection(state: WorkspaceWsState): GateProjection | null {
@@ -172,6 +295,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   if (turn) {
     return {
       key: gateIdentityFromState(state) ?? turn.turn_id,
+      kind: "human_gate",
       turn_id: turn.turn_id,
       stage: state.stage,
       flow_kind: state.flowKind,
@@ -190,9 +314,41 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
     };
   }
 
+  const batchNode = batchConfirmGateNode(state);
+  const recoveryNode = compileRecoveryGateNode(state);
+  // REQ-PCG-03/F-30：confirmed/terminated 已由服务端持久化——残留的两新门节点
+  // 与迟到帧都不得复活待处理门（含下面 human_confirm 兜底分支）。
+  if (
+    (batchNode !== null || recoveryNode !== null) &&
+    TERMINAL_SESSION_STATUSES[state.sessionStatus ?? ""] === true
+  ) {
+    return null;
+  }
+
+  if (batchNode !== null) {
+    return nodeGateProjection({
+      state,
+      node: batchNode,
+      kind: "batch_confirm",
+      actionBlockReason,
+      terminateBlockReason,
+    });
+  }
+
+  if (recoveryNode !== null) {
+    return nodeGateProjection({
+      state,
+      node: recoveryNode,
+      kind: "compile_recovery",
+      actionBlockReason,
+      terminateBlockReason,
+    });
+  }
+
   if (snapshot) {
     return {
       key: gateIdentityFromState(state) ?? `snapshot:${state.stage}`,
+      kind: "human_gate",
       turn_id: null,
       stage: state.stage,
       flow_kind: state.flowKind,
@@ -217,6 +373,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
     const confirmed = state.sessionStatus === "confirmed";
     return {
       key: `stage:${state.stage}`,
+      kind: "human_gate",
       turn_id: null,
       stage: state.stage,
       flow_kind: state.flowKind,
@@ -243,6 +400,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
 
   return {
     key: gateIdentityFromState(state) ?? `stage:${state.stage}`,
+    kind: "human_gate",
     turn_id: null,
     stage: state.stage,
     flow_kind: state.flowKind,
@@ -297,14 +455,46 @@ export function cockpitInboxItemSessionId(itemId: string): string | null {
     : sessionId;
 }
 
+/**
+ * REQ-PCG-01/02：门条标题按门种类给出动作语义；两新门不复用 legacy 逐段决策文案。
+ */
+function gateInboxTitle(gate: GateProjection): string {
+  if (gate.kind === "batch_confirm") {
+    return "确认整组 Work Item Draft";
+  }
+  if (gate.kind === "compile_recovery") {
+    return "Final Compile 恢复";
+  }
+  return gate.triage ? "门禁等待（需分诊）" : "门禁等待";
+}
+
+function gateInboxHeadline(gate: GateProjection): string {
+  if (gate.kind === "batch_confirm") {
+    return "等待整组 Work Item Draft 确认";
+  }
+  if (gate.kind === "compile_recovery") {
+    return "Final Compile 中断，等待恢复动作";
+  }
+  return gate.trigger ? GATE_TRIGGER_LABELS[gate.trigger] : "等待人工确认";
+}
+
 export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] {
   const items: CockpitInboxItem[] = [];
   const gate = selectGateProjection(state);
 
   if (gate && gate.closed === null) {
     const findingsCount = gate.findings.length;
+    // REQ-PCG-02：recovery 门必须展示中断原因（引擎写在 recovery timeline node 的
+    // summary）；原因未同步时只读诊断文案，不以默认动作猜测。
+    const recoveryReason =
+      gate.kind === "compile_recovery"
+        ? (compileRecoveryGateNode(state)?.summary ?? null)
+        : null;
     const parts = [
-      gate.trigger ? GATE_TRIGGER_LABELS[gate.trigger] : "等待人工确认",
+      gateInboxHeadline(gate),
+      gate.kind === "compile_recovery"
+        ? (recoveryReason ?? "中断原因未同步（只读诊断）")
+        : null,
       findingsCount > 0 ? `findings ${findingsCount} 条` : null,
       gate.remaining_budget !== null ? `剩余修复轮次 ${gate.remaining_budget}` : null,
       gate.turn?.status === "failed" && gate.turn.failure_message
@@ -317,7 +507,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       id: `gate:${gate.key}`,
       kind: "gate",
       severity: gate.triage ? 2 : 1,
-      title: gate.triage ? "门禁等待（需分诊）" : "门禁等待",
+      title: gateInboxTitle(gate),
       summary: parts.join(" · "),
       triage: gate.triage,
       source: "gate",

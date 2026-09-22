@@ -25,6 +25,7 @@ const gateItem: CockpitInboxItem = {
   createdAt: null,
   gate: {
     key: "gate_001",
+    kind: "human_gate",
     turn_id: "turn_001",
     stage: "human_confirm",
     flow_kind: "single_candidate",
@@ -63,6 +64,7 @@ const artifactVersions = [
 // 未启用两动作（确认定稿/终止）。
 const authorConfirmGate: NonNullable<CockpitInboxItem["gate"]> = {
   key: "stage:author_confirm",
+  kind: "human_gate",
   turn_id: null,
   stage: "author_confirm",
   flow_kind: "legacy",
