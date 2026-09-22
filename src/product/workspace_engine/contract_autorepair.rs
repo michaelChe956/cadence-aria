@@ -21,7 +21,7 @@
 //! finding，其余 code 一律不碰。补齐全程零 verdict、零预算、零指纹——
 //! repeated_fingerprint 闸门冷态不受影响。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::product::work_item_contract::{
     ContractFindingSeverity, DependencyContractGraph, build_dependency_contract_graph,
@@ -44,25 +44,156 @@ pub(crate) struct ContractAutorepairOutcome {
 }
 
 /// 收敛循环：compile → 逐轮确定性补齐 → 重编译，直到无可机械修复缺口或
-/// 达上限。首个 compile 失败原样上抛（与既有 author 落盘路径同语义）；
-/// 补齐产物再编译失败同样上抛——补丁行不合法属程序缺陷，fail-closed
-/// 不允许静默回退掩盖。返回最终 IR、最终 source 与补齐日志。
+/// 达上限。首编译的 lowering 错误仅在**所有**诊断均为可精确定位的重复
+/// trusted command 时修复；其余诊断保持原样失败关闭。每轮补齐后的编译失败
+/// 同样上抛——补丁行不合法属程序缺陷，绝不静默回退掩盖。返回最终 IR、
+/// 最终 source 与补齐日志。
 pub(crate) fn converge_work_item_plan_source(
     source: &str,
     context: WorkItemPlanSourceContext,
 ) -> Result<(PlanCandidateIr, String, Vec<String>), Vec<CompilerDiagnostic>> {
     let mut source = source.to_string();
     let mut applied = Vec::new();
-    let mut ir = compile_work_item_plan(&source, &context)?;
     for _ in 0..MAX_CONTRACT_AUTOREPAIR_ROUNDS {
-        let Some(outcome) = apply_contract_autorepairs(&source, &ir) else {
-            break;
-        };
-        source = outcome.source;
-        applied.extend(outcome.applied);
-        ir = compile_work_item_plan(&source, &context)?;
+        match compile_work_item_plan(&source, &context) {
+            Ok(ir) => {
+                let Some(outcome) = apply_contract_autorepairs(&source, &ir) else {
+                    return Ok((ir, source, applied));
+                };
+                source = outcome.source;
+                applied.extend(outcome.applied);
+            }
+            Err(diagnostics) => {
+                let Some(outcome) = apply_duplicate_trusted_command_autorepair(&source, &diagnostics)
+                else {
+                    return Err(diagnostics);
+                };
+                source = outcome.source;
+                applied.extend(outcome.applied);
+            }
+        }
     }
-    Ok((ir, source, applied))
+    compile_work_item_plan(&source, &context).map(|ir| (ir, source, applied))
+}
+
+struct DuplicateTrustedCommandRepair {
+    work_item_id: String,
+    check_id: String,
+    command_line: usize,
+    check_start_line: usize,
+    check_end_line: usize,
+    has_manual_instruction: bool,
+}
+
+/// 只消费 lowering 阶段明确指向 `Verification.command` 实际源码行的重复
+/// trusted command 诊断。含非空 manual instruction 的重复 check 仅删 command
+/// 行；无独立人工说明的 check 则整块删除，避免留下既无 command 又无手工步骤的
+/// 非法 check。任一诊断无法由 AST/行号精确映射时返回 None，保持失败关闭。
+fn apply_duplicate_trusted_command_autorepair(
+    source: &str,
+    diagnostics: &[CompilerDiagnostic],
+) -> Option<ContractAutorepairOutcome> {
+    if diagnostics.is_empty()
+        || !diagnostics
+            .iter()
+            .all(is_duplicate_trusted_command_diagnostic)
+    {
+        return None;
+    }
+    let ast = parse_work_item_plan(source).ok()?;
+    let repairs = diagnostics
+        .iter()
+        .map(|diagnostic| duplicate_trusted_command_repair(&ast, source, diagnostic.line))
+        .collect::<Option<Vec<_>>>()?;
+    let mut deletions = BTreeSet::new();
+    let mut applied = Vec::new();
+    for repair in repairs {
+        if repair.has_manual_instruction {
+            deletions.insert(repair.command_line);
+            applied.push(format!(
+                "{}/{} 移除重复 trusted command（保留 manual_instruction）",
+                repair.work_item_id, repair.check_id
+            ));
+        } else {
+            deletions.extend(repair.check_start_line..=repair.check_end_line);
+            applied.push(format!(
+                "{}/{} 删除仅含重复 trusted command 的 Verification check",
+                repair.work_item_id, repair.check_id
+            ));
+        }
+    }
+    (!deletions.is_empty()).then(|| ContractAutorepairOutcome {
+        source: remove_lines(source, &deletions),
+        applied,
+    })
+}
+
+fn is_duplicate_trusted_command_diagnostic(diagnostic: &CompilerDiagnostic) -> bool {
+    diagnostic.code == "lowering_error"
+        && diagnostic.field == "trusted_commands"
+        && diagnostic.message == "同一 Work Item 不得重复引用 trusted command。"
+}
+
+fn duplicate_trusted_command_repair(
+    ast: &crate::product::work_item_plan_compiler::WorkItemPlanAst,
+    source: &str,
+    command_line: usize,
+) -> Option<DuplicateTrustedCommandRepair> {
+    for item in &ast.items {
+        let Some(verification) = item
+            .sections
+            .iter()
+            .find(|section| section.name.value == "Verification")
+        else {
+            continue;
+        };
+        let Some(command_index) = verification.fields.iter().position(|field| {
+            field.key.value == "command" && field.value.line == command_line
+        }) else {
+            continue;
+        };
+        let check_start_index = verification.fields[..=command_index]
+            .iter()
+            .rposition(|field| field.key.value == "check_id")?;
+        let next_check_index = verification.fields[command_index + 1..]
+            .iter()
+            .position(|field| field.key.value == "check_id")
+            .map(|index| command_index + 1 + index);
+        let check_end_line = next_check_index
+            .map(|index| verification.fields[index].value.line.saturating_sub(1))
+            .unwrap_or_else(|| verification_section_end_line(source, command_line).saturating_sub(1));
+        let check_fields =
+            &verification.fields[check_start_index..next_check_index.unwrap_or(verification.fields.len())];
+        let check_id = verification.fields[check_start_index].value.value.clone();
+        let has_manual_instruction = check_fields.iter().any(|field| {
+            field.key.value == "manual_instruction" && !is_explicit_none(&field.value.value)
+        });
+        return Some(DuplicateTrustedCommandRepair {
+            work_item_id: item.id.value.clone(),
+            check_id,
+            command_line,
+            check_start_line: verification.fields[check_start_index].value.line,
+            check_end_line,
+            has_manual_instruction,
+        });
+    }
+    None
+}
+
+fn verification_section_end_line(source: &str, command_line: usize) -> usize {
+    source
+        .lines()
+        .enumerate()
+        .skip(command_line)
+        .find_map(|(index, line)| {
+            (line.starts_with("### ") || line.starts_with("## ")).then_some(index + 1)
+        })
+        .unwrap_or_else(|| source.lines().count())
+}
+
+fn is_explicit_none(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value.eq_ignore_ascii_case("null") || value.eq_ignore_ascii_case("none")
 }
 
 struct CapabilityGap {
@@ -357,6 +488,20 @@ fn rewrite_lines(
     rewritten
 }
 
+
+fn remove_lines(source: &str, deleted: &BTreeSet<usize>) -> String {
+    let had_trailing_newline = source.ends_with('\n');
+    let mut lines = source
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| (!deleted.contains(&(index + 1))).then_some(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if had_trailing_newline {
+        lines.push('\n');
+    }
+    lines
+}
 /// 反查 (consumer, contract_id) 所在依赖边的 provider（与
 /// `contract_prerevision::required_action_text` 同一查询，保证补齐落点与
 /// 返修指令指认的 provider 一致）。
@@ -589,5 +734,73 @@ mod tests {
             .collect::<Vec<_>>();
         let graph = build_dependency_contract_graph(&contracts).expect("graph");
         assert!(validate_dependency_contract_graph(&graph).is_valid());
+    }
+    #[test]
+    fn converge_repairs_duplicate_trusted_command_without_losing_manual_instruction() {
+        let source = clean_candidate().replacen(
+            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true",
+            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true\n- check_id: CHECK-004\n- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint still returns configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true",
+            1,
+        );
+        let (ir, source, applied) = converge_work_item_plan_source(
+            &source,
+            WorkItemPlanSourceContext {
+                target_repository_id: "repo_fixture".to_string(),
+            },
+        )
+        .expect("duplicate trusted command must be mechanically repaired");
+
+        let verification = &ir.items[0].contract.verification_checks;
+        assert_eq!(verification.len(), 2);
+        assert_eq!(verification[0].command.as_deref(), Some("cargo test --locked --lib levels_api"));
+        assert_eq!(verification[1].command, None);
+        assert_eq!(
+            source
+                .matches("- command: cargo test --locked --lib levels_api")
+                .count(),
+            1
+        );
+        assert!(!source.contains("CHECK-004\n- command: cargo test --locked --lib levels_api"));
+        assert!(source.contains(
+            "- check_id: CHECK-004\n- manual_instruction: Confirm the endpoint still returns configured levels JSON."
+        ));
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].contains("重复 trusted command"));
+    }
+    #[test]
+    fn converge_removes_duplicate_check_without_manual_instruction() {
+        let source = clean_candidate().replacen(
+            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true",
+            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true\n- check_id: CHECK-004\n- command: cargo test --locked --lib levels_api\n- required: true\n- non_zero_test_execution_required: true",
+            1,
+        );
+        let (ir, source, applied) = converge_work_item_plan_source(
+            &source,
+            WorkItemPlanSourceContext {
+                target_repository_id: "repo_fixture".to_string(),
+            },
+        )
+        .expect("duplicate check without manual instruction must be removed");
+
+        assert_eq!(ir.items[0].contract.verification_checks.len(), 1);
+        assert!(!source.contains("CHECK-004"));
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].contains("删除仅含重复 trusted command"));
+    }
+
+    #[test]
+    fn converge_keeps_non_duplicate_diagnostics_fail_closed() {
+        let source = REP4_FIXTURE.replacen("- kind: backend\n", "", 1);
+        let diagnostics = converge_work_item_plan_source(
+            &source,
+            WorkItemPlanSourceContext {
+                target_repository_id: "repo_fixture".to_string(),
+            },
+        )
+        .expect_err("non-mechanical compiler diagnostics must remain errors");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.field == "kind" && diagnostic.code != "lowering_error"
+        }));
+        assert!(!diagnostics.iter().any(is_duplicate_trusted_command_diagnostic));
     }
 }
