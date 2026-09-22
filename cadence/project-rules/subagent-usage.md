@@ -8,16 +8,16 @@
 
 ## 1. 角色指派表
 
-| 角色 | 指派 | 通道降级链（2026-09-21 用户调整） | 全挂处置 |
+| 角色 | 指派 | 通道降级链（2026-09-22 用户调整） | 全挂处置 |
 |---|---|---|---|
-| **实施（worker）** | **glm53-task** | ✅ my-anthropic/glm-5.3 → tydic-openai/deepseek-flash | 通知用户 |
+| **实施（worker）** | **ter-task（优先）** | ✅ dihua-openai/gpt-5.6-terra（2026-09-22 用户指令恢复并优先；探针 4m18s 通过） | 通知用户 |
+| **实施（worker 备）** | glm53-task | ✅ my-anthropic/glm-5.3 → tydic-openai/deepseek-flash | 通知用户 |
 | 审核（reviewer） | k3-reviewer | ✅ 可多实例扩容；my-anthropic/kimi-for-coding → my-openai/gpt-5.6-sol | 通知用户 |
 | 勘察（scout） | glm5.3-f-scout | ✅ my-anthropic/glm-5.3-flash → bingqi/glm-5.3-flash | 通知用户 |
 | 裁决 | oracle | ✅ 保持不变（my-anthropic/k3 主链） | 分歧挂起等用户 |
-| ter-task | 🔴 **用户暂停** | 不派工（配置已加 SUSPENDED 标注） | 等用户通知解除 |
 | ds-task | 🔴 **用户暂停** | 不派工（配置已加 SUSPENDED 标注） | 等用户通知解除 |
 
-- **实施链（2026-09-21 用户调整）**：glm53-task 为唯一 worker（my-anthropic/glm-5.3 优先→**tydic-openai/deepseek-flash** 自动降级）；k3-reviewer 降级位=**my-openai/gpt-5.6-sol**（初版 dihua-openai/gpt-5.6-sol 实测不可用已换）；ter-task/ds-task 暂停等通知；链全挂→通知用户，不自主启用规则外模型（max-task/通用 task 等）。
+- **实施链（2026-09-22 用户调整）**：**ter-task 优先**（dihua-openai/gpt-5.6-terra，用户指令「能用则优先使用」）；glm53-task 为备选 worker（my-anthropic/glm-5.3 优先→tydic-openai/deepseek-flash 自动降级）；k3-reviewer 降级位=my-openai/gpt-5.6-sol；ds-task 仍暂停；链全挂→通知用户，不自主启用规则外模型（max-task/通用 task 等）。
 - **模型切换先例**：改 `~/.omp/agent/agents/<name>.md` 的 `model:` 列表（首位优先、降级通道留尾）——2026-09-21 按用户指令调整 glm53-task/k3-reviewer 两文件降级位（此前 2026-09-19 调整三文件+ter/ds 加 SUSPENDED）。
 - **通道探针**：派工前秒投一行探针（各角色一行回复即证健康）；通道挂的表现=404 model_not_found / 401 key disabled / 挂起无响应。
 
@@ -107,3 +107,4 @@
 > 本节只记变更不重复正文——正文始终为现行版。
 | 2026-09-19 | **用户指令调整通道链**：worker 链 my-anthropic/glm-5.3→bingqi；k3 降级 ds-flash；scout 改 my-anthropic flash 优先；ter/ds 暂停等通知 | 用户配置指令 |
 | 2026-09-21 | **用户指令再调降级链**：worker 降级位 bingqi/glm-5.3→**tydic-openai/deepseek-flash**；k3 降级位 tydic-openai/deepseek-flash→**my-openai/gpt-5.6-sol**（初版 my-openai/deepseek-flash / dihua-openai/gpt-5.6-sol 实测不可用，用户当场纠正） | 用户配置指令 |
+| 2026-09-22 | **ter-task 恢复并设为优先 worker**（dihua-openai/gpt-5.6-terra；探针 4m18s 通过）；glm53-task 降为备选；ds-task 仍暂停 | 用户指令「尝试一下 ter-task 能不能用?能用的话优先使用」 |
