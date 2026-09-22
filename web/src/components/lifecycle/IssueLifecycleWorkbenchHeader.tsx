@@ -1,4 +1,5 @@
 import { Plus, RefreshCw } from "lucide-react";
+import { useCockpitSettingsSlotRef } from "../cockpit/CockpitShell";
 
 export function IssueLifecycleWorkbenchHeader({
   projectName,
@@ -15,6 +16,8 @@ export function IssueLifecycleWorkbenchHeader({
   onRefresh: () => void;
   onCreateIssue: () => void;
 }) {
+  const settingsSlotRef = useCockpitSettingsSlotRef();
+
   return (
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
       <div className="min-w-0">
@@ -52,6 +55,11 @@ export function IssueLifecycleWorkbenchHeader({
           <Plus className="mr-1 h-4 w-4" />
           新建 Issue
         </button>
+        <div
+          data-testid="cockpit-settings-slot"
+          ref={settingsSlotRef}
+          className="flex items-center"
+        />
       </div>
     </div>
   );
