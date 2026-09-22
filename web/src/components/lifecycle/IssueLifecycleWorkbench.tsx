@@ -14,11 +14,8 @@ import {
   deleteStorySpec,
   deleteWorkItem,
   deleteWorkItemPlan,
-  generateDesignSpecs,
-  generateStorySpecs,
   getIssueLifecycle,
   getRepositoryInitialization,
-  prepareWorkItemPlan,
   listProductIssues,
   listProjects,
   listRepositories,
@@ -73,11 +70,11 @@ import { LogicalCodebaseManagementPanel } from "./LogicalCodebaseManagementPanel
 import { LogicalCodebaseSummaryBar } from "./LogicalCodebaseSummaryBar";
 import { IssueLifecycleWorkbenchDrawer } from "./IssueLifecycleWorkbenchDrawer";
 import { ProjectSidebar } from "./ProjectSidebar";
+import { WorkItemPlanOptionsDialog } from "./WorkItemPlanOptionsDialog";
 import {
-  WorkItemPlanOptionsDialog,
-  type WorkItemPlanOptionsFormValue,
-} from "./WorkItemPlanOptionsDialog";
-import { readWorkspaceProviderDefaultsSnapshot } from "../../state/workspace-provider-defaults";
+  useIssueLifecycleGeneration,
+  type PendingWorkItemPlanLaunch,
+} from "./useIssueLifecycleGeneration";
 import { IssueQueue } from "./IssueQueue";
 import {
   defaultCollapsedGroups,
@@ -106,32 +103,10 @@ import {
   normalizeLifecycleResponse,
   resolveGroupCodingAttempt,
   selectedLifecycleColumns,
-  toDrawerEntity,
   waitForDeleteExitAnimation,
 } from "./IssueLifecycleWorkbenchParts";
-import type { WorkbenchStageKey } from "./StageStepper";
 import { IssueLifecycleWorkbenchView } from "./IssueLifecycleWorkbenchView";
 export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
-type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
-type PendingWorkItemPlanLaunch = {
-  card: LifecycleCardData;
-  /** REQ-PPS-01：开启弹窗即快照表单初值（含用户默认 provider），弹窗期间不被并发写入改动。 */
-  options: WorkItemPlanOptionsFormValue;
-};
-const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
-  include_integration_tests: true,
-  include_e2e_tests: false,
-  force_frontend_backend_split: true,
-  require_execution_plan_confirm: false,
-} satisfies WorkItemPlanOptionsFormValue;
-
-// REQ-PPS-01 场景三：创建被服务端 fail-closed 拒绝（provider 不可用等 4xx）时的兜底文案，
-// 服务端 message 存在时以它为准。
-const LAUNCH_FAILURE_MESSAGES: Record<ProviderWorkspaceLaunchTarget, string> = {
-  story: "生成 Story Spec 失败",
-  design: "生成 Design Spec 失败",
-  work_item: "生成 Work Item Plan 失败",
-};
 
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
@@ -495,6 +470,24 @@ export function IssueLifecycleWorkbench({
     setAggregateInitializationBusy,
     refresh,
   });
+  // Task 6 收尾：plan/story/design 创建入口（含 provider 快照与失败可见化）整块抽到
+  // useIssueLifecycleGeneration——纯搬运，零行为变化。
+  const {
+    handleLaunchWorkspace,
+    handleGenerateNext,
+    handleGenerateForStage,
+    handleConfirmWorkItemPlanOptions,
+  } = useIssueLifecycleGeneration({
+    selectedProjectId,
+    selectedColumns: selectedIssueColumns,
+    pendingWorkItemPlanLaunch,
+    setPendingWorkItemPlanLaunch,
+    setError,
+    setSelectedCardKey,
+    refresh,
+    openDrawer,
+    onOpenWorkspace,
+  });
   // Task 8：运维摘要条的派生值。异常口径：聚合索引缺失（null，尚未建立）或
   // state !== "active"，或最近一次指针发布 status 含 failed/partial。
   const lcSummaryExpandedForProject = selectedProjectId
@@ -715,86 +708,6 @@ export function IssueLifecycleWorkbench({
     });
   }
 
-  async function handleGenerateNext(card: LifecycleCardData) {
-    if (!selectedProjectId) {
-      setError("缺少 Project 或生命周期实体");
-      return;
-    }
-
-    try {
-      if (card.kind === "story_spec") {
-        const response = await generateDesignSpecs(
-          selectedProjectId,
-          card.issueId,
-          {
-            title: defaultLaunchTitle({ target: "design", card }),
-            story_spec_ids: [card.id],
-            ...readWorkspaceProviderDefaultsSnapshot(),
-          },
-        );
-        const nextId = response.design_specs[0]?.design_spec_id;
-        await refresh(selectedProjectId);
-        if (nextId) {
-          const nextKey = lifecycleEntityKey("design_spec", card.issueId, nextId);
-          setSelectedCardKey(nextKey);
-          openDrawer(nextKey);
-        }
-        return;
-      }
-
-      if (card.kind === "design_spec") {
-        setError(null);
-        setPendingWorkItemPlanLaunch({
-          card,
-          options: {
-            ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
-            ...readWorkspaceProviderDefaultsSnapshot(),
-          },
-        });
-        return;
-      }
-
-      setError("当前实体不支持生成下一阶段");
-    } catch (reason) {
-      // 调用方是 `void handleGenerateNext(...)`：与 handleLaunchWorkspace 同款，失败
-      // 必须显式落到工作台错误横幅（REQ-PPS-01 场景三）。
-      setError(
-        errorMessage(
-          reason,
-          card.kind === "story_spec"
-            ? LAUNCH_FAILURE_MESSAGES.design
-            : LAUNCH_FAILURE_MESSAGES.work_item,
-        ),
-      );
-    }
-  }
-
-  // Task 6：阶段工作区空阶段主按钮接线——复用现有生成链路，不新增 API：
-  // story -> 用当前 Issue 卡走 handleLaunchWorkspace("story")；
-  // design -> 用最新 Story 卡走 handleGenerateNext（内部走 generateDesignSpecs）；
-  // work_item -> 用最新 Design 卡走 handleGenerateNext（打开 Work Item Plan 配置弹窗）。
-  function handleGenerateForStage(stage: WorkbenchStageKey) {
-    if (stage === "story") {
-      const issueCard = selectedIssueColumns.issue[0];
-      if (!issueCard) {
-        setError("缺少 Issue");
-        return;
-      }
-      void handleLaunchWorkspace("story", issueCard);
-      return;
-    }
-
-    const sourceCard =
-      stage === "design"
-        ? selectedIssueColumns.story_spec.at(-1)
-        : selectedIssueColumns.design_spec.at(-1);
-    if (!sourceCard) {
-      setError(stage === "design" ? "缺少 Story Spec" : "缺少 Design Spec");
-      return;
-    }
-    void handleGenerateNext(sourceCard);
-  }
-
   async function handleCreateIssue(payload: CreateLifecycleIssuePayload) {
     if (!selectedProjectId) {
       setError("缺少 Project");
@@ -949,111 +862,6 @@ export function IssueLifecycleWorkbench({
       return;
     }
     void handleDeleteLifecycleCard(card);
-  }
-
-  async function handleLaunchWorkspace(
-    target: ProviderWorkspaceLaunchTarget,
-    card: LifecycleCardData,
-  ) {
-    if (!selectedProjectId) {
-      setError("缺少 Project 或生命周期卡片");
-      return;
-    }
-
-    try {
-      if (target === "story") {
-        const response = await generateStorySpecs(
-          selectedProjectId,
-          card.issueId,
-          {
-            title: defaultLaunchTitle({ target, card }),
-            ...readWorkspaceProviderDefaultsSnapshot(),
-          },
-        );
-        const storySpecId = response.story_specs[0]?.story_spec_id;
-        setSelectedCardKey(
-          storySpecId
-            ? lifecycleEntityKey("story_spec", card.issueId, storySpecId)
-            : null,
-        );
-        await refresh(selectedProjectId);
-        if (response.workspace_session) {
-          onOpenWorkspace(response.workspace_session.workspace_session_id);
-        }
-        return;
-      }
-
-      if (target === "design" && card.kind === "story_spec") {
-        const response = await generateDesignSpecs(
-          selectedProjectId,
-          card.issueId,
-          {
-            title: defaultLaunchTitle({ target, card }),
-            story_spec_ids: [card.id],
-            ...readWorkspaceProviderDefaultsSnapshot(),
-          },
-        );
-        const designSpecId = response.design_specs[0]?.design_spec_id;
-        setSelectedCardKey(
-          designSpecId
-            ? lifecycleEntityKey("design_spec", card.issueId, designSpecId)
-            : null,
-        );
-        await refresh(selectedProjectId);
-        if (response.workspace_session) {
-          onOpenWorkspace(response.workspace_session.workspace_session_id);
-        }
-        return;
-      }
-
-      if (target === "work_item" && card.kind === "design_spec") {
-        setError(null);
-        setPendingWorkItemPlanLaunch({
-          card,
-          options: {
-            ...DEFAULT_WORK_ITEM_PLAN_OPTIONS,
-            ...readWorkspaceProviderDefaultsSnapshot(),
-          },
-        });
-        return;
-      }
-
-      setError("当前卡片不能启动该 Workspace");
-    } catch (reason) {
-      // 调用方是 `void handleLaunchWorkspace(...)`：没有宿主接住这条链路，失败必须
-      // 落到工作台错误横幅，否则 provider 不可用等 4xx 对用户完全不可见。
-      setError(errorMessage(reason, LAUNCH_FAILURE_MESSAGES[target]));
-    }
-  }
-
-  async function handleConfirmWorkItemPlanOptions(
-    options: WorkItemPlanOptionsFormValue,
-  ) {
-    if (!selectedProjectId || !pendingWorkItemPlanLaunch) {
-      setError("缺少 Project 或 Design Spec");
-      return;
-    }
-
-    const { card } = pendingWorkItemPlanLaunch;
-    if (card.kind !== "design_spec") {
-      setError("当前实体不能生成 Work Item Plan");
-      return;
-    }
-
-    setError(null);
-    const response = await prepareWorkItemPlan(
-      selectedProjectId,
-      card.issueId,
-      {
-        title: defaultLaunchTitle({ target: "work_item", card }),
-        story_spec_ids: card.raw.story_spec_ids,
-        design_spec_ids: [card.id],
-        ...options,
-      },
-    );
-    await refresh(selectedProjectId);
-    setPendingWorkItemPlanLaunch(null);
-    onOpenWorkspace(response.workspace_session.workspace_session_id);
   }
 
   const dialogs: ReactNode = (
