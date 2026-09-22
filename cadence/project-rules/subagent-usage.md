@@ -18,6 +18,7 @@
 | ds-task | 🔴 **用户暂停** | 不派工（配置已加 SUSPENDED 标注） | 等用户通知解除 |
 
 - **实施链（2026-09-22 用户调整）**：**ter-task 优先**（dihua-openai/gpt-5.6-terra，用户指令「能用则优先使用」）；glm53-task 为备选 worker（my-anthropic/glm-5.3 优先→tydic-openai/deepseek-flash 自动降级）；k3-reviewer 降级位=my-openai/gpt-5.6-sol；ds-task 仍暂停；链全挂→通知用户，不自主启用规则外模型（max-task/通用 task 等）。
+- **分层派工（2026-09-22 用户核准 controller 建议）**：**大/多步实施派 ter-task**（能力优先，接受其响应较慢——探针 4m18s vs glm53-task 2.6s）；**机械小改/小任务派 glm53-task**（快）；同一批次内两条链可用时按此分流。
 - **模型切换先例**：改 `~/.omp/agent/agents/<name>.md` 的 `model:` 列表（首位优先、降级通道留尾）——2026-09-21 按用户指令调整 glm53-task/k3-reviewer 两文件降级位（此前 2026-09-19 调整三文件+ter/ds 加 SUSPENDED）。
 - **通道探针**：派工前秒投一行探针（各角色一行回复即证健康）；通道挂的表现=404 model_not_found / 401 key disabled / 挂起无响应。
 
