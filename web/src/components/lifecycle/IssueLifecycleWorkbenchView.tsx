@@ -73,7 +73,7 @@ export function IssueLifecycleWorkbenchView({
   onOpenCodingWorkspaceFromDrawer, onGenerateNext, onDeleteFromDrawer, dialogs,
 }: IssueLifecycleWorkbenchViewProps) {
   return <>
-    <div data-testid="workbench-shell" className="grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]">
+    <div data-testid="workbench-shell" className={`grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]${isDrawerOpen && focusedEntity ? " lg:pr-[calc(480px+1rem)]" : ""}`}>
       <ProjectSidebar projects={projects} codebases={codebases} repositories={repositories} selectedProjectId={selectedProjectId} issueCount={issueCount} busy={busy} onSelectProject={onSelectProject} onCreateProject={onCreateProject} onAddCodebase={onAddCodebase} onDeleteProject={onDeleteProject} onDeleteRepository={onDeleteRepository} onDeleteLogicalCodebase={onDeleteLogicalCodebase} />
       <WorkbenchSurface mainLabel="Issue 生命周期工作台" statusBar={busy ? <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span> : null} alert={error} header={<IssueLifecycleWorkbenchHeader projectName={selectedProject?.name} focusedIssueId={focusedIssueId} canCreateIssue={Boolean(selectedProjectId) && repositories.length > 0} onShowAll={onShowAll} onRefresh={onRefresh} onCreateIssue={onCreateIssue} />} main={<div className="space-y-3">
         {selectedProjectId && logicalCodebases.length > 0 ? <div className="space-y-2">
