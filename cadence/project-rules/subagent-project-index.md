@@ -26,7 +26,7 @@ description: 本项目规则索引——被派工时按活动类型定位项目�
 
 1. **`cargo test` 禁带 `-j 1`** —— 并行度由 `.cargo/config.toml` 的 `jobs = 8` 统一托管，命令行不写 `-j`。
 2. **定向跑 `src/lib.rs` 内单元测试必须限制目标**：用 `cargo test --locked --lib <过滤名>`，禁用 `cargo test --locked <过滤名>`（后者仍会遍历全部 integration 二进制）。
-3. **改前端必须重建二进制** —— 前端资源经 rust-embed 在编译期嵌入，不重建则改动不生效。
+3. **前端生效方式按模式区分** —— 迭代模式（服务器带 `ARIA_WEB_DIST` 跑 debug 二进制）：改前端只需 `cd web && pnpm build`（~3 秒）+刷新，**不重建不重启**；改后端用 `cargo build --locked`（debug 增量 ~20 秒）+重启。里程碑模式（vXX 验收谱系）：`pnpm build` 先行 + `cargo build --release --locked` + 停旧起新 + 三对账。两模式都必须核对服务端前端指纹与 `web/dist/index.html` 一致（防忘 build 服务旧 dist）。详见 `build-test-commands.md` §6。
 
 详见 `cadence/project-rules/build-test-commands.md`。
 
