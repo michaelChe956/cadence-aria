@@ -7,6 +7,7 @@ mod advance_initialization;
 mod advance_split_recovery_matrix;
 mod advance_split_targets;
 mod artifact_selection;
+mod artifact_selection_matrix;
 include!("tests/part_02.rs");
 include!("tests/part_03.rs");
 include!("tests/part_03/task_3_4_oracles.rs");

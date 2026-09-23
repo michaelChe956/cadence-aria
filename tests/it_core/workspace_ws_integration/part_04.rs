@@ -1,3 +1,28 @@
+/// SC 人工门反馈链的 durable assistant 候选（change `artifact-candidate-selection` Task 6）。
+///
+/// 原夹具用 stub `"# Work Item Plan\n"`——无 fence 且缺全部必需 heading，过不了
+/// WorkItemPlan artifact gate；迁移到候选选择器后 reload 产物为空，
+/// `build_sc_manual_revision_prompt_for_turn` 以 `HUMAN_GATE_REVISION_CANDIDATE_MISSING`
+/// 拒绝反馈，本用例便在「WS 阶段门后 feedback 到达 dispatch」的断言处失败。生产 SC 会话的
+/// durable assistant message 是完整候选 markdown（会话门修订基线的既有语义），故夹具升级为
+/// gate 合规形态；测试意图与断言不变。
+const SC_HUMAN_GATE_CANDIDATE: &str = "# Work Item Plan\n\n\
+    ## 计划范围\n\
+    本计划覆盖 Issue issue_0001 的单个可执行候选。\n\n\
+    ## 任务拆分\n\
+    - [TASK-001] 完成后端接入。\n\n\
+    ## 依赖图\n\
+    无。\n\n\
+    ## 验证计划\n\
+    cargo test --locked。\n\n\
+    ## 执行顺序\n\
+    先完成任务拆分中的唯一任务。\n\n\
+    ## 风险\n\
+    无。\n\n\
+    ## 追踪关系\n\
+    source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+    [TASK-001] -> [REQ-001]\n";
+
 #[tokio::test]
 async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage_gate() {
     let root = tempdir().expect("root");
@@ -69,7 +94,7 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
     );
     session_record.messages.push(cadence_aria::product::models::WorkspaceMessageRecord {
         role: "assistant".to_string(),
-        content: "# Work Item Plan\n".to_string(),
+        content: SC_HUMAN_GATE_CANDIDATE.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
     });
     let session_path = lifecycle
