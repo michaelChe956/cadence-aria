@@ -15,6 +15,10 @@ use crate::cross_cutting::streaming_provider::UsageReportData;
 const MAX_TAIL_BYTES: u64 = 128 * 1024;
 const MAX_TAIL_LINES: usize = 200;
 const MAX_CODEX_SESSION_DEPTH: usize = 4;
+/// 反向块扫描的单块字节数。
+const SCAN_BLOCK_BYTES: u64 = 64 * 1024;
+/// 反向块扫描允许读取的总字节数上限，防止超大日志被全量载入。
+const SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 从 Pi `data.sessionFile` 指向的 JSONL 文件读取最近一条 usage 记录。
 pub(crate) fn read_pi_usage(session_file: &Path, role: &str) -> Option<UsageReportData> {
@@ -79,7 +83,7 @@ fn read_kimi_usage_once(
     let mut found = false;
     for entry in entries.flatten() {
         let wire = entry.path().join("wire.jsonl");
-        let Some(value) = latest_json_line(&wire).into_iter().find(is_kimi_turn_usage) else {
+        let Some(value) = latest_matching_line(&wire, is_kimi_turn_usage) else {
             continue;
         };
         let Some(usage) = value.get("usage") else {
@@ -209,6 +213,65 @@ fn is_kimi_turn_usage(value: &Value) -> bool {
 
 fn unsigned(value: &Value, field: &str) -> Option<u64> {
     value.get(field).and_then(Value::as_u64)
+}
+
+/// 从文件尾向前按块扫描 JSONL，返回最新一条满足 `is_match` 的记录。
+///
+/// 固定尾部窗口（`tail_lines`）一旦被少数超长行占满，最新的 usage 记录就会被
+/// 挤出窗口；这里改为反向块扫描：每次读 `SCAN_BLOCK_BYTES`，块内从新到旧逐行
+/// 匹配，未命中则继续向前，直到命中、到达文件头或累计扫描量达到
+/// `SCAN_MAX_BYTES`。跨块边界的行通过携带未闭合片段逐块拼接还原，单行超过
+/// 块大小也不会丢失。
+fn latest_matching_line(path: &Path, is_match: impl Fn(&Value) -> bool) -> Option<Value> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let floor = length.saturating_sub(SCAN_MAX_BYTES);
+    let mut pending: Vec<u8> = Vec::new();
+    let mut end = length;
+    while end > floor {
+        let start = end.saturating_sub(SCAN_BLOCK_BYTES).max(floor);
+        let mut block = vec![0u8; (end - start) as usize];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut block).ok()?;
+        let Some(first_newline) = block.iter().position(|&byte| byte == b'\n') else {
+            // 整块都在一行内部：与已携带片段拼成该行更靠前的部分，继续向前。
+            block.extend_from_slice(&pending);
+            pending = block;
+            end = start;
+            continue;
+        };
+        let last_newline = block
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .expect("checked first_newline exists");
+        // 块尾未闭合的行前半段 + 上一块携带的行后半段 = 最新一条跨块行。
+        let mut crossing = block[last_newline + 1..].to_vec();
+        crossing.extend_from_slice(&pending);
+        if let Some(value) = parse_matching_line(&crossing, &is_match) {
+            return Some(value);
+        }
+        for line in block[first_newline + 1..last_newline + 1]
+            .split(|&byte| byte == b'\n')
+            .rev()
+        {
+            if let Some(value) = parse_matching_line(line, &is_match) {
+                return Some(value);
+            }
+        }
+        // 块首片段是更早一行的后半段，留待下一块拼接。
+        pending = block[..first_newline].to_vec();
+        end = start;
+    }
+    // 扫描预算覆盖到文件头时，剩余片段就是首行（或整个无换行的单行文件）。
+    if floor == 0 {
+        return parse_matching_line(&pending, &is_match);
+    }
+    None
+}
+
+fn parse_matching_line(line: &[u8], is_match: &impl Fn(&Value) -> bool) -> Option<Value> {
+    let value = serde_json::from_slice(line).ok()?;
+    is_match(&value).then_some(value)
 }
 
 fn latest_json_line(path: &Path) -> Vec<Value> {
@@ -437,5 +500,121 @@ mod tests {
             "broken json\n{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":1}}\n",
         );
         assert!(read_kimi_usage(root.path(), cwd, session, "author").is_none());
+    }
+
+    #[test]
+    fn local_usage_reads_kimi_turn_usage_pushed_beyond_fixed_tail_window() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // story 长内容行会把最新 turn usage 挤出固定 128 KiB 尾部窗口
+        // （真实案例：487KB / 145 行的 wire.jsonl，usage.record 距尾 22.7KB）。
+        let filler = "x".repeat(150 * 1024);
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            &format!(
+                "{{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{{\"inputOther\":30,\"inputCacheRead\":4,\"inputCacheCreation\":2,\"output\":5}}}}\n{{\"type\":\"story.chunk\",\"content\":\"{filler}\"}}\n{{\"type\":\"staleGuard.cleared\"}}\n"
+            ),
+        );
+        let report = read_kimi_usage(root.path(), cwd, session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(32));
+        assert_eq!(report.output_tokens, Some(5));
+        assert_eq!(report.cache_read_tokens, Some(4));
+        assert_eq!(report.cache_creation_tokens, Some(2));
+    }
+
+    #[test]
+    fn local_usage_keeps_latest_turn_semantics_within_short_file() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // 短文件内多条 turn usage：仍取最新一条，且末行无换行也能读。
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            &format!(
+                "{{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{{\"inputOther\":1,\"inputCacheRead\":1,\"inputCacheCreation\":1,\"output\":1}}}}\n{{\"type\":\"message\",\"content\":\"{}\"}}\n{{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{{\"inputOther\":9,\"inputCacheRead\":8,\"inputCacheCreation\":7,\"output\":6}}}}",
+                "y".repeat(4096)
+            ),
+        );
+        let report = read_kimi_usage(root.path(), cwd, session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(16));
+        assert_eq!(report.output_tokens, Some(6));
+        assert_eq!(report.cache_read_tokens, Some(8));
+        assert_eq!(report.cache_creation_tokens, Some(7));
+    }
+
+    #[test]
+    fn local_usage_reads_kimi_usage_line_crossing_block_boundary() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // 让 turn usage 行恰好横跨 64 KiB 块边界：块切分不得截断该行。
+        let usage_line = "{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":11,\"inputCacheRead\":3,\"inputCacheCreation\":2,\"output\":4}}";
+        let block = super::SCAN_BLOCK_BYTES as usize;
+        let after = "z".repeat(block + 20 - usage_line.len() - 1);
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            &format!("{usage_line}\n{after}\n"),
+        );
+        let report = read_kimi_usage(root.path(), cwd, session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(13));
+        assert_eq!(report.output_tokens, Some(4));
+        assert_eq!(report.cache_read_tokens, Some(3));
+        assert_eq!(report.cache_creation_tokens, Some(2));
+    }
+
+    #[test]
+    fn local_usage_returns_none_when_kimi_usage_beyond_scan_budget() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // usage 只出现在扫描上限之外：反向扫描触及 8 MiB 上限后必须安全返回 None。
+        let filler_line = format!(
+            "{{\"type\":\"message\",\"content\":\"{}\"}}\n",
+            "w".repeat(1024)
+        );
+        let mut content = String::from(
+            "{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":5,\"inputCacheRead\":5,\"inputCacheCreation\":5,\"output\":5}}\n",
+        );
+        while content.len() <= super::SCAN_MAX_BYTES as usize + 1024 {
+            content.push_str(&filler_line);
+        }
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            &content,
+        );
+        assert!(read_kimi_usage(root.path(), cwd, session, "author").is_none());
+    }
+
+    #[test]
+    fn local_usage_reads_single_line_kimi_wire_without_trailing_newline() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // 整个 wire 只有一行且无换行符：仍须读出 usage。
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            "{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":6,\"inputCacheRead\":2,\"inputCacheCreation\":1,\"output\":3}}",
+        );
+        let report = read_kimi_usage(root.path(), cwd, session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(7));
+        assert_eq!(report.output_tokens, Some(3));
+        assert_eq!(report.cache_read_tokens, Some(2));
+        assert_eq!(report.cache_creation_tokens, Some(1));
     }
 }
