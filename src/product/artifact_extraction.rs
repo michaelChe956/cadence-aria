@@ -21,9 +21,6 @@ pub fn extract_artifact_content(full_output: &str) -> String {
 ///
 /// `artifact-candidate-selection` 的 Task 2/3/4 消费本结构与
 /// [`scan_top_level_fenced_candidates`]；字段语义一经固定不得改名。
-// 生产接线在 Task 2（selector）/Task 3（调用方迁移）落地前，本组 API 仅被本模块
-// 单测使用，故在此暂标 `allow(dead_code)`；接线后该标注应一并删除。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FencedArtifactCandidate {
     /// fence 内正文（不含 opening/closing fence 行本身，保留其间的原始字节）。
@@ -48,7 +45,6 @@ pub(crate) struct FencedArtifactCandidate {
 ///
 /// 边界判定 fail-closed：同长度（或更长）非裸 fence 视为内层 fence 并配对；内层未
 /// 成对闭合导致外层边界不可判定时，整块丢弃、不产出候选、不猜边界。
-#[allow(dead_code)] // 同 FencedArtifactCandidate：待 Task 2/3 生产接线后删除。
 pub(crate) fn scan_top_level_fenced_candidates(output: &str) -> Vec<FencedArtifactCandidate> {
     let mut candidates = Vec::new();
     let mut open = None::<OpenArtifactCandidate>;
@@ -112,7 +108,6 @@ pub(crate) fn scan_top_level_fenced_candidates(output: &str) -> Vec<FencedArtifa
 }
 
 /// 扫描器内部游标：当前 opening fence 与其正文起点。
-#[allow(dead_code)] // 同 FencedArtifactCandidate：待 Task 2/3 生产接线后删除。
 #[derive(Clone, Copy)]
 struct OpenArtifactCandidate {
     ch: u8,
@@ -123,7 +118,6 @@ struct OpenArtifactCandidate {
 }
 
 /// 解析行首 fence：返回（fence 字符、连续长度、marker 之后的剩余文本）。
-#[allow(dead_code)] // 同 FencedArtifactCandidate：待 Task 2/3 生产接线后删除。
 fn fence_run(trimmed_line: &str) -> Option<(u8, usize, &str)> {
     let first = trimmed_line.as_bytes().first().copied()?;
     if first != b'`' && first != b'~' {

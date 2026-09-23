@@ -1,3 +1,7 @@
+use crate::cross_cutting::document_ops::compute_sha256;
+use crate::product::artifact_extraction::{
+    extract_artifact_content, scan_top_level_fenced_candidates,
+};
 use crate::product::models::WorkspaceType;
 
 #[cfg(test)]
@@ -314,6 +318,194 @@ pub(crate) fn validate_workspace_artifact_constraints(
         missing_required_ids,
         warnings: Vec::new(),
     }
+}
+
+/// 既有优先路径的 XML artifact 起始 marker：存在时由调用方沿用既有单候选抽取
+/// （本次不扩 XML 多候选）。
+const XML_ARTIFACT_OPEN_TAG: &str = "<artifact>";
+
+/// 候选选择结论。
+#[allow(dead_code)] // 生产接线（Task 3/4）落地后删除；先例见 artifact_extraction.rs。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectionVerdict {
+    /// 恰好一个候选通过 gate，已选中该候选。
+    Unique,
+    /// 零个候选通过 gate（fail-closed，不回落候选外文本）。
+    NoPassing,
+    /// 多个候选通过 gate，语义歧义（fail-closed，不取末块/最长块）。
+    Ambiguous,
+}
+
+/// 单个候选的 gate 结果与其在原输出中的边界、正文 hash。
+#[allow(dead_code)] // 同 SelectionVerdict：待生产接线后删除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateGateResult {
+    /// 1-based 行号：fenced 候选为 opening/closing fence 行；legacy fallback 候选为
+    /// 抽取区间首/末行。
+    pub(crate) opening_line: usize,
+    pub(crate) closing_line: usize,
+    pub(crate) opening_byte: usize,
+    pub(crate) closing_byte_end: usize,
+    /// 候选正文（不含 fence 行）的 sha256 hex。
+    pub(crate) sha256: String,
+    pub(crate) passed: bool,
+    /// 未通过时的既有 gate 阻断原因（逐候选保留，零通过时全部上报）。
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+/// workspace-aware 候选选择结果（Task 3/4 消费）。
+#[allow(dead_code)] // 同 SelectionVerdict：待生产接线后删除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateSelection {
+    pub(crate) verdict: SelectionVerdict,
+    /// 仅 `SelectionVerdict::Unique` 时为 `Some`（待选正文）。
+    pub(crate) selected_markdown: Option<String>,
+    pub(crate) candidates: Vec<CandidateGateResult>,
+    pub(crate) raw_output_chars: usize,
+    pub(crate) raw_output_sha256: String,
+    /// 是否走了既有单候选 fallback：无顶层 fenced 候选，或存在 XML `<artifact>`
+    /// 优先路径时。
+    pub(crate) used_legacy_fallback: bool,
+}
+
+/// workspace-aware artifact 选择：枚举顶层 fenced 候选，逐个以当前 workspace type 的
+/// 既有 gate 校验，**恰好一个通过**才选中（change `artifact-candidate-selection`
+/// REQ-ACS-01）。
+///
+/// - 零通过或多通过一律 fail-closed：不取「最后一个」「最长一个」，存在完整候选但全部
+///   失败时也不回落 heading fallback 猜测产物；
+/// - 候选正文内的禁止 token（nested artifact fence、`<thinking>` 等）仍由既有 gate
+///   硬拒绝，不做任何放宽；
+/// - XML `<artifact>` marker 存在时沿用既有优先路径；无任何顶层 fenced 候选时走既有
+///   单候选 `extract_artifact_content` fallback，并以 `used_legacy_fallback` 标记。
+#[allow(dead_code)] // 同 SelectionVerdict：待 Task 3/4 生产接线后删除。
+pub(crate) fn select_workspace_artifact(
+    full_output: &str,
+    workspace_type: WorkspaceType,
+) -> CandidateSelection {
+    let raw_output_chars = full_output.chars().count();
+    let raw_output_sha256 = compute_sha256(full_output.as_bytes());
+
+    if full_output.contains(XML_ARTIFACT_OPEN_TAG) {
+        return legacy_candidate_selection(
+            full_output,
+            workspace_type,
+            raw_output_chars,
+            raw_output_sha256,
+        );
+    }
+
+    let scanned = scan_top_level_fenced_candidates(full_output);
+    if scanned.is_empty() {
+        return legacy_candidate_selection(
+            full_output,
+            workspace_type,
+            raw_output_chars,
+            raw_output_sha256,
+        );
+    }
+
+    let mut candidates = Vec::with_capacity(scanned.len());
+    let mut passing_index = None;
+    let mut passing_count = 0usize;
+    for (index, candidate) in scanned.iter().enumerate() {
+        let report = validate_workspace_artifact_constraints(&candidate.markdown, &workspace_type);
+        if report.passed {
+            passing_count += 1;
+            if passing_index.is_none() {
+                passing_index = Some(index);
+            }
+        }
+        candidates.push(CandidateGateResult {
+            opening_line: candidate.opening_line,
+            closing_line: candidate.closing_line,
+            opening_byte: candidate.opening_byte,
+            closing_byte_end: candidate.closing_byte_end,
+            sha256: candidate.sha256.clone(),
+            passed: report.passed,
+            blocking_reasons: report.blocking_reasons(),
+        });
+    }
+
+    let verdict = match passing_count {
+        0 => SelectionVerdict::NoPassing,
+        1 => SelectionVerdict::Unique,
+        _ => SelectionVerdict::Ambiguous,
+    };
+    let selected_markdown = match (verdict, passing_index) {
+        // 只克隆被选中的候选正文：其余候选正文不进入结果、不再复制。
+        (SelectionVerdict::Unique, Some(index)) => Some(scanned[index].markdown.clone()),
+        _ => None,
+    };
+
+    CandidateSelection {
+        verdict,
+        selected_markdown,
+        candidates,
+        raw_output_chars,
+        raw_output_sha256,
+        used_legacy_fallback: false,
+    }
+}
+
+/// 既有单候选路径（XML marker 优先 / 无 fenced 候选）：结果仍走同一 workspace gate。
+fn legacy_candidate_selection(
+    full_output: &str,
+    workspace_type: WorkspaceType,
+    raw_output_chars: usize,
+    raw_output_sha256: String,
+) -> CandidateSelection {
+    let markdown = extract_artifact_content(full_output);
+    let report = validate_workspace_artifact_constraints(&markdown, &workspace_type);
+    let (opening_line, closing_line, opening_byte, closing_byte_end) =
+        legacy_extraction_span(full_output, &markdown);
+    let candidate = CandidateGateResult {
+        opening_line,
+        closing_line,
+        opening_byte,
+        closing_byte_end,
+        sha256: compute_sha256(markdown.as_bytes()),
+        passed: report.passed,
+        blocking_reasons: report.blocking_reasons(),
+    };
+    let verdict = if report.passed {
+        SelectionVerdict::Unique
+    } else {
+        SelectionVerdict::NoPassing
+    };
+
+    CandidateSelection {
+        verdict,
+        selected_markdown: report.passed.then_some(markdown),
+        candidates: vec![candidate],
+        raw_output_chars,
+        raw_output_sha256,
+        used_legacy_fallback: true,
+    }
+}
+
+/// legacy 抽取区间的 1-based 行列与字节边界：`markdown` 是 `full_output` 的连续子串
+/// （既有抽取只做切片与 trim），故按首处出现定位。
+fn legacy_extraction_span(full_output: &str, markdown: &str) -> (usize, usize, usize, usize) {
+    let start = full_output.find(markdown).unwrap_or_default();
+    let end = start + markdown.len();
+    let opening_line = line_number_at(full_output, start);
+    let closing_line = if markdown.is_empty() {
+        opening_line
+    } else {
+        line_number_at(full_output, end - 1)
+    };
+    (opening_line, closing_line, start, end)
+}
+
+/// `byte` 落在 `output` 的第几行（1-based，按 `\n` 计数；按字节扫描以免切到多字节
+/// 字符中间）。
+fn line_number_at(output: &str, byte: usize) -> usize {
+    output.as_bytes()[..byte.min(output.len())]
+        .iter()
+        .filter(|current| **current == b'\n')
+        .count()
+        + 1
 }
 
 pub(crate) fn reviewer_boundary_rules_for(workspace_type: &WorkspaceType) -> String {
