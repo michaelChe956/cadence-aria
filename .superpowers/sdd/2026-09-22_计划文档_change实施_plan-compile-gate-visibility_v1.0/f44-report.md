@@ -3,7 +3,7 @@
 - 日期：2026-09-23
 - 实施：F44Impl（worker 子代理）
 - worktree：`/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo`（基线 HEAD 1534be36；期间并入 SplitGuard3 的 ac15b2d0，文件零交集）
-- 结论：**DONE_WITH_CONCERNS**——入口已落地并实测可用；**group 作用域终态 attempt 的「重开可用面」受引擎既有结构门限制，本批 fail-closed 拒绝而非半途崩溃**，需要决策后续（见 §5）。
+- 结论：**DONE**——入口已落地并实测可用；**group 作用域终态的 resume target 恢复已按用户裁决实施（§6）**，含现场形态（unit 部分已完成 + 中止归一的 Skipped unit）的端到端实测。
 
 ## 1. 实测根因（三处，非一处）
 
@@ -66,10 +66,29 @@
 - 点击 → `restart_coding` → 后端重验 routing/快照/policy 后 CAS 回 Running → runner 从当前 stage 续跑（work_item 作用域已端到端实测）。失败一律回 `coding_protocol_error`，页面 statusText 可见（不静默）。
 - `StartCoding` 对终态**仍拒绝**（part_12 契约零回归）；`RecoverCoding`/`awaiting_manual_recovery` 面零改动。
 
-## 5. Concerns（需决策）
+## 5. group 作用域 resume target 恢复（用户裁决后实施）
 
-1. **group 作用域中止终态的「重开可用面」结构性受限（主要遗留）**：中止会把 unit 归一为 `Skipped`，重开后 `validate_group_attempt_pointers` 无合法目标 → 本批**fail-closed 拒绝**（实测：状态不被改写，不会退化成人工恢复态）。要真正放行现场 attempt e4a4… 这类 group 中止，需要「恢复 group resume target」的真实特性：把首个非 `Completed` unit 复位为 active（并清 `completed_at`）、对齐 `active_unit_id`/`current_work_item_id`、保证该 unit 有 active unit run（现场 unit3 的 run 仍是 `running`，可复用；无 run 时需 `create_retry_coding_unit_run`/启动 run）——涉及 `update_coding_unit_status` 语义扩展与 unit run/handoff 不变量，超出「最小守卫」，需独立立项 + 你的授权（本次未自授权实施）。
+授权内容：①`restart_terminal_attempt_for_execution` group 分支复位首个非 Completed unit 为 active、清其 `completed_at`、对齐指针、保证该 unit 有 active unit run；②`ensure_restart_has_resume_target` 由 fail-closed 前置门改为执行恢复；③`update_coding_unit_status` 语义扩展与 unit run/handoff 不变量保持；④TDD；⑤全门禁；⑥独立 commit；⑦报告追加。
+
+实施与设计取舍：
+
+- **执行顺序 = 先复位 unit、后 CAS 重开**。原因：`update_coding_unit_status` 自身要取 attempt 文件锁，而 `with_exclusive_lock` 是 flock（同进程同文件不可重入），不能嵌在 CAS 锁内；且「复位成功但 CAS 失败」时 attempt 仍在终态，下一次重开可自愈（反向顺序会留下 Running + 无 active unit 的不可恢复态）。socket 分支里 `restart_terminal_attempt_for_execution` 与 runner spawn 仍共用 `prepare_coding_message` 的 attempt 锁与 mutation lease，消息级并发不变。
+- **复位范围刻意收窄到 `Skipped`/`Failed`**（不是字面「首个非 Completed」）：中止会把所有 active unit 归一为 `Skipped`（`group_terminal.rs:71`），终态 attempt 上可复位的只可能是这两者；`Superseded`（被计划修订取代）、`BlockedByPlanDefect`、`AwaitingAmendment` 一律不动，避免重开绕过计划修订/重验语义；`Completed` 不动（TDD 断言）。
+- **unit run 不新建不改写**：`active_unit_run_projection`（plan_defect.rs:549）在 `get_active_unit_run` 返回 NotFound 时，会按既有链路（plan lineage/revision/projection bundle/handoff 解析）物化一个 `Running` run；现场 unit3 的 stale `running` run 直接被复用。因此恢复只做「unit 状态 + attempt 指针」，不碰 handoff/plan binding/advance 记录。
+- **`update_coding_unit_status` 语义扩展**：进入终态仍写 `completed_at`；**离开终态（Running 等）现清除 `completed_at`**——否则会产生「Running + completed_at」矛盾记录。既有调用方只把 unit 推向终态或 `Blocked`（active、本就无 `completed_at`），行为零变化。
+- **恢复前的纯内存预演**：先在内存里把 unit 集与 attempt（status=Running + 指针对齐）改好，跑 `ensure_restart_has_resume_target` 复核；不通过则不做任何写盘（保持终态）。写盘只发生一次 `update_coding_unit_status` + 一次 CAS。
+
+新增/变更测试证据：
+
+- `tests/it_web/web_coding_ws_handler/part_19.rs::aborted_group_attempt_restart_coding_restores_resume_target`（红→绿）：fixture 先 `update_coding_unit_status(unit1, Completed)` 再 abort（对齐现场 unit1 已完成 + 末 unit 被归一为 Skipped 的形态），随后 `restart_coding` → 断言 ①回发 Running 快照 ②unit1 仍 `Completed`（不被复位）③unit2 复位为 `Running` 且 `completed_at=None` ④`active_unit_id`/`current_work_item_id` 对齐 unit2 ⑤attempt `Running` 且 `completed_at=None` ⑥阶段链推进到 Coding 阶段门 ⑦确认阶段门后 coder 角色运行重新落地。
+- 回归：`part_19` work_item 路径用例（单会话重开端到端）、`part_12`（终态 StartCoding 仍拒绝）、`it_web web_coding_ws_handler` 全量、`--lib` 全量、`it_core` large_file_guard、clippy/fmt、npm/tsc 全绿（见交付摘要）。
+- 观察到的 runner 死亡路径（前一版 fail-closed 前）：group 无目标时 runner 死于 `coding_group_attempt_incomplete` 并被推进为人工恢复态——这正是本次恢复要消除的形态，现已由阶段门/角色运行推进取代。
+
+## 6. Concerns（需决策）
+
+1. **group 作用域 resume target 已实施（用户裁决后，见 §5）**：中止会把非终态 unit 归一为 `Skipped`，重开后 `validate_group_attempt_pointers` 无合法目标 → 现由 `restore_group_resume_target` 在 CAS 前把首个 `Skipped`/`Failed` unit 复位为 active（`Running`）、对齐 `active_unit_id`/`current_work_item_id`、清 `completed_at`。实测（含现场形态 fixture）重开后阶段链推进到 Coding 阶段门且 coder 角色运行重新落地。
+   - **仍未直接验证的点**：现场 attempt e4a4 本身未在真实 workspace 上执行重开（本批验证在 fixture 层，含同形态 unit 布局；现场数据另有 unit3 的 stale `running` unit run 可复用、WI-003 handoff 归属等真实细节）。建议主代理在 v 部署后对 e4a4 做一次真实点击复验。
 2. **UI 与可用面的一致性**：按钮在所有终态都渲染，group 且无 resume target 时点击会得到明确错误（fail-visible）。若你希望「不可重开就不显示入口」，前端可从快照的 `attempt_scope`+`units` 自行判定（本批未做，避免入口静默消失掩盖 F-44 本意）。
 3. **审计动词**：`restart_coding` 复用既有 `start_coding` 审计 operation（同一用户意图 + 同一拒绝/完成生命周期，零新增审计词汇）；如需审计区分重开与首启，需扩 `CockpitOperation` 并同步拒绝 lifecycle 过滤面。
 4. **未改的相邻缺陷**：`CodingComposer` 的 `inputDisabled` 只含 `completed`/`aborted`，`failed` 态仍可输入「补充上下文」，而后端对终态 `ContextNote` 拒绝——同一「终态提供不可能动作」家族，属 F-43 相邻面，本批未动（避免越界与既有用例churn）。
-5. **未验证项**：真浏览器视觉复验未做（本次以组件测试 + 真实 WS 集成测试为准）；现场 attempt e4a4… 的实际重开结果**不可用**（落在 concern 1），因此**报告不声称现场 attempt 已能重启**。
+5. **未验证项**：真浏览器视觉复验未做（本次以组件测试 + 真实 WS 集成测试为准）；现场 attempt e4a4… 未在真实 workspace 上实际点击复验（fixture 层已覆盖同形态 unit 布局，见 §5 与 concern 1）——建议部署后由主代理做一次真实点击复验。
