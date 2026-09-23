@@ -105,6 +105,11 @@ export function CodingWorkspacePage({
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
+  // F-43 fix1：横幅「定位选择卡」请求的目标条目。对话列表只在 chat 页签且无
+  // Plan Repair 时挂载，未挂载时 ref=null——直接 scrollToEntry 会静默无操作，
+  // 故先记录目标 + 切回 chat，待列表重挂后由 effect 执行滚动（ChatCockpitPage
+  // jumpEntryId 先例）。
+  const [pendingJumpEntryId, setPendingJumpEntryId] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
@@ -210,10 +215,25 @@ export function CodingWorkspacePage({
     setDeleteBusy(false);
     setDeleteError(null);
     setPlanError(null);
+    setPendingJumpEntryId(null);
     pendingRepairActionRef.current = null;
     setPendingRepairAction(null);
     setRepairActionError(null);
   }, [addressKey]);
+
+  // F-43 fix1：目标条目确定后，等对话列表真挂载（chat 页签且无 Plan Repair）再滚动。
+  // Plan Repair 期间列表被整块替换，此 effect 会保持挂起直到修复会话结束/退出。
+  useEffect(() => {
+    if (pendingJumpEntryId === null || store.activePlanRepair || activePanel !== "chat") {
+      return;
+    }
+    const target = chatListRef.current;
+    if (!target) {
+      return;
+    }
+    target.scrollToEntry(pendingJumpEntryId);
+    setPendingJumpEntryId(null);
+  }, [activePanel, pendingJumpEntryId, store.activePlanRepair]);
 
   useEffect(() => {
     const activeRepair = store.activePlanRepair;
@@ -488,7 +508,12 @@ export function CodingWorkspacePage({
           结果页签时同样必须看到「有选择请求待处理」。 */}
       <PendingChoiceNotice
         entries={store.chatEntries}
-        onJump={(entryId) => chatListRef.current?.scrollToEntry(entryId)}
+        onJump={(entryId) => {
+          // F-43 fix1：先切回对话页签（列表在「运行结果」页签/Plan Repair 下未挂载，
+          // ref=null 时同步 scrollToEntry 是静默 no-op），滚动交给挂载后的 effect。
+          setPendingJumpEntryId(entryId);
+          setActivePanel("chat");
+        }}
       />
 
       <header className="grid min-h-16 min-w-0 shrink-0 gap-2 overflow-hidden border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]">

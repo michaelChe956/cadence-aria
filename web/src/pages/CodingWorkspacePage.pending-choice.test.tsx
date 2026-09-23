@@ -127,6 +127,36 @@ describe("CodingWorkspacePage choice arrival and settings slot", () => {
     expect(screen.getByTestId("pending-choice-notice")).toHaveTextContent("有 1 个选择请求待处理");
   });
 
+  // k3 复审 P2：横幅在「运行结果」页签下点「定位选择卡」时对话列表未挂载
+  // （ref=null）→ 原实现静默无操作。契约：先切回对话页签，列表重挂后再滚动。
+  it("switches back to the conversation panel before scrolling when the results tab is open", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    vi.mocked(getCodingAttemptDiff).mockResolvedValue({
+      attempt_id: CODING_ATTEMPT_ADDRESS.attemptId,
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      diff: "",
+    });
+    renderReadyPage();
+    act(() => {
+      useCodingWorkspaceStore.getState().appendChatEntry(pendingChoiceEntry());
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    expect(screen.queryByTestId("coding-chat-entry-list")).toBeNull();
+
+    scrollIntoView.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "定位选择卡" }));
+
+    expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
+    expect(screen.getByTestId("choice-request-entry")).toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it("drops the announcement once the choice is answered", () => {
     renderReadyPage();
 
