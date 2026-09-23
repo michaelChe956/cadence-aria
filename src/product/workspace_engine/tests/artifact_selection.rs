@@ -3,8 +3,8 @@
 //!
 //! 用例覆盖：唯一通过选中、零通过逐候选保留阻断原因、双通过歧义、三候选（1 示意 +
 //! 2 合法）歧义、候选全失败时禁止回落候选外 heading、无任何 marker 时 legacy 单候选
-//! fallback，以及 F-46 真实 durable 原文实跑（候选 2 个、`:200-203` 拒、`:270-361`
-//! 唯一通过）。
+//! fallback、XML `<artifact>` marker 优先接管 fenced 候选，以及 F-46 真实 durable
+//! 原文实跑（候选 2 个、`:200-203` 拒、`:270-361` 唯一通过）。
 use super::provider_drive::artifact_retry::{
     artifact_failure_reasons_with_diagnostic, artifact_selection_diagnostic_event,
 };
@@ -174,6 +174,33 @@ fn select_without_any_marker_uses_legacy_single_candidate_fallback() {
     assert_eq!(
         selection.selected_markdown.as_deref(),
         Some(compliant.trim_end())
+    );
+}
+
+#[test]
+fn select_xml_artifact_marker_takes_priority_over_fenced_candidates() {
+    // 输入同时含既有 XML marker（内为 Story 合规正文）与一个同样合规的 fenced
+    // ```artifact block：XML 优先路径必须接管，fenced 扫描不得枚举候选。若该早退
+    // 被删除/后移，fenced 扫描会静默接管并给出 fenced 正文与
+    // `used_legacy_fallback == false`，以下断言随之变红。
+    let xml_compliant = complete_story_artifact("XML 路径需求。", "XML 路径可验收。");
+    let fenced_compliant = complete_story_artifact("fenced 路径需求。", "fenced 路径可验收。");
+    let output = format!(
+        "前言\n<artifact>\n{xml_compliant}</artifact>\n中间说明\n{}尾随说明\n",
+        fenced(&fenced_compliant),
+    );
+
+    let selection = select_workspace_artifact(&output, WorkspaceType::Story);
+
+    assert!(selection.used_legacy_fallback);
+    assert_eq!(selection.verdict, SelectionVerdict::Unique);
+    // 单候选 = legacy 抽取路径：合规的 fenced block 也不被枚举为第二个候选。
+    assert_eq!(selection.candidates.len(), 1);
+    assert!(selection.candidates[0].passed);
+    // 选中正文逐字来自 XML marker 内的合规正文，而非 fenced block。
+    assert_eq!(
+        selection.selected_markdown.as_deref(),
+        Some(xml_compliant.trim_end())
     );
 }
 
