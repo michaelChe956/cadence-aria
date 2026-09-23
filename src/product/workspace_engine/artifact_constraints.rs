@@ -325,7 +325,6 @@ pub(crate) fn validate_workspace_artifact_constraints(
 const XML_ARTIFACT_OPEN_TAG: &str = "<artifact>";
 
 /// 候选选择结论。
-#[allow(dead_code)] // 生产接线（Task 3/4）落地后删除；先例见 artifact_extraction.rs。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelectionVerdict {
     /// 恰好一个候选通过 gate，已选中该候选。
@@ -337,7 +336,6 @@ pub(crate) enum SelectionVerdict {
 }
 
 /// 单个候选的 gate 结果与其在原输出中的边界、正文 hash。
-#[allow(dead_code)] // 同 SelectionVerdict：待生产接线后删除。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CandidateGateResult {
     /// 1-based 行号：fenced 候选为 opening/closing fence 行；legacy fallback 候选为
@@ -354,7 +352,6 @@ pub(crate) struct CandidateGateResult {
 }
 
 /// workspace-aware 候选选择结果（Task 3/4 消费）。
-#[allow(dead_code)] // 同 SelectionVerdict：待生产接线后删除。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CandidateSelection {
     pub(crate) verdict: SelectionVerdict,
@@ -378,7 +375,6 @@ pub(crate) struct CandidateSelection {
 ///   硬拒绝，不做任何放宽；
 /// - XML `<artifact>` marker 存在时沿用既有优先路径；无任何顶层 fenced 候选时走既有
 ///   单候选 `extract_artifact_content` fallback，并以 `used_legacy_fallback` 标记。
-#[allow(dead_code)] // 同 SelectionVerdict：待 Task 3/4 生产接线后删除。
 pub(crate) fn select_workspace_artifact(
     full_output: &str,
     workspace_type: WorkspaceType,

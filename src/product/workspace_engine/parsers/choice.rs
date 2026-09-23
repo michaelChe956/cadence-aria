@@ -7,8 +7,9 @@ pub(crate) fn detect_author_choice_request(
     if !matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
         return None;
     }
-    let artifact_markdown = extract_artifact_content(content);
-    if content_has_complete_workspace_artifact(&artifact_markdown, workspace_type) {
+    // 完整产物（唯一 gate-passing 候选）优先于文本选择题判定；候选不再由旧
+    // 「首开—末闭」区间抽取，避免示意 block 污染判定。
+    if content_has_complete_workspace_artifact(content, workspace_type) {
         return None;
     }
     if !looks_like_user_question(content) {
@@ -227,7 +228,9 @@ pub(crate) fn content_has_complete_workspace_artifact(
     content: &str,
     workspace_type: &WorkspaceType,
 ) -> bool {
-    validate_workspace_artifact_constraints(content, workspace_type).passed
+    // REQ-ACS-01：语义由「抽取出来的单块是否过 gate」升级为「是否恰好一个顶层候选过
+    // gate」；零通过/歧义都不算完整产物（fail-closed）。
+    selection_is_unique(&workspace_artifact_selection(content, workspace_type))
 }
 
 pub(crate) fn normalize_workspace_heading_line(line: &str) -> Option<String> {

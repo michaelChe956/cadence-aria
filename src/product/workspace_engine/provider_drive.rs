@@ -272,8 +272,7 @@ impl WorkspaceEngine {
             return false;
         }
 
-        let artifact_markdown = extract_artifact_content(full_content);
-        !content_has_complete_workspace_artifact(&artifact_markdown, &self.session.workspace_type)
+        !content_has_complete_workspace_artifact(full_content, &self.session.workspace_type)
             && detect_author_choice_request(full_content, &self.session.workspace_type).is_none()
     }
 
@@ -697,11 +696,11 @@ impl WorkspaceEngine {
                             }
                             let completed_output = if self.workspace_requires_artifact_gate()
                                 && !content_has_complete_workspace_artifact(
-                                    &extract_artifact_content(&full_output),
+                                    &full_output,
                                     &self.session.workspace_type,
                                 )
                                 && content_has_complete_workspace_artifact(
-                                    &extract_artifact_content(&full_content),
+                                    &full_content,
                                     &self.session.workspace_type,
                                 ) {
                                 full_content.clone()
@@ -1026,24 +1025,20 @@ impl WorkspaceEngine {
         }
 
         self.pending_author_choice = None;
-        let artifact_markdown = extract_artifact_content(&full_content);
-        if self.workspace_requires_artifact_gate() {
-            let report = validate_workspace_artifact_constraints(
-                &artifact_markdown,
-                &self.session.workspace_type,
-            );
-            if !report.passed {
-                let blocking_reasons = report.blocking_reasons();
-                if artifact_retry_attempted {
-                    self.finish_invalid_workspace_artifact_after_retry(&blocking_reasons)
-                        .await;
-                } else {
-                    self.finish_invalid_workspace_artifact(&blocking_reasons)
-                        .await;
-                }
-                return;
+        // REQ-ACS-01：唯一 gate-passing 候选才作为产物；零通过/歧义走既有失败分支
+        // （retry 判断由调用方在同一 raw 源上先行完成，此处不重新选源）。
+        let selection = workspace_artifact_selection(&full_content, &self.session.workspace_type);
+        let Some(artifact_markdown) = selected_artifact_markdown(&selection) else {
+            let blocking_reasons = selection_failure_reasons(&selection);
+            if artifact_retry_attempted {
+                self.finish_invalid_workspace_artifact_after_retry(&blocking_reasons)
+                    .await;
+            } else {
+                self.finish_invalid_workspace_artifact(&blocking_reasons)
+                    .await;
             }
-        }
+            return;
+        };
         let aggregate_write_back_diagnostic = if let Some(store) = &self.lifecycle_store
             && matches!(
                 self.session.workspace_type,

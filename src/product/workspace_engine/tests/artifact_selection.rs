@@ -222,3 +222,77 @@ fn select_f46_real_durable_output_picks_unique_gate_passing_candidate() {
         Some(expected.as_str())
     );
 }
+
+/// Task 3：合成 durable session record（与磁盘 JSON 同构），用于 reload 路径断言。
+fn session_record_with_assistant_output(
+    workspace_type: WorkspaceType,
+    content: String,
+) -> WorkspaceSessionRecord {
+    serde_json::from_value(serde_json::json!({
+        "id": "workspace_session_reload",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
+        "entity_id": "entity_0001",
+        "workspace_type": workspace_type,
+        "status": "confirmed",
+        "author_provider": "codex",
+        "reviewer_provider": "claude_code",
+        "review_rounds": 1,
+        "superpowers_enabled": true,
+        "openspec_enabled": true,
+        "messages": [{
+            "role": "assistant",
+            "content": content,
+            "created_at": "2026-09-23T00:00:00Z",
+        }],
+        "created_at": "2026-09-23T00:00:00Z",
+        "updated_at": "2026-09-23T00:00:00Z",
+    }))
+    .expect("workspace session record fixture")
+}
+
+/// 双 block 原文：示意 block（过不了 gate）+ `<thinking>` 过程文本 + 唯一合规 block。
+fn dual_block_output(compliant: &str) -> String {
+    format!(
+        "前言\n{}中间 <thinking>过程</thinking> 文本\n{}尾随说明\n",
+        fenced(DRAFT_STORY),
+        fenced(compliant),
+    )
+}
+
+/// Task 3（REQ-ACS-01）：reload 与 coding fallback 走同一 selector——`from_record`
+/// 只取唯一 gate-passing 候选，不再回退旧「首开—末闭」区间（那样会把示意块、过程
+/// 文本与最终块混成一个产物）。
+#[test]
+fn reload_and_coding_fallback_share_unique_candidate_selection() {
+    let compliant_story =
+        complete_story_artifact("系统支持 provider 检查。", "用户能看到 provider 状态。");
+    let session = WorkspaceSession::from_record(session_record_with_assistant_output(
+        WorkspaceType::Story,
+        dual_block_output(&compliant_story),
+    ));
+
+    assert_eq!(
+        session
+            .artifact
+            .as_ref()
+            .map(ArtifactPayload::markdown_or_empty),
+        Some(compliant_story.trim())
+    );
+
+    // coding fallback（无持久化版本 markdown 时回退到最后一条 assistant 产物）同源。
+    let compliant_work_item = complete_work_item_artifact("实现 provider 检查。");
+    let work_item_record = session_record_with_assistant_output(
+        WorkspaceType::WorkItem,
+        dual_block_output(&compliant_work_item),
+    );
+
+    assert_eq!(
+        crate::product::coding_work_item_context::select_work_item_markdown(
+            None,
+            &work_item_record
+        )
+        .as_deref(),
+        Some(compliant_work_item.trim())
+    );
+}

@@ -64,10 +64,11 @@ fn recover_complete_artifact_misclassified_as_text_fallback(
     if detect_author_choice_request(full_content, &session.workspace_type).is_some() {
         return Ok(false);
     }
-    let artifact_markdown = extract_artifact_content(full_content);
-    if !content_has_complete_workspace_artifact(&artifact_markdown, &session.workspace_type) {
+    let Some(artifact_markdown) =
+        selected_workspace_artifact_markdown(full_content, &session.workspace_type)
+    else {
         return Ok(false);
-    }
+    };
 
     let payload = ArtifactPayload::Markdown {
         markdown: artifact_markdown.clone(),

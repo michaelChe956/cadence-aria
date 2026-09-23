@@ -233,7 +233,17 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         provider_conversations: Vec::new(),
         messages: vec![WorkspaceMessageRecord {
             role: "assistant".to_string(),
-            content: "```artifact\n# Work Item\n\n## 验证命令\n\n```bash\nuv run python -m unittest discover -s tests -v\n```\n```"
+            content: "```artifact\n\
+                # Work Item\n\n\
+                ## 目标\n补齐 coding 上下文验证命令回退。\n\n\
+                ## 范围\n仅覆盖当前单个可执行任务。\n\n\
+                ## 实现步骤\n- 完成当前任务实现。\n- 补充当前任务验证。\n\n\
+                ## 依赖\n依赖已确认 Story Spec 与 Design Spec。\n\n\
+                ## 验证命令\n```bash\nuv run python -m unittest discover -s tests -v\n```\n\n\
+                ## 风险\n无。\n\n\
+                ## 追踪关系\n- source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+                - [REQ-001]\n\
+                ```"
                 .to_string(),
             created_at: "2026-05-28T00:00:00Z".to_string(),
         }],

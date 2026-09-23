@@ -317,15 +317,15 @@ fn four_backtick_artifact_extracts_across_workspace_types_and_suppresses_story_d
              返修完成。"
         );
 
-        let extracted = extract_artifact_content(&output);
+        let selection = select_workspace_artifact(&output, workspace_type.clone());
         assert_eq!(
-            extracted,
-            artifact.trim(),
-            "{workspace_type:?} 应抽取四反引号 artifact 正文"
+            selected_artifact_markdown(&selection).as_deref(),
+            Some(artifact.trim()),
+            "{workspace_type:?} 应唯一选中四反引号 artifact 正文"
         );
         assert!(
-            content_has_complete_workspace_artifact(&extracted, &workspace_type),
-            "{workspace_type:?} 抽取后的 artifact 应通过完整性校验"
+            content_has_complete_workspace_artifact(&output, &workspace_type),
+            "{workspace_type:?} 四反引号 artifact 应通过完整性校验"
         );
 
         if matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {

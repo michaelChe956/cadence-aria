@@ -256,14 +256,21 @@ pub(crate) fn workspace_status_for_stage(stage: &WorkspaceStage) -> WorkspaceSes
 
 pub(crate) fn latest_artifact_from_messages(
     messages: &[WorkspaceMessageRecord],
+    workspace_type: &WorkspaceType,
 ) -> Option<ArtifactPayload> {
     messages
         .iter()
         .rev()
         .find(|message| matches!(message.role.as_str(), "assistant" | "provider"))
-        .map(|message| ArtifactPayload::Markdown {
-            markdown: extract_artifact_content(&message.content),
-            diff: None,
+        .and_then(|message| {
+            // session reload 用同一 selector：唯一 gate-passing 候选才作为产物，
+            // 零通过/歧义保持 `None`，不回退旧「首开—末闭」区间。
+            selected_workspace_artifact_markdown(&message.content, workspace_type).map(|markdown| {
+                ArtifactPayload::Markdown {
+                    markdown,
+                    diff: None,
+                }
+            })
         })
 }
 

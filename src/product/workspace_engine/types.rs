@@ -113,7 +113,7 @@ pub struct WorkspaceSession {
 
 impl WorkspaceSession {
     pub fn from_record(record: WorkspaceSessionRecord) -> Self {
-        let artifact = latest_artifact_from_messages(&record.messages);
+        let artifact = latest_artifact_from_messages(&record.messages, &record.workspace_type);
         Self {
             session_id: record.id,
             project_id: record.project_id,

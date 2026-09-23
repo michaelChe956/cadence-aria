@@ -1,5 +1,4 @@
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
@@ -9,6 +8,7 @@ use crate::product::models::{
 };
 use crate::product::test_executor::planned_test_commands_from_markdown;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::product::workspace_engine::selected_workspace_artifact_markdown;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CompiledCodingWorkItemContext {
@@ -403,7 +403,10 @@ fn latest_assistant_artifact_markdown(session: &WorkspaceSessionRecord) -> Optio
         .iter()
         .rev()
         .find(|message| matches!(message.role.as_str(), "assistant" | "provider"))
-        .map(|message| extract_artifact_content(&message.content))
+        .and_then(|message| {
+            // 与 workspace engine 同一选择语义：只取唯一 gate-passing 候选。
+            selected_workspace_artifact_markdown(&message.content, &session.workspace_type)
+        })
         .filter(|content| !content.trim().is_empty())
 }
 

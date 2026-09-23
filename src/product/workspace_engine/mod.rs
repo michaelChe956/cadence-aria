@@ -17,7 +17,6 @@ use crate::cross_cutting::streaming_provider::{
     RiskLevel, StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputError, StructuredOutputState};
-use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{
@@ -80,6 +79,7 @@ pub(crate) use advance::{
 };
 pub mod aggregate_output_parser;
 mod artifact_constraints;
+mod artifact_selection;
 mod author_confirm;
 mod compile;
 mod compile_parse;
@@ -142,6 +142,7 @@ pub use types::{
 };
 
 pub(crate) use artifact_constraints::*;
+pub(crate) use artifact_selection::*;
 
 #[cfg(test)]
 pub(crate) async fn single_candidate_compile_test_lock() -> tokio::sync::MutexGuard<'static, ()> {

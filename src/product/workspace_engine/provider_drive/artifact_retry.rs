@@ -2,9 +2,10 @@ use super::*;
 
 impl WorkspaceEngine {
     pub(crate) fn workspace_artifact_blocking_reasons(&self, full_content: &str) -> Vec<String> {
-        let artifact_markdown = extract_artifact_content(full_content);
-        validate_workspace_artifact_constraints(&artifact_markdown, &self.session.workspace_type)
-            .blocking_reasons()
+        selection_failure_reasons(&workspace_artifact_selection(
+            full_content,
+            &self.session.workspace_type,
+        ))
     }
 
     pub(crate) async fn begin_artifact_retry_node(
