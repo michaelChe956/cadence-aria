@@ -573,6 +573,59 @@ mod tests {
     }
 
     #[test]
+    fn local_usage_reads_kimi_usage_line_hit_by_crossing_pending_join() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // usage 行尾跨过 64 KiB 块边界：行首片段（旧块尾部）必须与上一块携带的
+        // 行尾片段（pending）按「前半 + 后半」顺序拼接后才能命中，两侧片段均非空。
+        let head = "{\"type\":\"message\",\"content\":\"seed\"}";
+        let usage_line = "{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":41,\"inputCacheRead\":5,\"inputCacheCreation\":3,\"output\":7}}";
+        let block = super::SCAN_BLOCK_BYTES as usize;
+        let front = usage_line.len() / 2;
+        let tail = "z".repeat(block + front - usage_line.len() - 2);
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            &format!("{head}\n{usage_line}\n{tail}\n"),
+        );
+        let report = read_kimi_usage(root.path(), cwd, session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(44));
+        assert_eq!(report.output_tokens, Some(7));
+        assert_eq!(report.cache_read_tokens, Some(5));
+        assert_eq!(report.cache_creation_tokens, Some(3));
+    }
+
+    #[test]
+    fn local_usage_keeps_latest_kimi_usage_across_block_boundary() {
+        let root = tempdir().expect("tempdir");
+        let cwd = Path::new("/workspace/naruto");
+        let session = "448df463-188a-45c7-ad93-c3920ef68870";
+        let key = "wd_naruto_88aa5146ca53";
+        // 命中的 usage 行行首在旧块、行尾跨入新块；旧块内另有更早的一条 usage
+        // 完整行：反向扫描必须先在跨块行上命中，不得退回旧块内更早的匹配行。
+        let seed = "{\"type\":\"message\",\"content\":\"seed\"}";
+        let older = "{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":10,\"inputCacheRead\":1,\"inputCacheCreation\":1,\"output\":2}}";
+        let latest = "{\"type\":\"usage.record\",\"usageScope\":\"turn\",\"usage\":{\"inputOther\":50,\"inputCacheRead\":6,\"inputCacheCreation\":4,\"output\":9}}";
+        let block = super::SCAN_BLOCK_BYTES as usize;
+        let front = latest.len() / 2;
+        let tail = "z".repeat(block + front - latest.len() - 2);
+        write(
+            &root
+                .path()
+                .join(format!("{key}/session_{session}/agents/main/wire.jsonl")),
+            &format!("{seed}\n{older}\n{latest}\n{tail}\n"),
+        );
+        let report = read_kimi_usage(root.path(), cwd, session, "author").expect("usage");
+        assert_eq!(report.input_tokens, Some(54));
+        assert_eq!(report.output_tokens, Some(9));
+        assert_eq!(report.cache_read_tokens, Some(6));
+        assert_eq!(report.cache_creation_tokens, Some(4));
+    }
+
+    #[test]
     fn local_usage_returns_none_when_kimi_usage_beyond_scan_budget() {
         let root = tempdir().expect("tempdir");
         let cwd = Path::new("/workspace/naruto");
