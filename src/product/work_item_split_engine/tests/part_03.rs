@@ -37,6 +37,52 @@ fn build_split_prompt_inlines_schema_and_kind_guidance() {
     }
 }
 
+/// REQ-ACS-03：Work Item Plan 的 split/outline JSON 结构化输出 prompt 不注入
+/// Markdown artifact 负面清单，JSON validator 契约不变。
+#[test]
+fn split_json_prompts_never_teach_the_markdown_artifact_negative_list() {
+    let (request, issue, repository) = split_prompt_fixture();
+
+    let split = build_split_prompt(
+        &request,
+        &issue,
+        &repository,
+        &[],
+        &[],
+        "(empty)",
+        &RoutingReferenceContext::Legacy,
+    );
+    let outline = build_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        &["Story context [REQ-001]".to_string()],
+        &["Design context [DEC-001]".to_string()],
+        "src/product\nweb/src",
+        &[],
+        &[],
+        &RoutingReferenceContext::Legacy,
+    );
+
+    for (kind, prompt) in [("split", split), ("outline", outline)] {
+        assert!(
+            !prompt.contains(crate::product::workspace_engine::AUTHOR_ARTIFACT_NEGATIVE_LIST),
+            "{kind} JSON prompt must not carry the shared markdown artifact negative list"
+        );
+        for keyword in [
+            "负面清单",
+            "四反引号",
+            "不得作为最终候选回显",
+            "artifact fence 之外",
+        ] {
+            assert!(
+                !prompt.contains(keyword),
+                "{kind} JSON prompt must not carry the markdown artifact negative list (`{keyword}`)"
+            );
+        }
+    }
+}
+
 #[test]
 fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
     let (request, issue, repository) = split_prompt_fixture();

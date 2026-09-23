@@ -15,6 +15,7 @@ use crate::product::models::{
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::product::workspace_engine::AUTHOR_ARTIFACT_NEGATIVE_LIST;
 use tempfile::tempdir;
 
 mod linked_context;
@@ -42,6 +43,43 @@ fn all_workspace_artifact_outputs_require_artifact_fence() {
             schema.contains("```artifact fenced block"),
             "{workspace_type:?} output schema must require artifact fenced block"
         );
+    }
+}
+
+/// REQ-ACS-03：「初次 output schema」注入点（Web workspace 上下文 `[output_schema]`）
+/// 对四类 workspace 都注入同一份 artifact 输出负面清单教学。
+#[test]
+fn all_workspace_output_schemas_teach_the_shared_negative_list() {
+    const NEGATIVE_LIST_KEYWORDS: [&str; 5] = [
+        "一个",
+        "artifact fence 之外",
+        "<thinking>",
+        "四反引号",
+        "不得作为最终候选回显",
+    ];
+
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let schema = output_schema_for(&workspace_type);
+        assert!(
+            schema.contains(AUTHOR_ARTIFACT_NEGATIVE_LIST),
+            "{workspace_type:?} output schema must inject the shared negative list constant"
+        );
+        assert_eq!(
+            schema.matches(AUTHOR_ARTIFACT_NEGATIVE_LIST).count(),
+            1,
+            "{workspace_type:?} output schema must not carry a second copy of the negative list"
+        );
+        for keyword in NEGATIVE_LIST_KEYWORDS {
+            assert!(
+                schema.contains(keyword),
+                "{workspace_type:?} output schema must teach negative-list keyword `{keyword}`: {schema}"
+            );
+        }
     }
 }
 #[test]

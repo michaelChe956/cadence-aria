@@ -3,7 +3,8 @@ use crate::product::cadence_skills::routing_reference::{
 };
 use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::workspace_engine::{
-    allowed_outputs_for, author_artifact_schema_contract_for, forbidden_outputs_for,
+    AUTHOR_ARTIFACT_NEGATIVE_LIST, allowed_outputs_for, author_artifact_schema_contract_for,
+    forbidden_outputs_for,
 };
 
 pub(super) fn workspace_type_label(workspace_type: &WorkspaceType) -> &'static str {
@@ -165,6 +166,8 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
     if let Some(contract) = author_artifact_schema_contract_for(workspace_type) {
         schema.push_str(&contract);
     }
+    schema.push_str("\n\n");
+    schema.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
     schema
 }
 

@@ -95,6 +95,21 @@ fn initial_author_runtime_contract(
     )
 }
 
+/// REQ-ACS-03 弱模型输出负面清单：Story/Design/Work Item/legacy Work Item Plan 的
+/// author prompt 三个注入点——Web 初次 `[output_schema]`、共享 author output
+/// contract、artifact retry contract——必须引用本常量，禁止各写一份。
+///
+/// 本教学是预防层，不改变 REQ-ACS-01 的 artifact gate 判定语义；Work Item Plan 的
+/// split/outline JSON 结构化输出流（`WorkItemSplitProviderOutput`）不注入本清单。
+pub(crate) const AUTHOR_ARTIFACT_NEGATIVE_LIST: &str = "\
+输出纪律（负面清单）：
+- 最终响应只生成一个完整的顶层 artifact fenced block；不要输出多个完整候选、示意 block，或把早前示例复制成 block。
+- 过程说明、思考与决策解释必须写在最终 artifact fence 之外；不要输出 <thinking>/</thinking> 标签。
+- artifact 正文不得包含另一个 artifact fence。
+- 正文内需要三反引号代码块时，外层使用四反引号 ````artifact ... ```` 包裹；不要用与外层同长度的 fence 造成边界歧义。
+- prompt 中的骨架/示例只是结构说明，不得作为最终候选回显；最终 fence 内第一行必须是当前工作类型的一级标题。
+";
+
 pub(crate) fn build_artifact_retry_prompt(
     workspace_type: &WorkspaceType,
     previous_output: &str,
@@ -104,9 +119,12 @@ pub(crate) fn build_artifact_retry_prompt(
     let mut prompt = format!(
         "上一轮已结束，但没有输出完整 artifact。\n\
          不要继续调研，不要只解释。\n\
-         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n\
-         只能输出一个完整 artifact fenced block；不要拆成多个 artifact block，不要在 artifact 内输出 <thinking>。\n\
-         如仍有需要用户确认的问题，必须先使用 AskUserQuestion 等结构化交互；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n"
+         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n"
+    );
+    prompt.push('\n');
+    prompt.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
+    prompt.push_str(
+        "如仍有需要用户确认的问题，必须先使用 AskUserQuestion 等结构化交互；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n",
     );
     if !blocking_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");
@@ -517,6 +535,8 @@ impl WorkspaceEngine {
         prompt.push_str(structured_interaction_artifact_decision_contract(
             &self.session.workspace_type,
         ));
+        prompt.push_str("\n\n");
+        prompt.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
     }
 }
 
