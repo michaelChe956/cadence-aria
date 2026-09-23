@@ -66,3 +66,14 @@
 2. `line-clamp-6` 为固定 6 行阈值；判定走行数/字符估算（无布局量测的降级），超长单行（>240 字符）也会出现「展开全文」——产品语义如此，非缺陷。
 3. `ChatEntryList` 的 `Map` 索引为运行时动态键集（规则允许的情形），`ChoiceRequestEntry` 内既有局部 `isRecord` 守卫为本次改动前的既有结构（未新增同类守卫，也未改其语义）。
 4. 未改 src/：F-43 ④ 后端面（新连接补发 pending choice）不在本单范围；F-35~42 面未回退（全量测试绿）。
+
+---
+
+## 7. fix1（k3 复审 P2 回执）— 横幅定位在「运行结果」页签下静默失效
+
+- 提交：`4c89f494 fix(coding-ui): 横幅定位在结果页签下切回对话页签再滚动（F-43 fix1）`（文件：`web/src/pages/CodingWorkspacePage.tsx`、`web/src/pages/CodingWorkspacePage.pending-choice.test.tsx`；基线 HEAD 6db84c48，含 F-44 改动）
+- **问题（P2）**：`CodingWorkspacePage.tsx` 的 `onJump` 只调 `chatListRef.current?.scrollToEntry`，而 `ChatEntryList` 仅在 `activePanel !== "results"` 且无 `activePlanRepair` 的分支挂载——用户停在「运行结果」页签时列表卸载、`ref=null`，点「定位选择卡」既无滚动也不切回，属静默无操作。
+- **修法**：新增 `pendingJumpEntryId` 状态；`onJump` 置目标 + `setActivePanel("chat")`（同步调用时列表尚未重挂，不能只切页签）；新增 effect 在 `activePanel === "chat"`、无 `activePlanRepair`、且 `chatListRef.current` 非空时执行 `scrollToEntry` 并清空目标（ChatCockpitPage `jumpEntryId` 先例，:557-562）。Plan Repair 期间列表被整块替换，effect 挂起至修复会话结束/退出后再滚动；切换 attempt（addressKey 变化）时一并清空挂起目标。
+- **测试（先红后绿）**：新增 `switches back to the conversation panel before scrolling when the results tab is open`——results 页签下断言对话列表不存在 → 点「定位选择卡」→ 断言切回 chat 页签、选择卡重新渲染、`scrollIntoView` 确实被调（修复前红：列表仍未挂载）。
+- **验证**：`cd web && npm test` → **183 文件 / 1711 测试全绿**；`pnpm exec tsc --noEmit` → exit 0。
+- **残余**：同为「未挂载即静默 no-op」的相邻入口 `handleSelectTimelineNode`（时间轴选节点后 `scrollToEntry`）在 results 页签/Plan Repair 下同样不滚动——本次未纳入（不在 k3 回执范围），如需一致行为可复用同一 `pendingJumpEntryId` 通道。
