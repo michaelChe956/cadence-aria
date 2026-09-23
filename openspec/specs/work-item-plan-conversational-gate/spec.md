@@ -22,9 +22,11 @@
 
 ### Requirement: 单飞与预算纪律（REQ-CG-02）
 
-同一人工门同时 SHALL 至多存在一个非终态 turn；已有 in-flight turn 时收到新反馈或 approve/abandon SHALL 均返回 `gate_busy`，不隐式排队、不关门；终止决定仅在 turn 进入终态后处理。`manual_repairs_remaining` SHALL 在 turn durable 预留时扣减；修订失败（provider 错误、校验拒绝、超时）SHALL NOT 退还已扣预算。**普通 SC 修订门**内的人工修订 turn 成功完成并经 Evaluate policy route 重建门快照时，快照预算 SHALL 重置为默认值（与初始 author Evaluate-pass 同构；2026-09-03 专项测量轮实测记录并补句）；门未重建（修订失败/门未重开）时预算 SHALL 保持既有值。**amendment 人工门**（REQ-GCE-03 场景二重开的原门）的修订 turn 成功后，无论无 reviewer 的本地 Evaluate 路由还是有 reviewer 的 review-pass 路由重建 Approval 快照，快照预算 SHALL 接续重开时原 `human_gate_snapshot` 的 `manual_repairs_remaining`（typed turn 只扣快照、不递增 run_history 计数，重建不得凭空恢复已耗预算）。amendment 门的接续/守卫判别 SHALL 绑定 durable amendment 事实，且 MUST 复用重开授权（`probe_amendment_gate_context`）所用的同一完整谓词——指向本 plan session 的 Open/Applying `PlanAmendmentContext`，**且**其 group attempt 处于 AwaitingPlanAmendment 并绑定本 plan session 的 entity；仅凭会话状态三元组（SingleCandidate + phase Completed + WaitingForHuman）SHALL NOT 判定为 amendment 门——该三元组可由通用状态写入伪造；group attempt 已离开 AwaitingPlanAmendment 的应用窗口（context 先行 Open→Applying 而 attempt 状态已同步/未同步的窗口内）SHALL NOT 判定为 amendment 门——迟到 verdict 照常被终态评审守卫丢弃，重建走普通门重置语义。判别为三态：「明确无 amendment 事实」（记录可读且签名不符 / 无 context / attempt 不在 AwaitingPlanAmendment）走普通门语义；判别命中而原快照缺席时 SHALL fail-closed 终止（AbortFatal{PersistenceFailure}）；判别所需 durable 事实无法读取/校验（session record 或 context 文件损坏、目录读失败、瞬态 I/O 错误）时 SHALL 同样以持久化失败 fail-closed 终止（AbortFatal{PersistenceFailure}），SHALL NOT 被当作「无 amendment 事实」进入普通门重置公式——否则真 amendment 链在存储瞬断时会被凭空恢复预算。fail-closed 终止的 policy diagnostics SHALL 写回 durable session record（与 policy route 落盘机制一致），仅内存诊断不足。判别命中时 SHALL NOT 回退普通重置公式重建。amendment 接续语义与普通门重建重置语义存在家族分叉，已登记 defer 待统一裁决。provider 传输层瞬断 SHALL 在同一逻辑 `turn_id` 下以 `attempt_no` 递增内部重试，复用原 provider-start ledger 语义，SHALL NOT 创建新 turn。
+同一人工门同时 SHALL 至多存在一个非终态 turn；已有 in-flight turn 时收到新反馈或 approve/abandon SHALL 均返回 `gate_busy`，不隐式排队、不关门；终止决定仅在 turn 进入终态后处理。`manual_repairs_remaining` SHALL 在 turn durable 预留时扣减；修订失败（provider 错误、校验拒绝、超时）SHALL NOT 退还已扣预算。**普通 SC 修订门**内的人工修订 turn 成功完成并经 Evaluate policy route 重建门快照时，快照预算 SHALL 重置为默认值（与初始 author Evaluate-pass 同构；2026-09-03 专项测量轮实测记录并补句）；门未重建（修订失败/门未重开）时预算 SHALL 保持既有值。**amendment 人工门**（REQ-GCE-03 场景二重开的原门）的修订 turn 成功后，无论无 reviewer 的本地 Evaluate 路由还是有 reviewer 的 review-pass 路由重建 Approval 快照，快照预算 SHALL 接续重开时原 `human_gate_snapshot` 的 `manual_repairs_remaining`（typed turn 只扣快照、不递增 run_history 计数，重建不得凭空恢复已耗预算）。amendment 门的接续/守卫判别 SHALL 绑定 durable amendment 事实，且 MUST 复用重开授权（`probe_amendment_gate_context`）所用的同一完整谓词。
 
 **SC 门消息面边界**：SC interactive 与 amendment 门 SHALL 仅接受 `human_gate_feedback`、approve（`Confirm` 语义）与 abandon（显式 typed 入站命令，`legacy-protocol-retirement` REQ-RET-02 重承载落地）三类消息；关门决策 SHALL 以门专属 typed 决策承载，MUST NOT 依赖 legacy `HumanConfirmDecision`（旧枚举已随退役删除）；收到错误消息类型（含已删除的 legacy 决策消息）时系统 SHALL 返回 stage-specific protocol error 且零副作用。
+
+在门状态明确为可恢复 Final Compile 且阶段/flow/durable recovery 事实匹配时，现有 `WorkItemPlanCompileRecoveryAction` MAY 作为独立的 compile recovery 操作经 Cockpit WS 放行；该操作不是人工门反馈或关门决定，不改变三类人工门消息边界。其他阶段、错误 flow、缺少 recovery 事实或已终态时 SHALL 返回 stage-specific protocol error 且零副作用。
 
 #### Scenario: 门内并发反馈被拒绝
 
@@ -45,6 +47,21 @@
 
 - **WHEN** SC 门开启期间客户端发送已删除的 legacy `human_confirm` 类决策消息
 - **THEN** 系统返回 stage-specific protocol error 且零副作用（门状态、预算、turn 均不变），关门决策不依赖 `HumanConfirmDecision`
+
+#### Scenario: 合法 recovery action 与人工门命令并存
+
+- **WHEN** SC 会话处于可恢复 Final Compile 状态，客户端从 Cockpit 发送既有 `WorkItemPlanCompileRecoveryAction`
+- **THEN** WS 接受该独立 recovery 操作并按既有 recovery 语义处理；`Confirm`、`HumanGateFeedback`、`AbandonHumanGate` 的语义和放行边界不变
+
+#### Scenario: 非 recovery 状态拒绝 recovery action
+
+- **WHEN** 客户端在 generate、普通 HumanConfirm、AuthorConfirm 或已终态发送 `WorkItemPlanCompileRecoveryAction`
+- **THEN** 系统返回 stage-specific protocol error，门、compile、预算与 provider 状态均不变
+
+#### Scenario: recovery action 不替代关门命令
+
+- **WHEN** 用户需要批准、反馈或终止 SC 人工门
+- **THEN** Cockpit 继续分别发送 `Confirm`、`HumanGateFeedback` 或 `AbandonHumanGate`，不得把 recovery action 映射为其中任一命令
 
 ### Requirement: SC manual revision 专属路径（REQ-CG-03）
 
