@@ -8,6 +8,7 @@ import {
   workspaceContentCacheValues,
 } from "./workspace-content-cache";
 import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
+import type { WorkspaceSessionStatePayload } from "./workspace-ws-store-types";
 import {
   installWorkspaceStoreTestHooks,
   makeCompileArtifactPayload,
@@ -1072,6 +1073,136 @@ describe("workspace ws store gate rebuild", () => {
       ).toHaveLength(1);
     },
   );
+
+  // F-39（review 结论卡常显）：story/design 快照只带 timeline_node_summaries——
+  // session_state.rs 的 should_inline_work_item_plan_detail 把 reviewer_run 的 detail
+  // 排除在非 plan 会话之外（只有 REST /timeline-node-details 水合才拿得到 verdict）。
+  // 水合缺位时 rebuild 一张 review 结论卡都生不出（节点只剩占位 detail → 走「无内容」
+  // 分支），对话流里只剩门卡的压缩文案；且 rebuild 路径的 metadata 不携带 round
+  //（live 路径 review_complete 带），两条路径不对称。completed reviewer_run 必须每轮
+  // 成卡：有 verdict 用完整版，没有则用 node.summary+node.round 兜底，同 id 不叠双。
+  describe("F-39 review verdict cards without hydrated detail", () => {
+    function reviewRoundsSnapshot(
+      rounds: Array<{ round: number; summary: string }>,
+    ): WorkspaceSessionStatePayload {
+      return {
+        session_id: "session_review_rounds",
+        workspace_type: "story",
+        stage: "human_confirm",
+        session_status: "waiting_for_human",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: rounds.length,
+          verification_review_count: 0,
+        },
+        messages: [],
+        checkpoints: [],
+        artifact: "# Draft",
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: rounds.map(({ round, summary }) => ({
+          node_id: `timeline_node_review_${round}`,
+          node_type: "reviewer_run" as const,
+          agent: "codex" as const,
+          stage: "cross_review",
+          round,
+          status: "completed" as const,
+          title: `Review Round ${round}`,
+          summary,
+          started_at: `2026-05-26T10:0${round}:00Z`,
+          completed_at: `2026-05-26T10:0${round}:30Z`,
+          duration_ms: 30_000,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: rounds.length,
+          },
+        })),
+        active_node_id: null,
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: null,
+      };
+    }
+
+    it("rebuilds one review verdict card per completed round from the node payload", () => {
+      useWorkspaceStore.getState().setSessionState(
+        reviewRoundsSnapshot([
+          { round: 1, summary: "第一轮需要返修" },
+          { round: 2, summary: "第二轮通过" },
+        ]),
+      );
+
+      const cards = useWorkspaceStore
+        .getState()
+        .chatEntries.filter((entry) => entry.type === "review_verdict");
+      expect(cards).toHaveLength(2);
+      expect(cards.map((card) => card.node_id)).toEqual([
+        "timeline_node_review_1",
+        "timeline_node_review_2",
+      ]);
+      expect(cards.map((card) => card.metadata?.round)).toEqual([1, 2]);
+      expect(cards.map((card) => card.content)).toEqual([
+        "第一轮需要返修",
+        "第二轮通过",
+      ]);
+      expect(cards.map((card) => card.metadata?.summary)).toEqual([
+        "第一轮需要返修",
+        "第二轮通过",
+      ]);
+      // 兜底卡不得凭空捏造 verdict——没有事实来源就没有该字段。
+      expect(cards.every((card) => card.metadata?.verdict === undefined)).toBe(true);
+    });
+
+    it("carries the round on the hydrated verdict card without duplicating it", () => {
+      useWorkspaceStore.getState().setSessionState({
+        ...reviewRoundsSnapshot([{ round: 2, summary: "第二轮通过" }]),
+        timeline_node_details: {
+          timeline_node_review_2: makeNodeDetail({
+            node_id: "timeline_node_review_2",
+            node_type: "reviewer_run",
+            agent_role: "reviewer",
+            status: "completed",
+            provider: { name: "codex", model: "gpt-5" },
+            verdict: {
+              verdict: "pass",
+              summary: "第二轮通过",
+              comments: "",
+              findings: [
+                {
+                  severity: "suggestion",
+                  message: "可选建议一",
+                  evidence: "",
+                  required_action: "",
+                },
+              ],
+            },
+          }),
+        },
+      });
+
+      const cards = useWorkspaceStore
+        .getState()
+        .chatEntries.filter((entry) => entry.type === "review_verdict");
+      // 有 detail.verdict 时走完整版，兜底不得叠出第二张同 id 卡。
+      expect(cards).toHaveLength(1);
+      expect(cards[0].metadata).toEqual(
+        expect.objectContaining({
+          round: 2,
+          verdict: "pass",
+          summary: "第二轮通过",
+        }),
+      );
+      expect(cards[0].metadata?.findings).toEqual([
+        expect.objectContaining({ severity: "suggestion", message: "可选建议一" }),
+      ]);
+    });
+  });
 });
 
 function buildSessionState(sessionId: string) {

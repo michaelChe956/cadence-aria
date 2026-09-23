@@ -16,6 +16,7 @@ export function ReviewVerdictEntry({
   );
   const requiredFindings = findings.filter(isRequiredFinding);
   const optionalFindings = findings.filter((finding) => !isRequiredFinding(finding));
+  const round = verdict.round;
 
   return (
     <ChatEntryContainer
@@ -37,6 +38,29 @@ export function ReviewVerdictEntry({
             ) : null}
           </div>
         </div>
+        {/* F-39：轮次与可选建议条数此前不渲染——多轮评审的结论卡彼此不可辨（rebuild
+            路径 metadata 缺 round，live 路径带）。轮次取自 metadata.round；可选建议
+            条数与 selectLatestReviewAdvisoryCount / 下方「可选建议」分组同一判据。 */}
+        {round !== null || optionalFindings.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {round !== null ? (
+              <span
+                data-testid="review-round-label"
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+              >
+                Review Round {round}
+              </span>
+            ) : null}
+            {optionalFindings.length > 0 ? (
+              <span
+                data-testid="review-advisory-count"
+                className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]"
+              >
+                可选建议 {optionalFindings.length} 条
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {diagnostic ? (
           <StructuredOutputDiagnosticView
             diagnostic={diagnostic}
@@ -68,7 +92,9 @@ function verdictFromEntry(entry: ChatEntry) {
   const comments = typeof metadata?.comments === "string" ? metadata.comments : null;
   const summary = typeof metadata?.summary === "string" ? metadata.summary : null;
   const reviewGate = typeof metadata?.review_gate === "string" ? metadata.review_gate : null;
-  return { verdict, comments, summary, reviewGate };
+  // F-39：轮次（live 路径 review_complete 与 rebuild 兜底卡均携带；缺失即不画标签）。
+  const round = typeof metadata?.round === "number" ? metadata.round : null;
+  return { verdict, comments, summary, reviewGate, round };
 }
 
 function findingsFromEntry(entry: ChatEntry): ReviewFinding[] {

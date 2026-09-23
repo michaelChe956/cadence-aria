@@ -36,6 +36,12 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
 
     const detail = state.nodeDetails[node.node_id];
     if (!detail) {
+      // F-39：detail 整块缺失（快照未内联 + REST 水合缺位）时，completed reviewer_run
+      // 仍须成卡——否则对话流里只剩门卡的压缩文案。
+      const verdictEntry = reviewVerdictEntryForNode(node, null);
+      if (verdictEntry) {
+        entries.push(verdictEntry);
+      }
       continue;
     }
 
@@ -76,6 +82,11 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     );
     if (!hasPersistedDetailContent && summary) {
       entries.push(...providerSummaryEntries(node, summary, role));
+      // F-39：快照只发 summaries 的会话走这条早退分支——review 结论卡必须同样落地。
+      const verdictEntry = reviewVerdictEntryForNode(node, detail);
+      if (verdictEntry) {
+        entries.push(verdictEntry);
+      }
       continue;
     }
 
@@ -260,33 +271,9 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       });
     }
 
-    if (detail.verdict) {
-      const verdictSummary = getStringField(detail.verdict, "summary") ?? "审核结论";
-      const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
-      const verdictComments = getStringField(detail.verdict, "comments") ?? "";
-      const verdictFindings = getArrayField(detail.verdict, "findings");
-      const reviewGate = getStringField(detail.verdict, "review_gate");
-      const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
-        detail.verdict.structured_output_diagnostic,
-      );
-      entries.push({
-        id: chatEntryId(node.node_id, "review-verdict"),
-        type: "review_verdict",
-        role: "reviewer",
-        content: verdictSummary,
-        timestamp: detail.ended_at ?? detail.started_at,
-        node_id: node.node_id,
-        metadata: {
-          verdict: verdictValue,
-          comments: verdictComments,
-          summary: verdictSummary,
-          findings: verdictFindings,
-          ...(reviewGate ? { review_gate: reviewGate } : {}),
-          ...(structuredOutputDiagnostic
-            ? { structured_output_diagnostic: structuredOutputDiagnostic }
-            : {}),
-        },
-      });
+    const verdictEntry = reviewVerdictEntryForNode(node, detail);
+    if (verdictEntry) {
+      entries.push(verdictEntry);
     }
   }
 
@@ -303,6 +290,73 @@ interface PreparedProviderPrompt {
   nodeTitle: string;
   provider: string | null;
   content: string;
+}
+
+/**
+ * F-39（review 结论卡常显）：review 结论卡此前只在「节点 detail 带 verdict」时生成。
+ * story/design 的 WS 快照只发 timeline_node_summaries（session_state.rs 的
+ * should_inline_work_item_plan_detail 只内联 plan 系 reviewer detail），REST 水合缺位时
+ * 对话流里只剩门卡的压缩文案。completed reviewer_run 一律成卡：
+ * - 有 detail.verdict → 完整版（round 与 live 路径的 review_complete 对齐）；
+ * - 无可用 detail/verdict → 以 node.summary + node.round 兜底（同 id，不叠双）。
+ * 兜底卡不捏造 verdict/findings——没有事实来源就没有那些字段。
+ */
+function reviewVerdictEntryForNode(
+  node: TimelineNode,
+  detail: TimelineNodeDetail | null,
+): ChatEntry | null {
+  if (detail?.verdict) {
+    const verdictSummary = getStringField(detail.verdict, "summary") ?? "审核结论";
+    const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
+    const verdictComments = getStringField(detail.verdict, "comments") ?? "";
+    const verdictFindings = getArrayField(detail.verdict, "findings");
+    const reviewGate = getStringField(detail.verdict, "review_gate");
+    const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
+      detail.verdict.structured_output_diagnostic,
+    );
+    return {
+      id: chatEntryId(node.node_id, "review-verdict"),
+      type: "review_verdict",
+      role: "reviewer",
+      content: verdictSummary,
+      timestamp: detail.ended_at ?? detail.started_at,
+      node_id: node.node_id,
+      metadata: {
+        verdict: verdictValue,
+        comments: verdictComments,
+        summary: verdictSummary,
+        round: node.round ?? null,
+        findings: verdictFindings,
+        ...(reviewGate ? { review_gate: reviewGate } : {}),
+        ...(structuredOutputDiagnostic
+          ? { structured_output_diagnostic: structuredOutputDiagnostic }
+          : {}),
+      },
+    };
+  }
+
+  // 兜底仅限「已完成的一轮评审」：未完成没有结论，非 reviewer 节点没有结论语义。
+  // 后端 complete_review 恒以 verdict.summary 收口节点（review/routing.rs），故
+  // node.summary 就是该轮结论原文；summary 缺失时不出空卡（不猜、不造）。
+  if (chatRoleForTimelineNode(node) !== "reviewer" || node.status !== "completed") {
+    return null;
+  }
+  const summary = node.summary?.trim();
+  if (!summary) {
+    return null;
+  }
+  return {
+    id: chatEntryId(node.node_id, "review-verdict"),
+    type: "review_verdict",
+    role: "reviewer",
+    content: summary,
+    timestamp: node.completed_at ?? node.started_at,
+    node_id: node.node_id,
+    metadata: {
+      summary,
+      round: node.round ?? null,
+    },
+  };
 }
 
 function preparedWorkspaceContextEntries(

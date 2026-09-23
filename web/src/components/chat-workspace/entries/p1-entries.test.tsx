@@ -101,6 +101,46 @@ describe("chat workspace p1 entries", () => {
     expect(screen.getByText("可以补充复杂度说明")).toBeInTheDocument();
   });
 
+  // F-39：多轮评审的结论卡此前彼此不可辨——rebuild 路径 metadata 缺 round，且可选建议
+  // 条数只在产物面板显示。结论卡自身必须带轮次与建议条数。
+  it("labels review verdict entries with the round and advisory count", () => {
+    const entry = makeEntry({
+      type: "review_verdict",
+      role: "reviewer",
+      content: "第二轮需要返修",
+      metadata: {
+        verdict: "revise",
+        summary: "第二轮需要返修",
+        round: 2,
+        findings: [
+          { severity: "must_fix", message: "必须修复项" },
+          { severity: "suggestion", message: "可选建议一" },
+          { severity: "suggestion", message: "可选建议二" },
+        ],
+      },
+    });
+
+    render(<ReviewVerdictEntry entry={entry} />);
+
+    expect(screen.getByTestId("review-round-label")).toHaveTextContent("Review Round 2");
+    // 判据与 selectLatestReviewAdvisoryCount 一致：非 blocking/must_fix 才算可选建议。
+    expect(screen.getByTestId("review-advisory-count")).toHaveTextContent("可选建议 2 条");
+  });
+
+  it("omits the round label and advisory count when the entry has neither", () => {
+    const entry = makeEntry({
+      type: "review_verdict",
+      role: "reviewer",
+      content: "审核通过",
+      metadata: { verdict: "pass", summary: "审核通过" },
+    });
+
+    render(<ReviewVerdictEntry entry={entry} />);
+
+    expect(screen.queryByTestId("review-round-label")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("review-advisory-count")).not.toBeInTheDocument();
+  });
+
   it("labels suggestion-only review verdicts as confirmable", () => {
     const entry = makeEntry({
       type: "review_verdict",

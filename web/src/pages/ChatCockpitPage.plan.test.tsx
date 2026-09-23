@@ -18,7 +18,10 @@ import {
   type WorkspaceWsState,
 } from "../state/workspace-ws-store";
 import type { PlanProjectionBundle } from "../api/types";
-import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
+import {
+  fetchWorkspaceArtifactVersion,
+  fetchWorkspaceNodeDetail,
+} from "../api/workspace-content";
 import { planRepairSnapshotFixture } from "../state/workspace-plan-repair-test-fixtures";
 import { observerStateFromSessionState } from "../state/workspace-observer-store";
 import { readCockpitSettings } from "../state/cockpit-settings";
@@ -821,6 +824,96 @@ describe("ChatCockpitPage", () => {
         undefined,
       );
       expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
+    });
+  });
+
+  // F-39（执行流阶段卡定位）：非对话流页签（产物审核/计划审批）下 ChatEntryList 整块
+  // 卸载——chatListRef.current === null，点击阶段卡此前只写 drilldownNodeId：视图不切回、
+  // 滚动不发生、零反馈（静默 no-op）。滚动 effect 又只依赖 drilldownEntryId，视图切回
+  // 之后也不再重滚。选中节点 = 切回对话流并定位到该节点的气泡；没有可定位目标时给出
+  // 可见反馈而不是沉默。
+  describe("F-39 timeline node drilldown locates the conversation bubble", () => {
+    function planSessionWithReviewNode(summary: string | null) {
+      useWorkspaceStore.setState({
+        sessionId: "session_001",
+        stage: "human_confirm",
+        workspaceType: "work_item_plan",
+        flowKind: "legacy",
+        sessionStatus: "waiting_for_human",
+        providers: { author: "pi", reviewer: "codex" },
+        artifact: "# Work Item Plan\n",
+        artifactVersions: [],
+        chatEntries: [],
+        timelineNodes: [
+          timelineNode({
+            node_id: "node_review_1",
+            node_type: "reviewer_run",
+            agent: "codex",
+            stage: "cross_review",
+            round: 1,
+            status: "completed",
+            title: "Review Round 1",
+            summary,
+            started_at: "2026-09-22T16:00:00Z",
+            completed_at: "2026-09-22T16:01:00Z",
+          }),
+        ],
+      });
+    }
+
+    it("switches back to the conversation view and scrolls to the node's bubble", async () => {
+      const user = userEvent.setup();
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+      });
+      planSessionWithReviewNode("需要返修");
+      useWorkspaceStore.setState({
+        chatEntries: [
+          {
+            id: "node_review_1:stream",
+            type: "provider_stream",
+            role: "reviewer",
+            content: "reviewing diff",
+            timestamp: "2026-09-22T16:00:30Z",
+            node_id: "node_review_1",
+          },
+        ],
+      });
+      // 水合缺位（detail 端点不可用）：本用例只依赖 store 里的既有条目。
+      vi.mocked(fetchWorkspaceNodeDetail).mockRejectedValue(
+        new Error("节点详情不可用"),
+      );
+
+      renderCockpit();
+      await user.click(screen.getByTestId("cockpit-artifact-review-tab"));
+      // 前提：产物页签下对话流整块卸载，滚动入口（ref）为空。
+      expect(screen.queryByTestId("cockpit-conversation-flow-list")).toBeNull();
+
+      await user.click(screen.getByTestId("timeline-node-reviewer_run"));
+
+      expect(screen.getByTestId("cockpit-conversation-flow-list")).toBeVisible();
+      const scrolledEntryIds = scrollIntoView.mock.contexts
+        .filter((context): context is HTMLElement => context instanceof HTMLElement)
+        .map((context) => context.dataset.entryId);
+      expect(scrolledEntryIds).toContain("node_review_1:stream");
+    });
+
+    it("surfaces a hint when the selected stage has no locatable bubble", async () => {
+      const user = userEvent.setup();
+      planSessionWithReviewNode("需要返修");
+      vi.mocked(fetchWorkspaceNodeDetail).mockRejectedValue(
+        new Error("节点详情不可用"),
+      );
+
+      renderCockpit();
+      await user.click(screen.getByTestId("cockpit-artifact-review-tab"));
+      await user.click(screen.getByTestId("timeline-node-reviewer_run"));
+
+      expect(screen.getByTestId("cockpit-conversation-flow-list")).toBeVisible();
+      // 无目标可辨反馈：不得静默。
+      expect(screen.getByTestId("drilldown-no-target-hint")).toBeVisible();
     });
   });
 });

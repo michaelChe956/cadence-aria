@@ -742,12 +742,23 @@ export function ChatCockpitPage({
         : null,
     [drilldownNodeId, selectedState],
   );
+  // F-39：选中执行流阶段卡 = 「定位到该节点的对话气泡」。非对话流页签（产物审核/
+  // 计划审批）下 ChatEntryList 整块卸载——chatListRef.current === null，此前只写
+  // drilldownNodeId：视图不切回、滚动不发生、零反馈（静默 no-op）。阶段卡、诊断计数
+  // 与断连横幅三个入口统一走本回调，选中即切回对话流。
+  const handleSelectTimelineNode = useCallback((nodeId: string | null) => {
+    setDrilldownNodeId(nodeId);
+    setDrilldownView("conversation");
+  }, []);
 
   useEffect(() => {
-    if (drilldownEntryId) {
-      chatListRef.current?.scrollToEntry(drilldownEntryId);
+    // 视图不是对话流时列表未挂载，滚动无意义；drilldownView 入依赖保证从产物/计划
+    // 页签切回对话流后重滚（此前只依赖 drilldownEntryId，切回不重滚）。
+    if (drilldownView !== "conversation" || !drilldownEntryId) {
+      return;
     }
-  }, [drilldownEntryId]);
+    chatListRef.current?.scrollToEntry(drilldownEntryId);
+  }, [drilldownEntryId, drilldownView]);
 
   // v40 复验 #3 后续（刷新水合）：review verdict 只随节点 detail 携带（
   // /timeline-node-details/{id}），live 时 WS 事件入 store；刷新/重开后 cockpit
@@ -861,7 +872,7 @@ export function ChatCockpitPage({
           }
           onViewTimeline={
             abortedByDisconnectNode
-              ? () => setDrilldownNodeId(abortedByDisconnectNode.node_id)
+              ? () => handleSelectTimelineNode(abortedByDisconnectNode.node_id)
               : undefined
           }
           recoverableInterruptedRun={state.recoverableInterruptedRun}
@@ -913,7 +924,7 @@ export function ChatCockpitPage({
                 <button
                   type="button"
                   data-testid="cockpit-protocol-diagnostic-count"
-                  onClick={() => setDrilldownNodeId(selectedState?.activeNodeId ?? null)}
+                  onClick={() => handleSelectTimelineNode(selectedState?.activeNodeId ?? null)}
                   className="aria-chip aria-mono aria-num border-[var(--aria-line-strong)] text-[11px] text-[var(--aria-ink-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                 >
                   诊断 {selectedState?.protocolDiagnostics.length ?? 0}
@@ -937,7 +948,7 @@ export function ChatCockpitPage({
               // 下钻选中的行即 ② 区的「当前步」（aria-current="step"）；未下钻时退回 store 的进行中节点。
               activeNodeId={drilldownNodeId ?? selectedState?.activeNodeId ?? null}
               selectedNodeId={drilldownNodeId}
-              onSelectNode={setDrilldownNodeId}
+              onSelectNode={handleSelectTimelineNode}
               variant="flow"
               flowRows={flowRows}
               nodeDetails={selectedState?.nodeDetails ?? {}}
@@ -952,6 +963,17 @@ export function ChatCockpitPage({
           >
           <div className="flex min-w-0 items-center gap-2 px-3 py-2">
             <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
+            {/* F-39：选中了阶段卡却在对话流里找不到对应气泡（未生成/未水合）时必须给出
+                可辨反馈——此前静默 no-op，用户只看到「点了没反应」。 */}
+            {drilldownView === "conversation" && drilldownNodeId && !drilldownEntryId ? (
+              <span
+                data-testid="drilldown-no-target-hint"
+                role="status"
+                className="text-xs leading-snug text-[var(--aria-ink-muted)]"
+              >
+                该阶段在对话流里没有可定位的内容（可能尚未生成或未水合）
+              </span>
+            ) : null}
             {canConfigureProviders ? (
               <>
                 <ProviderConfigDialogButton
