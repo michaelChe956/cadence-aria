@@ -63,6 +63,95 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
 }
 
 #[tokio::test]
+async fn drive_work_item_plan_provider_session_persists_usage_event() {
+    // F-40：计划拆分（single_candidate author）链路此前对 `ProviderEvent::UsageReport`
+    // 是空分支——usage 既不落 node detail 也不上 WS，author 阶段卡/气泡因此永远没有
+    // token 读数（reviewer 链路同源落盘，故只有 Review 卡有）。本用例锁定计划驱动
+    // 收到 UsageReport 后 node detail 落一条 kind=usage 事件（对照 part_07 的
+    // provider_session_maps_usage_report_to_usage_execution_event 先例）。
+    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_usage_event");
+    engine.session.session_id = lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .expect("workspace sessions")
+        .into_iter()
+        .find(|session| session.workspace_type == WorkspaceType::WorkItemPlan)
+        .expect("work item plan session")
+        .id;
+    let node_id = engine.begin_work_item_plan_author_run().await;
+    let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+    let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+    // 先落一段流式内容（与既有用例同款），使 node detail 的存在不依赖本修复——
+    // 本用例的红色判据是「usage 事件缺失」，不是「detail 不存在」。
+    provider_event_tx
+        .send(ProviderEvent::TextDelta {
+            content: "Plan draft\n".to_string(),
+        })
+        .await
+        .expect("send text delta");
+    provider_event_tx
+        .send(ProviderEvent::UsageReport(
+            crate::cross_cutting::streaming_provider::UsageReportData {
+                role: "author".to_string(),
+                input_tokens: Some(339),
+                output_tokens: Some(9_774),
+                cache_read_tokens: Some(58_368),
+                cache_creation_tokens: None,
+            },
+        ))
+        .await
+        .expect("send usage report");
+    provider_event_tx
+        .send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "Final structured output".to_string(),
+                None,
+            ),
+        ))
+        .await
+        .expect("send completed");
+    drop(provider_event_tx);
+    let mut command_rx = empty_provider_commands();
+
+    engine
+        .drive_work_item_plan_provider_session_to_output(
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: provider_event_rx,
+                commands: provider_command_tx,
+            }),
+            &mut command_rx,
+            node_id.clone(),
+            ProviderName::ClaudeCode,
+        )
+        .await
+        .expect("collector output");
+
+    let detail = lifecycle
+        .load_node_detail(engine.session().session_id.as_str(), &node_id)
+        .expect("node detail");
+    let persisted = detail
+        .execution_events
+        .iter()
+        .filter(|event| event["event_id"] == "usage_author")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted.len(),
+        1,
+        "UsageReport should persist exactly one usage event on the plan author node"
+    );
+    assert_eq!(persisted[0]["kind"], "usage");
+    assert_eq!(persisted[0]["title"], "author token usage");
+    let output: serde_json::Value =
+        serde_json::from_str(persisted[0]["output"].as_str().expect("usage output json"))
+            .expect("usage output parses");
+    assert_eq!(output["role"], "author");
+    assert_eq!(output["input_tokens"], 339);
+    assert_eq!(output["output_tokens"], 9_774);
+    assert_eq!(output["cache_read_tokens"], 58_368);
+}
+
+#[tokio::test]
 async fn drive_work_item_plan_provider_session_hides_structured_output_from_stream() {
     let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_stream_filter");

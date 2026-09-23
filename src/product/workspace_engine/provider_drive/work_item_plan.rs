@@ -308,9 +308,18 @@ impl WorkspaceEngine {
                                 .await;
                             return Err(format!("permission timeout: {permission_id}"));
                         }
-                        // token 用量采集仅覆盖 workspace_engine 主事件循环；计划拆分链路
-                        // 暂不消费 usage（best-effort，缺失不报错）。
-                        ProviderEvent::UsageReport(_) => {}
+                        // token 用量（F-40）：与主循环 / reviewer 驱动 / coding 引擎同构，
+                        // 映射为 kind=usage 的 execution event——同时落 node detail 与 WS
+                        // 事件流（此前本链路是空分支：计划拆分 author 的 token 在数据面
+                        // 整体缺失，author 阶段卡/气泡因此无读数，仅 Review 卡有）。
+                        ProviderEvent::UsageReport(report) => {
+                            self.emit_execution_event(
+                                execution_event_from_usage_report(report),
+                                Some(node_id.clone()),
+                                Some(agent.clone()),
+                            )
+                            .await;
+                        }
                         // 策略审计出口（approval_decision/protocol_warning/
                         // session_terminated）：观测性事件，engine 主循环不消费；
                         // durable 落盘在 Task 3.2 的 LifecycleStore sink 注入。
