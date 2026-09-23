@@ -107,12 +107,29 @@ export function createCockpitActionFacade(input: {
       return input.sendAbandonGate(input.commandId ?? newCommandId());
     },
     advance() {
+      const state = input.getState();
       // k3 P2-2：AuthorConfirm 矩阵只放行 Abort/AbandonHumanGate——HTTP confirm 的
       // 乐观 confirmed 态也不发 advance（否则必回 ADVANCE_STAGE_INVALID 红条）。
-      if (input.getState().stage === "author_confirm") {
+      if (state.stage === "author_confirm") {
         return false;
       }
-      const reason = gateActionBlockReason(input.getState());
+      // k3 P2（F-42 fix1）：manual advance 的有效通路只有一条——SC 计划已确认、引擎
+      // 仍需一次推进。矩阵唯一的 Advance 放行格是「stage=completed ∧
+      // single_candidate」（protocol.rs），且客户端 stage 可能落后于持久层（已 Confirm
+      // 但页面仍显示 human_confirm），故判据取流+关门裁决、不读客户端 stage——与
+      // autopilot（useCockpitAutopilot：flowKind=single_candidate 且 closure
+      // confirm/sessionStatus confirmed 才推进）同源。该判据取代旧的 "closed" 裸豁免：
+      // story/design 终态与 terminated 会话不再借 closed 发帧（前者必回
+      // ADVANCE_STAGE_INVALID，后者会误推进已终止会话）；修复前这两种形态由
+      // terminal_stage 静默拦截，零出站。
+      const advanceableSingleCandidateGate =
+        state.flowKind === "single_candidate" &&
+        (state.humanGateClosure?.decision === "confirm" ||
+          state.sessionStatus === "confirmed");
+      if (!advanceableSingleCandidateGate) {
+        return false;
+      }
+      const reason = gateActionBlockReason(state);
       if (reason !== null && reason !== "closed") {
         return false;
       }

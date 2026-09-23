@@ -276,6 +276,99 @@ describe("cockpit gate action facade", () => {
     expect(sendAdvance).toHaveBeenCalledOnce();
   });
 
+  // F-42 fix1（k3 P2 必修）：终态会话在非门阶段的 closed（终态判据派生或关门帧）不得借
+  // 旧 "closed" 豁免发 advance——story/design 终态与 terminated 会话服务端矩阵皆拒收
+  // （protocol.rs 的 Completed 臂只放行 single_candidate；HumanConfirm/其余阶段无 Advance
+  // 格），放行必回 ADVANCE_STAGE_INVALID 红条或误推进已终止会话。修复前这两种形态由
+  // terminal_stage 静默拦截，零出站。
+  const nonAdvanceableTerminalStates: Array<[string, Partial<WorkspaceWsState>]> = [
+    [
+      "story 定稿（confirmed+completed、无 closure 帧）",
+      {
+        stage: "completed",
+        flowKind: "legacy",
+        workspaceType: "story",
+        sessionStatus: "confirmed",
+        humanGateClosure: null,
+      },
+    ],
+    [
+      "story 定稿（confirmed+completed、带 closure 帧）",
+      {
+        stage: "completed",
+        flowKind: "legacy",
+        workspaceType: "story",
+        sessionStatus: "confirmed",
+        humanGateClosure: { decision: "confirm", stage: "completed" },
+      },
+    ],
+    [
+      "SC 计划已终止（terminated+completed）",
+      {
+        stage: "completed",
+        flowKind: "single_candidate",
+        sessionStatus: "terminated",
+        humanGateClosure: null,
+      },
+    ],
+  ];
+
+  it.each(nonAdvanceableTerminalStates)("keeps manual advance off for %s", (_name, state) => {
+    useWorkspaceStore.setState({
+      ...state,
+      humanGateSnapshot: null,
+      singleCandidatePhase: null,
+    });
+    const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
+
+    expect(
+      createCockpitActionFacade({
+        flowKind: "single_candidate",
+        commandId: null,
+        getState: useWorkspaceStore.getState,
+        sendConfirm: vi.fn(() => true),
+        sendAbandonGate: vi.fn(() => true),
+        sendHumanGateFeedback: vi.fn(() => true),
+        sendAdvance,
+        adoptReview: vi.fn(),
+        sendBatchConfirm: vi.fn(async () => undefined),
+        sendCompileRecovery: vi.fn(),
+      }).advance(),
+    ).toBe(false);
+    expect(sendAdvance).not.toHaveBeenCalled();
+  });
+
+  // 收紧不得误伤原意：矩阵唯一的 Advance 放行格是「stage=completed ∧ single_candidate」
+  // （protocol.rs），且客户端 stage 可能落后于持久层（autopilot 同款判据不读 stage）——
+  // SC 已确认计划的手动推进必须继续出站。
+  it("keeps manual advance for the confirmed single-candidate plan at completed", () => {
+    useWorkspaceStore.setState({
+      stage: "completed",
+      flowKind: "single_candidate",
+      singleCandidatePhase: "completed",
+      sessionStatus: "confirmed",
+      humanGateClosure: null,
+      humanGateSnapshot: null,
+    });
+    const sendAdvance = vi.fn<(commandId?: string) => boolean>(() => true);
+
+    expect(
+      createCockpitActionFacade({
+        flowKind: "single_candidate",
+        commandId: null,
+        getState: useWorkspaceStore.getState,
+        sendConfirm: vi.fn(() => true),
+        sendAbandonGate: vi.fn(() => true),
+        sendHumanGateFeedback: vi.fn(() => true),
+        sendAdvance,
+        adoptReview: vi.fn(),
+        sendBatchConfirm: vi.fn(async () => undefined),
+        sendCompileRecovery: vi.fn(),
+      }).advance(),
+    ).toBe(true);
+    expect(sendAdvance).toHaveBeenCalledOnce();
+  });
+
   it("re-reads actionability before every action so a stale snapshot cannot send", () => {
     const sendConfirm = vi.fn(() => true);
     const sendAbandonGate = vi.fn(() => true);

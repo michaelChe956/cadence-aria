@@ -449,10 +449,17 @@ impl WorkspaceEngine {
     /// 门态，对话流门卡仍渲染可点的确认/终止按钮，二次点击被服务端矩阵拒
     /// （INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage completed）。
     ///
-    /// 只收口「活动节点确为 Active 的 HumanConfirm」：review 自动路由（routing.rs
-    /// 三条 callsite）直入 compile 时活动节点是 review/author 节点，且已被各自调用
-    /// 方收口——不得被本收口覆写摘要与完成时间。时间/摘要走既有同源链路
-    /// （complete_active_node → update_timeline_node 取 now，与 compile 节点一致）。
+    /// 只收口「活动节点确为 Active 的 HumanConfirm」，不得覆写其他节点的状态/摘要/
+    /// 完成时间。本入口的两类 callsite：
+    /// - 人工确认源：`conversational_gate.rs` 的 close_human_gate approve 臂与
+    ///   `controls.rs` 的 handle_confirm（HumanConfirm + SC Approval 臂）——活动节点
+    ///   正是待收口的门节点；
+    /// - 自动评审源：`review/routing.rs` 的 apply_policy_route（ContinueToCompleted +
+    ///   SC + AutoIfValid）、batch review Pass、serial draft 完结三处直入 compile——
+    ///   活动节点是 review/draft 节点，双条件使其为 no-op（评审要求「跳过可选建议」的
+    ///   路径经 `work_item_plan_optional_pass_review` → `enter_review_decision`，不直入
+    ///   本入口）。时间/摘要走既有同源链路（complete_active_node →
+    ///   update_timeline_node 取 now，与 compile 节点一致）。
     async fn close_active_human_confirm_node(&mut self) {
         let is_open_human_confirm_gate = self
             .active_node_id
