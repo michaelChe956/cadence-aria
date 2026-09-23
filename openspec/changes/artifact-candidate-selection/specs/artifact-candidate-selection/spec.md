@@ -8,7 +8,7 @@
 
 ### Requirement: 顶层候选枚举与唯一选择（REQ-ACS-01）
 
-artifact 提取 SHALL 枚举 provider 输出中的**顶层完整** fenced artifact 候选（含既有 `<artifact>` XML marker 优先级与 fallback 兼容），SHALL NOT 再以「首个 opening 至最后 closing」的跨块区间作为候选。对每个完整候选，系统 SHALL 以当前 workspace type 的既有 artifact gate 逐个校验；**恰好一个候选通过时** SHALL 选中该候选作为 author 产物。通过数为零或大于一时 SHALL fail-closed 失败：零通过保留全部既有阻断原因并附候选位置上下文；多个通过代表语义歧义，MUST NOT 静默选择「最后一个」或「最长一个」。存在完整候选但全部失败时 SHALL NOT 回落 heading fallback 猜测产物。嵌套 fence 边界不可判定（同长度 fence 歧义、未闭合 inner fence）时 SHALL fail-closed，不猜测候选边界。既有 gate 对所选正文的禁止 token（nested artifact fence、`<thinking>` 等）SHALL 保持硬拒绝零放宽。
+artifact 提取 SHALL 枚举 provider 输出中的**顶层完整** fenced artifact 候选（含既有 `<artifact>` XML marker 优先级与 fallback 兼容），SHALL NOT 再以「首个 opening 至最后 closing」的跨块区间作为候选。对每个完整候选，系统 SHALL 以当前 workspace type 的既有 artifact gate 逐个校验；**恰好一个候选通过时** SHALL 选中该候选作为 author 产物。通过数为零或大于一时 SHALL fail-closed 失败：零通过保留全部既有阻断原因并附候选位置上下文；多个通过代表语义歧义，MUST NOT 静默选择「最后一个」或「最长一个」。存在完整候选但全部失败时 SHALL NOT 回落 heading fallback 猜测产物。嵌套 fence 边界不可判定（同长度 fence 歧义、未闭合 inner fence）时 SHALL fail-closed，不猜测候选边界。既有 gate 对所选正文的禁止 token（nested artifact fence、`<thinking>` 等）SHALL 保持硬拒绝零放宽。session reload 与 coding 上下文的产物恢复同样以唯一通过候选为准：未通过 gate 的存量 assistant artifact 不再提供无条件文本回退，收紧为不恢复（对产物必经 gate 的正常链路无影响）。
 
 #### Scenario: 前置示意 block 加唯一有效候选可恢复
 
@@ -28,12 +28,17 @@ artifact 提取 SHALL 枚举 provider 输出中的**顶层完整** fenced artifa
 #### Scenario: 同长度嵌套 fence 歧义失败关闭
 
 - **WHEN** 候选正文内存在与外层同长度的 fence 且无法判定配对边界
-- **THEN** 系统不猜测边界，该候选按不可判定失败关闭
+- **THEN** 系统不猜测边界，该候选按不可判定失败关闭（不产出候选）；此时若全文无其他完整候选，系统按既有 legacy fallback 路径处理并由其对抽取正文的 gate 判定终局——候选级失败关闭不因 fallback 启用而放宽
 
 #### Scenario: 所选正文污染仍硬拒绝
 
 - **WHEN** 唯一被选中的候选正文内部含 `<thinking>` 或 nested artifact fence
 - **THEN** 既有 gate 硬拒绝该候选，系统失败关闭，提取边界修复不构成放行
+
+#### Scenario: 存量未过 gate 产物不再回退
+
+- **WHEN** session reload 或 coding fallback 读到未通过 gate 的存量 assistant artifact
+- **THEN** 恢复结果为空（不回退旧首开—末闭抽取文本），消费方按既有缺失分支处理
 
 ### Requirement: 候选选择诊断落盘（REQ-ACS-02）
 
