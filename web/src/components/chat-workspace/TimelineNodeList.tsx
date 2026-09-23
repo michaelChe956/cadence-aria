@@ -275,15 +275,6 @@ function TimelineFlowTile({
             {duration}
           </span>
         ) : null}
-        {tokenUsage ? (
-          <span
-            data-testid={`flow-tokens-${node.node_type}`}
-            aria-label={tokenUsage.detail}
-            className="aria-mono aria-num shrink-0 text-[10px] text-[var(--aria-ink-muted)]"
-          >
-            {tokenUsage.compact}
-          </span>
-        ) : null}
         <span
           data-testid={`flow-state-${node.node_type}`}
           className="ml-auto min-w-0 truncate text-[10px] text-[var(--aria-ink-muted)]"
@@ -291,6 +282,23 @@ function TimelineFlowTile({
           {stateLabel}
         </span>
       </span>
+      {/* F-40：token 三段数（↙输入/输出/缓存）此前与时间/耗时同行，左侧窄栏方块里
+          顶穿右边界、尾字被裁。裁决改为独立一行（时间/耗时行下方）——行内允许换行
+          吸收极长读数，不截数、不裁切；无 usage 事件时不渲染空行。 */}
+      {tokenUsage ? (
+        <span
+          data-testid={`flow-token-row-${node.node_type}`}
+          className="flex min-w-0 flex-wrap items-center gap-x-1.5"
+        >
+          <span
+            data-testid={`flow-tokens-${node.node_type}`}
+            aria-label={tokenUsage.detail}
+            className="aria-mono aria-num min-w-0 break-words text-[10px] text-[var(--aria-ink-muted)]"
+          >
+            {tokenUsage.compact}
+          </span>
+        </span>
+      ) : null}
     </button>
   );
 }

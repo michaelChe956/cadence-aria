@@ -404,6 +404,74 @@ describe("TimelineNodeList flow variant", () => {
     expect(screen.queryByTestId("flow-tokens-reviewer_run")).toBeNull();
   });
 
+  // F-40：token 三段数与时间/耗时同行时，左侧窄栏方块里会顶穿右边界、尾字被裁。
+  // 裁决：token 另起一行（时间/耗时行下方），窄卡不溢出且不截数。
+  it("puts the token reading on its own row below the time row", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode, timelineNode({ node_id: "node-flow-2", node_type: "reviewer_run" })]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[...flowRows]}
+        nodeDetails={{
+          "node-flow-1": nodeDetail({
+            execution_events: [
+              usageEvent({ input_tokens: 1_200, output_tokens: 300, cache_read_tokens: 500 }),
+            ],
+          }),
+          "node-flow-2": nodeDetail({
+            node_id: "node-flow-2",
+            node_type: "reviewer_run",
+            agent_role: "reviewer",
+            execution_events: [
+              usageEvent({ input_tokens: 7_855, output_tokens: 6_084, cache_read_tokens: 30_592 }),
+            ],
+          }),
+        }}
+      />,
+    );
+
+    for (const nodeType of ["author_run", "reviewer_run"] as const) {
+      const tokenRow = screen.getByTestId(`flow-token-row-${nodeType}`);
+      const tokens = screen.getByTestId(`flow-tokens-${nodeType}`);
+      const started = screen.getByTestId(`flow-started-${nodeType}`);
+      const elapsed = screen.getByTestId(`flow-elapsed-${nodeType}`);
+      const state = screen.getByTestId(`flow-state-${nodeType}`);
+
+      // 独立一行：token 读数不得与时间/耗时/状态同行。
+      expect(tokenRow.contains(started)).toBe(false);
+      expect(tokenRow.contains(elapsed)).toBe(false);
+      expect(tokenRow.contains(state)).toBe(false);
+      expect(tokens.parentElement).toBe(tokenRow);
+      // 时间/耗时行在前，token 行在其下方。
+      expect(
+        started.compareDocumentPosition(tokenRow) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      // 不溢出且不截数：读数不挂 truncate，行内允许换行吸收极长读数。
+      expect(tokens.className).not.toContain("truncate");
+      expect(tokenRow.className).toContain("flex-wrap");
+    }
+  });
+
+  it("renders no token row at all when the node detail carries no usage event", () => {
+    render(
+      <TimelineNodeList
+        nodes={[flowNode]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        variant="flow"
+        flowRows={[flowRows[0]!]}
+        nodeDetails={{ "node-flow-1": nodeDetail({ execution_events: [] }) }}
+      />,
+    );
+
+    expect(screen.queryByTestId("flow-tokens-author_run")).toBeNull();
+    expect(screen.queryByTestId("flow-token-row-author_run")).toBeNull();
+  });
+
   it("reads the latest usage event and ignores payloads it cannot parse", () => {
     render(
       <TimelineNodeList
