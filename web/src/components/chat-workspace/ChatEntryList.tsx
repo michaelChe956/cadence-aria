@@ -51,6 +51,14 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       groupedItems.forEach((item, index) => {
         if (item.kind === "group") {
           map.set(entryIdForGroup(item.group), index);
+          // 分组内的条目（如 choice_request 走 interruptEntries）没有独立行：
+          // 按条目 id 定位必须落到它所在的分组行，否则「定位选择卡」静默失败。
+          for (const entry of [
+            ...item.group.interruptEntries,
+            ...item.group.inlineEvents,
+          ]) {
+            map.set(entry.id, index);
+          }
         } else {
           map.set(item.entry.id, index);
         }
@@ -99,12 +107,15 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       () => ({
         scrollToEntry(entryId: string) {
           const index = entryIndexById.get(entryId);
-          if (index !== undefined) {
-            rowVirtualizer.scrollToIndex(index, { align: "start" });
-            parentRef.current
-              ?.querySelector<HTMLElement>(`[data-entry-id="${entryId}"]`)
-              ?.scrollIntoView({ behavior: "auto", block: "start" });
+          if (index === undefined) {
+            return;
           }
+          rowVirtualizer.scrollToIndex(index, { align: "start" });
+          // 分组行不带条目 id（data-entry-id 是分组 id），按行索引回退定位。
+          const row =
+            parentRef.current?.querySelector<HTMLElement>(`[data-entry-id="${entryId}"]`) ??
+            parentRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
+          row?.scrollIntoView({ behavior: "auto", block: "start" });
         },
       }),
       [entryIndexById, rowVirtualizer],

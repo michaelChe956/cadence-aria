@@ -12,6 +12,7 @@ import {
 } from "../api/workspace-content";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
 import { ArtifactReviewPanel } from "../components/chat-workspace/ArtifactReviewPanel";
+import { useCockpitSettingsSlotRef } from "../components/cockpit/CockpitShell";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
@@ -90,6 +91,7 @@ export function LegacyChatWorkspacePage({
     reconnectAttemptCount,
     retryNow,
   } = workspaceWs;
+  const settingsSlotRef = useCockpitSettingsSlotRef();
   const storeSessionId = useWorkspaceStore((state) => state.sessionId);
   const workspaceType = useWorkspaceStore((state) => state.workspaceType);
   const stage = useWorkspaceStore((state) => state.stage);
@@ -483,7 +485,10 @@ export function LegacyChatWorkspacePage({
       data-testid="legacy-chat-workspace-page"
       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
     >
-      <div className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3">
+      <div
+        data-testid="workspace-top-bar"
+        className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3"
+      >
         <button
           type="button"
           onClick={onBack}
@@ -502,6 +507,14 @@ export function LegacyChatWorkspacePage({
           ) : (
             <WifiOff aria-label="未连接" className="h-4 w-4 text-red-600" />
           )}
+          {/* F-43 ③：驾驶舱设置入口宿主（F-37 先例）。work_item 会话默认走
+              legacy 形态（chat-cockpit-mode 白名单不含 work_item），此前不登记
+              slot，CockpitShell 只能落 fixed 兜底浮层乱飘。 */}
+          <div
+            data-testid="cockpit-settings-slot"
+            ref={settingsSlotRef}
+            className="flex items-center"
+          />
         </div>
       </div>
 

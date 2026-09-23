@@ -41,6 +41,7 @@ export function ChoiceRequestEntry({
   const [selectedByQuestion, setSelectedByQuestion] = useState<Record<string, string[]>>({});
   const [freeTextByQuestion, setFreeTextByQuestion] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [promptExpanded, setPromptExpanded] = useState(false);
 
   function selectedIdsFor(questionId: string) {
     return selectedByQuestion[questionId] ?? [];
@@ -162,6 +163,10 @@ export function ChoiceRequestEntry({
 
   const canSubmit = questions.length > 0 && questions.every(isQuestionAnswered);
   const showQuestionPrompts = usesStructuredQuestions || questions.length > 1;
+  const segments = promptSegments(prompt);
+  const clampable = segments.some(
+    (segment) => segment.kind === "text" && needsPromptClamp(segment.text),
+  );
 
   const resolvedSummary = choiceSummary(response, questions, options);
   const content = (
@@ -175,7 +180,42 @@ export function ChoiceRequestEntry({
               {sourceLabel}
             </span>
           ) : null}
-          <div className="mt-1 text-[var(--aria-ink-muted)]">{prompt}</div>
+          <div className="mt-1 space-y-1">
+            {segments.map((segment, index) =>
+              segment.kind === "command" ? (
+                <pre
+                  key={`command-${index}`}
+                  data-testid="choice-command-block"
+                  className="max-h-40 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-subtle)] p-2 font-mono text-[11px] leading-4 text-[var(--aria-ink)]"
+                >
+                  {segment.text}
+                </pre>
+              ) : (
+                <p
+                  key={`text-${index}`}
+                  data-testid="choice-prompt-text"
+                  className={[
+                    "whitespace-pre-wrap break-words text-[var(--aria-ink-muted)]",
+                    clampable && !promptExpanded ? "line-clamp-6" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {segment.text}
+                </p>
+              ),
+            )}
+            {clampable ? (
+              <button
+                type="button"
+                aria-expanded={promptExpanded}
+                onClick={() => setPromptExpanded((expanded) => !expanded)}
+                className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              >
+                {promptExpanded ? "收起全文" : "展开全文"}
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -407,4 +447,53 @@ function stringField(value: unknown, key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+interface ChoicePromptSegment {
+  kind: "text" | "command";
+  text: string;
+}
+
+const DANGEROUS_COMMAND_HEADER = /^\s*(?:⚠️|⚠)?\s*Dangerous command\s*[:：]\s*$/i;
+const DANGEROUS_COMMAND_TRAILER = /^\s*Allow\s*[?？]\s*$/i;
+const PROMPT_CLAMP_LINES = 6;
+// clamp 判定不能等布局（jsdom/首帧无量测），按行数 + 每行约 40 字符折算。
+const PROMPT_CLAMP_CHARS_PER_LINE = 40;
+
+/**
+ * F-43 ①：provider（已实测 pi）的危险命令询问形如
+ *   "⚠️ Dangerous command:\n\n<命令正文>\n\nAllow?"
+ * 正文可达数千字符，此前与提示文字混作一段普通文本，把选项按钮推出可点区域。
+ * 这里按「标记行 / 命令正文 / 尾行」切段：正文单独走等宽内滚块，其余文本可
+ * clamp。非危险命令形态（无标记行）整段作为文本，行为与此前一致。
+ */
+function promptSegments(prompt: string): ChoicePromptSegment[] {
+  const lines = prompt.split("\n");
+  const headerIndex = lines.findIndex((line) => DANGEROUS_COMMAND_HEADER.test(line));
+  if (headerIndex === -1) {
+    return [{ kind: "text", text: prompt }];
+  }
+  const trailerOffset = lines
+    .slice(headerIndex + 1)
+    .findIndex((line) => DANGEROUS_COMMAND_TRAILER.test(line));
+  const trailerIndex = trailerOffset === -1 ? lines.length : headerIndex + 1 + trailerOffset;
+  const commandText = lines.slice(headerIndex + 1, trailerIndex).join("\n").trim();
+  if (commandText.length === 0) {
+    return [{ kind: "text", text: prompt }];
+  }
+  const segments: ChoicePromptSegment[] = [
+    { kind: "text", text: lines.slice(0, headerIndex + 1).join("\n") },
+    { kind: "command", text: commandText },
+  ];
+  if (trailerIndex < lines.length) {
+    segments.push({ kind: "text", text: lines.slice(trailerIndex).join("\n") });
+  }
+  return segments;
+}
+
+function needsPromptClamp(text: string) {
+  return (
+    text.split("\n").length > PROMPT_CLAMP_LINES ||
+    text.length > PROMPT_CLAMP_LINES * PROMPT_CLAMP_CHARS_PER_LINE
+  );
 }

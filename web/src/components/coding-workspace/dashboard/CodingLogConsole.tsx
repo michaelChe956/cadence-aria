@@ -29,6 +29,13 @@ export function CodingLogConsole() {
     overscan: 10,
     getItemKey: (index) => visibleLines[index]?.id ?? index,
     initialRect: { width: 0, height: 320 },
+    // F-43 ④：行高不再写死 20px（定高 + 换行内容 = 相邻行文字叠印）。行元素交给
+    // 虚拟化按内容测量；jsdom/无布局环境量到 0 时回退估算行高，保持既有窗口化行为。
+    measureElement: (element, entry) => {
+      const measured =
+        entry?.borderBoxSize?.[0]?.blockSize ?? (element as HTMLElement).offsetHeight;
+      return measured > 0 ? measured : LINE_HEIGHT;
+    },
     // 对齐 ChatEntryList 的接线:jsdom/无布局环境 clientHeight 为 0,
     // 默认 observer 会把 scrollRect 钉在 {0,0} 导致 range 恒空,这里回退固定高度。
     observeElementRect: (_instance, callback) => {
@@ -108,20 +115,24 @@ export function CodingLogConsole() {
               return (
                 <div
                   key={line.id}
+                  ref={virtualizer.measureElement}
                   data-index={item.index}
                   data-testid="coding-log-line"
-                  className="absolute left-0 top-0 flex w-full items-baseline gap-2 px-2 font-mono text-[11px] leading-5"
-                  style={{ transform: `translateY(${item.start}px)`, height: LINE_HEIGHT }}
+                  className="absolute left-0 top-0 flex w-full min-w-0 items-baseline gap-2 overflow-hidden px-2 font-mono text-[11px] leading-5"
+                  style={{ transform: `translateY(${item.start}px)` }}
                 >
                   <span className="aria-num shrink-0 text-[var(--aria-ink-muted)]">{line.at.slice(11, 19)}</span>
-                  <span className="min-w-0 shrink-0 truncate text-[var(--aria-ink-muted)]">
+                  {/* 节点名限宽可收缩：shrink-0 + 无上限会把行撑出容器（横向溢出）。 */}
+                  <span className="min-w-0 max-w-[8rem] shrink truncate text-[var(--aria-ink-muted)]">
                     {line.nodeTitle ?? "全局"}
                   </span>
+                  {/* 消息允许按词换行（break-words + pre-wrap），行高由测量承接；不再叠加
+                      truncate 的 nowrap——两者同时存在时换行内容会溢出定高行压住下一行。 */}
                   <span
                     className={
                       line.kind === "event"
-                        ? "min-w-0 flex-1 truncate border-l-2 border-[var(--aria-line-strong)] pl-1.5 text-[var(--aria-ink)]"
-                        : "min-w-0 flex-1 truncate whitespace-pre-wrap break-all text-[var(--aria-ink)]"
+                        ? "min-w-0 flex-1 whitespace-pre-wrap break-words border-l-2 border-[var(--aria-line-strong)] pl-1.5 text-[var(--aria-ink)]"
+                        : "min-w-0 flex-1 whitespace-pre-wrap break-words text-[var(--aria-ink)]"
                     }
                   >
                     {line.text}

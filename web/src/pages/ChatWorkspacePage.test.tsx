@@ -8,6 +8,8 @@ import {
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import { useWorkspaceSessionObservers } from "../hooks/useWorkspaceSessionObservers";
+import { CockpitShell } from "../components/cockpit/CockpitShell";
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { MockWebSocket } from "../hooks/useWorkspaceWs.test-utils";
@@ -44,6 +46,12 @@ vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
 
 vi.mock("../hooks/useUnloadGuard", () => ({
   useUnloadGuard: vi.fn(),
+}));
+
+// F-43 ③：只在本文件验证「legacy 页登记设置入口宿主」时渲染真实 CockpitShell，
+// 观察器（会走真实 HTTP 目录接口）用桩替换。
+vi.mock("../hooks/useWorkspaceSessionObservers", () => ({
+  useWorkspaceSessionObservers: vi.fn(),
 }));
 
 vi.mock("../api/workspace-content", () => ({
@@ -580,7 +588,7 @@ describe("ChatWorkspacePage dual track switch", () => {
   installChatWorkspacePageTestHooks();
 
   function setWorkspaceType(
-    workspaceType: "story" | "design" | "work_item_plan",
+    workspaceType: "story" | "design" | "work_item_plan" | "work_item",
     sessionStatus: "open" | "confirmed" | "terminated" = "open",
   ) {
     useWorkspaceStore.getState().setSessionState({
@@ -638,6 +646,33 @@ describe("ChatWorkspacePage dual track switch", () => {
 
     expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
     expect(screen.queryByTestId("cockpit-page")).toBeNull();
+  });
+
+  // F-43 ③：work_item 会话默认走 legacy 形态（chat-cockpit-mode 白名单不含
+  // work_item），而 legacy 页此前不登记设置入口宿主——CockpitShell 只能落
+  // fixed 兜底浮层。契约：顶栏登记 slot，兜底浮层不再出现。
+  it("registers the cockpit settings slot in the legacy workspace top bar", () => {
+    vi.mocked(useWorkspaceSessionObservers).mockReturnValue({
+      records: [],
+      inbox: [],
+      countedInbox: [],
+      watchedSessionIds: [],
+      watchSession: vi.fn(),
+    });
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item");
+    mockWorkspaceWs();
+
+    render(
+      <CockpitShell>
+        <ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} onOpenSession={vi.fn()} />
+      </CockpitShell>,
+    );
+
+    const slot = screen.getByTestId("cockpit-settings-slot");
+    expect(slot).toContainElement(screen.getByTestId("cockpit-settings-trigger"));
+    expect(slot.closest('[data-testid="workspace-top-bar"]')).not.toBeNull();
+    expect(screen.queryByTestId("cockpit-settings-fallback")).toBeNull();
   });
 
   it("keeps the legacy start-generation flow usable when legacy is explicitly set", () => {

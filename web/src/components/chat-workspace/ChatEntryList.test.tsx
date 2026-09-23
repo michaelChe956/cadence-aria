@@ -146,6 +146,29 @@ describe("ChatEntryList", () => {
     expect(scrollToIndex).toHaveBeenCalledWith(0, { align: "start" });
   });
 
+  // F-43 ②：choice_request 走分组 interruptEntries（同组还挂着 provider_stream
+  // 主条目），分组行只带分组/主条目 id——按 choice 条目 id 定位此前静默失败，
+  // 「定位选择卡」会毫无反应。契约：组内任一成员 id 都能落到该分组行。
+  it("scrolls to a choice request grouped behind a stream entry", () => {
+    const ref = createRef<ChatEntryListHandle>();
+
+    render(
+      <ChatEntryList
+        ref={ref}
+        entries={[
+          { ...makeEntry("entry-stream", "provider_stream", "正在输出"), node_id: "node-1" },
+          { ...makeEntry("entry-choice", "choice_request", "请选择下一步"), node_id: "node-1" },
+        ]}
+      />,
+    );
+
+    scrollIntoView.mockClear();
+    ref.current?.scrollToEntry("entry-choice");
+
+    expect(scrollToIndex).toHaveBeenCalledWith(0, { align: "start" });
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it("keeps scrollToEntry available for timeline selection", () => {
     const ref = createRef<ChatEntryListHandle>();
     const entries = Array.from({ length: 100 }, (_, index) => ({

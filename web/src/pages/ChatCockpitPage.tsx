@@ -9,6 +9,7 @@ import {
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
 import { ArtifactReviewPanel } from "../components/chat-workspace/ArtifactReviewPanel";
+import { PendingChoiceNotice, pendingChoiceEntries } from "../components/chat-workspace/PendingChoiceNotice";
 import {
   ChatInputBar,
   type ChatInputBarHandle,
@@ -131,6 +132,7 @@ export function ChatCockpitPage({
       ? state
       : observedRecords.find((record) => record.sessionId === takeoverSessionId)?.state ?? null;
   const selectedSessionId = takeoverSessionId ?? sessionId;
+  const pendingChoices = pendingChoiceEntries(selectedState?.chatEntries ?? []);
   const statusState = selectedState ?? state;
   const activeTimelineNode =
     statusState.timelineNodes.find((node) => node.node_id === statusState.activeNodeId) ??
@@ -959,7 +961,12 @@ export function ChatCockpitPage({
           <section
             data-testid="cockpit-conversation-flow"
             aria-label="下钻对话流"
-            className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto_auto] rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
+            className={[
+              "grid min-h-0 min-w-0 flex-1 rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]",
+              pendingChoices.length > 0
+                ? "grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]"
+                : "grid-rows-[auto_minmax(0,1fr)_auto_auto]",
+            ].join(" ")}
           >
           <div className="flex min-w-0 items-center gap-2 px-3 py-2">
             <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
@@ -1059,6 +1066,12 @@ export function ChatCockpitPage({
               </div>
             ) : null}
           </div>
+          {pendingChoices.length > 0 ? (
+            <PendingChoiceNotice
+              entries={selectedState?.chatEntries ?? []}
+              onJump={handleJumpToEntry}
+            />
+          ) : null}
           {drilldownView === "artifact" && isArtifactReviewSession ? (
             <ArtifactReviewPanel
               artifactVersions={selectedState?.artifactVersions ?? []}

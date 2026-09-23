@@ -13,6 +13,8 @@ import { deleteCodingAttempt } from "../api/client";
 import type { CodingAttemptAddress } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingDashboard } from "../components/coding-workspace/dashboard/CodingDashboard";
+import { PendingChoiceNotice } from "../components/chat-workspace/PendingChoiceNotice";
+import { useCockpitSettingsSlotRef } from "../components/cockpit/CockpitShell";
 import {
   PlanRepairCenter,
   type PlanRepairAction,
@@ -83,6 +85,7 @@ export function CodingWorkspacePage({
 }) {
   const api = useCodingWorkspaceWs(address);
   const store = useCodingWorkspaceStore();
+  const settingsSlotRef = useCockpitSettingsSlotRef();
   const planRepairApi = useWorkspaceWs(
     store.activePlanRepair?.childSessionId ?? null,
   );
@@ -427,7 +430,10 @@ export function CodingWorkspacePage({
       data-testid="coding-workspace-page"
       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
     >
-      <div className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3">
+      <div
+        data-testid="coding-workspace-top-bar"
+        className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3"
+      >
         <button
           type="button"
           onClick={onBack}
@@ -467,8 +473,23 @@ export function CodingWorkspacePage({
             <History aria-hidden="true" className="h-3.5 w-3.5" />
             <span>操作审计</span>
           </button>
+          {/* F-43 ③：驾驶舱设置入口宿主（F-37 先例）。此前本页不登记 slot，
+              CockpitShell 只能落 fixed 兜底浮层压住页面内容。 */}
+          <div
+            data-testid="cockpit-settings-slot"
+            ref={settingsSlotRef}
+            className="flex items-center"
+          />
         </div>
       </div>
+
+      {/* F-43 ②：未处理 choice 的到达提示挂在**页级**（顶栏之下），不随
+          「运行对话/结果」页签切换消失——卡本身只在对话页签里，用户停在
+          结果页签时同样必须看到「有选择请求待处理」。 */}
+      <PendingChoiceNotice
+        entries={store.chatEntries}
+        onJump={(entryId) => chatListRef.current?.scrollToEntry(entryId)}
+      />
 
       <header className="grid min-h-16 min-w-0 shrink-0 gap-2 overflow-hidden border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">

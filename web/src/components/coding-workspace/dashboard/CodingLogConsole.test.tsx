@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 import { CODING_LOG_TAIL_LIMIT, useCodingLogStore, type CodingLogEntryInput } from "../../../state/coding-log-store";
@@ -63,6 +63,46 @@ describe("CodingLogConsole", () => {
   it("shows an explicit empty state when no line matches", () => {
     render(<CodingLogConsole />);
     expect(screen.getByTestId("coding-log-empty")).toHaveTextContent("暂无日志");
+  });
+
+  // F-43 ④：日志行此前「绝对定位 + 写死 20px 行高 + truncate 与
+  // whitespace-pre-wrap 互相覆盖」——多行文本在定高行里换行后溢出到下一行
+  // （文字叠印），节点名 shrink-0 又把长串撑出横向滚动。契约：行高交给
+  // 虚拟化按内容测量（不再写死），消息 break-words 单次渲染、节点名限宽可缩。
+  it("lays each log line out as a measured single copy without a fixed row height", () => {
+    const longLine = `${"x".repeat(400)} tail`;
+    act(() => {
+      useCodingLogStore.getState().appendLines([
+        line({ text: longLine }),
+        line({ kind: "event", text: "event line" }),
+      ]);
+    });
+
+    render(<CodingLogConsole />);
+
+    const rows = screen.getAllByTestId("coding-log-line");
+    const streamRow = rows[0]!;
+    const eventRow = rows[1]!;
+
+    // 行高不再写死：多行内容由测量接管，不会压到相邻行。
+    expect(streamRow.style.height).toBe("");
+    expect(streamRow).toHaveAttribute("data-index", "0");
+    expect(eventRow.style.height).toBe("");
+
+    // 单印：同一行文本在 DOM 里只出现一次。
+    expect(within(streamRow).getAllByText(longLine)).toHaveLength(1);
+
+    const message = within(streamRow).getByText(longLine);
+    expect(message.className).toContain("break-words");
+    expect(message.className).not.toContain("truncate");
+
+    const eventMessage = within(eventRow).getByText("event line");
+    expect(eventMessage.className).not.toContain("truncate");
+
+    // 横向不溢出：节点名限宽可收缩，不再 shrink-0 撑破行长。
+    const nodeTitle = within(streamRow).getByText("Coder");
+    expect(nodeTitle.className).not.toContain("shrink-0");
+    expect(nodeTitle.className).toContain("max-w-");
   });
 
   it("keeps the newest line visible when pinned to the bottom", () => {
