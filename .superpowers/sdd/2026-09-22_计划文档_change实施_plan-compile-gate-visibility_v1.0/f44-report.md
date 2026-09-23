@@ -92,3 +92,16 @@
 3. **审计动词**：`restart_coding` 复用既有 `start_coding` 审计 operation（同一用户意图 + 同一拒绝/完成生命周期，零新增审计词汇）；如需审计区分重开与首启，需扩 `CockpitOperation` 并同步拒绝 lifecycle 过滤面。
 4. **未改的相邻缺陷**：`CodingComposer` 的 `inputDisabled` 只含 `completed`/`aborted`，`failed` 态仍可输入「补充上下文」，而后端对终态 `ContextNote` 拒绝——同一「终态提供不可能动作」家族，属 F-43 相邻面，本批未动（避免越界与既有用例churn）。
 5. **未验证项**：真浏览器视觉复验未做（本次以组件测试 + 真实 WS 集成测试为准）；现场 attempt e4a4… 未在真实 workspace 上实际点击复验（fixture 层已覆盖同形态 unit 布局，见 §5 与 concern 1）——建议部署后由主代理做一次真实点击复验。
+
+## 7. fix1（F-44 审查回执：1×P1 必修 + 2×P3）
+
+P1（必修，多 remainder 死胡同）：原 `restore_group_resume_target` 只复位**首个** Skipped/Failed unit，而 `group_terminal` 归一化会把**全部**非终态 unit 变 Skipped/Failed——中止在第 k<n 个 unit（主流形态）时，继任选择器只认 `Pending`，unit_{k+1..n} 被永久放弃、final confirm 永不满足、非终态又拒 `RestartCoding` = 死胡同。
+
+- 修法（k3 ②完整版）：新增 `CodingExecutionUnitStatus::is_group_remainder_candidate()`（`Pending | Skipped | Failed`，`Superseded`/`Completed` 永不为候选），并让**两个**继任选择器统一走该谓词：`advance_to_next_group_unit`（legacy 分支）与 `select_next_sc_group_unit`（SC 分支，依赖就绪判定与 Pending 候选同构，未改语义）。复活 unit_k 完成后，选择器按同一谓词接续复活 unit_{k+1}，链路仍是既有 `start_pending_coding_unit_run`（run 为 Running 直接复用 / Pending 翻 Running / 无 run 时由 `active_unit_run_projection` 既有物化），全程不新建/不改写 run。
+- 红→绿实测：新增 `tests/it_web/web_coding_ws_handler/part_19.rs::group_remainder_selector_resumes_skipped_successor_unit`——fixture 置 unit1 `Completed` + unit2 `Skipped`（中止归一形态），直接驱动 `advance_to_next_group_unit`，断言 unit2 被接续复活为 `Running` 且 `active_unit_id` 对齐。**红**：把谓词临时退回 `Pending` 后该用例 FAILED（`Skipped remainder 必须被继任选择器接续复活`）；**绿**：谓词在位即 PASS。
+
+P3a（防御纵深）：`restart_terminal_attempt_for_execution` 开头补**只读终态预检**（复用函数首行已取的快照，零额外读盘）——非终态调用在任何写盘之前即拒，不再出现「先落 unit 复位、再在 CAS 阶段失败」。CAS 锁内的终态校验保留为并发兜底。
+
+P3b（注释如实）：`update_coding_unit_status` 的 `completed_at` 清除分支注释改写为如实列举三类触发方——①本批终态重开复位 Skipped/Failed unit；②`resume_attempt_after_amendment` 的 `AmendmentResumeMode::Reexecute` 把 `Superseded` 置回 Running（既有行为，此前遗留 stale `completed_at`，现一并清除，属良性修正）；③ProviderFailure 把 `Blocked` 置回 Running（等价空操作）；并说明「进终态写戳、离开终态清戳」与 attempt record 的 `completed_at` 语义对齐。
+
+Fix1 门禁：`cargo fmt --check` 0、`cargo clippy --all-targets --all-features -- -D warnings` 0、`--lib` / `--test it_web` / `--test it_core large_file_guard` 全绿（含新增用例）。
