@@ -1,7 +1,9 @@
 use super::*;
 
 mod aggregate_writeback;
-mod artifact_retry;
+// `pub(crate)`：REQ-ACS-02 诊断构造（有界 detail / 失败提示）由
+// `workspace_engine::tests::artifact_selection` 直接断言。
+pub(crate) mod artifact_retry;
 mod choice_audit;
 mod pending_choices;
 mod watchdog;
@@ -12,6 +14,7 @@ use crate::product::logical_codebase::PlanningContextSnapshotStore;
 use crate::product::workspace_engine::aggregate_output_parser::{
     parse_design_aggregate_output, parse_story_aggregate_output,
 };
+use artifact_retry::artifact_failure_reasons_with_diagnostic;
 use choice_audit::ChoiceResponseAuditInput;
 pub(crate) use pending_choices::PendingChoiceRequests;
 pub(crate) use pending_choices::pending_choice_requests_snapshot;
@@ -716,13 +719,32 @@ impl WorkspaceEngine {
                                         None
                                     } else {
                                         context.attempted = true;
+                                        // REQ-ACS-01/02：同一 raw 源只选一次——失败原因、
+                                        // 诊断事件与续写 prompt 共用这一份 gate 结果。
+                                        let selection = workspace_artifact_selection(
+                                            &completed_output,
+                                            &self.session.workspace_type,
+                                        );
+                                        let diagnostic_error = self
+                                            .record_artifact_selection_diagnostic(
+                                                node_id.as_deref(),
+                                                &selection,
+                                            )
+                                            .await
+                                            .err();
+                                        let blocking_reasons =
+                                            artifact_failure_reasons_with_diagnostic(
+                                                &selection,
+                                                diagnostic_error.as_deref(),
+                                            );
                                         let retry_input = self.build_artifact_retry_input(
                                             &context.input,
                                             &completed_output,
+                                            &blocking_reasons,
                                             completed_provider_session_id.clone(),
                                         );
                                         context.input = retry_input.clone();
-                                        Some((context.provider.clone(), retry_input))
+                                        Some((context.provider.clone(), retry_input, blocking_reasons))
                                     }
                                 } else {
                                     None
@@ -731,9 +753,7 @@ impl WorkspaceEngine {
                                 None
                             };
 
-                            if let Some((provider, retry_input)) = retry_start {
-                                let blocking_reasons = self
-                                    .workspace_artifact_blocking_reasons(&completed_output);
+                            if let Some((provider, retry_input, blocking_reasons)) = retry_start {
                                 node_id = self
                                     .begin_artifact_retry_node(
                                         node_id.as_deref(),
@@ -1028,8 +1048,16 @@ impl WorkspaceEngine {
         // REQ-ACS-01：唯一 gate-passing 候选才作为产物；零通过/歧义走既有失败分支
         // （retry 判断由调用方在同一 raw 源上先行完成，此处不重新选源）。
         let selection = workspace_artifact_selection(&full_content, &self.session.workspace_type);
+        // REQ-ACS-02：候选选择发生/失败一律落一条有界诊断（durable-only，原文零复制）；
+        // 诊断持久化失败只作为失败摘要里的有界提示，不放宽 gate、不额外启动 provider。
+        let diagnostic_node_id = self.active_node_id.clone();
+        let diagnostic_error = self
+            .record_artifact_selection_diagnostic(diagnostic_node_id.as_deref(), &selection)
+            .await
+            .err();
         let Some(artifact_markdown) = selected_artifact_markdown(&selection) else {
-            let blocking_reasons = selection_failure_reasons(&selection);
+            let blocking_reasons =
+                artifact_failure_reasons_with_diagnostic(&selection, diagnostic_error.as_deref());
             if artifact_retry_attempted {
                 self.finish_invalid_workspace_artifact_after_retry(&blocking_reasons)
                     .await;
