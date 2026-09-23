@@ -18,3 +18,4 @@ include!("web_coding_ws_handler/part_15.rs");
 include!("web_coding_ws_handler/part_16.rs");
 include!("web_coding_ws_handler/part_17.rs");
 include!("web_coding_ws_handler/part_18.rs");
+include!("web_coding_ws_handler/part_19.rs");

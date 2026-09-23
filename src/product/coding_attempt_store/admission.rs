@@ -7,7 +7,10 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionAttempt};
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingExecutionUnit, CodingExecutionUnitStatus,
+};
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
 use crate::product::logical_codebase::snapshot_validator::validate_snapshot_fields;
 use crate::product::logical_codebase::{AggregatePolicyArtifactStore, RepositoryRouting};
@@ -40,6 +43,22 @@ const ADMISSION_TICKET_INVALID: &str = "admission_ticket_invalid";
 const ADMISSION_TICKET_EXPIRED: &str = "admission_ticket_expired";
 const ADMISSION_TICKET_CONSUMED: &str = "admission_ticket_consumed";
 const ATTEMPT_AWAITING_MANUAL_RECOVERY: &str = "attempt_awaiting_manual_recovery";
+const ATTEMPT_NOT_TERMINAL_FOR_RESTART: &str = "attempt_not_terminal_for_restart";
+const ATTEMPT_RESTART_NO_RESUME_TARGET: &str = "attempt_restart_no_resume_target";
+
+/// 进入 `Running` 的 admission 通道模式。默认 `None` 对 `AwaitingManualRecovery`
+/// 与终态（`Completed`/`Failed`/`Aborted`）一律 fail-closed 拒绝；两条显式人工
+/// 通道各自只放开一个终态源状态，且仍必须重走完整路由/快照/policy 校验与
+/// ticket version CAS（不构成绕过状态机的旁路）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionReopen {
+    /// 常规 admission：仅 `valid_executable_admission_transition` 的源状态。
+    None,
+    /// F-16：`awaiting_manual_recovery` 的显式恢复（`recover_coding`）。
+    ManualRecovery,
+    /// F-44：`aborted`/`failed` 终态的显式「重新开始」（`restart_coding`）。
+    TerminalRestart,
+}
 
 /// Admission API failure code. The public boundary uses a stable string while its variants keep
 /// internal failures distinguishable for callers and tests.
@@ -146,7 +165,7 @@ impl CodingAttemptStore {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
-                false,
+                AdmissionReopen::None,
             )
         })
         .map_err(admission_store_code)
@@ -172,7 +191,7 @@ impl CodingAttemptStore {
                 &attempt.issue_id,
                 &attempt.id,
                 ticket,
-                false,
+                AdmissionReopen::None,
             )
         })
         .map_err(admission_store_code)
@@ -293,7 +312,7 @@ impl CodingAttemptStore {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
-                false,
+                AdmissionReopen::None,
             )
         }) {
             Ok(ticket) => ticket,
@@ -314,7 +333,7 @@ impl CodingAttemptStore {
                 &attempt.issue_id,
                 &attempt.id,
                 &ticket,
-                false,
+                AdmissionReopen::None,
             )
         }) {
             tracing::warn!(
@@ -354,9 +373,70 @@ impl CodingAttemptStore {
                     current.status
                 )));
             }
-            let ticket =
-                self.admit_attempt_for_execution_locked(project_id, issue_id, attempt_id, true)?;
-            self.transition_to_executable_locked(project_id, issue_id, attempt_id, &ticket, true)
+            let ticket = self.admit_attempt_for_execution_locked(
+                project_id,
+                issue_id,
+                attempt_id,
+                AdmissionReopen::ManualRecovery,
+            )?;
+            self.transition_to_executable_locked(
+                project_id,
+                issue_id,
+                attempt_id,
+                &ticket,
+                AdmissionReopen::ManualRecovery,
+            )
+        })?;
+        self.get_attempt(project_id, issue_id, attempt_id)
+    }
+
+    /// F-44：`aborted`/`failed` 终态的显式「重新开始」通道入口（wire 动作
+    /// `restart_coding` 专用）。仅接受当前处于 Aborted/Failed 的 attempt，在同一
+    /// attempt 锁内重走完整路由/快照/policy admission 校验（签发 ticket → CAS
+    /// 消费）回到 Running，并清除 `completed_at`。
+    ///
+    /// 与一般 admission（`admit_and_transition_attempt_to_executable` 等，对终态
+    /// fail-closed 拒绝）刻意分离：半启动重启 / sc_advance 等自动路径对终态依旧
+    /// 零动作（F-14 fail-closed 与 F-43 终态 group 拒绝面零回归），重开只能由
+    /// 显式人工动作触发并重验目标身份。stage 不改写——重启由 runner 既有阶段链
+    /// 从当前 stage 续跑（与半启动恢复同源语义）。
+    pub(crate) fn restart_terminal_attempt_for_execution(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let current = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if !matches!(
+                current.status,
+                CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+            ) {
+                return Err(ProductStoreError::Io(format!(
+                    "{ATTEMPT_NOT_TERMINAL_FOR_RESTART}: {:?}",
+                    current.status
+                )));
+            }
+            ensure_restart_has_resume_target(&current, &self.list_coding_units(
+                project_id,
+                issue_id,
+                attempt_id,
+            )?)?;
+            let ticket = self.admit_attempt_for_execution_locked(
+                project_id,
+                issue_id,
+                attempt_id,
+                AdmissionReopen::TerminalRestart,
+            )?;
+            self.transition_to_executable_locked(
+                project_id,
+                issue_id,
+                attempt_id,
+                &ticket,
+                AdmissionReopen::TerminalRestart,
+            )
         })?;
         self.get_attempt(project_id, issue_id, attempt_id)
     }
@@ -366,20 +446,29 @@ impl CodingAttemptStore {
         project_id: &str,
         issue_id: &str,
         attempt_id: &str,
-        allow_manual_recovery: bool,
+        reopen: AdmissionReopen,
     ) -> Result<AdmissionTicketRecord, ProductStoreError> {
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery && !allow_manual_recovery {
+        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery
+            && reopen != AdmissionReopen::ManualRecovery
+        {
             return Err(ProductStoreError::Io(
                 ATTEMPT_AWAITING_MANUAL_RECOVERY.to_string(),
             ));
         }
         // F-16 恢复通道：AwaitingManualRecovery 只经
-        // `recover_attempt_from_manual_recovery`（allow=true）进入校验，其余
-        // 状态照走一般 admission 源状态表。
+        // `recover_attempt_from_manual_recovery`（reopen=ManualRecovery）进入校验；
+        // F-44 重开通道：Aborted/Failed 只经
+        // `restart_terminal_attempt_for_execution`（reopen=TerminalRestart）进入校验。
+        // 其余状态照走一般 admission 源状态表。
         let source_valid = super::attempt::valid_executable_admission_transition(&attempt.status)
-            || (allow_manual_recovery
-                && attempt.status == CodingAttemptStatus::AwaitingManualRecovery);
+            || (reopen == AdmissionReopen::ManualRecovery
+                && attempt.status == CodingAttemptStatus::AwaitingManualRecovery)
+            || (reopen == AdmissionReopen::TerminalRestart
+                && matches!(
+                    attempt.status,
+                    CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+                ));
         if !source_valid {
             return Err(ProductStoreError::Io(format!(
                 "invalid_coding_attempt_status_transition: {:?} -> {:?}",
@@ -451,15 +540,22 @@ impl CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
         ticket: &AdmissionTicketRecord,
-        allow_manual_recovery: bool,
+        reopen: AdmissionReopen,
     ) -> Result<(), ProductStoreError> {
         let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         let recovering_from_manual_recovery =
             attempt.status == CodingAttemptStatus::AwaitingManualRecovery;
-        if recovering_from_manual_recovery && !allow_manual_recovery {
+        if recovering_from_manual_recovery && reopen != AdmissionReopen::ManualRecovery {
             return Err(ProductStoreError::Io(
                 ATTEMPT_AWAITING_MANUAL_RECOVERY.to_string(),
             ));
+        }
+        let restarting_from_terminal = matches!(
+            attempt.status,
+            CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+        );
+        if restarting_from_terminal && reopen != AdmissionReopen::TerminalRestart {
+            return Err(ProductStoreError::Io(ADMISSION_TICKET_INVALID.to_string()));
         }
         let ticket_path =
             self.admission_ticket_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
@@ -485,7 +581,8 @@ impl CodingAttemptStore {
             return Err(ProductStoreError::Io(ADMISSION_TICKET_EXPIRED.to_string()));
         }
         let source_valid = super::attempt::valid_executable_admission_transition(&attempt.status)
-            || (allow_manual_recovery && recovering_from_manual_recovery);
+            || (reopen == AdmissionReopen::ManualRecovery && recovering_from_manual_recovery)
+            || (reopen == AdmissionReopen::TerminalRestart && restarting_from_terminal);
         if persisted.attempt_version != attempt.version
             || attempt.status == CodingAttemptStatus::Running
             || !source_valid
@@ -502,6 +599,10 @@ impl CodingAttemptStore {
             // F-16：恢复成功即结束本次人工恢复会话——清除稳定 reason，回到
             // 干净的 Running 语义（新会话由 CAS marker 重新锚定）。
             attempt.manual_recovery_reason = None;
+        }
+        if restarting_from_terminal {
+            // F-44：重开成功即离开终态——清除终态时间戳，回到干净的 Running 语义。
+            attempt.completed_at = None;
         }
         self.save_coding_attempt_with_status(&attempt)?;
         // The attempt record is authoritative. Cleanup is intentionally best-effort: a failed
@@ -587,6 +688,61 @@ fn legacy_snapshot_digest(attempt: &CodingExecutionAttempt) -> String {
         "legacy:{}:{}:{}",
         attempt.project_id, attempt.issue_id, attempt.id
     )
+}
+
+/// F-44：终态重开的 durable 前置门。重开后 runner 会在既有阶段链上按
+/// `Running` 形态重验 group 结构（`group_validation::validate_group_attempt_pointers`，
+/// 该函数读盘取状态，无法用「假想重开后记录」预演），因此这里按**重开后的形态**
+/// 显式判定是否存在合法 active/resume target；不存在时 fail-closed 拒绝。
+///
+/// 不预检的代价是实测过的：group attempt 先被重开为 Running，再由 runner 死于
+/// `coding_group_attempt_incomplete: ... has no legal active or resume target`，并被
+/// runner 死亡路径推进为人工恢复态——用户既没重启成功，又丢了原来的 Aborted 状态。
+///
+/// 判定与 `validate_group_attempt_pointers` 的分支一一对应，规则变更须同步：
+/// - 恰一个 active unit 且 attempt 指针指向它 → 合法；
+/// - 无 active unit 且指针为空 → 仅当全部 unit 已完成且 stage ≥ ReviewRequest；
+/// - 其余形态（含多 active unit、有待定 unit、指针与活动 unit 不匹配）→ 拒绝。
+///
+/// 非 group（`work_item`）attempt 无 unit 目标概念，直接放行。
+fn ensure_restart_has_resume_target(
+    attempt: &CodingExecutionAttempt,
+    units: &[CodingExecutionUnit],
+) -> Result<(), ProductStoreError> {
+    if attempt.scope != CodingAttemptScope::WorkItemGroup {
+        return Ok(());
+    }
+    let active_units: Vec<&CodingExecutionUnit> = units
+        .iter()
+        .filter(|unit| unit.status.is_active())
+        .collect();
+    let pointers_match = |unit: &CodingExecutionUnit| {
+        attempt.active_unit_id.as_deref() == Some(unit.id.as_str())
+            && attempt.current_work_item_id.as_deref()
+                == Some(unit.logical_work_item_id.as_str())
+    };
+    if let [only_active] = active_units.as_slice() {
+        if pointers_match(only_active) {
+            return Ok(());
+        }
+    } else if active_units.is_empty() {
+        let pointers_are_empty =
+            attempt.active_unit_id.is_none() && attempt.current_work_item_id.is_none();
+        let all_units_completed = !units.is_empty()
+            && units
+                .iter()
+                .all(|unit| unit.status == CodingExecutionUnitStatus::Completed);
+        if pointers_are_empty
+            && all_units_completed
+            && attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order()
+        {
+            return Ok(());
+        }
+    }
+    Err(ProductStoreError::Io(format!(
+        "{ATTEMPT_RESTART_NO_RESUME_TARGET}: attempt {} has no legal active or resume target",
+        attempt.id
+    )))
 }
 
 fn admission_store_code(error: ProductStoreError) -> StableCode {

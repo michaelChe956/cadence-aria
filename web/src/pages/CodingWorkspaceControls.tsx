@@ -8,6 +8,7 @@ import type {
   CodingProviderRole,
 } from "../api/types";
 import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
+import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
 import { codingStartupRejectionCopy } from "../state/cockpit-operation-semantics";
@@ -196,6 +197,24 @@ export function ActionButtons({
     groupFinalReadinessStatus === "complete" && groupFinalReadinessDiagnostics.length === 0;
   const finalConfirmDiagnostic = groupFinalReadinessDiagnostics[0]?.message;
   const startupCopy = codingStartupRejectionCopy(startupErrorCode);
+
+  // F-44：终态（用户已中止/失败）优先于阶段分支——此时阶段按钮（开始/继续/
+  // 确认完成）都不再可达，只提供「重新开始」显式入口（两步确认防误触，与
+  // GatePromptEntry 的终止按钮同款 ConfirmTwiceButton 先例）；运行中/已完成
+  // 不渲染（completed 不提供重开，进行中的 attempt 走阶段按钮）。
+  if (status === "aborted" || status === "failed") {
+    return (
+      <div className="flex items-center gap-2">
+        <ConfirmTwiceButton
+          label="重新开始"
+          confirmLabel="确认重新开始"
+          ariaLabel={compact ? "底部重新开始" : undefined}
+          confirmAriaLabel={compact ? "底部确认重新开始" : undefined}
+          onConfirm={api.restartCoding}
+        />
+      </div>
+    );
+  }
 
   if (stage === "prepare_context") {
     return (

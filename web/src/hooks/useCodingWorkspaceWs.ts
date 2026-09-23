@@ -83,6 +83,23 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
     return true;
   }, [attemptId, sendJson]);
 
+  // F-44：中止/失败终态的显式「重新开始」——与 startCoding 同一用户意图
+  // （发起一次 coding 启动）与同一审计/拒绝生命周期，仅 wire 动词不同：
+  // 后端只对终态放行 restart_coding，并重走 admission CAS 回 Running 再 spawn。
+  const restartCoding = useCallback(() => {
+    if (!attemptId || !sendJson({ type: "restart_coding" })) return false;
+    const recordId = useOperationAuditStore.getState().record({
+      sessionId: attemptId,
+      gateId: null,
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+      detail: null,
+    });
+    startupAuditRecordIdsRef.current.set(attemptId, recordId);
+    return true;
+  }, [attemptId, sendJson]);
+
   const sendContextNote = useCallback(
     (content: string) => {
       if (!sendJson({ type: "context_note", content })) return;
@@ -329,6 +346,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
 
   return {
     startCoding,
+    restartCoding,
     sendContextNote,
     sendProviderSelect,
     sendPermissionModeSelect,

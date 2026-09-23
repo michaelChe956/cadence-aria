@@ -76,6 +76,24 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
     });
   });
 
+  it("sends the terminal restart verb and records it as a user start audit record", () => {
+    useOperationAuditStore.getState().reset();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.restartCoding();
+    });
+
+    expect(harness.ws.sent).toEqual([JSON.stringify({ type: "restart_coding" })]);
+    expect(useOperationAuditStore.getState().records.at(-1)).toMatchObject({
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+    });
+  });
+
   it("does not create a user start audit record from a passive resumed snapshot", () => {
     useOperationAuditStore.getState().reset();
     const harness = renderCodingHook();

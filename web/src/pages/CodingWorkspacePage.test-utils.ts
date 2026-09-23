@@ -35,6 +35,7 @@ export function deferred<T>() {
 export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
     startCoding: vi.fn(),
+    restartCoding: vi.fn(),
     sendContextNote: vi.fn(),
     sendProviderSelect: vi.fn(),
     sendPermissionModeSelect: vi.fn(),

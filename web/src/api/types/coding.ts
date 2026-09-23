@@ -517,6 +517,8 @@ export type CodingWsInMessage =
   | { type: "abort_attempt" }
   /** F-16：awaiting_manual_recovery 显式恢复动作（重走 admission CAS 回 running）。 */
   | { type: "recover_coding" }
+  /** F-44：aborted/failed 终态显式重新开始动作（重走 admission CAS 回 running 并重启 runner）。 */
+  | { type: "restart_coding" }
   | { type: "request_manual_pause" }
   | { type: "coding_ping" };
 

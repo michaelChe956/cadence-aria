@@ -52,6 +52,7 @@ mod code_review_router;
 mod event_hub;
 mod failed_review_recovery;
 mod plan_repair;
+mod restart;
 mod runner_cleanup;
 mod runner_recovery;
 mod sc_start_guard;

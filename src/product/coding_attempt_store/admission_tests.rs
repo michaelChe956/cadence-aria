@@ -1165,3 +1165,5 @@
             permission_modes: Default::default(),
         }
     }
+
+    mod admission_restart_tests;

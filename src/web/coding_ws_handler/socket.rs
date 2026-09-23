@@ -294,7 +294,13 @@ async fn handle_coding_socket(
                         continue;
                     }
                 };
-                if inbound == CodingWsInMessage::StartCoding {
+                // F-14/F-44：sc_advance attempt 的 durable-ready 门——StartCoding 与
+                // RestartCoding 共用同款语义（半启动恢复 sc_advance_restart_blocked
+                // 亦同源）：未绑定 group / 未 Ready / 读取失败均 fail-closed 拒绝。
+                if matches!(
+                    inbound,
+                    CodingWsInMessage::StartCoding | CodingWsInMessage::RestartCoding
+                ) {
                     let advance_ready = if current_attempt.admission_kind
                         == CodingAdmissionKind::ScAdvance
                     {
@@ -338,6 +344,8 @@ async fn handle_coding_socket(
                         .await;
                         continue;
                     }
+                }
+                if inbound == CodingWsInMessage::StartCoding {
                     if runner_started {
                         drop(mutation_lease);
                         let _ = send_coding_json(
@@ -371,6 +379,58 @@ async fn handle_coding_socket(
                     runner_started = true;
                     runner_command_tx = Some(command_tx);
                     drop(mutation_lease);
+                } else if inbound == CodingWsInMessage::RestartCoding {
+                    // F-44：中止/失败终态的显式「重新开始」通道——重走 admission
+                    // CAS 回到 Running（重验路由/快照/policy），再复用 StartCoding/
+                    // RecoverCoding 同款 spawn 路径重启 runner，由 runner 既有阶段链
+                    // 从当前 stage 续跑。失败 fail-visible（coding_restart_failed），
+                    // 不吞错误；状态门保证该分支只在 Aborted/Failed 下可达。
+                    match coding_store.restart_terminal_attempt_for_execution(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                    ) {
+                        Ok(updated) => {
+                            let Some(command_tx) = spawn_coding_runner(
+                                state.clone(),
+                                coding_store.clone(),
+                                event_tx.clone(),
+                                updated.clone(),
+                            ) else {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_runner_already_started".to_string(),
+                                        message:
+                                            "coding runner is already active for this attempt"
+                                                .to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            };
+                            runner_started = true;
+                            runner_command_tx = Some(command_tx);
+                            drop(mutation_lease);
+                            if let Ok(snapshot) =
+                                build_coding_session_state(&coding_store, updated)
+                            {
+                                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                            }
+                        }
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_restart_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 } else if inbound == CodingWsInMessage::RecoverCoding {
                     // F-16：人工恢复态的显式恢复通道——重走 admission CAS 回到
                     // Running（完整路由/快照/policy 重验），再复用 StartCoding
@@ -1000,7 +1060,14 @@ pub fn is_coding_ws_message_allowed(
         status,
         CodingAttemptStatus::Completed | CodingAttemptStatus::Failed | CodingAttemptStatus::Aborted
     ) {
-        return false;
+        // F-44：`Aborted`/`Failed` 是「可重新开始」的终态——只放行显式重开动作
+        // RestartCoding（重走 admission CAS 回 Running 并重启 runner）；已完成
+        // 的 attempt 不提供重开。StartCoding 等其余消息维持 F-14 fail-closed
+        // 拒绝（终态不得被隐式唤醒，F-43 终态 group 拒绝面零回归）。
+        return matches!(
+            status,
+            CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+        ) && matches!(message, CodingWsInMessage::RestartCoding);
     }
     if matches!(message, CodingWsInMessage::ContextNote { .. }) && status.is_active() {
         return true;

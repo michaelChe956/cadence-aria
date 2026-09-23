@@ -228,6 +228,10 @@ pub enum CodingWsInMessage {
     /// F-16：`awaiting_manual_recovery` 的显式恢复动作——重走 admission CAS
     /// 回到 Running 并重启 runner（人工恢复态唯一非 Abort 放行消息）。
     RecoverCoding,
+    /// F-44：`aborted`/`failed` 终态的显式「重新开始」动作——重走 admission CAS
+    /// 回到 Running 并重启 runner（终态唯一放行消息；`completed` 不提供重开，
+    /// StartCoding 对终态继续 fail-closed 拒绝）。
+    RestartCoding,
     RequestManualPause,
     CodingPing,
 }
