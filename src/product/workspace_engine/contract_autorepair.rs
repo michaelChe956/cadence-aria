@@ -13,12 +13,17 @@
 //! - `unconsumed_required_handoff`：从 provider `### Handoff Schema` 的
 //!   `- provided_contract_refs:` 值中删除未消费引用（`split_values` 跨行
 //!   聚合语义，逐行删值；剩余引用重接，空则写合法空值 `[]`）。
+//! - `unknown_structured_key`：删除该诊断指向的未知结构化 key 源行（parse 阶段
+//!   诊断已带 key 与 1-based 行号；仅当该行 strip 后为 `- <key>:` 或 `<key>:`
+//!   形态才删——未知 section/非 key-value 行/section 外内容共用同一 code，保持
+//!   失败关闭。复验 F-41：修订轮 author 在 `### Handoff Schema` 自创
+//!   `requested_fields` 属此形态）。
 //!
 //! 修复落在 markdown source 层再走正常重编译（source/IR/report 新鲜一致，
 //! `verify_publish_freshness` 链路零变化）；残余 Error（`required_contract_missing`/
 //! `unknown_provider_logical_work_item`/环/重复等非机械类）不拦截，照常产生
-//! 机械 verdict 走 F5-A 模型返修。保守边界：只消费上述两个 code 的 Error
-//! finding，其余 code 一律不碰。补齐全程零 verdict、零预算、零指纹——
+//! 机械 verdict 走 F5-A 模型返修。保守边界：只消费上述三个 code 的 finding，
+//! 其余 code 一律不碰。补齐全程零 verdict、零预算、零指纹——
 //! repeated_fingerprint 闸门冷态不受影响。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,10 +49,10 @@ pub(crate) struct ContractAutorepairOutcome {
 }
 
 /// 收敛循环：compile → 逐轮确定性补齐 → 重编译，直到无可机械修复缺口或
-/// 达上限。首编译的 lowering 错误仅在**所有**诊断均为可精确定位的重复
-/// trusted command 时修复；其余诊断保持原样失败关闭。每轮补齐后的编译失败
-/// 同样上抛——补丁行不合法属程序缺陷，绝不静默回退掩盖。返回最终 IR、
-/// 最终 source 与补齐日志。
+/// 达上限。首编译的 lowering/parse 错误仅在**所有**诊断均可由行号精确映射
+/// 的机械缺口（未知结构化 key 行删除 / 重复 trusted command）时修复；其余
+/// 诊断保持原样失败关闭。每轮补齐后的编译失败同样上抛——补丁行不合法属程序
+/// 缺陷，绝不静默回退掩盖。返回最终 IR、最终 source 与补齐日志。
 pub(crate) fn converge_work_item_plan_source(
     source: &str,
     context: WorkItemPlanSourceContext,
@@ -64,8 +69,8 @@ pub(crate) fn converge_work_item_plan_source(
                 applied.extend(outcome.applied);
             }
             Err(diagnostics) => {
-                let Some(outcome) =
-                    apply_duplicate_trusted_command_autorepair(&source, &diagnostics)
+                let Some(outcome) = apply_unknown_structured_key_autorepair(&source, &diagnostics)
+                    .or_else(|| apply_duplicate_trusted_command_autorepair(&source, &diagnostics))
                 else {
                     return Err(diagnostics);
                 };
@@ -84,6 +89,58 @@ struct DuplicateTrustedCommandRepair {
     check_start_line: usize,
     check_end_line: usize,
     has_manual_instruction: bool,
+}
+
+/// 未知结构化 key 的 parse 阶段诊断码（与 `parse.rs::UNKNOWN_STRUCTURED_KEY_CODE`
+/// 同源：`grammar::DIAGNOSTIC_CODES[1]`）。
+const UNKNOWN_STRUCTURED_KEY_CODE: &str =
+    crate::product::work_item_plan_compiler::grammar::DIAGNOSTIC_CODES[1];
+
+/// 只消费 parse 阶段明确指向「未知结构化 key 自身源行」的诊断：逐行删除该 key
+/// 行（诊断已带 key 与 1-based 行号）。`unknown_structured_key` 是未知 key 与
+/// 未知 section、非 key/value 行、section 外内容等共用的 code，因此每一行都必须
+/// 由 [`unknown_structured_key_line`] 逐条精确映射；任一诊断无法映射即整体放弃，
+/// 保持失败关闭（绝不误删合法内容）。
+fn apply_unknown_structured_key_autorepair(
+    source: &str,
+    diagnostics: &[CompilerDiagnostic],
+) -> Option<ContractAutorepairOutcome> {
+    let mut deletions = BTreeSet::new();
+    let mut applied = Vec::new();
+    for diagnostic in diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == UNKNOWN_STRUCTURED_KEY_CODE)
+    {
+        let line = unknown_structured_key_line(source, diagnostic)?;
+        if deletions.insert(line) {
+            applied.push(format!(
+                "删除未知结构化 key 行 {line}：{}",
+                diagnostic.field
+            ));
+        }
+    }
+    if deletions.is_empty() {
+        return None;
+    }
+    Some(ContractAutorepairOutcome {
+        source: remove_lines(source, &deletions),
+        applied,
+    })
+}
+
+/// 单条 `unknown_structured_key` 诊断能否精确映射到「该 key 自己的源行」。
+/// 仅当诊断行号在界内且该行 strip 后为 `- <key>:` 或 `<key>:` 形态时返回该行号；
+/// 行号错位/越界、或 field 与行内容不符（未知 section、非 key/value 行等）返回
+/// None。
+fn unknown_structured_key_line(source: &str, diagnostic: &CompilerDiagnostic) -> Option<usize> {
+    let key = diagnostic.field.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let line = source.lines().nth(diagnostic.line.checked_sub(1)?)?;
+    let stripped = line.trim();
+    (stripped.starts_with(&format!("- {key}:")) || stripped.starts_with(&format!("{key}:")))
+        .then_some(diagnostic.line)
 }
 
 /// 只消费 lowering 阶段明确指向 `Verification.command` 实际源码行的重复
@@ -793,6 +850,129 @@ mod tests {
         assert!(!source.contains("CHECK-004"));
         assert_eq!(applied.len(), 1);
         assert!(applied[0].contains("删除仅含重复 trusted command"));
+    }
+
+    /// 复验 F-41：修订轮 author 在 `### Handoff Schema` 自创 `requested_fields`
+    /// （`STRUCTURED_KEYS` 白名单外）→ parse 阶段 `unknown_structured_key` 直接终态死。
+    fn unknown_structured_key_candidate() -> String {
+        clean_candidate().replacen(
+            "- required_fields: commit_sha\n",
+            "- required_fields: commit_sha\n- requested_fields: 无\n",
+            1,
+        )
+    }
+
+    fn source_context() -> WorkItemPlanSourceContext {
+        WorkItemPlanSourceContext {
+            target_repository_id: "repo_fixture".to_string(),
+        }
+    }
+
+    fn unknown_key_diagnostic(line: usize, field: &str) -> CompilerDiagnostic {
+        CompilerDiagnostic {
+            code: "unknown_structured_key".to_string(),
+            line,
+            field: field.to_string(),
+            message: "未知结构化 key 必须拒绝。".to_string(),
+            repair_example: "- kind: backend".to_string(),
+        }
+    }
+
+    #[test]
+    fn converge_removes_unknown_structured_key_line_and_recompiles_clean() {
+        let source = unknown_structured_key_candidate();
+        let diagnostics = compile_work_item_plan(&source, &source_context())
+            .expect_err("unknown structured key must fail the first compile");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unknown_structured_key"
+                    && diagnostic.field == "requested_fields"
+            }),
+            "first compile must report the unknown key: {diagnostics:?}"
+        );
+
+        let (ir, source, applied) = converge_work_item_plan_source(&source, source_context())
+            .expect("unknown structured key line must be mechanically repaired");
+        assert!(!source.contains("requested_fields"));
+        assert!(
+            source.contains(
+                "- required_fields: commit_sha\n- provided_contract_refs: contract.levels-api\n"
+            ),
+            "neighbouring legal fields must survive the deletion:\n{source}"
+        );
+        assert_eq!(
+            source.lines().count(),
+            unknown_structured_key_candidate().lines().count() - 1
+        );
+        // 返回的 IR 由删除后的 source 新鲜编译得到。
+        assert_eq!(ir.items.len(), 3);
+        assert_eq!(applied.len(), 1);
+        assert!(
+            applied[0].contains("未知结构化 key") && applied[0].contains("requested_fields"),
+            "deterministic log entry: {}",
+            applied[0]
+        );
+    }
+
+    #[test]
+    fn unknown_structured_key_repair_requires_the_line_to_carry_the_key() {
+        let source = unknown_structured_key_candidate();
+        // 行号错位（指向相邻的合法行）与行号越界均不得删行。
+        assert!(
+            apply_unknown_structured_key_autorepair(
+                &source,
+                &[unknown_key_diagnostic(50, "requested_fields")]
+            )
+            .is_none()
+        );
+        assert!(
+            apply_unknown_structured_key_autorepair(
+                &source,
+                &[unknown_key_diagnostic(
+                    source.lines().count() + 1,
+                    "requested_fields"
+                )]
+            )
+            .is_none()
+        );
+        // 命中行时按诊断行号精确删除。
+        let target = source
+            .lines()
+            .position(|line| line == "- requested_fields: 无")
+            .expect("fixture carries the unknown key line")
+            + 1;
+        let outcome = apply_unknown_structured_key_autorepair(
+            &source,
+            &[unknown_key_diagnostic(target, "requested_fields")],
+        )
+        .expect("exact line match must be repairable");
+        assert!(!outcome.source.contains("requested_fields"));
+    }
+
+    #[test]
+    fn converge_keeps_same_code_non_key_lines_fail_closed() {
+        // 未知 section 与非 key/value 行共用 `unknown_structured_key` code：
+        // 诊断 field 与源行内容不符，绝不误删。
+        let unknown_section = clean_candidate().replacen(
+            "### Blockers\n",
+            "### Unexpected Section\n### Blockers\n",
+            1,
+        );
+        let malformed_line = clean_candidate().replacen(
+            "- required_fields: commit_sha\n",
+            "requested_fields 无\n- required_fields: commit_sha\n",
+            1,
+        );
+        for source in [unknown_section, malformed_line] {
+            let diagnostics = converge_work_item_plan_source(&source, source_context())
+                .expect_err("non-key lines sharing the code must stay fail-closed");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "unknown_structured_key"),
+                "{diagnostics:?}"
+            );
+        }
     }
 
     #[test]

@@ -88,6 +88,11 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 15_600;
 // 逐字消息）与正反例 few-shot，净增 448B；实测 21,838/余 162B（最大 fixture，见
 // prompt_contract::work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_
 // real_findings 的 eprintln）。
+// 第 12 次评估（2026-09-23，复验 F-41）：Handoff Schema 条款补键白名单教学
+// （只允许 required_fields/provided_contract_refs/reviewer_check_refs 三个 key，自创
+// key 如 requested_fields 会被编译器拒），净增 132B。预算维持 22,000（已是整百级，
+// 余量仍为正，先例 2026-09-06/09-07 同口径）；实测 21,978/余 22B（最大 fixture
+// prompt_contract_weak_model，其余 fixture 余 30~40B）。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 22_000;
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
@@ -230,6 +235,7 @@ fn work_item_plan_markdown_reference_discipline(requirement_ids: Option<&[String
          正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。\n\
          canonical fail-closed：required_capability_missing 拒绝 plan。\n\
          Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。\n\
+         Handoff Schema 段只允许这三个 key；其他 key（如 requested_fields）会被编译器拒绝（unknown_structured_key）。\n\
          Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空；验证/集成类 Work Item 同样声明其产出的证据类契约。\n\
          provided_contract_refs 列出本 WI 交接给下游的契约引用：只列会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的引用；没有要交接的引用时，该字段的值写 []——[] 是 provided_contract_refs 的合法取值，不是省略字段，也不表示其他 section 可以为空。\n\
          正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → 合法。\n\

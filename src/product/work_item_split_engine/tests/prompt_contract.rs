@@ -878,6 +878,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。",
         "canonical fail-closed：required_capability_missing 拒绝 plan。",
         "Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。",
+        "Handoff Schema 段只允许这三个 key；其他 key（如 requested_fields）会被编译器拒绝（unknown_structured_key）。",
         "Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空；验证/集成类 Work Item 同样声明其产出的证据类契约。",
         "provided_contract_refs 列出本 WI 交接给下游的契约引用：只列会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的引用；没有要交接的引用时，该字段的值写 []——[] 是 provided_contract_refs 的合法取值，不是省略字段，也不表示其他 section 可以为空。",
         "正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → 合法。",

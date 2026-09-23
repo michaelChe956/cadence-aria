@@ -46,12 +46,24 @@ fn markdown_without_section(story_id: &str, design_id: &str, section_heading: &s
         .join("\n\n")
 }
 
-/// 在结构化 section 内追加表外 key，制造 unknown_structured_key 类 compile 失败
-/// （所有必需 section/字段仍在，不产生 missing_section）。
+/// 在结构化 section 内追加表外 key，制造可机械修复的 unknown_structured_key 形态
+/// （所有必需 section/字段仍在，不产生 missing_section）：收敛器删除该 key 行后
+/// 重编译通过，不进入教学重驱。
 fn markdown_with_unknown_structured_key(story_id: &str, design_id: &str) -> String {
     single_candidate_markdown(story_id, design_id).replacen(
         "### Handoff Schema\n- required_fields: commit_sha",
         "### Handoff Schema\n- bogus_key: x\n- required_fields: commit_sha",
+        1,
+    )
+}
+
+/// 追加未知 section 标题（空 body），制造不可机械修复的 unknown_structured_key 形态：
+/// 与表外 key 共用同一 diagnostic code，但诊断 field 与源行内容不符，收敛器必须保持
+/// 失败关闭（既不删行，也不产生 missing_section，因而不触发教学重驱）。
+fn markdown_with_unknown_section(story_id: &str, design_id: &str) -> String {
+    single_candidate_markdown(story_id, design_id).replacen(
+        "### Handoff Schema\n- required_fields: commit_sha",
+        "### Unexpected Section\n### Handoff Schema\n- required_fields: commit_sha",
         1,
     )
 }
@@ -230,11 +242,11 @@ async fn single_candidate_compile_missing_section_reredrive_failure_is_terminal_
 }
 
 #[tokio::test]
-async fn single_candidate_compile_unknown_key_failure_stays_terminal_without_reredrive() {
+async fn single_candidate_unrepairable_unknown_key_failure_stays_terminal_without_reredrive() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(SequenceOutputProvider {
-        outputs: vec![markdown_with_unknown_structured_key(
+        outputs: vec![markdown_with_unknown_section(
             &fixture.story_id,
             &fixture.design_id,
         )],
@@ -269,6 +281,77 @@ async fn single_candidate_compile_unknown_key_failure_stays_terminal_without_rer
         crate::product::models::SingleCandidatePhase::Failed,
     )
     .await;
+}
+
+/// 复验 F-41：`### Handoff Schema` 内自创的表外 key（`- bogus_key: x`）由收敛器
+/// 确定性删行修复，不再终态失败、也不消耗教学重驱——恰一次 provider 驱动后继续到
+/// HumanConfirm，且持久化的 source revision 是删行后的版本。
+#[tokio::test]
+async fn single_candidate_unknown_key_line_is_removed_deterministically_without_reredrive() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![markdown_with_unknown_structured_key(
+            &fixture.story_id,
+            &fixture.design_id,
+        )],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _first_input = next_provider_input(&mut input_rx).await;
+    no_more_provider_inputs(&mut input_rx).await;
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    assert_eq!(
+        single_candidate_generation_steps_for_session(&fixture.record.id),
+        vec!["full_markdown_author", "parse_source_revision", "selector"],
+        "unknown key line deletion must continue through the canonical compile path exactly once",
+    );
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload single-candidate session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+    );
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: durable.project_id.clone(),
+        issue_id: durable.issue_id.clone(),
+        plan_id: durable.entity_id.clone(),
+    };
+    let source_store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+        fixture.app_paths.clone(),
+    );
+    let stored = source_store
+        .get_source_revision(
+            &scope,
+            durable
+                .work_item_plan_source_revision_ref
+                .as_deref()
+                .expect("source revision ref"),
+        )
+        .expect("stored source");
+    assert!(
+        !stored.source.contains("bogus_key"),
+        "the unknown key line must be deleted from the persisted source revision: {}",
+        stored.source
+    );
+    assert_eq!(
+        stored.source,
+        single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        "deleting the unknown key line must restore the original legal source byte-for-byte"
+    );
 }
 
 #[tokio::test]
