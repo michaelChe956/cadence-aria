@@ -466,6 +466,12 @@ impl super::CodingAttemptStore {
                     | CodingExecutionUnitStatus::Skipped
             ) {
                 unit.completed_at = Some(now.clone());
+            } else {
+                // F-44：离开终态必须清除终态时间戳，否则留下「Running + completed_at」
+                // 的矛盾记录（终态重开把中止时归一的 Skipped unit 复位为 resume target
+                // 即走此分支）。既有调用方只把 unit 推向终态或 Blocked（active、本
+                // 就无 completed_at），行为零变化。
+                unit.completed_at = None;
             }
             unit.status = status;
             unit.summary = summary;

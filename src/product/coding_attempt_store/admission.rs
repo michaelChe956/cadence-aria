@@ -407,6 +407,10 @@ impl CodingAttemptStore {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        // F-44：group 作用域的 resume target 恢复必须先于 CAS 完成——`update_coding_unit_status`
+        // 自身要取 attempt 文件锁（flock 不可重入），且恢复先落盘使得「恢复成功但 CAS 失败」
+        // 的状态可被下一次重开自愈（attempt 仍在终态，unit 已就位）。
+        self.restore_group_resume_target(&attempt)?;
         let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
         with_exclusive_lock(&path, || {
             let current = self.get_attempt(project_id, issue_id, attempt_id)?;
@@ -419,11 +423,10 @@ impl CodingAttemptStore {
                     current.status
                 )));
             }
-            ensure_restart_has_resume_target(&current, &self.list_coding_units(
-                project_id,
-                issue_id,
-                attempt_id,
-            )?)?;
+            ensure_restart_has_resume_target(
+                &current,
+                &self.list_coding_units(project_id, issue_id, attempt_id)?,
+            )?;
             let ticket = self.admit_attempt_for_execution_locked(
                 project_id,
                 issue_id,
@@ -439,6 +442,72 @@ impl CodingAttemptStore {
             )
         })?;
         self.get_attempt(project_id, issue_id, attempt_id)
+    }
+
+    /// F-44（group 面，授权实施）：把 group attempt 的 resume target 复位出来。
+    ///
+    /// 中止/失败会把非终态 unit 归一为 `Skipped`（`group_terminal.rs`），于是重开后
+    /// `validate_group_attempt_pointers` 找不到合法 active/resume target——runner 会在
+    /// 既有阶段链上直接死于 `coding_group_attempt_incomplete`。本方法在 CAS 之前把
+    /// **首个 `Skipped`/`Failed` unit** 复位为 active（`Running`）：`update_coding_unit_status`
+    /// 同步对齐 `active_unit_id`/`current_work_item_id`，并在离开终态时清除
+    /// `completed_at`（见其 F-44 分支）。
+    ///
+    /// 复位范围刻意收窄到 `Skipped`/`Failed`：中止会把「运行中/等待/阻塞/计划缺陷/
+    /// 待修订」等 active unit 一并归一为 `Skipped`，故终态 attempt 上可复位的只可能是
+    /// 这两者；`Superseded`（被修订取代）与 `Completed` 一律不动，避免绕过计划修订/
+    /// 重验语义。已经在 `Running` 的执行上下文、unit run、handoff 归属全部沿用既有
+    /// 记录（`active_unit_run_projection` 对缺失 run 会按既有链路物化），本方法不新建
+    /// 也不改写 run。
+    ///
+    /// `work_item`（单 work item）attempt 无 unit 目标概念，直接返回 Ok。
+    fn restore_group_resume_target(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Ok(());
+        }
+        let units = self.list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let mut planned = units.clone();
+        if let Some(target) = planned.iter_mut().find(|unit| {
+            matches!(
+                unit.status,
+                CodingExecutionUnitStatus::Skipped | CodingExecutionUnitStatus::Failed
+            )
+        }) {
+            target.status = CodingExecutionUnitStatus::Running;
+            target.completed_at = None;
+        }
+        // 纯内存预演「重开后的形态」：status=Running + 复位后的 unit 集与指针。任一
+        // 结构门不满足即 fail-closed 拒绝，不做任何写盘（保持终态、可重试自愈）。
+        let mut planned_attempt = attempt.clone();
+        planned_attempt.status = CodingAttemptStatus::Running;
+        if let Some(target) = planned
+            .iter()
+            .find(|unit| unit.status == CodingExecutionUnitStatus::Running)
+        {
+            planned_attempt.active_unit_id = Some(target.id.clone());
+            planned_attempt.current_work_item_id = Some(target.logical_work_item_id.clone());
+        }
+        ensure_restart_has_resume_target(&planned_attempt, &planned)?;
+        let Some(target_id) = planned_attempt.active_unit_id.clone() else {
+            // 无需复位（全 Completed 的终审形态），保持既有记录不动。
+            return Ok(());
+        };
+        let summary = planned
+            .iter()
+            .find(|unit| unit.id == target_id)
+            .and_then(|unit| unit.summary.clone());
+        self.update_coding_unit_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &target_id,
+            CodingExecutionUnitStatus::Running,
+            summary,
+        )?;
+        Ok(())
     }
 
     fn admit_attempt_for_execution_locked(
@@ -718,8 +787,7 @@ fn ensure_restart_has_resume_target(
         .collect();
     let pointers_match = |unit: &CodingExecutionUnit| {
         attempt.active_unit_id.as_deref() == Some(unit.id.as_str())
-            && attempt.current_work_item_id.as_deref()
-                == Some(unit.logical_work_item_id.as_str())
+            && attempt.current_work_item_id.as_deref() == Some(unit.logical_work_item_id.as_str())
     };
     if let [only_active] = active_units.as_slice() {
         if pointers_match(only_active) {
