@@ -53,6 +53,25 @@ const TERMINAL_SESSION_STATUSES: Record<string, true> = {
   terminated: true,
 };
 
+/**
+ * F-42：终态会话的门收口裁决。确认链（WS confirm / 对话门 approve / HTTP confirm
+ * 200 乐观态）落 Confirmed/Terminated 后不再补发 human_gate_closed 帧，重连后内存
+ * closure 也为空——只看 closure，终态门卡会残留可点的确认/终止按钮，二次点击被
+ * 服务端矩阵拒（INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage completed；
+ * 实测 workspace_session_0003）。判据与 REQ-PCG-03/F-30 的 TERMINAL_SESSION_STATUSES
+ * 同源：终态即关门，裁决由已持久化的会话状态派生（terminated → terminate，其余
+ * 终态 → confirm）。
+ */
+export function terminalGateClosure(
+  state: Pick<WorkspaceWsState, "sessionStatus">,
+): GateClosureDecision | null {
+  const status = state.sessionStatus ?? "";
+  if (TERMINAL_SESSION_STATUSES[status] !== true) {
+    return null;
+  }
+  return status === "terminated" ? "terminate" : "confirm";
+}
+
 /** 门身份判据的输入面（投影、阻断判据、动作面共用）。 */
 export type GateKindState = Pick<
   WorkspaceWsState,
@@ -135,7 +154,9 @@ export function gateActionBlockReason(state: WorkspaceWsState): GateActionBlockR
       ? "terminal_stage"
       : null;
   }
-  if (state.humanGateClosure?.decision) {
+  // F-42：closure 缺失但会话已终态（重连/刷新、HTTP confirm 乐观态）同样是关门——
+  // 终态判据与 F-30 同源，给出「已关闭」而非放行可点按钮。
+  if (state.humanGateClosure?.decision || terminalGateClosure(state) !== null) {
     return "closed";
   }
   if (state.stage === "human_confirm") {
@@ -291,6 +312,8 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   const turn = state.humanGateTurn;
   const actionBlockReason = gateActionBlockReason(state);
   const terminateBlockReason = gateTerminateBlockReason(state);
+  // F-42：终态会话（confirmed/terminated）无关门帧也按关门投影——见 terminalGateClosure。
+  const terminalClosure = terminalGateClosure(state);
 
   if (turn) {
     return {
@@ -305,7 +328,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       findings: snapshot?.findings ?? [],
       resumable: snapshot?.resumable ?? false,
       triage,
-      closed: closure?.decision ?? null,
+      closed: closure?.decision ?? terminalClosure,
       closure_stage: closure?.stage ?? null,
       opened_at: turn.opened_at,
       turn,
@@ -358,7 +381,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       findings: snapshot.findings,
       resumable: snapshot.resumable,
       triage,
-      closed: closure?.decision ?? null,
+      closed: closure?.decision ?? terminalClosure,
       closure_stage: closure?.stage ?? null,
       opened_at: state.snapshotGateOpenedAt ?? "",
       turn: null,
@@ -368,9 +391,9 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   }
   // F-20：story/design legacy 流 author_confirm 即人工门（无 typed turn/durable
   // snapshot），以 stage 前缀投影——收件箱门条/对话流门卡/审计 gateId 同源派生。
-  // confirmed（HTTP confirm 200 乐观/权威）即关门，收件箱不再挂等待项。
+  // confirmed（HTTP confirm 200 乐观/权威）即关门（F-42 起判据统一走
+  // terminalGateClosure：confirmed/terminated 都关门），收件箱不再挂等待项。
   if (isStoryDesignAuthorConfirm(state)) {
-    const confirmed = state.sessionStatus === "confirmed";
     return {
       key: `stage:${state.stage}`,
       kind: "human_gate",
@@ -383,8 +406,8 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       findings: [],
       resumable: false,
       triage,
-      closed: confirmed ? "confirm" : (closure?.decision ?? null),
-      closure_stage: confirmed ? state.stage : (closure?.stage ?? null),
+      closed: closure?.decision ?? terminalClosure,
+      closure_stage: closure?.stage ?? (terminalClosure !== null ? state.stage : null),
       opened_at: "",
       turn: null,
       action_block_reason: actionBlockReason,
@@ -410,7 +433,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
     findings: [],
     resumable: false,
     triage,
-    closed: closure?.decision ?? null,
+    closed: closure?.decision ?? terminalClosure,
     closure_stage: closure?.stage ?? null,
     opened_at: "",
     turn: null,

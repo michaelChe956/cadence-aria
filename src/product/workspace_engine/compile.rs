@@ -442,7 +442,38 @@ impl WorkspaceEngine {
             .await;
     }
 
+    /// F-42：确认链（SC 人门 approve → Final Compile → Confirmed）离开 human_confirm
+    /// 时收口门节点。此前链路只关 compile 节点，门节点 human_confirm 留在 Active——
+    /// 持久层不自洽（实测 workspace_session_0003：node_004 human_confirm 仍 active，
+    /// 而 005 compile / 006 completed 已 completed），重连投影据残留 Active 节点恢复
+    /// 门态，对话流门卡仍渲染可点的确认/终止按钮，二次点击被服务端矩阵拒
+    /// （INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage completed）。
+    ///
+    /// 只收口「活动节点确为 Active 的 HumanConfirm」：review 自动路由（routing.rs
+    /// 三条 callsite）直入 compile 时活动节点是 review/author 节点，且已被各自调用
+    /// 方收口——不得被本收口覆写摘要与完成时间。时间/摘要走既有同源链路
+    /// （complete_active_node → update_timeline_node 取 now，与 compile 节点一致）。
+    async fn close_active_human_confirm_node(&mut self) {
+        let is_open_human_confirm_gate = self
+            .active_node_id
+            .as_ref()
+            .and_then(|node_id| {
+                self.timeline_nodes
+                    .iter()
+                    .find(|node| &node.node_id == node_id)
+            })
+            .is_some_and(|node| {
+                node.node_type == TimelineNodeType::HumanConfirm
+                    && node.status == TimelineNodeStatus::Active
+            });
+        if is_open_human_confirm_gate {
+            self.complete_active_node(Some("已确认通过".to_string()))
+                .await;
+        }
+    }
+
     async fn enter_work_item_plan_compile_with_auto_confirmation(&mut self, auto_confirm: bool) {
+        self.close_active_human_confirm_node().await;
         self.transition_stage(WorkspaceStage::Running).await;
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemPlanCompile,

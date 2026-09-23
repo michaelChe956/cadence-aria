@@ -935,6 +935,79 @@ describe("workspace ws store gate rebuild", () => {
     });
   });
 
+  // F-42（复验）：实测 workspace_session_0003 的持久形态是「session confirmed +
+  // stage completed + human_confirm 节点仍 active + 门快照在场」。确认走 WS
+  // confirm/对话门 approve（不重发 human_gate_closed 关门帧），重连/刷新后内存
+  // closure 为空——此前门卡按 durable 快照重建为可点的确认/终止按钮，二次点击
+  // 被服务端矩阵拒（INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage
+  // completed）。终态判据与 REQ-PCG-03/F-30 的 TERMINAL_SESSION_STATUSES 同源。
+  it("closes the rebuilt gate card when the session is already confirmed", () => {
+    useWorkspaceStore.getState().setSessionState({
+      ...buildSessionState("session_confirmed_gate"),
+      stage: "completed",
+      session_status: "confirmed",
+      human_gate_snapshot: humanGateSnapshotFixture(),
+      timeline_nodes: [staleHumanConfirmNode()],
+      active_node_id: "timeline_node_004",
+    });
+
+    useWorkspaceStore.getState().rebuildChatEntries();
+
+    const gatePrompts = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompts).toHaveLength(1);
+    expect(gatePrompts[0]).toMatchObject({ resolved: true, resolution: "confirm" });
+    expect(gatePrompts[0]?.metadata).toMatchObject({ gate_status: "confirm" });
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).filter((item) => item.kind === "gate"),
+    ).toEqual([]);
+  });
+
+  it("closes the rebuilt gate card as terminated once the session is terminated", () => {
+    useWorkspaceStore.getState().setSessionState({
+      ...buildSessionState("session_terminated_gate"),
+      stage: "completed",
+      session_status: "terminated",
+      human_gate_snapshot: humanGateSnapshotFixture(),
+      timeline_nodes: [staleHumanConfirmNode()],
+      active_node_id: "timeline_node_004",
+    });
+
+    useWorkspaceStore.getState().rebuildChatEntries();
+
+    const gatePrompts = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompts).toHaveLength(1);
+    expect(gatePrompts[0]).toMatchObject({ resolved: true, resolution: "terminate" });
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).filter((item) => item.kind === "gate"),
+    ).toEqual([]);
+  });
+
+  // 乐观收口态：HTTP confirm 200 已把 session_status 置 confirmed，stage 事件可能
+  // 尚未到达（仍是 human_confirm）——同样是合法收口信号，门卡必须同步收口，否则
+  // 用户会在「已确认」的会话上看到可点按钮。
+  it("closes the rebuilt gate card on the optimistic confirmed state", () => {
+    useWorkspaceStore.getState().setSessionState({
+      ...buildSessionState("session_optimistic_confirmed_gate"),
+      stage: "human_confirm",
+      session_status: "confirmed",
+      human_gate_snapshot: humanGateSnapshotFixture(),
+      timeline_nodes: [staleHumanConfirmNode()],
+      active_node_id: "timeline_node_004",
+    });
+
+    useWorkspaceStore.getState().rebuildChatEntries();
+
+    const gatePrompts = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompts).toHaveLength(1);
+    expect(gatePrompts[0]).toMatchObject({ resolved: true, resolution: "confirm" });
+  });
+
   it("keeps a typed turn across a same-session snapshot fingerprint change", () => {
     const store = useWorkspaceStore.getState();
     store.setSessionState({
@@ -1225,6 +1298,41 @@ function buildSessionState(sessionId: string) {
     checkpoints: [],
     artifact: null,
     providers: { author: "claude_code" as const, reviewer: null },
+  };
+}
+
+/** F-42：实测 workspace_session_0003 的 SC 门快照（预算 3、native_human_required）。 */
+function humanGateSnapshotFixture() {
+  return {
+    findings: [],
+    repeated_fingerprints: [],
+    attempts_used: 0,
+    manual_repairs_remaining: 3,
+    trigger: "native_human_required" as const,
+    resumable: true,
+  };
+}
+
+/** F-42：确认链遗留的 Active human_confirm 节点（service 侧持久层曾如此落盘）。 */
+function staleHumanConfirmNode() {
+  return {
+    node_id: "timeline_node_004",
+    node_type: "human_confirm" as const,
+    agent: null,
+    stage: "human_confirm",
+    round: null,
+    status: "active" as const,
+    title: "人工确认",
+    summary: "SingleCandidate 已通过 Evaluate，等待 Approval",
+    started_at: "2026-09-23T03:10:44.882807791+00:00",
+    completed_at: null,
+    duration_ms: null,
+    artifact_ref: null,
+    provider_config_snapshot: {
+      author: "pi" as const,
+      reviewer: "kimi_code" as const,
+      review_rounds: 1,
+    },
   };
 }
 

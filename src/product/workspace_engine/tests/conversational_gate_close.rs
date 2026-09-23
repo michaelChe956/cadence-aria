@@ -765,3 +765,53 @@ async fn conversational_gate_terminate_at_evaluate_gate_abandons_durably() {
     assert_eq!(durable.human_gate_reservation, None);
     assert_eq!(engine.session().stage, WorkspaceStage::Completed);
 }
+
+/// F-42（复验）：确认链（SC 人门 approve → Final Compile → Confirmed）此前只收口
+/// compile 节点，门节点 human_confirm 留在 Active——持久层不自洽。实测
+/// workspace_session_0003：node_004 human_confirm 仍 active，而 005 compile /
+/// 006 completed 均已 completed；重连投影按残留 Active 节点恢复门态，对话流门卡
+/// 仍渲染可点的确认/终止按钮，二次点击被服务端矩阵拒
+/// （INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage completed）。
+#[tokio::test]
+async fn conversational_gate_approve_completes_human_confirm_node_before_confirmed_terminal() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, _lifecycle, mut engine) = approval_fixture();
+    let (event_tx, _event_rx) = mpsc::channel(32);
+    engine.event_tx = event_tx;
+    // 门开：review 路由为 SC 计划落 HumanConfirm 门节点（routing.rs
+    // ContinueToCompleted + SingleCandidate 非 AutoIfValid → enter_human_confirm），
+    // approve 从该门出发。
+    engine
+        .enter_human_confirm(Some(
+            "SingleCandidate 已通过 Evaluate，等待 Approval".to_string(),
+        ))
+        .await;
+    let gate_node_id = engine
+        .active_node_id
+        .clone()
+        .expect("human confirm node is active before approval");
+    assert_eq!(
+        engine.active_node_type(),
+        Some(TimelineNodeType::HumanConfirm)
+    );
+
+    let result = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await;
+    assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
+
+    let gate_node = engine
+        .timeline_nodes
+        .iter()
+        .find(|node| node.node_id == gate_node_id)
+        .expect("human confirm node");
+    assert_eq!(
+        gate_node.status,
+        TimelineNodeStatus::Completed,
+        "approve chain must close the human_confirm node instead of leaving it active"
+    );
+    assert!(
+        gate_node.completed_at.is_some(),
+        "closed gate node carries the chain's completion timestamp"
+    );
+}

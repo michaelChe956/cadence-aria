@@ -192,6 +192,40 @@ describe("workspace cockpit gate projection", () => {
     });
   });
 
+  // F-42（复验）：确认链落 Confirmed/Terminated 后不再补发 human_gate_closed 帧
+  // （WS confirm / 对话门 approve / HTTP confirm 200 乐观态都不发）。终态必须独立
+  // 让门收口，否则重连/刷新后的门卡仍放行确认/终止，二次点击被服务端矩阵拒
+  // （INVALID_MESSAGE_FOR_STAGE: confirm not allowed in stage completed）。
+  it("closes the gate on a terminal session without a closure frame", () => {
+    useWorkspaceStore.getState().setSessionState({
+      ...snapshotGateState({ trigger: "native_human_required", manual_repairs_remaining: 3 }),
+      stage: "completed",
+      session_status: "confirmed",
+    });
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      closed: "confirm",
+      action_block_reason: "closed",
+      terminate_block_reason: "closed",
+    });
+    expect(
+      selectCockpitInbox(useWorkspaceStore.getState()).filter((item) => item.kind === "gate"),
+    ).toEqual([]);
+  });
+
+  it("closes the gate as terminated on a terminated session", () => {
+    useWorkspaceStore.getState().setSessionState({
+      ...snapshotGateState({ trigger: "native_human_required", manual_repairs_remaining: 3 }),
+      stage: "completed",
+      session_status: "terminated",
+    });
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      closed: "terminate",
+      terminate_block_reason: "closed",
+    });
+  });
+
   it("flags triage from the rebuilt review verdict metadata", () => {
     const store = useWorkspaceStore.getState();
     store.setStage("human_confirm");
