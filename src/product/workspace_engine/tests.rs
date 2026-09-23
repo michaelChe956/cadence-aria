@@ -17,6 +17,7 @@ include!("tests/part_07.rs");
 include!("tests/part_08.rs");
 include!("tests/part_09.rs");
 include!("tests/part_10.rs");
+include!("tests/part_10_negative_list.rs");
 include!("tests/part_11.rs");
 include!("tests/part_12.rs");
 include!("tests/part_13.rs");
