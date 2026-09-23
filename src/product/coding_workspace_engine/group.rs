@@ -270,13 +270,13 @@ impl CodingWorkspaceEngine {
                 GroupUnitSelectionOutcome::Complete => None,
             }
         } else {
-            let mut pending_units = units
+            let mut remainder_units = units
                 .iter()
-                .filter(|unit| unit.status == CodingExecutionUnitStatus::Pending)
+                .filter(|unit| unit.status.is_group_remainder_candidate())
                 .collect::<Vec<_>>();
-            pending_units.sort_by_key(|unit| unit.order_index);
+            remainder_units.sort_by_key(|unit| unit.order_index);
             let mut next = None;
-            for candidate in pending_units {
+            for candidate in remainder_units {
                 if self
                     .store
                     .start_pending_coding_unit_run(attempt, &candidate.id)?

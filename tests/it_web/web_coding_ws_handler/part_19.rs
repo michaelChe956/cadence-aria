@@ -217,3 +217,67 @@ async fn aborted_group_attempt_restart_coding_restores_resume_target() {
     ws.close(None).await.expect("close ws");
     server.abort();
 }
+
+/// F-44 fix1（P1）：group 继任选择器必须把中止归一出（`group_terminal`）的
+/// `Skipped` remainder 纳入候选。否则「中止在第 k<n 个 unit」的主流形态下
+/// unit_{k+1..n} 被永久放弃、final confirm 永不满足、而非终态又拒 `RestartCoding`
+/// ——死胡同循环。本用例直接驱动选择器：unit1 已完成 + unit2 为 Skipped 形态，
+/// 断言 unit2 被接续复活为 active（依赖语义与 Pending 候选同构）。
+#[tokio::test]
+async fn group_remainder_selector_resumes_skipped_successor_unit() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let _app = app_with_group_full_chain_attempt(root.path());
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
+    store
+        .update_coding_unit_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            "coding_unit_0001",
+            CodingExecutionUnitStatus::Completed,
+            None,
+        )
+        .expect("complete unit 1");
+    store
+        .update_coding_unit_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            "coding_unit_0002",
+            CodingExecutionUnitStatus::Skipped,
+            None,
+        )
+        .expect("skip unit 2 (abort normalization shape)");
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let engine = cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+        store.clone(),
+        cadence_aria::product::git_workspace_service::GitWorkspaceService::new(),
+        event_tx,
+    );
+    let advanced = engine
+        .advance_to_next_group_unit(&attempt)
+        .await
+        .expect("advance to next group unit");
+    assert_eq!(
+        advanced.active_unit_id.as_deref(),
+        Some("coding_unit_0002"),
+        "Skipped remainder 必须被继任选择器接续复活"
+    );
+    let units = store
+        .list_coding_units("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("units");
+    assert_eq!(
+        units
+            .iter()
+            .find(|unit| unit.id == "coding_unit_0002")
+            .expect("unit 2")
+            .status,
+        CodingExecutionUnitStatus::Running
+    );
+}

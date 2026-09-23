@@ -176,12 +176,12 @@ impl CodingWorkspaceEngine {
             });
         }
 
-        let pending = by_logical
+        let candidates = by_logical
             .values()
-            .filter(|unit| unit.status == CodingExecutionUnitStatus::Pending)
+            .filter(|unit| unit.status.is_group_remainder_candidate())
             .cloned()
             .collect::<Vec<_>>();
-        if pending.is_empty() {
+        if candidates.is_empty() {
             return Ok(GroupUnitSelectionOutcome::Complete);
         }
         let mut ready = Vec::new();
@@ -189,7 +189,7 @@ impl CodingWorkspaceEngine {
         let mut blocked_by_waiting = false;
         let mut waiting_audit = None;
         let mut waiting_message = None;
-        for unit in &pending {
+        for unit in &candidates {
             let mut unit_ready = true;
             for dependency_id in &graph_dependencies[&unit.logical_work_item_id] {
                 let dependency = &by_logical[dependency_id];
@@ -239,7 +239,10 @@ impl CodingWorkspaceEngine {
                 audit: ready_audit,
             });
         }
-        let mut pending_unit_ids = pending.into_iter().map(|unit| unit.id).collect::<Vec<_>>();
+        let mut pending_unit_ids = candidates
+            .into_iter()
+            .map(|unit| unit.id)
+            .collect::<Vec<_>>();
         pending_unit_ids.sort();
         Ok(GroupUnitSelectionOutcome::Waiting {
             pending_unit_ids,

@@ -407,6 +407,18 @@ impl CodingAttemptStore {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        // F-44 fix1（P3a）：只读终态预检置于一切写盘之前——非终态调用必须零写盘拒绝，
+        // 不得先落 restore 的 unit 复位再由 CAS 阶段失败（防御纵深：当前 wire 白名单
+        // 已保证不可达，但入口不得依赖调用方）。
+        if !matches!(
+            attempt.status,
+            CodingAttemptStatus::Aborted | CodingAttemptStatus::Failed
+        ) {
+            return Err(ProductStoreError::Io(format!(
+                "{ATTEMPT_NOT_TERMINAL_FOR_RESTART}: {:?}",
+                attempt.status
+            )));
+        }
         // F-44：group 作用域的 resume target 恢复必须先于 CAS 完成——`update_coding_unit_status`
         // 自身要取 attempt 文件锁（flock 不可重入），且恢复先落盘使得「恢复成功但 CAS 失败」
         // 的状态可被下一次重开自愈（attempt 仍在终态，unit 已就位）。

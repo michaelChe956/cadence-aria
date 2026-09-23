@@ -468,9 +468,13 @@ impl super::CodingAttemptStore {
                 unit.completed_at = Some(now.clone());
             } else {
                 // F-44：离开终态必须清除终态时间戳，否则留下「Running + completed_at」
-                // 的矛盾记录（终态重开把中止时归一的 Skipped unit 复位为 resume target
-                // 即走此分支）。既有调用方只把 unit 推向终态或 Blocked（active、本
-                // 就无 completed_at），行为零变化。
+                // 的矛盾记录。触发方有三类：①终态重开把中止时归一的 Skipped/Failed
+                // unit 复位为 resume target（本批新增）；②`resume_attempt_after_amendment`
+                // 的 `AmendmentResumeMode::Reexecute` 把 `Superseded` unit 置回 Running
+                // （既有行为，此前会遗留 stale `completed_at`，现在一并清除——良性修正）；
+                // ③ProviderFailure 把 `Blocked` unit 重新置为 Running（`Blocked` 本就
+                // active、无 `completed_at`，等价空操作）。即：进终态写戳、离开终态清戳，
+                // 与 attempt record 的 completed_at 语义对齐。
                 unit.completed_at = None;
             }
             unit.status = status;
