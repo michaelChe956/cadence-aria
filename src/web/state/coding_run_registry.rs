@@ -248,6 +248,27 @@ impl CodingRunRegistry {
         sent
     }
 
+    /// F-43：取该 attempt 当前 runner 的命令通道（交互应答经注册表投递的后备）。
+    ///
+    /// 页面刷新/新开 WS 连接时，新 socket 不持有 runner 句柄（`spawn_coding_runner`
+    /// 只把 `command_tx` 留给启动它的连接），而 runner 仍在等 choice/permission
+    /// 应答——作答必须回落到这里，否则被拒或被静默丢弃，「界面有卡、点了没反应」
+    /// 仍是死锁（与 `abort_attempt` 同源的 attempt 级路由）。
+    ///
+    /// 同一 attempt 并存多条 run（测试 fixture 可做到）时无法判定应答归属，返回
+    /// `None`，调用方保持既有行为。
+    pub fn command_sender(
+        &self,
+        attempt_key: &CodingAttemptRunKey,
+    ) -> Option<mpsc::Sender<CodingRunnerCommand>> {
+        let inner = self.inner.lock().expect("coding run registry lock");
+        let runs = inner.runs.get(attempt_key)?;
+        match runs.len() {
+            1 => runs.values().next().map(|entry| entry.command_tx.clone()),
+            _ => None,
+        }
+    }
+
     pub fn runner_count(&self, attempt_key: &CodingAttemptRunKey) -> usize {
         self.inner
             .lock()

@@ -20,7 +20,9 @@ use crate::web::workspace_ws_types::{
 };
 
 use super::protocol::CodingExecutionEventReplay;
-use super::{CodingWsOutMessage, coding_execution_context, stage_gate_required};
+use super::{
+    CodingWsOutMessage, coding_choice_request_frame, coding_execution_context, stage_gate_required,
+};
 
 pub(crate) fn build_coding_session_state(
     coding_store: &CodingAttemptStore,
@@ -144,6 +146,26 @@ pub(crate) fn build_coding_session_state(
         work_item_execution_plan: Box::new(work_item_execution_plan),
         linked_plan_repair: Box::new(linked_plan_repair),
     })
+}
+
+/// F-43：新连接 attach 时必须补发的未决 provider choice 帧。
+///
+/// 源是 durable choice-gate 目录（引擎 `emit_choice_request` 落盘的那份），只取
+/// `status=Open`：`resolve_choice_gate` 会把已答 gate 移入 `resolved/`，过期/撤销
+/// 亦不在 Open 集内，因此「已答/过期不重发」由数据本身保证，无需额外时间戳比对。
+///
+/// 为什么投影（快照 `pending_choices`）之外还要补帧：快照只重建卡片数据，不重建
+/// 客户端按帧维护的「待答卡」接线；页面刷新/新开连接若不补帧，coder 等服务端、
+/// 界面等入口——刷新即死锁（同构 F-24 workspace WS 的重订阅补发）。
+pub(crate) fn pending_choice_frames(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Vec<CodingWsOutMessage>, CodingWorkspaceEngineError> {
+    Ok(coding_store
+        .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        .iter()
+        .map(coding_choice_request_frame)
+        .collect())
 }
 
 /// F-13 刷新回放：实时 `coding_execution_event` 只广播不落 chat_entries，运行期

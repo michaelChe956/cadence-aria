@@ -6,25 +6,23 @@ use cadence_aria::cross_cutting::streaming_provider::{
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
+    CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
     CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
-use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
-    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
-    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
-    CodingTimelineNodeStatus,
-    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
-    WorkItemExecutionPlan,
+    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingChoiceOption,
+    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus,
+    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired,
+    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunEventType, CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest,
+    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict, WorkItemExecutionPlan,
 };
-use cadence_aria::product::lifecycle_store::{
-    CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
-    LifecycleStore,
-};
+use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+use cadence_aria::product::lifecycle_store::{
+    CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
@@ -40,12 +38,12 @@ use cadence_aria::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
     WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
-use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler, projection_hashes,
 };
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::coding_ws_handler::{
@@ -539,7 +537,9 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         completed_at: Some("2026-08-07T00:00:01Z".to_string()),
         artifact_refs: Vec::new(),
     };
-    store.save_timeline_node(&attempt, failed_node).expect("failed node");
+    store
+        .save_timeline_node(&attempt, failed_node)
+        .expect("failed node");
     let first = store
         .create_role_run(
             &attempt,
@@ -581,7 +581,12 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
             Some("provider_connection_interrupted".to_string()),
         )
         .expect("first failure");
-    let cycle_id = first.retry_metadata.as_ref().expect("cycle metadata").cycle_id.clone();
+    let cycle_id = first
+        .retry_metadata
+        .as_ref()
+        .expect("cycle metadata")
+        .cycle_id
+        .clone();
     let second = store
         .create_retry_role_run(
             &attempt,
@@ -708,7 +713,10 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         serde_json::json!([raw_refs[2]])
     );
     assert_eq!(rest["pending_gates"][0]["gate_id"], gate.gate_id);
-    assert_eq!(rest["pending_gates"][0]["reason_code"], "code_review_provider_interrupted");
+    assert_eq!(
+        rest["pending_gates"][0]["reason_code"],
+        "code_review_provider_interrupted"
+    );
     assert_eq!(rest["role_runs"][2]["retry_metadata"]["attempt_no"], 3);
     assert_eq!(rest["role_runs"][2]["status"], "failed");
     let retry_exhausted = |snapshot: &serde_json::Value| {
@@ -809,7 +817,8 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
-                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             }),
         )
         .expect("create stage gate");
@@ -827,8 +836,14 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
             assert_eq!(pending_gates.len(), 1);
             assert_eq!(pending_gates[0].gate_id, "coding_stage_gate_0001");
             assert_eq!(pending_gates[0].kind, CodingGateKind::StageGate);
-            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::CodeReview));
-            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::CodeReviewer));
+            assert_eq!(
+                pending_gates[0].stage,
+                Some(CodingExecutionStage::CodeReview)
+            );
+            assert_eq!(
+                pending_gates[0].role,
+                Some(CodingProviderRole::CodeReviewer)
+            );
             assert_eq!(
                 pending_gates[0].expires_at.as_deref(),
                 Some("2026-05-28T00:00:05Z")

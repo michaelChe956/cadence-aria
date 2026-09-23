@@ -1,14 +1,14 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
 use axum::response::IntoResponse;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::product::advance_store::AdvanceStore;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAdmissionKind, CodingAttemptStatus, CodingExecutionStage,
+    CodingAdmissionKind, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
@@ -23,9 +23,9 @@ use super::outbound::{
 use super::{
     CodingWsInMessage, CodingWsOutMessage, build_coding_session_state,
     coding_attempt_lookup_protocol_error, confirm_open_stage_gate, context_note_chat_entry,
-    provider_selection_targets_current_running_stage, should_resume_runner_after_gate_response,
-    spawn_coding_runner, spawn_coding_runner_reserved, update_provider_permission_mode,
-    update_provider_selection,
+    pending_choice_frames, provider_selection_targets_current_running_stage,
+    should_resume_runner_after_gate_response, spawn_coding_runner, spawn_coding_runner_reserved,
+    update_provider_permission_mode, update_provider_selection,
 };
 
 pub(crate) mod abort;
@@ -106,6 +106,15 @@ async fn handle_coding_socket(
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
     {
+        state.coding_sockets.remove(&attempt_key, socket_token);
+        return;
+    }
+    // F-43：attach 初帧补发未决 provider choice（同构 F-24 workspace WS 的
+    // 重订阅补发）。快照里的 `pending_choices` 只重建卡片数据，不重建客户端
+    // 按帧维护的「待答卡」接线；新连接（页面刷新/重开、第二观察者）漏补即
+    // 「coder 等服务端、界面等入口」的刷新死锁。已答/过期 gate 不在 Open 集内，
+    // 天然不重发。
+    if !send_pending_choice_frames(&mut socket_tx, &coding_store, &resumed_attempt).await {
         state.coding_sockets.remove(&attempt_key, socket_token);
         return;
     }
@@ -835,7 +844,9 @@ async fn handle_coding_socket(
                     reason,
                 } = inbound
                 {
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                    if let Some(command_tx) =
+                        interactive_runner_sender(&state, &attempt_key, runner_command_tx.as_ref())
+                    {
                         let _ = command_tx
                             .send(CodingRunnerCommand::PermissionResponse {
                                 id,
@@ -851,7 +862,9 @@ async fn handle_coding_socket(
                     free_text,
                 } = inbound
                 {
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                    if let Some(command_tx) =
+                        interactive_runner_sender(&state, &attempt_key, runner_command_tx.as_ref())
+                    {
                         let _ = command_tx
                             .send(CodingRunnerCommand::ChoiceResponse {
                                 id,
@@ -929,6 +942,47 @@ async fn handle_coding_socket(
         }
     }
     state.coding_sockets.remove(&attempt_key, socket_token);
+}
+
+/// F-43：把该 attempt 当前未决 choice 逐帧补发给本次连接。
+///
+/// 读取面与快照同源（`build_coding_session_state` 读同一 choice-gate 目录），
+/// 故此处读取失败只可能是「快照已失败/已给出空投影」的同一次故障，不再额外打断
+/// 连接；仅写失败（连接已断）返回 false 交调用方收尾。
+async fn send_pending_choice_frames<S>(
+    socket: &mut S,
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    let Ok(frames) = pending_choice_frames(coding_store, attempt) else {
+        return true;
+    };
+    for frame in &frames {
+        if !send_coding_json(socket, frame).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// F-43：交互应答（choice/permission）的投递通道。
+///
+/// 本 socket 持有 runner 句柄（StartCoding/RecoverCoding 由本连接启动）时逐字
+/// 沿用既有通道，行为零变化；无句柄的连接（页面刷新/新开 tab）回落到注册表里该
+/// attempt 的 runner 命令通道——runner 仍在等这份应答，否则作答被拒
+/// （`coding_choice_runner_not_active`）或被静默丢弃，「卡在了、点了没反应」仍是
+/// 死锁（与 `abort_attempt` 同源的 attempt 级路由）。
+fn interactive_runner_sender(
+    state: &WebAppState,
+    attempt_key: &CodingAttemptRunKey,
+    local: Option<&mpsc::Sender<CodingRunnerCommand>>,
+) -> Option<mpsc::Sender<CodingRunnerCommand>> {
+    local
+        .cloned()
+        .or_else(|| state.coding_runs.command_sender(attempt_key))
 }
 
 pub fn is_coding_ws_message_allowed(

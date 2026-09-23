@@ -232,7 +232,9 @@ impl CodingWorkspaceEngine {
         request: ChoiceRequestData,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let source = request.source.as_str().to_string();
-        self.store.create_choice_gate(
+        // F-43：落盘 gate 即「未决 choice 的 durable 源」；实时帧与新连接 attach
+        // 补发帧都从这条记录构造（`coding_choice_request_frame`），两路同形。
+        let gate = self.store.create_choice_gate(
             attempt,
             CreateChoiceGateInput {
                 attempt_id: attempt.id.clone(),
@@ -241,7 +243,7 @@ impl CodingWorkspaceEngine {
                 node_id: Some(node_id.to_string()),
                 role,
                 provider: provider.clone(),
-                source: source.clone(),
+                source,
                 prompt: request.prompt.clone(),
                 options: request
                     .options
@@ -273,25 +275,7 @@ impl CodingWorkspaceEngine {
                 event: ws_event_from_choice_request(node_id, provider, &request),
             })
             .await;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingChoiceRequest {
-                id: request.id,
-                prompt: request.prompt,
-                source,
-                options: request
-                    .options
-                    .into_iter()
-                    .map(|option| ChoiceOption {
-                        id: option.id,
-                        label: option.label,
-                        description: option.description,
-                    })
-                    .collect(),
-                allow_multiple: request.allow_multiple,
-                allow_free_text: request.allow_free_text,
-            })
-            .await;
+        let _ = self.event_tx.send(coding_choice_request_frame(&gate)).await;
         Ok(())
     }
 

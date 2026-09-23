@@ -157,6 +157,31 @@ pub type PlanRepairRequestDto = PlanRepairRequest;
 pub type WorkspaceSessionLinkDto = WorkspaceSessionLink;
 pub type PlanAmendmentManifestDto = PlanAmendmentManifest;
 
+/// F-43：`coding_choice_request` 帧的唯一构造点。
+///
+/// 实时发射（引擎 `emit_choice_request`）与 attach 补发（新连接初帧）共用同一
+/// 映射，保证两路帧逐字段同形——客户端按 choice id upsert 卡片，两路不同形会
+/// 直接表现为「卡在但答不了」。输入刻意取 durable `CodingChoiceGate`：引擎落盘
+/// 后即可用它发射，补发侧读同一记录，无需另抄一份映射。
+pub(crate) fn coding_choice_request_frame(gate: &CodingChoiceGate) -> CodingWsOutMessage {
+    CodingWsOutMessage::CodingChoiceRequest {
+        id: gate.choice_id.clone(),
+        prompt: gate.prompt.clone(),
+        source: gate.source.clone(),
+        options: gate
+            .options
+            .iter()
+            .map(|option| ChoiceOption {
+                id: option.id.clone(),
+                label: option.label.clone(),
+                description: option.description.clone(),
+            })
+            .collect(),
+        allow_multiple: gate.allow_multiple,
+        allow_free_text: gate.allow_free_text,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodingWsInMessage {

@@ -48,10 +48,9 @@ use crate::product::models::{
 use crate::product::workspace_engine::permission_mode_for_provider_type;
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
-use crate::web::coding_ws_handler::CodingWsOutMessage;
+use crate::web::coding_ws_handler::{CodingWsOutMessage, coding_choice_request_frame};
 use crate::web::workspace_ws_types::{
-    ChoiceOption, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
-    WsPermissionRiskLevel,
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsPermissionRiskLevel,
 };
 
 mod amendment;
