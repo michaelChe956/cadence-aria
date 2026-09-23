@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardCopy } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
-import { confirmWorkspaceSession, takeoverWorkspaceSession } from "../api/client";
-import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
-import { fetchWorkspaceArtifactVersion, fetchWorkspaceNodeDetail } from "../api/workspace-content";
+import { takeoverWorkspaceSession } from "../api/client";
+import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
   ChatEntryList,
   type ChatEntryListHandle,
@@ -15,10 +14,7 @@ import {
   type ChatInputBarHandle,
 } from "../components/chat-workspace/ChatInputBar";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
-import {
-  DisconnectBanner,
-  loadAcknowledgedAbortedNodes,
-} from "../components/workspace/DisconnectBanner";
+import { DisconnectBanner } from "../components/workspace/DisconnectBanner";
 import { BulkConfirmReport } from "../components/chat-workspace/cockpit/BulkConfirmReport";
 import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox";
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
@@ -29,14 +25,10 @@ import {
   useCockpitSettings,
   useCockpitShellInbox,
 } from "../components/cockpit/CockpitShell";
-import {
-  COCKPIT_INBOX_DRAWER_ID,
-  CockpitInboxDrawer,
-} from "../components/cockpit/CockpitInboxDrawer";
+import { CockpitInboxDrawer } from "../components/cockpit/CockpitInboxDrawer";
 import { CockpitPageHeader } from "../components/cockpit/CockpitPageHeader";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
-import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
@@ -92,6 +84,9 @@ import {
   type TerminalNodeContext,
   useNowTicker,
 } from "./ChatCockpitPageParts";
+import { useCockpitGateConfirm } from "./useCockpitGateConfirm";
+import { useCockpitHotkeyActions } from "./useCockpitHotkeyActions";
+import { useCockpitNodeDetailHydration } from "./useCockpitNodeDetailHydration";
 
 export function ChatCockpitPage({
   sessionId,
@@ -270,8 +265,6 @@ export function ChatCockpitPage({
     selectedState?.workspaceType === "design" ||
     selectedState?.workspaceType === "work_item_plan";
   const chatInputRef = useRef<ChatInputBarHandle | null>(null);
-  // v40 复验 #3：节点 detail 水合去重（见下方水合 effect）。
-  const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
   const activeNode = useMemo(
     () => state.timelineNodes.find((node) => node.node_id === state.activeNodeId) ?? null,
     [state.activeNodeId, state.timelineNodes],
@@ -316,146 +309,11 @@ export function ChatCockpitPage({
     setDrilldownView("conversation");
     setJumpEntryId(entryId);
   }, []);
-  // F-31 纠偏：评审改为用户可选——author 门上提供「确认定稿」（缺省，不带
-  // with_review）与「确认并评审」（with_review=true，服务端接管进入评审轮）两个
-  // 动作；待处理抽屉经 facade confirmReview 同款对齐（v37 复验 #2），
-  // 快捷键/批量 confirm 等其余入口维持定稿缺省。
-  /**
-   * F-20（wave2-f18-report §5）+ REQ-PCG-01（plan-compile-gate-visibility）：HTTP
-   * confirm 通路。story/design AuthorConfirm 与 work_item_plan 整组 Draft
-   * （batch_confirm）的 approve 设计通路同为 HTTP confirm 端点——WS confirm 帧在
-   * 这些阶段被矩阵拒收。响应落定稿时乐观置 confirmed 收敛决策面；F-31 起服务端可能
-   * 接管本轮进入 CrossReview（响应未定稿），此时不得乐观收敛，权威状态以服务端
-   * session_state 广播为准。失败就地亮协议错误面（拒收不得零反馈）。
-   */
-  const sendHttpConfirm = useCallback(
-    (options: { withReview: boolean; detail: string }): Promise<void> => {
-      const current = useWorkspaceStore.getState();
-      const targetSessionId = current.sessionId;
-      if (targetSessionId === null) {
-        return Promise.resolve();
-      }
-      const auditRecordId = useOperationAuditStore.getState().record({
-        sessionId: targetSessionId,
-        gateId: selectGateProjection(current)?.key ?? null,
-        operation: "confirm",
-        source: "chat",
-        outcome: "sent",
-        detail: options.detail,
-      });
-      return confirmWorkspaceSession(targetSessionId, "user", options.withReview)
-        .then((session) => {
-          useOperationAuditStore.getState().markCompleted(auditRecordId);
-          if (session.status === "confirmed") {
-            useWorkspaceStore.getState().setSessionStatus("confirmed");
-          }
-          // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
-          // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
-          notifyLifecycleInvalidated(session.issue_id);
-        })
-        .catch((error: unknown) => {
-          const code =
-            typeof error === "object" && error !== null && "code" in error
-              ? String(error.code)
-              : "http_confirm_failed";
-          const message =
-            error instanceof Error && error.message !== ""
-              ? error.message
-              : "确认请求被服务端拒绝";
-          useOperationAuditStore.getState().markRejected(auditRecordId, code);
-          // k3 P3（F-31 纠偏复审）：拒收不得零反馈（F-28 同类）——legacy 会话
-          // reviewer_enabled_at_start=None 时前端 reviewerEnabled 缺省 true，
-          // 「确认并评审」会撞后端如实 4xx（workspace_session_review_not_enabled）。
-          // 复用 F-28 hard-error-notice 面（ChatInputBar 在 author_confirm 渲染）
-          // 就地亮出错误码+语义，决策面保持敞开供改点「确认定稿」。
-          useWorkspaceStore.getState().setProtocolError({ code, message });
-        });
-    },
-    [],
-  );
-  // 门面 confirm/confirmReview 的统一入口：HTTP 通路门（story/design author 门与
-  // work_item_plan 整组 Draft 门）走 HTTP confirm；其余（SC typed/legacy
-  // human_confirm）走既有 WS confirm 帧。withReview 仅对 author 门有意义（F-31
-  // 抽屉「确认并评审」）——整组 Draft 确认不带评审参数。
-  const confirmHttpGate = useCallback(
-    (withReview = false): boolean => {
-      const current = useWorkspaceStore.getState();
-      const batch = gateKindOf(current) === "batch_confirm";
-      if ((!batch && !isStoryDesignAuthorConfirm(current)) || current.sessionId === null) {
-        return false;
-      }
-      void sendHttpConfirm({
-        withReview: !batch && withReview,
-        detail: batch ? "http-confirm-batch" : withReview ? "http-confirm-review" : "http-confirm",
-      });
-      return true;
-    },
-    [sendHttpConfirm],
-  );
-  /**
-   * REQ-PCG-01：门面 confirmBatch 的发送入口——只有当前门确实是未阻断的
-   * batch_confirm 时才出站（门面已做同类校验；这里再读一次 store 防陈旧闭包）。
-   */
-  const confirmBatchGate = useCallback((): Promise<void> => {
-    const current = useWorkspaceStore.getState();
-    if (
-      gateKindOf(current) !== "batch_confirm" ||
-      gateActionBlockReason(current) !== null ||
-      current.sessionId === null
-    ) {
-      return Promise.resolve();
-    }
-    return sendHttpConfirm({ withReview: false, detail: "http-confirm-batch" });
-  }, [sendHttpConfirm]);
-  // 门面 confirm 统一入口（门面 confirm/confirmReview、快捷键、批量确认共用本入口）：
-  // story/design author 门与 work_item_plan 整组 Draft 门走 HTTP，其余（SC typed/
-  // legacy human_confirm）走既有 WS confirm 帧；withReview 仅对 author 门有意义
-  // （F-31 抽屉「确认并评审」），WS 通路忽略该参。
-  const routeGateConfirm = useCallback((withReview = false): boolean => {
-    const current = useWorkspaceStore.getState();
-    const kind = gateKindOf(current);
-    if (kind === "batch_confirm") {
-      return confirmHttpGate(withReview);
-    }
-    // REQ-PCG-02：compile recovery 门没有 confirm 语义——WS confirm 帧在 SC
-    // HumanConfirm 会命中 Approval 臂并开启第二个 compile
-    // （compile.rs enter_policy_valid_work_item_plan_compile），故确认入口对整个
-    // recovery 门 fail-closed（recovery 自身动作走 recoverCompile 的独立通道）。
-    if (kind === "compile_recovery") {
-      return false;
-    }
-    if (isStoryDesignAuthorConfirm(current)) {
-      return confirmHttpGate(withReview);
-    }
-    return workspaceWs.sendConfirmGate();
-  }, [confirmHttpGate, workspaceWs.sendConfirmGate]);
-
-  // v38 复验 #2/#3（恢复 C3 前原意）：story/design AuthorConfirm 门的反馈修订
-  // 发送通道——「采纳 Review 意见」预填（或手输）后经「发送反馈」提交即
-  // request_revision（服务端进入 Revision 并由作者按反馈重写，完成后回门）。
-  // 审计与 confirm 同源（operation=feedback）；仅 story/design 会话接线，
-  // WorkItemPlan 门（plan-repair 语义）不经过本回调。
-  const sendRevisionFeedback = useCallback((feedback: string): boolean => {
-    const current = useWorkspaceStore.getState();
-    if (
-      !isStoryDesignAuthorConfirm(current) ||
-      gateActionBlockReason(current) !== null
-    ) {
-      return false;
-    }
-    const sent = workspaceWs.sendRequestRevision(feedback);
-    if (sent) {
-      useOperationAuditStore.getState().record({
-        sessionId: current.sessionId ?? sessionId,
-        gateId: selectGateProjection(current)?.key ?? null,
-        operation: "feedback",
-        source: "chat",
-        outcome: "sent",
-        detail: feedback,
-      });
-    }
-    return sent;
-  }, [sessionId, workspaceWs.sendRequestRevision]);
+  // 门确认/修订反馈发送族（sendHttpConfirm/confirmHttpGate/confirmBatchGate/
+  // routeGateConfirm/sendRevisionFeedback，含 F-20/F-29/F-31/REQ-PCG-01/02 与
+  // v38 反馈通路注释）拆至 useCockpitGateConfirm.ts，纯移动零行为变化。
+  const { confirmHttpGate, confirmBatchGate, routeGateConfirm, sendRevisionFeedback } =
+    useCockpitGateConfirm({ sessionId, workspaceWs });
   // v40 复验 #3：门面 adoptReview 接线——与主区/产物审核面板「采纳 Review
   // 意见」同款行为：最新 review 报告预填为修订反馈（ChatInputBar prefill，
   // 经「发送反馈」走 sendRevisionFeedback）并切回对话视图。纯客户端动作
@@ -648,95 +506,19 @@ export function ChatCockpitPage({
       )?.id.split(":")[0] ?? null,
     [observedInbox, sessionId],
   );
-  // F-31：待处理收件箱已移入默认收起的抽屉（收起为常驻 DOM + visibility 过渡
-  // 隐藏、子树不卸载），于是抽屉内的接管按钮/反馈框在收起态既不可见也不可聚焦。
-  // 热键要先展开抽屉；对 visibility:hidden 子树 focus() 会静默失效，所以收起时把
-  // 目标挂起，等抽屉真正提交/可见后再聚焦。
-  const [pendingInboxFocus, setPendingInboxFocus] = useState<HTMLElement | null>(
-    null,
-  );
-  useEffect(() => {
-    if (!inboxDrawerOpen || pendingInboxFocus === null) {
-      return;
-    }
-    pendingInboxFocus.focus();
-    setPendingInboxFocus(null);
-  }, [inboxDrawerOpen, pendingInboxFocus]);
-  const hotkeyHandlers = useMemo(
-    () => ({
-      confirm: () => {
-        const current = useWorkspaceStore.getState();
-        createCockpitActionFacade({
-          flowKind: current.flowKind,
-          commandId:
-            typeof current.humanGateTurn?.command_id === "string"
-              ? current.humanGateTurn.command_id
-              : null,
-          getState: useWorkspaceStore.getState,
-          sendConfirm: routeGateConfirm,
-          sendAbandonGate: workspaceWs.sendAbandonGate,
-          sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
-          sendAdvance: workspaceWs.sendAdvance,
-          adoptReview: adoptLatestReview,
-          sendBatchConfirm: confirmBatchGate,
-          sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
-        }).confirm();
-      },
-      feedback: () => {
-        const editor = document.querySelector<HTMLElement>(
-          '[data-testid="gate-feedback-editor"] [aria-label="门禁反馈"]',
-        );
-        if (editor === null) {
-          return;
-        }
-        if (editor.closest(`#${COCKPIT_INBOX_DRAWER_ID}`) === null) {
-          // 主区门卡的反馈框本就可见，照旧直接聚焦。
-          editor.focus();
-          return;
-        }
-        setPendingInboxFocus(editor);
-        setInboxDrawerOpen(true);
-      },
-      takeover: () => {
-        if (takeoverTargetSessionId === null) {
-          return;
-        }
-        // 接管按钮随收件箱入抽屉：先展开抽屉再 arm()，否则「确认接管」态落在
-        // 不可见子树里，用户还没看到确认态就要再按一次直接执行接管。
-        setInboxDrawerOpen(true);
-        takeoverButtonRef.current?.arm();
-      },
-      advance: () => {
-        const current = useWorkspaceStore.getState();
-        createCockpitActionFacade({
-          flowKind: current.flowKind,
-          commandId:
-            typeof current.humanGateTurn?.command_id === "string"
-              ? current.humanGateTurn.command_id
-              : null,
-          getState: useWorkspaceStore.getState,
-          sendConfirm: routeGateConfirm,
-          sendAbandonGate: workspaceWs.sendAbandonGate,
-          sendHumanGateFeedback: workspaceWs.sendHumanGateFeedback,
-          sendAdvance: workspaceWs.sendAdvance,
-          adoptReview: adoptLatestReview,
-          sendBatchConfirm: confirmBatchGate,
-          sendCompileRecovery: workspaceWs.sendWorkItemPlanCompileRecoveryAction,
-        }).advance();
-      },
-    }),
-    [
-      takeoverTargetSessionId,
-      workspaceWs.sendAdvance,
-      workspaceWs.sendAbandonGate,
-      routeGateConfirm,
-      adoptLatestReview,
-      workspaceWs.sendHumanGateFeedback,
-      confirmBatchGate,
-      workspaceWs.sendWorkItemPlanCompileRecoveryAction,
-    ],
-  );
-  useCockpitHotkeys(hotkeyHandlers);
+  // 收件箱抽屉聚焦挂起（F-31 visibility:hidden 子树 focus 失效补偿）与
+  // confirm/feedback/takeover/advance 四组快捷键接线拆至 useCockpitHotkeyActions.ts，
+  // 纯移动零行为变化。
+  useCockpitHotkeyActions({
+    inboxDrawerOpen,
+    setInboxDrawerOpen,
+    takeoverTargetSessionId,
+    takeoverButtonRef,
+    routeGateConfirm,
+    adoptLatestReview,
+    confirmBatchGate,
+    workspaceWs,
+  });
   const drilldownEntryId = useMemo(
     () =>
       drilldownNodeId && selectedState
@@ -762,55 +544,14 @@ export function ChatCockpitPage({
     chatListRef.current?.scrollToEntry(drilldownEntryId);
   }, [drilldownEntryId, drilldownView]);
 
-  // v40 复验 #3 后续（刷新水合）：review verdict 只随节点 detail 携带（
-  // /timeline-node-details/{id}），live 时 WS 事件入 store；刷新/重开后 cockpit
-  // 页此前无 detail 水合（仅 Legacy 页有同款 effect），review_verdict 条目无法
-  // 重建——主区/收件箱「采纳 Review 意见」与审核结论卡在刷新后整体消失。对齐
-  // Legacy 纪律：拉取全部已完成节点 detail（气泡 usage 行同源受益）。
-  useEffect(() => {
-    hydratedNodeIdsRef.current.clear();
-  }, [sessionId]);
-  useEffect(() => {
-    const completedNodeIds = state.timelineNodes
-      .filter((node) => node.status === "completed")
-      .map((node) => node.node_id);
-    const nodeIds = Array.from(
-      new Set(
-        [state.activeNodeId, ...completedNodeIds].filter(
-          (nodeId): nodeId is string => typeof nodeId === "string" && nodeId.length > 0,
-        ),
-      ),
-    );
-    for (const nodeId of nodeIds) {
-      if (hydratedNodeIdsRef.current.has(nodeId)) {
-        continue;
-      }
-      hydratedNodeIdsRef.current.add(nodeId);
-      Promise.resolve(fetchWorkspaceNodeDetail(sessionId, nodeId))
-        .then((detail) => {
-          if (!detail) {
-            hydratedNodeIdsRef.current.delete(nodeId);
-            return;
-          }
-          const current = useWorkspaceStore.getState();
-          if (current.sessionId !== sessionId) {
-            return;
-          }
-          current.setNodeDetail(detail);
-        })
-        .catch(() => {
-          hydratedNodeIdsRef.current.delete(nodeId);
-        });
-    }
-  }, [sessionId, state.activeNodeId, state.timelineNodes]);
-  useEffect(() => {
-    const acknowledgedNodes = loadAcknowledgedAbortedNodes();
-    if (acknowledgedNodes.length > 0) {
-      useWorkspaceStore
-        .getState()
-        .setAcknowledgedAbortedNodes(acknowledgedNodes);
-    }
-  }, []);
+  // v40 复验 #3 后续（刷新水合）：节点 detail 水合去重 + completed/active 节点
+  // detail 拉取 + 断连中止节点确认态恢复拆至 useCockpitNodeDetailHydration.ts，
+  // 纯移动零行为变化。
+  useCockpitNodeDetailHydration({
+    sessionId,
+    timelineNodes: state.timelineNodes,
+    activeNodeId: state.activeNodeId,
+  });
 
   useEffect(() => {
     if (!jumpEntryId) {
