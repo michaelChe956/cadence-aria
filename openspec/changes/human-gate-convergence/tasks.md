@@ -9,16 +9,16 @@
 
 - [x] 2.1 批次确认门专属 title/why 文案+删除误导相位提示行；两道门可区分用例（REQ-HGC-02 场景 1）。
 - [x] 2.2 「距通过」清单投影（must_fix/预检/Verification/approve 可用性）；红绿（REQ-HGC-02 场景 2）。
-- [ ] 2.3 跨轮 delta（新增/已解决/复现/unknown，消费 C1 结构化 identity）；红绿（REQ-HGC-02 场景 3）。
+- [x] 2.3 跨轮 delta（新增/已解决/复现/unknown，消费 C1 结构化 identity）；红绿（REQ-HGC-02 场景 3）。— commit `1b0ccb79`
 
 ## 3. 分类透明与解析韧性（前后端）
 
-- [ ] 3.1 finding-list 双轨显示（effective class 主显+severity 标注）；红绿（REQ-HGC-03 场景 1）。
-- [ ] 3.2 invalid_json 同 invocation 一次重试（零计数增量）+失败保 diagnostic 进人工；红绿（REQ-HGC-03 场景 2）。
+- [x] 3.1 finding-list 双轨显示（effective class 主显+severity 标注）；红绿（REQ-HGC-03 场景 1）。— commit `a3560fc3`
+- [x] 3.2 invalid_json 同 invocation 一次重试（零计数增量）+失败保 diagnostic 进人工；红绿（REQ-HGC-03 场景 2）。— commit `86392ffc`
 
 ## 4. 修订教学逃生
 
-- [ ] 4.1 REVISION_TEACHING 结构变更逃生条款（受影响闭包联动+影响面声明；禁删字段/绕过 validator 不变）；prompt contract 断言。
+- [x] 4.1 REVISION_TEACHING 结构变更逃生条款（受影响闭包联动+影响面声明；禁删字段/绕过 validator 不变）；prompt contract 断言。— commit `86392ffc`
 
 ## 5. 门禁收口
 
