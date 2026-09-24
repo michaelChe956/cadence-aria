@@ -172,7 +172,8 @@ impl WorkspaceEngine {
             ReviewProviderRunResult::Aborted => return,
             ReviewProviderRunResult::Failed(_) => {
                 let verdict = fallback_review_verdict(first_completion, first_error, true);
-                self.complete_review(first_completion.clone(), verdict).await;
+                self.complete_review(first_completion.clone(), verdict)
+                    .await;
                 return;
             }
         };

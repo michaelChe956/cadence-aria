@@ -22,4 +22,4 @@
 
 ## 5. 门禁收口
 
-- [ ] 5.1 lib/it_core/it_web/vitest 全量+strict；F-52 预算假数现场回放（三轮真递减）；既有 CG-02 重置断言按新语义改写登记。
+- [x] 5.1 lib/it_core/it_web/vitest 全量+strict；F-52 预算假数现场回放（三轮真递减）；既有 CG-02 重置断言按新语义改写登记。

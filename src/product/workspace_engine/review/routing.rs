@@ -391,9 +391,7 @@ impl WorkspaceEngine {
         if verdict
             .structured_output_diagnostic
             .as_ref()
-            .is_some_and(|diagnostic| {
-                diagnostic.repair_attempted && !diagnostic.repair_succeeded
-            })
+            .is_some_and(|diagnostic| diagnostic.repair_attempted && !diagnostic.repair_succeeded)
         {
             decision.history_delta = RunHistoryDelta::default();
         }
