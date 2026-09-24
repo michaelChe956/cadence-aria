@@ -967,3 +967,5 @@ pub(super) async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expecte
 // 大文件守卫(>1200 行)按 include! 拆分:reredrive_and_reopen=SC compile 教学重驱/
 // failed-completed 重开/迟到 run 让位/终态恢复错误用例与其专属 provider 夹具。
 include!("single_candidate_provider_run/reredrive_and_reopen.rs");
+// Task 2（REQ-WSC-09）：教学重驱白名单扩到 parse 语法类集合的端到端用例。
+include!("single_candidate_provider_run/ears_reredrive.rs");

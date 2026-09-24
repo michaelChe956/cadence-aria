@@ -21,6 +21,23 @@ pub(crate) enum SingleCandidateProviderRunError {
 const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
     "；SingleCandidate session 已终态失败，请显式重新开始生成";
 
+/// 可教学重驱的 compile parse 语法类诊断码。
+///
+/// 集合来源（Task 0 实查）：`work_item_plan_compiler::parse` 的语法类诊断码全集
+/// 即 `grammar::DIAGNOSTIC_CODES`（missing_section / unknown_structured_key /
+/// invalid_work_item_id / invalid_ears），减去 `contract_autorepair` 已确定性收敛
+/// 的码——`unknown_structured_key` 在收敛器内按诊断行号确定性删行（F-41）、
+/// 重复 trusted command 亦有确定性收敛轮，先确定性后模型，故不进教学重驱。
+/// 其余三个码在编译 loop 现状下无任何自动返修面（F-48：invalid_ears 因此直达
+/// 终态），教学重驱是其唯一一次自愈机会。
+const TEACHABLE_PARSE_FAILURE_CODES: [&str; 3] =
+    ["missing_section", "invalid_ears", "invalid_work_item_id"];
+
+/// 该诊断码是否属于可教学重驱的 parse 语法类。
+fn is_teachable_parse_failure(code: &str) -> bool {
+    TEACHABLE_PARSE_FAILURE_CODES.contains(&code)
+}
+
 /// 丢弃 provider 在 markdown 文档标题前输出的前言，保留既有 parser 的失败语义。
 ///
 /// 定位首个固定文档标题的字节偏移并从该处修剪；找不到标题时原样返回，避免把
@@ -48,6 +65,7 @@ fn prepare_author_delivery_for_compile(
     crate::product::work_item_plan_compiler::NormalizedPlanSource {
         source: trim_provider_preamble(&normalized.source).to_string(),
         normalized_heading_lines: normalized.normalized_heading_lines,
+        normalized_ears_lines: normalized.normalized_ears_lines,
     }
 }
 
@@ -65,10 +83,17 @@ fn author_normalization_event_id(kind: &str, node_id: &str, raw_output: &str) ->
     use sha2::{Digest, Sha256};
     let digest = hex::encode(Sha256::digest(raw_output.as_bytes()));
     format!(
-        normalized_ears_lines: normalized.normalized_ears_lines,
         "single_candidate_{kind}_normalized_{node_id}_{}",
         &digest[..16]
     )
+}
+
+fn author_heading_normalized_event_id(node_id: &str, raw_output: &str) -> String {
+    author_normalization_event_id("heading", node_id, raw_output)
+}
+
+fn author_ears_normalized_event_id(node_id: &str, raw_output: &str) -> String {
+    author_normalization_event_id("ears_spacing", node_id, raw_output)
 }
 
 /// 归一化审计事件发射（首轮与 F2-B 教学重驱轮共用）：归一化行数>0 时才发。
@@ -88,14 +113,6 @@ async fn emit_author_heading_normalized_event(
         diagnostic = crate::product::work_item_plan_compiler::PLAN_HEADING_NORMALIZATION_DIAGNOSTIC,
         normalized_heading_lines = delivery.normalized_heading_lines,
         "single-candidate author markdown 结构标题已确定性归一化后再编译"
-fn author_heading_normalized_event_id(node_id: &str, raw_output: &str) -> String {
-    author_normalization_event_id("heading", node_id, raw_output)
-}
-
-fn author_ears_normalized_event_id(node_id: &str, raw_output: &str) -> String {
-    author_normalization_event_id("ears_spacing", node_id, raw_output)
-}
-
     );
     engine
         .emit_execution_event(
@@ -119,23 +136,6 @@ fn author_ears_normalized_event_id(node_id: &str, raw_output: &str) -> String {
         .await;
 }
 
-/// compile 失败原因原文（与 single_candidate.rs `format_compiler_diagnostics`
-/// 同源的 code:line:message 形态，供教学重驱 prompt 回灌与终态错误拼装）。
-fn format_compile_failure_reasons(
-    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
-) -> Vec<String> {
-    diagnostics
-        .iter()
-        .map(|diagnostic| {
-            format!(
-                "{}:{}:{}",
-                diagnostic.code, diagnostic.line, diagnostic.message
-            )
-        })
-        .collect()
-}
-
-/// 3.6 弱模型基线加固：IR 预校验——在持久化前跑与
 /// EARS 关键字空白归一化审计事件发射（首轮与 F2-B 教学重驱轮共用）：
 /// 救回行数>0 时才发，保证「本次交付被确定性救回」可判定（REQ-WSC-02）。
 async fn emit_author_ears_normalized_event(
@@ -179,6 +179,23 @@ async fn emit_author_ears_normalized_event(
         .await;
 }
 
+/// compile 失败原因原文（与 single_candidate.rs `format_compiler_diagnostics`
+/// 同源的 code:line:message 形态，供教学重驱 prompt 回灌与终态错误拼装）。
+fn format_compile_failure_reasons(
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+) -> Vec<String> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}:{}",
+                diagnostic.code, diagnostic.line, diagnostic.message
+            )
+        })
+        .collect()
+}
+
+/// 3.6 弱模型基线加固：IR 预校验——在持久化前跑与
 /// `complete_single_candidate_work_item_plan_author` 内部同源的
 /// `validate_plan_candidate_ir`（上下文组装同源：plan 的 source spec ids 与
 /// repository profile），使 IR 校验失败（unknown_requirement_ref /
@@ -294,6 +311,14 @@ async fn drive_single_candidate_reredrive(
         author_provider,
     )
     .await;
+    emit_author_ears_normalized_event(
+        engine,
+        node_id,
+        &reredrive_output,
+        &reredrive_delivery,
+        author_provider,
+    )
+    .await;
     Ok(reredrive_delivery.source)
 }
 
@@ -311,14 +336,6 @@ pub(crate) async fn run_single_candidate_author(
                 crate::product::models::SingleCandidatePhase::Failed,
             );
             return Err(SingleCandidateProviderRunError::Message(message));
-    emit_author_ears_normalized_event(
-        engine,
-        node_id,
-        &reredrive_output,
-        &reredrive_delivery,
-        author_provider,
-    )
-    .await;
         }
     };
     if !should_start {
@@ -526,14 +543,17 @@ pub(crate) async fn run_single_candidate_author(
         &author_provider,
     )
     .await;
+    emit_author_ears_normalized_event(engine, &node_id, &full_output, &delivery, &author_provider)
+        .await;
     let full_output = delivery.source;
-    // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。missing_section 类
-    // compile 失败不再直接终态：先在 handler 预检查中复用与引擎落盘路径同源的
-    // contract_autorepair 收敛器；收敛成功的机械 lowering 缺口（当前为重复
-    // trusted command）直接带着修复后的 source 进入 complete，后者再次经过同一
-    // 收敛入口并落盘。收敛失败则保留原诊断，missing_section 继续教学重驱。
-    // 重驱产物重新进入本循环，因此同样不能绕过收敛器；重驱槽与收敛轮彼此独立，
-    // 每 candidate 仍至多一次额外 provider 驱动。
+    // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。parse 语法类
+    // （见 TEACHABLE_PARSE_FAILURE_CODES：missing_section / invalid_ears /
+    // invalid_work_item_id）compile 失败不再直接终态：先在 handler 预检查中复用
+    // 与引擎落盘路径同源的 contract_autorepair 收敛器；收敛成功的机械 lowering
+    // 缺口（当前为重复 trusted command）直接带着修复后的 source 进入 complete，
+    // 后者再次经过同一收敛入口并落盘。收敛失败则保留原诊断，parse 语法类继续
+    // 教学重驱。重驱产物重新进入本循环，因此同样不能绕过收敛器；重驱槽与收敛轮
+    // 彼此独立，每 candidate 仍至多一次额外 provider 驱动。
     // 3.6 弱模型基线加固：IR 校验失败（validate plan candidate IR failed 类，
     // 如 unknown_requirement_ref / acceptance_criterion_without_reviewer_check）
     // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
@@ -543,8 +563,6 @@ pub(crate) async fn run_single_candidate_author(
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
     };
-    emit_author_ears_normalized_event(engine, &node_id, &full_output, &delivery, &author_provider)
-        .await;
     let mut compile_source = full_output;
     let mut first_round_failure: Option<String> = None;
     let candidate_item_count = loop {
@@ -559,7 +577,7 @@ pub(crate) async fn run_single_candidate_author(
                     if first_round_failure.is_none()
                         && diagnostics
                             .iter()
-                            .any(|diagnostic| diagnostic.code == "missing_section")
+                            .any(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
                     {
                         first_round_failure = Some(reasons.join("; "));
                         let reredrive_prompt =
@@ -574,7 +592,7 @@ pub(crate) async fn run_single_candidate_author(
                                     status: ProviderExecutionEventStatus::Started,
                                     title: "SC compile 失败教学重驱提示词".to_string(),
                                     detail: Some(
-                                        "missing_section 类 compile 失败的教学重驱（含 compile 错误原文），恰一次"
+                                        "parse 语法类（missing_section / invalid_ears / invalid_work_item_id）compile 失败的教学重驱（含 compile 错误原文），恰一次"
                                             .to_string(),
                                     ),
                                     command: None,
@@ -791,6 +809,30 @@ mod tests {
         assert_eq!(
             trim_provider_preamble(source),
             "# Work Item Plan\n## Work Item WI-001: x\n```\n"
+        );
+    }
+
+    /// Task 0 实查结论的代码化:可教学集合 = parse 语法类全集
+    /// (`grammar::DIAGNOSTIC_CODES`) 减去 `contract_autorepair` 已确定性收敛的码
+    /// (`unknown_structured_key` 按诊断行号确定性删行,F-41)。语法层新增诊断码时
+    /// 本断言会失败,迫使同步审视白名单。
+    #[test]
+    fn teachable_parse_failure_codes_are_parse_grammar_minus_converged_codes() {
+        use super::{TEACHABLE_PARSE_FAILURE_CODES, is_teachable_parse_failure};
+        use crate::product::work_item_plan_compiler::grammar;
+
+        let converged_codes = ["unknown_structured_key"];
+        for code in grammar::DIAGNOSTIC_CODES {
+            let expected = !converged_codes.contains(&code);
+            assert_eq!(
+                is_teachable_parse_failure(code),
+                expected,
+                "白名单与实查推导不符: {code}"
+            );
+        }
+        assert_eq!(
+            TEACHABLE_PARSE_FAILURE_CODES.len(),
+            grammar::DIAGNOSTIC_CODES.len() - converged_codes.len()
         );
     }
 
