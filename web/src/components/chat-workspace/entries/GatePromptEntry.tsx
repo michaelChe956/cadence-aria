@@ -181,9 +181,16 @@ export function GatePromptEntry({
   const handleAdoptFindings = () => {
     // F-49 B6：把 advisory findings 按模板填入下方反馈输入框——只填入不提交
     // （用户可继续编辑）；已有输入时以空格追加，防覆盖用户已写内容（反馈框是
-    // 单行 input，value 净化会剥换行，不用换行连接）。
+    // 单行 input，value 净化会剥换行，不用换行连接）。F49-B6-fix1：同一
+    // findings 的采纳文本是确定性的，草稿已含该段即跳过（防重复点击重复拼接）。
     const adopted = gateAdoptFindingsFeedback(adoptableFindings);
-    setFeedback((current) => (current.trim() ? `${current} ${adopted}` : adopted));
+    setFeedback((current) =>
+      current.includes(adopted)
+        ? current
+        : current.trim()
+          ? `${current} ${adopted}`
+          : adopted,
+    );
   };
 
   return (

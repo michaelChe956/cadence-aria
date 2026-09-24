@@ -618,6 +618,29 @@ describe("GatePromptEntry actionability", () => {
       );
     });
 
+    // F49-B6-fix1：重复点击不重复追加——同一 findings 的采纳文本是确定性的，
+    // 草稿已含该段即跳过（防手抖双击把同一串建议拼两遍）。
+    it("adopts the advisory findings only once on repeated clicks (F49-B6-fix1)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: mixedFindings.slice(1),
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      const button = screen.getByTestId("gate-adopt-findings");
+      fireEvent.click(button);
+      fireEvent.click(button);
+
+      expect(screen.getByLabelText("门禁反馈")).toHaveValue(
+        "按复评建议修订以下内容：复杂度说明：补充复杂度说明；统一命名；其余内容保持不变。",
+      );
+    });
+
     it("hides the adopt button when every finding is must-fix (B6)", () => {
       render(
         <GatePromptEntry
