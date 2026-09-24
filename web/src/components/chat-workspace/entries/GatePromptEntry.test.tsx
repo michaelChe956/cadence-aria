@@ -14,6 +14,7 @@ import { GatePromptEntry } from "./GatePromptEntry";
 function gateEntry(
   actionBlockReason: "terminal_stage" | "phase_mismatch" | null,
   gateIdentity?: string,
+  metadata: Record<string, unknown> = {},
 ): ChatEntry {
   return {
     id: "gate:entry",
@@ -26,6 +27,7 @@ function gateEntry(
       command_id: "cmd_1",
       action_block_reason: actionBlockReason,
       ...(gateIdentity ? { gate_identity: gateIdentity } : {}),
+      ...metadata,
     },
   };
 }
@@ -253,5 +255,225 @@ describe("GatePromptEntry actionability", () => {
     expect(gateActions.terminate).toHaveBeenCalledOnce();
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
+  });
+
+  // F-49 A2：门卡身份与当前门投影不一致 ⇒ 该卡不是当前门（已被新一轮取代）。
+  // 修前 mismatch 直接回退 persistedReason（= 开门时刻的 action_block_reason，
+  // 实测 null）→ 旧卡照常渲染可点按钮，而页面只挂一个动作门面 ⇒ 点旧卡实际作用于
+  // 当前门（诊断 §0-B：点旧卡 confirm 使 sendConfirm 被调 1 次）。
+  it("locks a gate card whose identity is superseded by the live gate (F-49 A2)", () => {
+    const gateActions = actions();
+    const store = useWorkspaceStore.getState();
+    store.setStage("human_confirm");
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, "snapshot:2026-09-24T05:29:45.514Z:native_human_required|2|true||")}
+        actions={gateActions}
+      />,
+    );
+
+    expect(screen.getByText("该人工确认门已关闭")).toBeVisible();
+    expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+    expect(gateActions.confirm).not.toHaveBeenCalled();
+    expect(gateActions.feedback).not.toHaveBeenCalled();
+  });
+
+  it("locks a gate card once the gate projection disappears (F-49 A2)", () => {
+    const gateActions = actions();
+
+    render(<GatePromptEntry entry={gateEntry(null, "turn_1")} actions={gateActions} />);
+
+    expect(screen.getByText("该人工确认门已关闭")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+  });
+
+  // F-49 A4：提交成功后清空输入并给出成功反馈；此前文本永久留在输入框（用户以
+  // 为未提交）。门面拒发（返回 false）时不得清空、不得谎报成功。
+  it("clears the feedback input and reports the accepted submission (F-49 A4)", async () => {
+    const gateActions = actions();
+    const user = userEvent.setup();
+    const entry = gateEntry(null);
+    useWorkspaceStore.getState().appendChatEntry(entry);
+
+    render(<GatePromptEntry entry={entry} actions={gateActions} />);
+
+    await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
+    await user.click(screen.getByRole("button", { name: "提交反馈" }));
+
+    expect(gateActions.feedback).toHaveBeenCalledWith("请补齐边界");
+    expect(screen.getByLabelText("门禁反馈")).toHaveValue("");
+    expect(screen.getByTestId("gate-feedback-submitted")).toHaveTextContent("反馈已提交");
+    expect(useWorkspaceStore.getState().chatEntries[0]?.metadata).toMatchObject({
+      submitted_feedback: "请补齐边界",
+    });
+  });
+
+  it("keeps the typed feedback when the gate facade refuses the submission (F-49 A4)", async () => {
+    const gateActions = { ...actions(), feedback: vi.fn(() => false) };
+    const user = userEvent.setup();
+
+    render(<GatePromptEntry entry={gateEntry(null)} actions={gateActions} />);
+
+    await user.type(screen.getByLabelText("门禁反馈"), "请补齐边界");
+    await user.click(screen.getByRole("button", { name: "提交反馈" }));
+
+    expect(screen.getByLabelText("门禁反馈")).toHaveValue("请补齐边界");
+    expect(screen.queryByTestId("gate-feedback-submitted")).toBeNull();
+  });
+
+  // F-49 B5：旧轮收口后留档卡——只读，带轮次与已提交反馈摘要；动作面整块消失。
+  it("renders the archived round note on a superseded card and hides its actions (F-49 B5)", () => {
+    const gateActions = actions();
+    const archived: ChatEntry = {
+      ...gateEntry(null, "snapshot:2026-09-24T05:29:45.514Z|2|true||"),
+      resolved: true,
+      resolution: "superseded",
+      metadata: {
+        gate_identity: "snapshot:2026-09-24T05:29:45.514Z|2|true||",
+        gate_archive_round: 1,
+        gate_archive_note: "第 1 轮已提交反馈：在修复一下 review 审核出来的问题吧",
+      },
+    };
+
+    render(<GatePromptEntry entry={archived} actions={gateActions} />);
+
+    expect(
+      screen.getByText("第 1 轮已提交反馈：在修复一下 review 审核出来的问题吧"),
+    ).toBeVisible();
+    expect(screen.getByText("已留档")).toBeVisible();
+    expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认产物" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "终止" })).toBeNull();
+  });
+
+  // F-49 B1/B2/B3：门卡此前只有 4 字 trigger chip，无「为什么需要你」、无「建议确认
+  // 还是反馈」，findings 只在「requiresTriage 且 0 条」时被用来提示一句——实测 metadata
+  // 带 3 条 advisory 却完全不渲染。文案为 controller 草案（常量在 gate-prompt-copy.ts）。
+  describe("F-49 gate guidance", () => {
+    const advisoryFindings = [
+      { severity: "suggestion", message: "建议补充复杂度说明" },
+      { severity: "suggestion", message: "建议统一命名" },
+    ];
+
+    it("states why the human is needed for an advisory-only round (B1)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: advisoryFindings,
+            verdict: "pass",
+            review_gate: "user_confirm_allowed",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByTestId("gate-why")).toHaveTextContent(
+        "复评仍有 2 条 findings（均为建议级，不阻断发布）；引擎不做自动取舍，由你确认采纳或反馈修改。",
+      );
+    });
+
+    it("switches the reason line to the must-fix copy when a required finding is present (B1)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: [...advisoryFindings, { severity: "must_fix", message: "缺少验证命令" }],
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByTestId("gate-why")).toHaveTextContent("存在 1 条必须处理项，建议先提交反馈");
+    });
+
+    it("renders no reason line when the round carries no findings (B1 fail-closed)", () => {
+      render(<GatePromptEntry entry={gateEntry(null)} actions={actions()} />);
+
+      expect(screen.queryByTestId("gate-why")).toBeNull();
+    });
+
+    it("advises a direct confirm on advisory-only rounds (B2)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: advisoryFindings,
+            verdict: "pass",
+            review_gate: "user_confirm_allowed",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.getByTestId("gate-advice")).toHaveTextContent(
+        "机械校验 0 error——可直接确认；如需采纳建议请提交反馈",
+      );
+    });
+
+    it("omits the advice line when the gate cannot be confirmed (B2 fail-closed)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry("phase_mismatch", "stage:human_confirm", {
+            findings: advisoryFindings,
+            verdict: "pass",
+            review_gate: "user_confirm_allowed",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.queryByTestId("gate-advice")).toBeNull();
+    });
+
+    it("renders the round findings inside a collapsed list with the verdict-card styles (B3)", () => {
+      render(
+        <GatePromptEntry
+          entry={gateEntry(null, undefined, {
+            findings: [
+              { severity: "must_fix", message: "缺少验证命令", required_action: "补充验证命令" },
+              { severity: "suggestion", message: "建议补充复杂度说明" },
+            ],
+            verdict: "revise",
+            review_gate: "requires_revision",
+          })}
+          actions={actions()}
+        />,
+      );
+
+      const list = screen.getByTestId("gate-findings");
+      expect(list.tagName).toBe("DETAILS");
+      expect(list).not.toHaveAttribute("open");
+      expect(screen.getByText("需要解决")).toBeInTheDocument();
+      expect(screen.getByText("高 · 必须修复")).toBeInTheDocument();
+      expect(screen.getByText("可选建议")).toBeInTheDocument();
+      const rows = screen.getAllByTestId("review-finding");
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(list.contains(row)).toBe(true);
+      }
+    });
+
+    it("hides the folded findings list once the card is resolved (B3)", () => {
+      render(
+        <GatePromptEntry
+          entry={{
+            ...gateEntry(null, undefined, {
+              findings: advisoryFindings,
+              verdict: "pass",
+              review_gate: "user_confirm_allowed",
+            }),
+            resolved: true,
+            resolution: "confirm",
+          }}
+          actions={actions()}
+        />,
+      );
+
+      expect(screen.queryByTestId("gate-findings")).toBeNull();
+    });
   });
 });

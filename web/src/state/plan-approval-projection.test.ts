@@ -240,6 +240,31 @@ describe("selectFindingTargetEntryId", () => {
     ];
     expect(selectFindingTargetEntryId(entries, "contract_metrics")).toBeNull();
   });
+
+  // F-49 A9：门卡与结论卡带同一批 findings，而门卡总在数组末尾——倒序命中即返回
+  // 落点偏门卡，而门卡此前不显示 findings（跳过去看不到缺口）。结论卡展开渲染
+  // findings 分组，落点优先结论卡；门卡（F-49 B3 后带折叠列表）作兜底。
+  it("prefers the review verdict card over a later gate card carrying the same finding", () => {
+    const entries: ChatEntry[] = [
+      {
+        id: "review_1",
+        type: "review_verdict",
+        role: "reviewer",
+        content: "需要修改",
+        timestamp: "2026-09-14T08:00:01Z",
+        metadata: { findings: [{ contract_field: "contract_metrics" }] },
+      },
+      gateEntry("gate_new", ["contract_metrics"]),
+    ];
+
+    expect(selectFindingTargetEntryId(entries, "contract_metrics")).toBe("review_1");
+  });
+
+  it("falls back to the gate card when no review verdict carries the finding", () => {
+    const entries: ChatEntry[] = [gateEntry("gate_new", ["contract_metrics"])];
+
+    expect(selectFindingTargetEntryId(entries, "contract_metrics")).toBe("gate_new");
+  });
 });
 
 describe("planRepairStageLabel", () => {

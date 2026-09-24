@@ -114,29 +114,38 @@ export function checklistFindingsFromPlanRepair(
   ];
 }
 
+/**
+ * F-49 A9：缺口跳转落点。门卡与结论卡携同一批 findings，而门卡总在数组末尾——纯
+ * 倒序命中会落到门卡；门卡此前不渲染 findings（跳过去看不到缺口）。故先按
+ * `review_verdict`（F-39 结论卡，展开渲染 severity 分组）倒序找，未命中再退
+ * `gate_prompt`（F-49 B3 后门卡亦带折叠 findings 列表，落点仍可用）。
+ */
 export function selectFindingTargetEntryId(
   chatEntries: readonly ChatEntry[],
   contractId: string,
 ): string | null {
-  for (let index = chatEntries.length - 1; index >= 0; index -= 1) {
-    const entry = chatEntries[index];
-    if (entry.type !== "gate_prompt" && entry.type !== "review_verdict") {
-      continue;
+  const findIn = (type: ChatEntry["type"]): string | null => {
+    for (let index = chatEntries.length - 1; index >= 0; index -= 1) {
+      const entry = chatEntries[index];
+      if (entry.type !== type) {
+        continue;
+      }
+      const findings = (entry.metadata as Record<string, unknown> | undefined)
+        ?.findings;
+      if (!Array.isArray(findings)) {
+        continue;
+      }
+      const matched = findings.some(
+        (finding) =>
+          isRecord(finding) && finding["contract_field"] === contractId,
+      );
+      if (matched) {
+        return entry.id;
+      }
     }
-    const findings = (entry.metadata as Record<string, unknown> | undefined)
-      ?.findings;
-    if (!Array.isArray(findings)) {
-      continue;
-    }
-    const matched = findings.some(
-      (finding) =>
-        isRecord(finding) && finding["contract_field"] === contractId,
-    );
-    if (matched) {
-      return entry.id;
-    }
-  }
-  return null;
+    return null;
+  };
+  return findIn("review_verdict") ?? findIn("gate_prompt");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

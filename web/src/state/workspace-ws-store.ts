@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ChatEntry, ChoiceResponsePayload } from "./chat-entries";
 import { snapshotGateFingerprint } from "./cockpit-action-routing";
+import { gateArchiveClosedCopy, gateArchiveFeedbackCopy } from "./gate-prompt-copy";
 import {
   emptyWorkspaceContentCache,
   getWorkspaceContentCacheValue,
@@ -160,6 +161,56 @@ function snapshotIdentityFor(
   openedAt: string,
 ): string {
   return `snapshot:${openedAt}:${fingerprint}`;
+}
+
+function isArchivedGateEntry(entry: ChatEntry): boolean {
+  return entry.type === "gate_prompt" && typeof entry.metadata?.gate_archive_round === "number";
+}
+
+/**
+ * F-49 A1/B5：把被新一轮门取代的旧门卡留档——只读（resolved=true）+ 轮次 + 该轮
+ * 提交的反馈摘要（未记录到反馈时不谎报「已提交反馈」）。resolution 用
+ * `superseded`，与 confirm/terminate（关门决定）区分。
+ */
+function archiveGateEntry(entry: ChatEntry, round: number): ChatEntry {
+  const submitted = entry.metadata?.submitted_feedback;
+  const note =
+    typeof submitted === "string" && submitted.trim()
+      ? gateArchiveFeedbackCopy(round, submitted)
+      : gateArchiveClosedCopy(round);
+  return {
+    ...entry,
+    resolved: true,
+    resolution: "superseded",
+    metadata: {
+      ...entry.metadata,
+      gate_archive_round: round,
+      gate_archive_note: note,
+    },
+  };
+}
+
+/**
+ * F-49 A1：门内轮次切换即收口旧门卡。命中条件是「未决 + 门身份与来卡不同」——
+ * 同身份重放（引擎同 turn_id 重放）只更新同一条目，不触发留档。
+ */
+function supersedeStaleGateEntries(entries: ChatEntry[], incoming: ChatEntry): ChatEntry[] {
+  const incomingIdentity = incoming.metadata?.gate_identity;
+  if (typeof incomingIdentity !== "string") {
+    // 无门身份的卡（legacy 形态）不构成「新一轮」凭据：fail-closed 不动既有卡。
+    return [...entries];
+  }
+  let round = entries.filter(isArchivedGateEntry).length;
+  return entries.map((entry) => {
+    if (entry.type !== "gate_prompt" || entry.resolved === true) {
+      return entry;
+    }
+    if (entry.metadata?.gate_identity === incomingIdentity) {
+      return entry;
+    }
+    round += 1;
+    return archiveGateEntry(entry, round);
+  });
 }
 
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
@@ -485,6 +536,38 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
+  // F-49 A1：门卡专用 upsert——门内轮次切换（门载体从 durable snapshot 切到 typed
+  // turn）即收口旧门卡，保证任一时刻只有一张可动作门卡。判据是门身份
+  // （gate_identity）而非条目 id：同一次门内存活期内 id 会变
+  // （snapshot:<opened_at>:<fp> → <turn_id>），只有身份能识别「同一张门」。
+  upsertGatePromptEntry: (entry) =>
+    set((prev) => {
+      const next = supersedeStaleGateEntries(prev.chatEntries, entry);
+      const index = next.findIndex((existing) => existing.id === entry.id);
+      if (index === -1) {
+        next.push(entry);
+      } else {
+        next[index] = entry;
+      }
+      return { chatEntries: next };
+    }),
+
+  // F-49 A4/B5：记下本卡提交的反馈文本——提交成功后清空输入（A4）与旧轮留档摘要
+  // （B5）都以此为准，不在渲染层重读输入框。
+  recordGateFeedbackSubmission: (entryId, feedback) =>
+    set((prev) => {
+      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
+      if (index === -1) {
+        return {};
+      }
+      const next = [...prev.chatEntries];
+      next[index] = {
+        ...next[index],
+        metadata: { ...next[index].metadata, submitted_feedback: feedback },
+      };
+      return { chatEntries: next };
+    }),
+
   applyHumanGateTurnOpen: (turnId, commandId, remainingBudget) =>
     set((prev) => {
       if (prev.humanGateTurn?.turn_id === turnId) {
@@ -503,6 +586,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
           failure_message: null,
           opened_at: new Date().toISOString(),
           inlineError: null,
+          // F-49 A8：记下本 turn 开出时的门快照身份——门以新快照重建（修订成功后
+          // Evaluate 重置预算）后，预算以新快照为准，见 selectGateProjection。
+          opened_snapshot_identity: prev.snapshotGateIdentity,
         },
         humanGateClosure: null,
       };
@@ -622,17 +708,20 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         : {};
     }),
 
+  // F-49 A3：关门决定必须收口「全部」未决门卡。此前只 resolve 倒序命中的第一张：
+  // 门内轮次切换后残留的旧卡永不被收口（human_gate_closed 只在 approve/abandon
+  // 时发出），关门后对话流仍留可点旧卡。
   resolveGateEntry: (resolution) =>
     set((prev) => {
-      const entries = [...prev.chatEntries];
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        const entry = entries[index];
-        if (entry.type === "gate_prompt" && entry.resolved !== true) {
-          entries[index] = { ...entry, resolved: true, resolution };
-          return { chatEntries: entries };
+      let changed = false;
+      const entries = prev.chatEntries.map((entry) => {
+        if (entry.type !== "gate_prompt" || entry.resolved === true) {
+          return entry;
         }
-      }
-      return { chatEntries: prev.chatEntries };
+        changed = true;
+        return { ...entry, resolved: true, resolution };
+      });
+      return changed ? { chatEntries: entries } : {};
     }),
 
   updateStreamingEntry: (entryId, content) =>

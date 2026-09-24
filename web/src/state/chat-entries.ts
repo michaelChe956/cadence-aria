@@ -23,7 +23,7 @@ export type ChatEntryRole =
   | "code_reviewer"
   | "internal_reviewer"
   | "system";
-export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
+export type ChatEntryResolution = "confirm" | "request-change" | "terminate" | "superseded";
 export type { GateActionFacade };
 
 export interface GateEntryMetadata extends Record<string, unknown> {

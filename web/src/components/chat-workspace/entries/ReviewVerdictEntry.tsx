@@ -1,6 +1,11 @@
 import { MessageSquareText } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import {
+  isRequiredFindingSeverity,
+  ReviewFindingGroups,
+  reviewFindingsFromEntry,
+} from "../finding-list";
 import { structuredOutputDiagnosticFromUnknown } from "../../../state/structured-output-diagnostic";
 import { StructuredOutputDiagnosticView } from "./StructuredOutputDiagnostic";
 
@@ -10,19 +15,23 @@ export function ReviewVerdictEntry({
   entry: ChatEntry;
 }) {
   const verdict = verdictFromEntry(entry);
-  const findings = findingsFromEntry(entry);
+  const findings = reviewFindingsFromEntry(entry);
   const diagnostic = structuredOutputDiagnosticFromUnknown(
     (entry.metadata as Record<string, unknown> | undefined)?.structured_output_diagnostic,
   );
-  const requiredFindings = findings.filter(isRequiredFinding);
-  const optionalFindings = findings.filter((finding) => !isRequiredFinding(finding));
+  const optionalFindings = findings.filter(
+    (finding) => !isRequiredFindingSeverity(finding.severity),
+  );
   const round = verdict.round;
 
   return (
     <ChatEntryContainer
       role="reviewer"
       title={verdictLabel(verdict?.verdict ?? null, verdict?.reviewGate ?? null)}
-      className="border-amber-200 bg-amber-50"
+      // F-49 A7：面板色必须显式覆盖 role 面板——同级同权重时 Tailwind 输出顺序决定
+      // 胜负，dist 实测 green（role=reviewer）压掉作者的 amber（.border-amber-200
+      // 早于 .border-green-200、.bg-amber-50 早于 .bg-green-50），结论卡与门卡系撞色。
+      panelClassName="border-amber-200 bg-amber-50"
       testId="review-verdict-entry"
     >
       <div className="space-y-3">
@@ -67,24 +76,12 @@ export function ReviewVerdictEntry({
             comments={verdict?.comments ?? null}
           />
         ) : null}
-        {requiredFindings.length > 0 ? (
-          <FindingGroup title="需要解决" tone="required" findings={requiredFindings} />
-        ) : null}
-        {optionalFindings.length > 0 ? (
-          <FindingGroup title="可选建议" tone="optional" findings={optionalFindings} />
-        ) : null}
+        {findings.length > 0 ? <ReviewFindingGroups findings={findings} /> : null}
         {/* 退役留档（T5/REQ-RET-02）：review_decision 路径按钮随消息族删除。 */}
       </div>
     </ChatEntryContainer>
   );
 }
-
-type ReviewFinding = {
-  severity: string;
-  message: string;
-  evidence?: string;
-  required_action?: string;
-};
 
 function verdictFromEntry(entry: ChatEntry) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
@@ -95,94 +92,6 @@ function verdictFromEntry(entry: ChatEntry) {
   // F-39：轮次（live 路径 review_complete 与 rebuild 兜底卡均携带；缺失即不画标签）。
   const round = typeof metadata?.round === "number" ? metadata.round : null;
   return { verdict, comments, summary, reviewGate, round };
-}
-
-function findingsFromEntry(entry: ChatEntry): ReviewFinding[] {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  const findings = Array.isArray(metadata?.findings) ? metadata.findings : [];
-  return findings.filter(isReviewFinding);
-}
-
-function isReviewFinding(value: unknown): value is ReviewFinding {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const finding = value as Record<string, unknown>;
-  return typeof finding.severity === "string" && typeof finding.message === "string";
-}
-
-function isRequiredFinding(finding: ReviewFinding) {
-  return (
-    finding.severity === "blocking" || finding.severity === "must_fix"
-  );
-}
-
-function FindingGroup({
-  title,
-  tone,
-  findings,
-}: {
-  title: string;
-  tone: "required" | "optional";
-  findings: ReviewFinding[];
-}) {
-  const titleClass = tone === "required" ? "text-amber-900" : "text-[var(--aria-ink-muted)]";
-  const borderClass = tone === "required" ? "border-amber-200" : "border-[var(--aria-line)]";
-  return (
-    <section className={`space-y-2 rounded-md border ${borderClass} bg-white px-3 py-2`}>
-      <div className={`text-xs font-semibold ${titleClass}`}>{title}</div>
-      <div className="space-y-2">
-        {findings.map((finding, index) => (
-          <div
-            key={`${finding.severity}-${index}`}
-            className="space-y-1"
-            data-testid="review-finding"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <SeverityBadge severity={finding.severity} />
-              <div className="text-sm font-medium text-[var(--aria-ink)]">{finding.message}</div>
-            </div>
-            {finding.evidence ? (
-              <div className="text-xs text-[var(--aria-ink-muted)]">{finding.evidence}</div>
-            ) : null}
-            {finding.required_action ? (
-              <div className="text-xs font-medium text-[var(--aria-ink)]">
-                {finding.required_action}
-              </div>
-            ) : null}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function SeverityBadge({ severity }: { severity: string }) {
-  const label = severityLabel(severity);
-  const toneClass = isRequiredSeverity(severity)
-    ? "border-amber-200 bg-amber-50 text-amber-800"
-    : "border-slate-200 bg-slate-50 text-slate-600";
-  return (
-    <span
-      className={`inline-flex shrink-0 rounded border px-1.5 py-0.5 text-[11px] font-semibold ${toneClass}`}
-      title={severity}
-    >
-      {label}
-    </span>
-  );
-}
-
-function severityLabel(severity: string) {
-  switch (severity) {
-    case "blocking":
-      return "高 · 阻塞";
-    case "must_fix":
-      return "高 · 必须修复";
-    case "suggestion":
-      return "低 · 建议";
-    default:
-      return severity;
-  }
 }
 
 function verdictLabel(verdict: string | null, reviewGate: string | null) {
@@ -205,10 +114,4 @@ function verdictLabel(verdict: string | null, reviewGate: string | null) {
     return "需要人工确认";
   }
   return "审核结论";
-}
-
-function isRequiredSeverity(severity: string) {
-  return (
-    severity === "blocking" || severity === "must_fix"
-  );
 }

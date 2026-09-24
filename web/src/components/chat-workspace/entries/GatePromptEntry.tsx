@@ -8,6 +8,14 @@ import {
   type GateProjection,
   GATE_TRIGGER_LABELS,
 } from "../../../state/workspace-cockpit-projection";
+import {
+  GATE_ADVISORY_CONFIRM_HINT,
+  GATE_ARCHIVE_BADGE_LABEL,
+  GATE_FEEDBACK_SUBMITTED_NOTE,
+  gateFindingsToggleLabel,
+  gateWhyAdvisoryCopy,
+  gateWhyRequiredCopy,
+} from "../../../state/gate-prompt-copy";
 import type { WorkspaceWsState } from "../../../state/workspace-ws-store-types";
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
@@ -16,6 +24,7 @@ import type { CockpitActionFacade } from "../../../state/cockpit-action-routing"
 import { ConfirmTwiceButton } from "../cockpit/ConfirmTwiceButton";
 import { GateFeedbackEditor } from "../cockpit/GateFeedbackEditor";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import { isRequiredFindingSeverity, ReviewFindingGroups, reviewFindingsFromEntry } from "../finding-list";
 
 /** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
 const GATE_ARTIFACT_LABELS: Record<string, string> = {
@@ -35,10 +44,17 @@ export function GatePromptEntry({
   onOpenArtifact?: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const recordGateFeedbackSubmission = useWorkspaceStore(
+    (state) => state.recordGateFeedbackSubmission,
+  );
   const summary = summaryFromEntry(entry);
   const verdict = verdictFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
-  const findings = findingsFromEntry(entry);
+  const findings = reviewFindingsFromEntry(entry);
+  const requiredFindings = findings.filter((finding) =>
+    isRequiredFindingSeverity(finding.severity),
+  );
   const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
   const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
@@ -106,6 +122,29 @@ export function GatePromptEntry({
       : needsHuman
         ? "需要人工确认"
         : "人工确认";
+  // F-49 B1/B2：门卡首行必须回答「为什么需要你」与「建议确认还是反馈」——此前只有
+  // 4 字 trigger chip，确认者拿不到决策依据（文案见 gate-prompt-copy.ts）。无 findings
+  // 即不猜（fail-closed）；建议行只在确认按钮确实露出（无阻断、非 context blocker 门）
+  // 时才给「可直接确认」的建议。
+  const whyCopy =
+    findings.length === 0
+      ? null
+      : requiredFindings.length > 0
+        ? gateWhyRequiredCopy(requiredFindings.length)
+        : gateWhyAdvisoryCopy(findings.length);
+  const archiveNote = archiveNoteFromEntry(entry);
+  const confirmOffered = !isResolved && actionBlockReason === null && !isContextBlockerGate;
+  const advisoryOnly = findings.length > 0 && requiredFindings.length === 0;
+  const handleFeedbackSubmit = (value: string) => {
+    if (!actions || !actions.feedback(value)) {
+      return;
+    }
+    // F-49 A4：提交成功即清空输入（此前文本留在框内，用户以为未提交），并把该轮
+    // 反馈记到卡上——旧轮留档（B5）用它作摘要。
+    recordGateFeedbackSubmission(entry.id, value);
+    setFeedback("");
+    setFeedbackSubmitted(true);
+  };
 
   return (
     <ChatEntryContainer
@@ -115,6 +154,32 @@ export function GatePromptEntry({
       testId="gate-prompt-entry"
     >
       <div className="space-y-3">
+        {whyCopy && !isResolved ? (
+          <div
+            data-testid="gate-why"
+            className="text-sm font-medium text-[var(--aria-ink)]"
+          >
+            {whyCopy}
+          </div>
+        ) : null}
+        {advisoryOnly && confirmOffered ? (
+          <div data-testid="gate-advice" className="text-xs text-emerald-700">
+            {GATE_ADVISORY_CONFIRM_HINT}
+          </div>
+        ) : null}
+        {findings.length > 0 && !isResolved ? (
+          <details
+            data-testid="gate-findings"
+            className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-2"
+          >
+            <summary className="cursor-pointer text-xs font-semibold text-[var(--aria-ink)]">
+              {gateFindingsToggleLabel(findings.length)}
+            </summary>
+            <div className="mt-2 space-y-2">
+              <ReviewFindingGroups findings={findings} />
+            </div>
+          </details>
+        ) : null}
         <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
         {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
         {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
@@ -186,7 +251,14 @@ export function GatePromptEntry({
           </div>
         ) : null}
         {isResolved ? (
-          <ResolutionBadge resolution={entry.resolution} />
+          <div className="space-y-2">
+            {archiveNote ? (
+              <div data-testid="gate-archive-note" className="text-xs text-[var(--aria-ink-muted)]">
+                {archiveNote}
+              </div>
+            ) : null}
+            <ResolutionBadge resolution={entry.resolution} />
+          </div>
         ) : terminateBlockReason === null && actions ? (
           // F-21：终止放行即渲染动作位——phase_mismatch 的 plan 门（context
           // blocker/author 失败/缺相位）此前整面消失，终止零通路；现在露出
@@ -202,8 +274,16 @@ export function GatePromptEntry({
                 multiline={false}
                 value={feedback}
                 onChange={setFeedback}
-                onSubmit={actions.feedback}
+                onSubmit={handleFeedbackSubmit}
               />
+            ) : null}
+            {feedbackSubmitted ? (
+              <p
+                data-testid="gate-feedback-submitted"
+                className="text-xs font-medium text-emerald-700"
+              >
+                {GATE_FEEDBACK_SUBMITTED_NOTE}
+              </p>
             ) : null}
             {typedGateAwaitingCommand && actionBlockReason === null ? (
               <p className="text-xs text-[var(--aria-ink-muted)]">
@@ -253,6 +333,16 @@ function ResolutionBadge({ resolution }: { resolution?: string }) {
       </span>
     );
   }
+  if (resolution === "superseded") {
+    return (
+      <span
+        data-testid="gate-archive-badge"
+        className="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200"
+      >
+        {GATE_ARCHIVE_BADGE_LABEL}
+      </span>
+    );
+  }
   if (resolution === "terminate") {
     return (
       <span className="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-semibold text-red-700 ring-1 ring-red-200">
@@ -297,6 +387,11 @@ function blockReasonFromEntry(
 // setStage），阶段离开后投影消失——按 gateIdentity 与当前 stage 不一致判
 // terminal_stage，避免重渲染出可点但被静默拦截的假按钮（human_confirm 与
 // F-20 story/design author_confirm 门同款纪律）。
+//
+// F-49 A2：卡身份与当前门投影不一致即为「该卡不是当前门」——门内轮次切换时门载体
+// 从 durable snapshot 切到 typed turn，旧卡 id 随之变化并经 upsert 留档；任何未
+// 留档的残留卡都不得回退 persistedReason（= 开门时刻的 action_block_reason，实测
+// null）放行动作：页面只挂一个动作门面，点旧卡实际作用于当前门（诊断 §0-B）。
 function gateCardBlockReason(
   state: WorkspaceWsState,
   entry: ChatEntry,
@@ -313,9 +408,12 @@ function gateCardBlockReason(
       ? "terminal_stage"
       : fromProjection(projection);
   }
-  return gateIdentity.startsWith("stage:") && gateIdentity !== `stage:${state.stage}`
-    ? "terminal_stage"
-    : persistedReason;
+  // stage 前缀门（legacy story/design author_confirm）：身份即阶段，阶段变了才是
+  // 离场；其余（typed turn / durable snapshot 载体）身份不匹配即被取代 → 已关闭。
+  if (gateIdentity.startsWith("stage:")) {
+    return gateIdentity === `stage:${state.stage}` ? persistedReason : "terminal_stage";
+  }
+  return "closed";
 }
 function gateTriggerFromEntry(
   entry: ChatEntry,
@@ -355,23 +453,9 @@ function inlineErrorFromEntry(entry: ChatEntry): { code: string; message: string
   return typeof code === "string" && typeof message === "string" ? { code, message } : null;
 }
 
-type ReviewFinding = {
-  severity?: string;
-  message: string;
-  evidence?: string;
-  required_action?: string;
-};
-
-function findingsFromEntry(entry: ChatEntry): ReviewFinding[] {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  const findings = Array.isArray(metadata?.findings) ? metadata.findings : [];
-  return findings.filter(isReviewFinding);
-}
-
-function isReviewFinding(value: unknown): value is ReviewFinding {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const finding = value as Record<string, unknown>;
-  return typeof finding.message === "string";
+// F-49 B5：旧轮留档文案（由 store 的 upsertGatePromptEntry 写入 metadata）。留档卡
+// 是只读的——不复用 action_block_reason 面，只呈现轮次与摘要。
+function archiveNoteFromEntry(entry: ChatEntry): string | null {
+  const value = (entry.metadata as Record<string, unknown> | undefined)?.gate_archive_note;
+  return typeof value === "string" ? value : null;
 }

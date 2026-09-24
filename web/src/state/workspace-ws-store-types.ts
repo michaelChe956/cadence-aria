@@ -347,6 +347,13 @@ export interface HumanGateTurnState {
   failure_message: string | null;
   opened_at: string;
   inlineError: InlineProtocolError | null;
+  /**
+   * F-49 A8：本 turn 开出时的门快照身份（`snapshotGateIdentity`）。门以新快照重建后
+   * （修订成功经 Evaluate 重建、预算重置为默认值）残留 turn 的预算即过期——投影以
+   * 本字段与当前快照身份的差异判定「快照已接管预算」。缺省（undefined）表示开出时
+   * 无快照凭据，此时维持 turn 值（fail-closed）。
+   */
+  opened_snapshot_identity?: string | null;
 }
 
 export interface InlineProtocolError {
@@ -532,6 +539,10 @@ export interface WorkspaceWsActions {
   clearAllStreamBuffers: () => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
   appendChatEntry: (entry: ChatEntry) => void;
+  /** F-49 A1：门卡 upsert——门内轮次切换时把上一轮未决门卡留档（只读）。 */
+  upsertGatePromptEntry: (entry: ChatEntry) => void;
+  /** F-49 A4/B5：记录某张门卡本轮的反馈提交文本。 */
+  recordGateFeedbackSubmission: (entryId: string, feedback: string) => void;
   resolveGateEntry: (resolution: ChatEntryResolution) => void;
   updateStreamingEntry: (entryId: string, content: string) => void;
   setEntryUsage: (entryId: string, usage: UsageReportPayload) => void;

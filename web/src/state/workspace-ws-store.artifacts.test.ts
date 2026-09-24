@@ -18,7 +18,10 @@ import {
 describe("workspace ws store artifact payloads", () => {
   installWorkspaceStoreTestHooks();
 
-  it("resolves the latest unresolved gate prompt entry", () => {
+  // F-49 A3：关门决定收口「全部」未决门卡。此前只 resolve 倒序命中的第一张——门内
+  // 轮次切换后残留的旧卡永不被收口（human_gate_closed 只在 approve/abandon 时发出），
+  // 关门后对话流仍留可点旧卡。已收口条目保持原 resolution（重复收口不改写历史）。
+  it("resolves every unresolved gate prompt entry", () => {
     const store = useWorkspaceStore.getState();
     store.appendChatEntry({
       id: "gate-1",
@@ -36,23 +39,25 @@ describe("workspace ws store artifact payloads", () => {
     });
 
     store.resolveGateEntry("request-change");
-    const firstResolution = useWorkspaceStore.getState().chatEntries;
-    expect(firstResolution[0]).toEqual(expect.objectContaining({ id: "gate-1" }));
-    expect(firstResolution[0]).not.toHaveProperty("resolved");
-    expect(firstResolution[1]).toEqual(
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "gate-1",
+        resolved: true,
+        resolution: "request-change",
+      }),
       expect.objectContaining({
         id: "gate-2",
         resolved: true,
         resolution: "request-change",
       }),
-    );
+    ]);
 
     store.resolveGateEntry("confirm");
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
       expect.objectContaining({
         id: "gate-1",
         resolved: true,
-        resolution: "confirm",
+        resolution: "request-change",
       }),
       expect.objectContaining({
         id: "gate-2",

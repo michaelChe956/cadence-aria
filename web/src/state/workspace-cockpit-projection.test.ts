@@ -1005,3 +1005,65 @@ describe("REQ-PCG-01 existing gate regression", () => {
     });
   });
 });
+
+// F-49 A8：门内预算 chip 此前取残留 typed turn 的 remaining_budget。turn 按 D8 跨
+// session_state 保留（command_id 去重），而「修订成功经 Evaluate 重建门快照」时
+// 快照预算重置为默认值（spec REQ-CG-02 + conversational_gate_amendment_real_chain.rs
+// 实测重建后 manual_repairs_remaining=3）——门以新快照重建后必须显示新快照预算，
+// 否则低估剩余修复轮次。判据：门快照身份变了（= 门载体换快照），预算以快照为准。
+describe("F-49 gate budget authority", () => {
+  installWorkspaceStoreTestHooks();
+
+  it("keeps the in-flight turn budget while the gate snapshot is unchanged", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(
+      snapshotGateState({ trigger: "native_human_required", manual_repairs_remaining: 3 }),
+    );
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "turn_1",
+      turn_id: "turn_1",
+      remaining_budget: 2,
+    });
+  });
+
+  it("takes the rebuilt snapshot budget once the gate reopens on a new snapshot", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(
+      snapshotGateState({ trigger: "native_human_required", manual_repairs_remaining: 3 }),
+    );
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+
+    store.setSessionState({
+      ...snapshotGateState({ trigger: "verification_new_findings", manual_repairs_remaining: 3 }),
+      stage: "human_confirm",
+    });
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "turn_1",
+      turn_id: "turn_1",
+      remaining_budget: 3,
+    });
+  });
+
+  it("keeps the turn budget when the turn was opened before any snapshot arrived", () => {
+    const store = useWorkspaceStore.getState();
+    // 同一会话先落一次无快照的 session_state：turn 开出时门还没有快照凭据。
+    store.setSessionState({
+      ...snapshotGateState({ trigger: "native_human_required", manual_repairs_remaining: 3 }),
+      human_gate_snapshot: null,
+      stage: "human_confirm",
+    });
+    store.applyHumanGateTurnOpen("turn_1", "cmd_1", 2);
+
+    store.setSessionState(
+      snapshotGateState({ trigger: "native_human_required", manual_repairs_remaining: 3 }),
+    );
+
+    expect(selectGateProjection(useWorkspaceStore.getState())).toMatchObject({
+      key: "turn_1",
+      remaining_budget: 2,
+    });
+  });
+});

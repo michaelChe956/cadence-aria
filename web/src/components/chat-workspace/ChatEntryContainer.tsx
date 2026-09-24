@@ -7,6 +7,12 @@ interface ChatEntryContainerProps {
   titleSuffix?: ReactNode;
   children: ReactNode;
   className?: string;
+  /**
+   * F-49 A7：显式替换 role 面板色。`className` 与 role 面板并列输出时胜负由 Tailwind
+   * 输出顺序决定（同级同权重），实测 reviewer 的 green 会压掉作者的 amber——需要
+   * 覆盖面板色时走本 prop，不靠权重轮盘。
+   */
+  panelClassName?: string;
   testId?: string;
   wide?: boolean;
 }
@@ -58,6 +64,7 @@ export function ChatEntryContainer({
   titleSuffix,
   children,
   className = "",
+  panelClassName,
   testId,
   wide = false,
 }: ChatEntryContainerProps) {
@@ -70,7 +77,7 @@ export function ChatEntryContainer({
         className={[
           "w-full rounded-md border px-3 py-2 text-sm shadow-sm",
           role === "system" || wide ? "max-w-none" : "max-w-3xl",
-          styles.panel,
+          panelClassName ?? styles.panel,
           className,
         ]
           .filter(Boolean)

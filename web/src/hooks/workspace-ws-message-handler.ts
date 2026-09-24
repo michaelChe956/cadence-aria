@@ -89,10 +89,20 @@ const store = useWorkspaceStore.getState();
         // 以生成期标记和活跃 run 一同确认该 provider chunk 仍属当前生成。
         const isSingleCandidateGenerating =
           store.singleCandidatePhase === "generate" && Boolean(store.activeRunId);
+        // F-49 A6（前端半边）：门内修订（typed turn）在 human_confirm 阶段跑 provider，
+        // 而 ACTIVE_PROVIDER_STAGES 不含该阶段 ⇒ 整段修订流此前被丢弃，用户只看到门卡
+        // 状态变化（「author 修订步不可见」）。判据取「当前门有 in-flight 修订 turn」：
+        // turn 开出（open）或引擎回报 busy 期间该 provider chunk 必属本次修订。
+        const isHumanGateRevisionInFlight =
+          typeof nodeId === "string" &&
+          store.stage === "human_confirm" &&
+          store.humanGateTurn !== null &&
+          (store.humanGateTurn.status === "open" || store.humanGateTurn.status === "busy");
         const acceptsActiveProviderChunk =
           ACTIVE_PROVIDER_STAGES.has(store.stage) ||
           isPendingInitialProviderNode ||
-          isSingleCandidateGenerating;
+          isSingleCandidateGenerating ||
+          isHumanGateRevisionInFlight;
         if (!acceptsActiveProviderChunk) {
           break;
         }
@@ -160,7 +170,7 @@ const store = useWorkspaceStore.getState();
         ) {
           const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
           if (gatePrompt) {
-            store.appendChatEntry(gatePrompt);
+            store.upsertGatePromptEntry(gatePrompt);
           }
         }
       }
@@ -429,7 +439,7 @@ const store = useWorkspaceStore.getState();
         if (disposition.kind === "gate") {
           const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
           if (gatePrompt) {
-            store.appendChatEntry(gatePrompt);
+            store.upsertGatePromptEntry(gatePrompt);
           }
         }
       }
@@ -464,7 +474,7 @@ const store = useWorkspaceStore.getState();
         // 不新建门卡条目（去重键 turn_id）。
         const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
         if (gatePrompt) {
-          store.appendChatEntry(gatePrompt);
+          store.upsertGatePromptEntry(gatePrompt);
         }
       }
       break;
@@ -476,7 +486,7 @@ const store = useWorkspaceStore.getState();
         );
         const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
         if (gatePrompt) {
-          store.appendChatEntry(gatePrompt);
+          store.upsertGatePromptEntry(gatePrompt);
         }
       }
       break;
@@ -489,7 +499,7 @@ const store = useWorkspaceStore.getState();
         );
         const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
         if (gatePrompt) {
-          store.appendChatEntry(gatePrompt);
+          store.upsertGatePromptEntry(gatePrompt);
         }
       }
       break;

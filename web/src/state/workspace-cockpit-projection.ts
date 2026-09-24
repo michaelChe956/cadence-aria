@@ -316,6 +316,17 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
   const terminalClosure = terminalGateClosure(state);
 
   if (turn) {
+    // F-49 A8：残留 turn 的预算是上一轮的读数——「修订成功经 Evaluate 重建门快照」
+    // 时快照预算重置为默认值（spec REQ-CG-02；实测 conversational_gate_amendment_
+    // real_chain.rs 重建后 manual_repairs_remaining=3），而 turn 按 D8 跨
+    // session_state 保留（command_id 去重）。判据：门快照身份变了（= 门载体已换
+    // 快照），预算以新快照为准；快照未变（turn 在飞 / 门未重建）维持 turn 值；
+    // turn 开出时无快照凭据（undefined）也维持 turn 值（fail-closed）。
+    const snapshotSupersedesTurnBudget =
+      snapshot !== null &&
+      state.snapshotGateIdentity !== null &&
+      turn.opened_snapshot_identity != null &&
+      state.snapshotGateIdentity !== turn.opened_snapshot_identity;
     return {
       key: gateIdentityFromState(state) ?? turn.turn_id,
       kind: "human_gate",
@@ -324,7 +335,9 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       flow_kind: state.flowKind,
       status: turn.status,
       trigger: snapshot?.trigger ?? null,
-      remaining_budget: turn.remaining_budget,
+      remaining_budget: snapshotSupersedesTurnBudget
+        ? snapshot.manual_repairs_remaining
+        : turn.remaining_budget,
       findings: snapshot?.findings ?? [],
       resumable: snapshot?.resumable ?? false,
       triage,
