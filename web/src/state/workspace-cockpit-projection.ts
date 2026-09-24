@@ -502,9 +502,9 @@ function gateInboxTitle(gate: GateProjection): string {
   if (gate.kind === "compile_recovery") {
     return "Final Compile 恢复";
   }
-  // F-50 裁决 1：与主区门卡同一单标题制——默认「需要人工确认」，仅 triage
-  // intent 门保留「需要判断 reviewer 意图」。
-  return gate.triage ? "需要判断 reviewer 意图" : "需要人工确认";
+  // F-50 fix round 标题去重：triage 短语只保留主区门卡卡头一处——抽屉门条目
+  // 与非 triage 门同题；triage 细节由主区门卡头+原因行承载。
+  return "需要人工确认";
 }
 
 function gateInboxHeadline(gate: GateProjection): string | null {

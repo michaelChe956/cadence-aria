@@ -363,7 +363,20 @@ describe("workspace cockpit inbox projection", () => {
       triage: true,
       source: "gate",
     });
-    expect(items[0]?.summary).toContain("同一问题重复出现");
+    // F-50 fix round 标题去重：triage 短语只保留主区门卡卡头——抽屉门条目
+    // 与非 triage 门同题（gateSummaryTitle 不再分叉）。
+    expect(items[0]?.title).toBe("需要人工确认");
+  });
+
+  it("projects a user_triage_required verdict gate under the unified inbox title", () => {
+    const store = useWorkspaceStore.getState();
+    store.setStage("human_confirm");
+    store.appendChatEntry(reviewVerdictEntry({ review_gate: "user_triage_required" }));
+
+    const items = selectCockpitInbox(useWorkspaceStore.getState());
+
+    expect(items[0]?.triage).toBe(true);
+    expect(items[0]?.title).toBe("需要人工确认");
   });
 
   it("projects a stopped session item", () => {

@@ -8,6 +8,7 @@ import {
 } from "../finding-list";
 import { structuredOutputDiagnosticFromUnknown } from "../../../state/structured-output-diagnostic";
 import { StructuredOutputDiagnosticView } from "./StructuredOutputDiagnostic";
+import { GATE_CARD_CLASS } from "../gate-visual-tokens";
 
 export function ReviewVerdictEntry({
   entry,
@@ -28,22 +29,22 @@ export function ReviewVerdictEntry({
     <ChatEntryContainer
       role="reviewer"
       title={verdictLabel(verdict?.verdict ?? null, verdict?.reviewGate ?? null)}
-      // F-49 A7：面板色必须显式覆盖 role 面板——同级同权重时 Tailwind 输出顺序决定
-      // 胜负，dist 实测 green（role=reviewer）压掉作者的 amber（.border-amber-200
-      // 早于 .border-green-200、.bg-amber-50 早于 .bg-green-50），结论卡与门卡系撞色。
-      panelClassName="border-amber-200 bg-amber-50"
+      // F-49 A7 纪律保留：面板色由本组件显式指定，不留 Tailwind 输出顺序的权重
+      // 轮盘。F-50 视觉 v2 fix round 起纳入视觉规格——琥珀不再做整卡底色，与
+      // 门卡同一中性常量（白底+琥珀左线）；role=reviewer 的 green 面板照旧被覆盖。
+      panelClassName={GATE_CARD_CLASS}
       testId="review-verdict-entry"
     >
       <div className="space-y-3">
         <div className="flex items-start gap-2">
           <MessageSquareText className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
           <div className="min-w-0">
-            <div className="text-sm font-medium text-[var(--aria-ink)]">{entry.content}</div>
+            <div className="text-sm font-medium text-slate-900">{entry.content}</div>
             {verdict?.summary && verdict.summary !== entry.content ? (
-              <div className="mt-1 text-xs font-medium text-amber-900">{verdict.summary}</div>
+              <div className="mt-1 text-xs font-medium text-slate-600">{verdict.summary}</div>
             ) : null}
             {verdict?.comments && !diagnostic ? (
-              <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{verdict.comments}</div>
+              <div className="mt-1 text-xs text-slate-500">{verdict.comments}</div>
             ) : null}
           </div>
         </div>
@@ -102,7 +103,9 @@ function verdictLabel(verdict: string | null, reviewGate: string | null) {
     return "可确认当前版本";
   }
   if (reviewGate === "user_triage_required") {
-    return "需要判断 reviewer 意图";
+    // F-50 fix round 标题去重：triage 短语只保留主区门卡卡头一处，结论卡自称
+    // 分诊状态，不再与门卡头同文案（复拍三处同题的漏网点）。
+    return "审核结论待人工分诊";
   }
   if (verdict === "pass") {
     return "通过";

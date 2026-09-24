@@ -771,6 +771,13 @@ describe("GatePromptEntry actionability", () => {
       );
 
       expect(screen.getByText("需要判断 reviewer 意图")).toBeVisible();
+      // F-50 fix round 落地核查：triage 形态同样走 GATE_CARD_CLASS——中性白底+
+      // 琥珀左线（两分支共用同一 panelClassName，无 triage 专属旧面板残留）。
+      const card = screen.getByTestId("gate-prompt-entry");
+      expect(card.className).toContain("bg-white");
+      expect(card.className).toContain("border-l-4");
+      expect(card.className).toContain("border-l-amber-500/60");
+      expect(card.className).not.toContain("bg-[var(--aria-gate-open-bg)]");
       expect(screen.getByTestId("gate-why")).toHaveTextContent(
         "原因：评审结果无法自动取舍；请选择确认当前版本或反馈修改。",
       );

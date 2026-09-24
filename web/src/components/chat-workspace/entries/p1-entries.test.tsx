@@ -182,7 +182,8 @@ describe("chat workspace p1 entries", () => {
 
     render(<ReviewVerdictEntry entry={entry} />);
 
-    expect(screen.getByText("需要判断 reviewer 意图")).toBeInTheDocument();
+    expect(screen.getByText("审核结论待人工分诊")).toBeInTheDocument();
+    expect(screen.queryByText("需要判断 reviewer 意图")).not.toBeInTheDocument();
     expect(screen.queryByText("可确认当前版本")).not.toBeInTheDocument();
   });
 

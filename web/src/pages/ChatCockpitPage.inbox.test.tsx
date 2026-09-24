@@ -402,8 +402,11 @@ describe("ChatCockpitPage", () => {
     renderCockpit();
 
     const inbox = screen.getByTestId("cockpit-inbox");
+    // F-50 fix round 标题去重：triage 短语只保留主区门卡卡头一处——抽屉门条目
+    // 与非 triage 门同题「需要人工确认」，不再复述「需要判断 reviewer 意图」。
     expect(within(inbox).getAllByText(/需要判断 reviewer 意图|需要人工确认/)).toHaveLength(1);
-    expect(within(inbox).getByText("需要判断 reviewer 意图")).toBeInTheDocument();
+    expect(within(inbox).getByText("需要人工确认")).toBeInTheDocument();
+    expect(within(inbox).queryByText("需要判断 reviewer 意图")).toBeNull();
   });
 
   it("drills down into the conversation flow when a flow row is clicked", async () => {
